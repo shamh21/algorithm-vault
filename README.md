@@ -54,7 +54,9 @@ Preview an operator-approved live canary from a promoted ranking without submitt
 flask live-canary-trade --ranking-id <id> --user-id <id>
 ```
 
-Submit only after reviewing the preview and all blockers:
+`CANARY_PREVIEW_ONLY=true` is the safe default. While it is enabled, even an exact `--submit` command is blocked after running the full signal, sizing, net ROI v2, readiness, and risk evaluation. The command writes a preview audit record with `preview_only=true` and `real_order_submitted=false`.
+
+Real canary submission is a later operator action only after strict readiness passes, a verified active live connection exists, all risk gates approve, and `CANARY_PREVIEW_ONLY=false` is set locally:
 
 ```bash
 flask live-canary-trade --ranking-id <id> --user-id <id> --submit --confirm LIVE-CANARY-TRADE

@@ -499,6 +499,8 @@ def _live_canary_trade_payload(
     connection_id: int | None,
     submit: bool,
 ) -> dict[str, object]:
+    config_preview_only = _config_flag("CANARY_PREVIEW_ONLY", True)
+    preview_only = bool(config_preview_only or not submit)
     ranking = db.session.get(StrategyRanking, int(ranking_id))
     user = db.session.get(User, int(user_id))
     blockers: list[str] = []
@@ -507,6 +509,8 @@ def _live_canary_trade_payload(
         return {
             "ready": False,
             "submitted": False,
+            "real_order_submitted": False,
+            "preview_only": preview_only,
             "blockers": ["ranking_not_found"],
             "ranking_id": ranking_id,
             "user_id": user_id,
@@ -516,6 +520,8 @@ def _live_canary_trade_payload(
         return {
             "ready": False,
             "submitted": False,
+            "real_order_submitted": False,
+            "preview_only": preview_only,
             "blockers": ["user_not_found"],
             "ranking_id": ranking_id,
             "user_id": user_id,
@@ -565,38 +571,93 @@ def _live_canary_trade_payload(
                 blockers.append(f"risk:{risk_decision.rule_name}")
 
     ready = not blockers and bool(risk_decision_payload.get("approved", False)) and intent is not None
+    output_blockers = list(dict.fromkeys(blockers))
+    if submit and config_preview_only:
+        output_blockers = list(dict.fromkeys([*output_blockers, "canary_preview_only_enabled"]))
+    signal_summary = (
+        diagnostics.get("signal_payload", {}) if isinstance(diagnostics.get("signal_payload"), dict) else {}
+    )
+    projected_order = order_payload.get("projected_order", {})
+    if not isinstance(projected_order, dict):
+        projected_order = {}
+    signal_quality = (
+        diagnostics.get("signal_quality", {}) if isinstance(diagnostics.get("signal_quality"), dict) else {}
+    )
+    signal_metadata = signal_summary.get("metadata", {}) if isinstance(signal_summary.get("metadata"), dict) else {}
+    confidence = (
+        signal_summary.get("confidence")
+        or signal_metadata.get("confidence")
+        or (getattr(signal, "position_fraction", None) if signal is not None else None)
+        or signal_quality.get("confidence")
+    )
+    reason = str(
+        signal_summary.get("reason")
+        or signal_summary.get("rationale")
+        or risk_decision_payload.get("reason")
+        or ""
+    )
     payload: dict[str, object] = {
         "ready": ready,
         "submitted": False,
+        "real_order_submitted": False,
+        "preview_only": preview_only,
         "ranking_id": ranking.id,
         "user_id": user.id,
         "connection_id": connection.id if connection is not None else connection_id,
         "mode": "live",
         "submit_requested": submit,
-        "blockers": list(dict.fromkeys(blockers)),
+        "blockers": output_blockers,
+        "selected_symbol": ranking.symbol,
+        "selected_strategy": ranking.strategy_name,
+        "side": projected_order.get("side") or signal_summary.get("action"),
+        "size": projected_order.get("quantity", 0.0),
+        "confidence": confidence,
+        "reason": reason,
         "ranking": _ranking_canary_summary(ranking),
         "connection": {
             "active_verified": connection is not None,
             "provider": connection.provider if connection is not None else None,
             "verification_status": connection.verification_status if connection is not None else None,
         },
-        "signal": diagnostics.get("signal_payload", {}),
-        "signal_quality": diagnostics.get("signal_quality", {}),
+        "signal": signal_summary,
+        "signal_quality": signal_quality,
         "sizing": order_payload.get("sizing", {}),
-        "projected_order": order_payload.get("projected_order", {}),
+        "projected_order": projected_order,
         "risk_decision": risk_decision_payload,
         "live_canary_readiness": {
             "ready": ready,
-            "preview_only": not submit,
+            "preview_only": preview_only,
             "requires_exact_confirmation_for_submit": True,
             "uses_existing_live_caps": True,
             "optimizer_research_only": True,
+            "canary_preview_only_config": config_preview_only,
+            "real_order_submitted": False,
         },
     }
 
+    if preview_only:
+        audit_id = _record_live_canary_preview_audit(
+            ranking=ranking,
+            user=user,
+            connection=connection,
+            payload=payload,
+            intent=intent,
+            submit_requested=submit,
+            blocked_by_preview_only=bool(submit and config_preview_only),
+        )
+        if audit_id is not None:
+            payload["canary_preview_audit_id"] = audit_id
+
     if submit:
+        if config_preview_only:
+            payload["submitted"] = False
+            payload["real_order_submitted"] = False
+            payload["submit_blocked"] = True
+            payload["submit_block_reason"] = "CANARY_PREVIEW_ONLY is true; live canary submit is disabled."
+            return payload
         if not ready or intent is None:
             payload["submitted"] = False
+            payload["real_order_submitted"] = False
             payload["submit_blocked"] = True
             return payload
         order = get_service("order_manager").place_order(intent)
@@ -620,6 +681,10 @@ def _live_canary_trade_payload(
         db.session.add(audit)
         db.session.commit()
         payload["submitted"] = True
+        payload["real_order_submitted"] = True
+        payload["preview_only"] = False
+        payload["live_canary_readiness"]["preview_only"] = False
+        payload["live_canary_readiness"]["real_order_submitted"] = True
         payload["order"] = {
             "id": order.id,
             "status": order.status,
@@ -629,6 +694,59 @@ def _live_canary_trade_payload(
         }
 
     return payload
+
+
+def _config_flag(name: str, default: bool = False) -> bool:
+    value = current_app.config.get(name, default)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _record_live_canary_preview_audit(
+    *,
+    ranking: StrategyRanking,
+    user: User,
+    connection: TradingConnection | None,
+    payload: dict[str, object],
+    intent: OrderIntent | None,
+    submit_requested: bool,
+    blocked_by_preview_only: bool,
+) -> int | None:
+    audit_connection_id = intent.trading_connection_id if intent is not None else None
+    if audit_connection_id is None and connection is not None:
+        audit_connection_id = connection.id
+    audit = AuditLog(
+        category="orders",
+        action="live_canary_preview",
+        message=f"Live canary preview generated from ranking {ranking.id}; no real order submitted.",
+        user_id=user.id,
+        trading_connection_id=audit_connection_id,
+    )
+    audit.details = {
+        "preview_only": True,
+        "real_order_submitted": False,
+        "submit_requested": submit_requested,
+        "blocked_by_preview_only": blocked_by_preview_only,
+        "ranking_id": ranking.id,
+        "optimizer_profile": ranking.profile,
+        "strategy_name": ranking.strategy_name,
+        "symbol": ranking.symbol,
+        "timeframe": ranking.timeframe,
+        "selected_symbol": payload.get("selected_symbol"),
+        "selected_strategy": payload.get("selected_strategy"),
+        "side": payload.get("side"),
+        "size": payload.get("size"),
+        "confidence": payload.get("confidence"),
+        "reason": payload.get("reason"),
+        "projected_order": payload.get("projected_order", {}),
+        "risk_decision": payload.get("risk_decision", {}),
+        "signal_quality": payload.get("signal_quality", {}),
+        "blockers": payload.get("blockers", []),
+    }
+    db.session.add(audit)
+    db.session.commit()
+    return audit.id
 
 
 def _live_canary_connection(user_id: int, connection_id: int | None) -> tuple[TradingConnection | None, str]:

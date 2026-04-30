@@ -7,7 +7,17 @@ from types import SimpleNamespace
 from typing import Any
 
 from app.extensions import db
-from app.models import MLModelState, MLTrainingEvent, OptimizerRun, Setting, StrategyRanking, StrategyRun, TradingConnection, User
+from app.models import (
+    AuditLog,
+    MLModelState,
+    MLTrainingEvent,
+    OptimizerRun,
+    Setting,
+    StrategyRanking,
+    StrategyRun,
+    TradingConnection,
+    User,
+)
 from app.ml.online_ranker import extract_features
 from app.strategies.base import Signal
 from app.backtesting.optimizer import AGGRESSIVE_1H_WARNING, DYNAMIC_INTRADAY_WARNING, EXTREME_ROI_WARNING
@@ -609,10 +619,21 @@ def test_live_canary_preview_never_submits_order(app, monkeypatch) -> None:
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["submitted"] is False
+    assert payload["real_order_submitted"] is False
+    assert payload["preview_only"] is True
     assert payload["ready"] is True
+    assert payload["selected_symbol"] == "BTC"
+    assert payload["selected_strategy"] == "scalping"
+    assert payload["side"] == "buy"
+    assert payload["size"] > 0
+    assert payload["confidence"] == 0.5
     assert payload["projected_order"]["symbol"] == "BTC"
     assert payload["projected_order"]["notional"] <= app.config["MAX_POSITION_NOTIONAL"]
     assert payload["signal_quality"]["net_roi_v2_score"] > 0
+    audit = AuditLog.query.filter_by(action="live_canary_preview").one()
+    assert audit.details["preview_only"] is True
+    assert audit.details["real_order_submitted"] is False
+    assert audit.details["projected_order"]["symbol"] == "BTC"
 
 
 def test_live_canary_submit_requires_exact_confirmation(app) -> None:
@@ -659,7 +680,48 @@ def test_live_canary_blocks_missing_verified_connection(app, monkeypatch) -> Non
     assert payload["submitted"] is False
 
 
+def test_live_canary_preview_only_blocks_submit_even_with_confirmation(app, monkeypatch) -> None:
+    user, connection, ranking = _add_canary_ranking()
+    _patch_canary_market(app, monkeypatch)
+
+    def fail_place_order(intent):
+        raise AssertionError("preview-only mode must not submit an order")
+
+    monkeypatch.setattr(app.extensions["services"]["order_manager"], "place_order", fail_place_order)
+
+    result = app.test_cli_runner().invoke(
+        args=[
+            "live-canary-trade",
+            "--ranking-id",
+            str(ranking.id),
+            "--user-id",
+            str(user.id),
+            "--connection-id",
+            str(connection.id),
+            "--submit",
+            "--confirm",
+            "LIVE-CANARY-TRADE",
+        ]
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["ready"] is True
+    assert payload["submitted"] is False
+    assert payload["real_order_submitted"] is False
+    assert payload["preview_only"] is True
+    assert payload["submit_blocked"] is True
+    assert payload["submit_block_reason"] == "CANARY_PREVIEW_ONLY is true; live canary submit is disabled."
+    assert "canary_preview_only_enabled" in payload["blockers"]
+    assert payload["projected_order"]["symbol"] == "BTC"
+    audit = AuditLog.query.filter_by(action="live_canary_preview").one()
+    assert audit.details["blocked_by_preview_only"] is True
+    assert audit.details["submit_requested"] is True
+    assert audit.details["real_order_submitted"] is False
+
+
 def test_live_canary_submit_uses_order_manager_with_live_caps(app, monkeypatch) -> None:
+    app.config["CANARY_PREVIEW_ONLY"] = False
     user, connection, ranking = _add_canary_ranking()
     _patch_canary_market(app, monkeypatch)
     captured = {}
@@ -694,6 +756,8 @@ def test_live_canary_submit_uses_order_manager_with_live_caps(app, monkeypatch) 
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["submitted"] is True
+    assert payload["real_order_submitted"] is True
+    assert payload["preview_only"] is False
     assert payload["order"]["id"] == 123
     assert captured["intent"].mode == "live"
     assert captured["intent"].trading_connection_id == connection.id
