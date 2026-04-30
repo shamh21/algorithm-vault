@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+
+{% block title %}Wallet Withdrawals · Admin{% endblock %}
+
+{% block content %}
+<section class="page-heading advanced-only">
+  <span class="card-kicker">Advanced / Admin</span>
+  <h1>Wallet Withdrawals</h1>
+  <p class="muted">Manual withdrawal requests remain locked and unbroadcast until an admin approves them and live risk gates are clear.</p>
+</section>
+
+{% if panic_lock %}
+  <section class="banner danger" role="status">
+    <div class="mode-banner-main">
+      <span class="mode-banner-label">Panic Lock</span>
+      <strong>Approvals are blocked</strong>
+    </div>
+    <p>Rejecting pending requests is still available so locked funds can be released.</p>
+  </section>
+{% endif %}
+
+<section class="card">
+  <table>
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>User</th>
+        <th>Asset</th>
+        <th>Network</th>
+        <th>Amount</th>
+        <th>Status</th>
+        <th>Destination</th>
+        <th>Reason</th>
+        <th>Controls</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for withdrawal in withdrawals %}
+        <tr>
+          <td>#{{ withdrawal.id }}</td>
+          <td>{{ users.get(withdrawal.user_id).username if users.get(withdrawal.user_id) else withdrawal.user_id }}</td>
+          <td>{{ withdrawal.asset }}</td>
+          <td>{{ withdrawal.network }}</td>
+          <td>{{ "%.8f"|format(withdrawal.amount) }}</td>
+          <td>{{ withdrawal.status.replace("_", " ")|title }}</td>
+          <td><code>{{ withdrawal.destination_address }}</code></td>
+          <td>{{ withdrawal.failure_reason or "n/a" }}</td>
+          <td>
+            {% if withdrawal.status == "pending_approval" %}
+              <form method="post" action="{{ url_for('admin.approve_wallet_withdrawal', withdrawal_id=withdrawal.id) }}" class="inline-form" data-disable-on-submit>
+                {{ csrf_input()|safe }}
+                <button type="submit" data-loading-label="Approving...">Approve</button>
+              </form>
+              <form method="post" action="{{ url_for('admin.reject_wallet_withdrawal', withdrawal_id=withdrawal.id) }}" class="inline-form" data-disable-on-submit>
+                {{ csrf_input()|safe }}
+                <input type="hidden" name="reason" value="Withdrawal rejected by admin.">
+                <button type="submit" class="secondary" data-loading-label="Rejecting...">Reject</button>
+              </form>
+            {% else %}
+              <span class="muted">No action</span>
+            {% endif %}
+          </td>
+        </tr>
+      {% else %}
+        <tr><td colspan="9">No withdrawal requests recorded.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

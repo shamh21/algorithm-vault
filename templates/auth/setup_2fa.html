@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+
+{% block title %}Set Up 2FA · Algorithm Vault{% endblock %}
+
+{% block content %}
+<section class="auth-shell">
+  <article class="vault-card auth-card twofa-card">
+    <span class="card-kicker">Authenticator App</span>
+    <h1>Set Up 2FA</h1>
+    <p class="muted">Scan the QR code with Google Authenticator, Authy, or another TOTP authenticator app. SMS and email codes are not used.</p>
+    <div class="qr-panel">
+      <img src="{{ qr_code_uri }}" alt="2FA setup QR code">
+      <div>
+        <span class="card-kicker">Manual Entry Secret</span>
+        <input type="text" value="{{ secret }}" readonly data-copy-source>
+        <button type="button" class="secondary" data-copy-button>Copy Secret</button>
+      </div>
+    </div>
+    <form method="post" action="{{ url_for('auth.setup_2fa') }}" class="form-grid" data-disable-on-submit>
+      {{ csrf_input()|safe }}
+      <label>6-Digit Authenticator Code
+        <input type="text" name="totp_code" inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code" placeholder="000000" required>
+      </label>
+      <button type="submit" class="primary" data-loading-label="Verifying...">Enable 2FA</button>
+    </form>
+    <p class="muted">If the code is invalid, try the next code from your authenticator app.</p>
+  </article>
+</section>
+{% endblock %}
+
+{% block page_scripts %}
+<script src="{{ url_for('static', filename='js/wallet.js') }}"></script>
+{% endblock %}

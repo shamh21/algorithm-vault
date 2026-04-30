@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en" style="-webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#0b0f14">
+    <title>{% block title %}Algorithm Vault{% endblock %}</title>
+    <link rel="preload" as="style" href="{{ url_for('static', filename='css/app.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+    {% block page_styles %}{% endblock %}
+  </head>
+  <body class="app-body mode-{{ nav_mode|default('live') }}" data-safe-area>
+    <header class="site-header app-topbar" data-app-topbar>
+      <a class="brand-lockup" href="{{ url_for('consumer.home') }}" aria-label="Go to home">
+        <span class="brand-mark" aria-hidden="true">AV</span>
+        <span class="brand-copy">
+          <span class="eyebrow">Algorithm Vault</span>
+          <strong>Crypto Wallet</strong>
+          <small>Automated allocation cycles</small>
+        </span>
+      </a>
+
+      <div class="topbar-actions">
+        <div class="mode-chip mode-chip-{{ nav_mode|default('live') }}" aria-label="Current app mode">
+          <span class="mode-dot" aria-hidden="true"></span>
+          <span>{{ nav_mode|default('live')|replace('_', ' ')|upper }}</span>
+        </div>
+        <button class="nav-toggle secondary" type="button" aria-expanded="false" aria-controls="primary-navigation" data-nav-toggle>
+          <span class="nav-toggle-bars" aria-hidden="true"></span>
+          <span class="nav-toggle-label">Menu</span>
+        </button>
+      </div>
+
+      <nav class="nav app-nav" id="primary-navigation" data-primary-nav aria-label="Primary navigation">
+        {% if current_user %}
+          <a href="{{ url_for('consumer.home') }}" class="{% if request.endpoint == 'consumer.home' %}active{% endif %}">Home</a>
+          <a href="{{ url_for('consumer.wallet') }}" class="{% if request.endpoint == 'consumer.wallet' %}active{% endif %}">Wallet</a>
+          <a href="{{ url_for('consumer.vault') }}" class="{% if request.endpoint in ['consumer.vault', 'consumer.start_cycle'] %}active{% endif %}">Vault</a>
+          <a href="{{ url_for('consumer.activity') }}" class="{% if request.endpoint == 'consumer.activity' %}active{% endif %}">Activity</a>
+          <a href="{{ url_for('settings.index') }}" class="{% if request.endpoint and request.endpoint.startswith('settings') %}active{% endif %}">Settings</a>
+          {% if admin_authenticated %}
+            <a href="{{ url_for('dashboard.index') }}" class="advanced-only {% if request.endpoint and (request.endpoint.startswith('dashboard') or request.endpoint.startswith('orders') or request.endpoint.startswith('backtests') or request.endpoint.startswith('panic') or request.endpoint.startswith('admin')) %}active{% endif %}">Admin</a>
+          {% endif %}
+          <form method="post" action="{{ url_for('auth.logout') }}" class="nav-form">
+            {{ csrf_input()|safe }}
+            <button type="submit" class="secondary">Logout</button>
+          </form>
+        {% else %}
+          <a href="{{ url_for('auth.login') }}" class="{% if request.endpoint == 'auth.login' %}active{% endif %}">Login</a>
+          <a href="{{ url_for('auth.register') }}" class="{% if request.endpoint == 'auth.register' %}active{% endif %}">Register</a>
+        {% endif %}
+      </nav>
+    </header>
+
+    <section class="crypto-rail" aria-label="Crypto wallet balances">
+      <div class="crypto-rail-track">
+        {% for item in crypto_rail_assets %}
+          <a class="crypto-rail-item" href="{{ url_for('consumer.wallet') }}">
+            <span class="coin-icon" aria-hidden="true">{{ item.symbol[:1] }}</span>
+            <span class="coin-main">
+              <strong>{{ item.symbol }}</strong>
+              <small>{{ "%.4f"|format(item.balance) }}</small>
+            </span>
+            <span class="coin-move {{ 'positive' if item.movement >= 0 else 'negative' }}">
+              {{ "+" if item.movement >= 0 else "" }}{{ "%.2f"|format(item.movement) }}%
+            </span>
+          </a>
+        {% endfor %}
+      </div>
+    </section>
+
+    <section class="banner mode-banner info" role="status">
+      <div class="mode-banner-main">
+        <span class="mode-banner-label">Risk Notice</span>
+        <strong>Crypto trading carries significant risk</strong>
+      </div>
+      <p>Automated vault cycles can lose money. Profits are not guaranteed, and market conditions, liquidity, spread, and risk checks can reduce, delay, or prevent execution.</p>
+    </section>
+
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        <section class="flash-stack" aria-live="polite">
+          {% for category, message in messages %}
+            <div class="flash {{ category }}" data-flash-message>{{ message }}</div>
+          {% endfor %}
+        </section>
+      {% endif %}
+    {% endwith %}
+
+    <main class="page-shell app-main" id="main-content">
+      {% block content %}{% endblock %}
+    </main>
+
+    {% if current_user %}
+      <nav class="bottom-nav" aria-label="Mobile navigation">
+        <a href="{{ url_for('consumer.home') }}" class="{% if request.endpoint == 'consumer.home' %}active{% endif %}"><span>Home</span></a>
+        <a href="{{ url_for('consumer.wallet') }}" class="{% if request.endpoint == 'consumer.wallet' %}active{% endif %}"><span>Wallet</span></a>
+        <a href="{{ url_for('consumer.vault') }}" class="{% if request.endpoint in ['consumer.vault', 'consumer.start_cycle'] %}active{% endif %}"><span>Vault</span></a>
+        <a href="{{ url_for('consumer.activity') }}" class="{% if request.endpoint == 'consumer.activity' %}active{% endif %}"><span>Activity</span></a>
+        <a href="{{ url_for('settings.index') }}" class="{% if request.endpoint and request.endpoint.startswith('settings') %}active{% endif %}"><span>Settings</span></a>
+      </nav>
+    {% endif %}
+
+    <script>
+      (() => {
+        const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        document.body.classList.toggle("reduced-motion", prefersReducedMotion);
+        const toggle = document.querySelector("[data-nav-toggle]");
+        const nav = document.querySelector("[data-primary-nav]");
+        const topbar = document.querySelector("[data-app-topbar]");
+
+        if (toggle && nav) {
+          toggle.addEventListener("click", () => {
+            const isOpen = toggle.getAttribute("aria-expanded") === "true";
+            toggle.setAttribute("aria-expanded", String(!isOpen));
+            nav.classList.toggle("is-open", !isOpen);
+            document.body.classList.toggle("nav-open", !isOpen);
+          });
+
+          nav.addEventListener("click", (event) => {
+            if (event.target.closest("a")) {
+              toggle.setAttribute("aria-expanded", "false");
+              nav.classList.remove("is-open");
+              document.body.classList.remove("nav-open");
+            }
+          });
+
+          document.addEventListener("keydown", (event) => {
+            if (event.key === "Escape") {
+              toggle.setAttribute("aria-expanded", "false");
+              nav.classList.remove("is-open");
+              document.body.classList.remove("nav-open");
+            }
+          });
+        }
+
+        if (topbar) {
+          const updateTopbar = () => topbar.classList.toggle("is-scrolled", window.scrollY > 8);
+          updateTopbar();
+          window.addEventListener("scroll", updateTopbar, { passive: true });
+        }
+
+        document.querySelectorAll("[data-disable-on-submit]").forEach((form) => {
+          form.addEventListener("submit", () => {
+            const button = form.querySelector("button[type='submit']");
+            if (button) {
+              button.disabled = true;
+              button.dataset.originalLabel = button.textContent;
+              button.textContent = button.getAttribute("data-loading-label") || "Processing...";
+            }
+          });
+        });
+
+        if (!prefersReducedMotion) {
+          document.querySelectorAll(".card, .wallet-card, .vault-card, .banner, [data-flash-message]").forEach((element, index) => {
+            element.style.animationDelay = `${Math.min(index * 35, 180)}ms`;
+            element.classList.add("ui-rise-in");
+          });
+        }
+      })();
+    </script>
+    {% block page_scripts %}{% endblock %}
+  </body>
+</html>

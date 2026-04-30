@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+
+{% block title %}Withdraw {{ balance.asset }} · Algorithm Vault{% endblock %}
+
+{% block content %}
+<section class="modal-page-shell">
+  <article class="vault-card wallet-flow-card">
+    <span class="card-kicker">Withdraw</span>
+    <h1>Withdraw {{ balance.asset }}</h1>
+    <p class="muted">Withdrawals validate the destination address and either simulate in test mode or submit to the configured provider in real-address mode.</p>
+
+    <div class="balance-pill-row">
+      <span class="balance-pill positive">Available {{ "%.6f"|format(balance.available_balance) }} {{ balance.asset }}</span>
+      <span class="balance-pill warning">Locked {{ "%.6f"|format(balance.locked_balance) }} {{ balance.asset }}</span>
+    </div>
+
+    <form method="post" action="{{ url_for('consumer.withdraw', asset=balance.asset) }}" class="form-grid" data-disable-on-submit>
+      {{ csrf_input()|safe }}
+      {% if errors and errors.get("form") %}
+        <div class="flash danger">{{ errors.get("form") }}</div>
+      {% endif %}
+      <label>Withdraw Address
+        <input type="text" name="withdraw_address" placeholder="Paste destination address" value="{{ form_values.withdraw_address if form_values else '' }}" required>
+        {% if errors and errors.get("withdraw_address") %}<span class="field-error">{{ errors.get("withdraw_address") }}</span>{% endif %}
+      </label>
+      <label>Amount
+        <input type="number" name="amount" min="0" max="{{ balance.available_balance }}" step="0.000001" inputmode="decimal" value="{{ form_values.amount if form_values else '' }}" required>
+        {% if errors and errors.get("amount") %}<span class="field-error">{{ errors.get("amount") }}</span>{% endif %}
+      </label>
+      <label>Network
+        <select name="network">
+          {% for network in networks %}
+            <option value="{{ network }}" {% if network == (form_values.network if form_values else selected_network) %}selected{% endif %}>{{ network }}</option>
+          {% endfor %}
+        </select>
+        {% if errors and errors.get("network") %}<span class="field-error">{{ errors.get("network") }}</span>{% endif %}
+      </label>
+      <label>Authenticator Code
+        <input type="text" name="totp_code" inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code" placeholder="000000" required>
+        {% if errors and errors.get("totp_code") %}<span class="field-error">{{ errors.get("totp_code") }}</span>{% endif %}
+      </label>
+
+      <div class="risk-note">
+        <strong>Check the asset and network before submitting.</strong>
+        <span>Withdrawals may incur network fees and remain pending until backend processing completes.</span>
+      </div>
+
+      <button type="submit" class="primary" data-loading-label="Submitting...">Submit Withdrawal</button>
+    </form>
+
+    <a href="{{ url_for('consumer.wallet') }}" class="button-link secondary">Back to Wallet</a>
+  </article>
+</section>
+{% endblock %}

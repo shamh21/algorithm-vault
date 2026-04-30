@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+
+{% block title %}Cycle {{ cycle.id }} · Algorithm Vault{% endblock %}
+
+{% block content %}
+<section class="page-heading">
+  <span class="card-kicker">Vault Cycle</span>
+  <h1>Cycle {{ cycle.id }} Summary</h1>
+  <p class="muted">Testing view for allocation, execution, risk, leverage, reward/risk, and settlement details.</p>
+</section>
+
+<section class="grid two-up">
+  <article class="card">
+    <div class="section-heading">
+      <div>
+        <span class="card-kicker">Cycle</span>
+        <h2>{{ cycle.execution_substatus.replace("_", " ")|title }}</h2>
+      </div>
+      <span class="status-badge">{{ cycle.algorithm_profile }}</span>
+    </div>
+    <dl class="cycle-details">
+      <div><dt>Allocation</dt><dd>{{ "%.6f"|format(cycle.deposit_amount) }} {{ cycle.deposit_asset }}</dd></div>
+      <div><dt>Lock Duration</dt><dd>{{ format_duration_seconds(cycle.lock_duration_seconds or cycle.lock_duration_hours * 3600) }}</dd></div>
+      <div><dt>Settlement Asset</dt><dd>{{ cycle.settlement_asset }}</dd></div>
+      <div><dt>Starting Value</dt><dd>${{ "%.2f"|format(cycle.starting_value_usd) }}</dd></div>
+      <div><dt>Estimated Value</dt><dd>${{ "%.2f"|format(cycle.current_estimated_value_usd) }}</dd></div>
+      <div><dt>Final Settlement</dt><dd>{{ "%.6f"|format(cycle.final_settlement_amount or 0) }} {{ cycle.settlement_asset }}</dd></div>
+      <div><dt>Realized PnL</dt><dd>${{ "%.2f"|format(summary.get("realized_pnl_usd", 0)) }}</dd></div>
+      <div><dt>Unrealized PnL</dt><dd>${{ "%.2f"|format(summary.get("unrealized_pnl_usd", 0)) }}</dd></div>
+      <div><dt>Fees</dt><dd>${{ "%.2f"|format(summary.get("fees_usd", 0)) }}</dd></div>
+      <div><dt>Max Leverage</dt><dd>{{ "%.2f"|format(summary.get("max_leverage", 1)) }}x</dd></div>
+      <div><dt>Reward/Risk</dt><dd>{{ "%.2f"|format(summary.get("risk_reward", 0)) }}</dd></div>
+      <div><dt>Slippage</dt><dd>{{ "%.2f"|format(summary.get("slippage_bps", 0)) }} bps</dd></div>
+    </dl>
+  </article>
+
+  <article class="card">
+    <span class="card-kicker">Token And Profit Logic</span>
+    <h2>Cycle Mechanics</h2>
+    <ul class="clean-list">
+      {% for item in explanation %}
+        <li>{{ item }}</li>
+      {% endfor %}
+    </ul>
+  </article>
+</section>
+
+<section class="card">
+  <div class="section-heading">
+    <div>
+      <span class="card-kicker">Execution Legs</span>
+      <h2>Risk And Reward</h2>
+    </div>
+  </div>
+  <table>
+    <thead><tr><th>Strategy</th><th>Symbol</th><th>Timeframe</th><th>Cap</th><th>Leverage</th><th>Stop</th><th>Take Profit</th><th>Reward/Risk</th><th>PnL</th></tr></thead>
+    <tbody>
+      {% for leg in summary.get("legs", []) %}
+        <tr>
+          <td>{{ leg.get("strategy_name") or "Pending" }}</td>
+          <td>{{ leg.get("symbol") }}</td>
+          <td>{{ leg.get("timeframe") }}</td>
+          <td>${{ "%.2f"|format(leg.get("allocation_cap_usd", 0)) }}</td>
+          <td>{{ "%.2f"|format(leg.get("leverage", 1)) }}x</td>
+          <td>{{ "%.2f"|format(leg.get("stop_loss_pct", 0) * 100) }}%</td>
+          <td>{{ "%.2f"|format(leg.get("take_profit_pct", 0) * 100) }}%</td>
+          <td>{{ "%.2f"|format(leg.get("reward_risk", 0)) }}</td>
+          <td>${{ "%.2f"|format(leg.get("realized_pnl_usd", 0) + leg.get("unrealized_pnl_usd", 0)) }}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="9">No execution legs recorded.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="card">
+  <div class="section-heading">
+    <div>
+      <span class="card-kicker">Orders And Fills</span>
+      <h2>Trade Summary</h2>
+    </div>
+  </div>
+  <table>
+    <thead><tr><th>Order</th><th>Symbol</th><th>Side</th><th>Status</th><th>Size</th><th>Average Fill</th><th>Fees</th><th>PnL</th><th>Leverage</th><th>Reward/Risk</th><th>Edge</th></tr></thead>
+    <tbody>
+      {% for order in summary.get("orders", []) %}
+        <tr>
+          <td>{{ order.get("client_order_id") }}</td>
+          <td>{{ order.get("symbol") }}</td>
+          <td>{{ order.get("side")|title }}</td>
+          <td>{{ order.get("status")|title }}</td>
+          <td>{{ "%.6f"|format(order.get("filled_quantity", 0)) }}</td>
+          <td>{{ "%.4f"|format(order.get("average_fill", 0)) }}</td>
+          <td>${{ "%.2f"|format(order.get("fees", 0)) }}</td>
+          <td>${{ "%.2f"|format(order.get("realized_pnl", 0)) }}</td>
+          <td>{{ "%.2f"|format(order.get("leverage", 1)) }}x</td>
+          <td>{{ "%.2f"|format(order.get("risk_reward", 0)) }}</td>
+          <td>{{ "%.2f"|format(order.get("edge_score", 0)) }} bps<br><span class="muted">{{ "%.0f"|format(order.get("signal_confidence", 0) * 100) }}% {{ order.get("market_source") or "" }}</span></td>
+        </tr>
+      {% else %}
+        <tr><td colspan="11">No cycle orders recorded yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

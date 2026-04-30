@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+
+{% block title %}Deposit Addresses · Admin{% endblock %}
+
+{% block content %}
+<section class="page-heading advanced-only">
+  <span class="card-kicker">Advanced / Admin</span>
+  <h1>Deposit Address History</h1>
+  <p class="muted">Full versioned address history for audit review. Consumers see only their current active address.</p>
+</section>
+
+<section class="grid two-up">
+  <article class="card">
+    <h2>Generated Address Readiness</h2>
+    <dl class="cycle-details">
+      <div><dt>Real Addresses</dt><dd>{{ "Enabled" if wallet_readiness.use_real_addresses else "Disabled" }}</dd></div>
+      <div><dt>Keygen</dt><dd>{{ "Enabled" if wallet_readiness.keygen_enabled else "Disabled" }}</dd></div>
+      <div><dt>Encryption Key</dt><dd>{{ "Valid" if wallet_readiness.valid_encryption_key else "Missing or invalid" }}</dd></div>
+      <div><dt>Custody</dt><dd>{{ "Ready" if wallet_readiness.ready else "Blocked" }}</dd></div>
+    </dl>
+  </article>
+  <article class="card">
+    <h2>Supported Networks</h2>
+    <table>
+      <thead><tr><th>Asset</th><th>Network</th><th>Status</th></tr></thead>
+      <tbody>
+        {% for item in wallet_readiness.supported %}
+          <tr>
+            <td>{{ item.asset }}</td>
+            <td>{{ item.network }}</td>
+            <td>{{ "Ready" if item.ready else "Blocked" }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </article>
+</section>
+
+<section class="card">
+  <table>
+    <thead><tr><th>User</th><th>Asset</th><th>Network</th><th>Version</th><th>Status</th><th>Custody</th><th>Address</th><th>Created</th><th>Expired</th></tr></thead>
+    <tbody>
+      {% for address in addresses %}
+        <tr>
+          <td>{{ users.get(address.user_id).username if users.get(address.user_id) else address.user_id }}</td>
+          <td>{{ address.asset }}</td>
+          <td>{{ address.network }}</td>
+          <td>{{ address.version }}</td>
+          <td>{{ "Active" if address.is_active else "Inactive" }}</td>
+          <td>
+            {% if address.wallet_address_records and address.wallet_address_records[0].encrypted_metadata.get("custody") == "in_app" %}
+              Generated
+            {% elif address.wallet_address_records %}
+              Configured
+            {% else %}
+              External
+            {% endif %}
+          </td>
+          <td><code>{{ address.address }}</code></td>
+          <td>{{ address.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+          <td>{{ address.expired_at.strftime("%Y-%m-%d %H:%M") if address.expired_at else "n/a" }}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="9">No deposit addresses yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

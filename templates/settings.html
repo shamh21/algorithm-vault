@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+
+{% block title %}Settings · Algorithm Vault{% endblock %}
+
+{% block content %}
+<section class="page-heading">
+  <span class="card-kicker">Settings</span>
+  <h1>Wallet Preferences</h1>
+  <p class="muted">Keep the consumer experience focused on wallet balances, vault cycles, and settlement preferences.</p>
+</section>
+
+<section class="grid two-up">
+  <article class="wallet-card">
+    <h2>App Mode</h2>
+    <p class="muted">Current environment mode</p>
+    <div class="mode-chip mode-chip-{{ current_mode }}">
+      <span class="mode-dot" aria-hidden="true"></span>
+      <span>{{ current_mode|replace('_', ' ')|upper }}</span>
+    </div>
+    <p class="muted">This deployment is live-only. Execution remains blocked until a verified trading connection is active.</p>
+  </article>
+
+  <article class="wallet-card">
+    <h2>Trading Connection</h2>
+    {% if active_trading_connection %}
+      <div class="mode-chip">
+        <span class="mode-dot" aria-hidden="true"></span>
+        <span>{{ active_trading_connection.provider|upper }}</span>
+      </div>
+      <p class="muted">Live wallet and vault execution use your active connection only.</p>
+    {% else %}
+      <p class="muted">Connect your own exchange or wallet account before live trading.</p>
+    {% endif %}
+    <a href="{{ url_for('settings.connections') }}" class="button-link primary">Manage Connections</a>
+  </article>
+</section>
+
+<section class="grid two-up">
+  <article class="wallet-card">
+    <h2>Risk Notices</h2>
+    <ul class="compact-list">
+      <li>Live execution requires an active verified trading connection.</li>
+      <li>Risk checks enforce stop loss, notional, slippage, leverage, daily loss, cooldown, and panic-lock gates.</li>
+      <li>Optimizer output is diagnostic and does not bypass live eligibility controls.</li>
+    </ul>
+  </article>
+</section>
+
+{% if current_user and current_user.is_admin %}
+<section class="grid two-up">
+  <article class="wallet-card">
+    <h2>Address Mode</h2>
+    <form method="post" action="{{ url_for('settings.address_mode') }}" class="form-grid" data-disable-on-submit>
+      {{ csrf_input()|safe }}
+      <label class="checkbox-row">
+        <input type="checkbox" name="use_real_addresses" {% if use_real_addresses %}checked{% endif %}>
+        Use real generated wallet addresses and real withdrawal submission
+      </label>
+      <button type="submit" data-loading-label="Updating...">Update Address Mode</button>
+    </form>
+    <p class="muted">When disabled, wallet address generation fails closed until real custody or configured custody addresses are available.</p>
+  </article>
+</section>
+{% endif %}
+{% endblock %}

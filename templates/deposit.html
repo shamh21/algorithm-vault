@@ -1,0 +1,64 @@
+{% extends "base.html" %}
+
+{% block title %}Deposit {{ balance.asset }} · Algorithm Vault{% endblock %}
+
+{% block content %}
+<section class="modal-page-shell">
+  <article class="vault-card wallet-flow-card">
+    <span class="card-kicker">Deposit</span>
+    <h1>{{ balance.asset }} Deposit Address</h1>
+    <p class="muted">Use only generated real custody addresses or configured exchange/custody addresses. No address is shown unless the wallet service can create or verify one.</p>
+
+    <form method="get" action="{{ url_for('consumer.deposit', asset=balance.asset) }}" class="inline-form">
+      <label>Network
+        <select name="network" onchange="this.form.submit()">
+          {% for network in networks %}
+            <option value="{{ network }}" {% if network == selected_network %}selected{% endif %}>{{ network }}</option>
+          {% endfor %}
+        </select>
+      </label>
+    </form>
+
+    {% if address %}
+      <div class="deposit-address-layout">
+        <img class="qr-code" src="{{ qr_code_uri }}" alt="{{ balance.asset }} deposit address QR code">
+        <div class="address-copy-panel">
+          <label>Current Active Address
+            <input type="text" value="{{ address.address }}" readonly data-copy-source>
+          </label>
+          <button type="button" class="secondary copy-button" data-copy-button>Copy</button>
+          <span class="muted">Version {{ address.version }} · Created {{ address.created_at.strftime("%Y-%m-%d %H:%M") }}</span>
+        </div>
+      </div>
+    {% else %}
+      <div class="empty-state">
+        <span class="coin-icon" aria-hidden="true">!</span>
+        <strong>No deposit address configured for this asset/network.</strong>
+        <span class="muted">Enable live wallet key generation or configure a real custody/exchange {{ balance.asset }} address for {{ selected_network }} before accepting deposits.</span>
+      </div>
+    {% endif %}
+
+    <div class="risk-note">
+      <strong>Send only {{ balance.asset }} on {{ selected_network }}{% if address %} to this address{% endif %}.</strong>
+      <span>Sending any other asset or using a different network may result in loss. Network fees may apply.</span>
+    </div>
+
+    {% if address %}
+      <form method="post" action="{{ url_for('consumer.rotate_address', asset=balance.asset, network=selected_network) }}" class="form-grid rotate-form" data-disable-on-submit>
+        {{ csrf_input()|safe }}
+        <label class="checkbox-row">
+          <input type="checkbox" name="confirm_rotate">
+          I understand rotating this address renders the old address inactive and it should not be reused.
+        </label>
+        <button type="submit" class="secondary" data-loading-label="Rotating...">Rotate Address</button>
+      </form>
+    {% endif %}
+
+    <a href="{{ url_for('consumer.wallet') }}" class="button-link secondary">Back to Wallet</a>
+  </article>
+</section>
+{% endblock %}
+
+{% block page_scripts %}
+<script src="{{ url_for('static', filename='js/wallet.js') }}"></script>
+{% endblock %}

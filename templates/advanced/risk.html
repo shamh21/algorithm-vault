@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+
+{% block title %}Risk · Admin{% endblock %}
+
+{% block content %}
+<section class="page-heading advanced-only">
+  <span class="card-kicker">Advanced / Admin</span>
+  <h1>Risk Diagnostics</h1>
+  <p class="muted">Protected view for risk controls, rejection history, and safety audit events.</p>
+</section>
+
+<section class="grid two-up">
+  <article class="card danger-card">
+    <h2>Risk Status</h2>
+    <ul class="compact-list">
+      <li>Mode: {{ mode|upper }}</li>
+      <li>Daily Loss Limit: {{ risk_status.daily_loss_limit }}</li>
+      <li>Current Daily PnL: {{ "%.4f"|format(risk_status.daily_realized_pnl) }}</li>
+      <li>Max Leverage: {{ risk_status.max_leverage }}</li>
+      <li>Max Notional: {{ risk_status.max_position_notional }}</li>
+      <li>Max Slippage: {{ risk_status.max_slippage_pct }}</li>
+      <li>Panic Lock: {{ "ON" if risk_status.panic_lock else "OFF" }}</li>
+      <li>Live Blocked: {{ "yes" if risk_status.live_trading_blocked else "no" }}</li>
+    </ul>
+  </article>
+
+  <article class="card">
+    <h2>Admin Shortcuts</h2>
+    <div class="admin-link-grid">
+      <a href="{{ url_for('dashboard.index') }}" class="button-link secondary">Dashboard</a>
+      <a href="{{ url_for('orders.index') }}" class="button-link secondary">Open Orders</a>
+      <a href="{{ url_for('backtests.index') }}" class="button-link secondary">Backtests</a>
+      <a href="{{ url_for('panic.index') }}" class="button-link danger-button">Panic Controls</a>
+      <a href="{{ url_for('admin.strategies') }}" class="button-link secondary">Strategies</a>
+      <a href="{{ url_for('admin.live_readiness') }}" class="button-link secondary">Live Readiness</a>
+      <a href="{{ url_for('admin.deposit_addresses') }}" class="button-link secondary">Address History</a>
+    </div>
+  </article>
+</section>
+
+<section class="grid two-up">
+  <article class="card">
+    <h2>Recent Risk Events</h2>
+    <table>
+      <thead><tr><th>Rule</th><th>Reason</th><th>Created</th></tr></thead>
+      <tbody>
+        {% for event in recent_risk %}
+          <tr>
+            <td>{{ event.rule_name }}</td>
+            <td>{{ event.reason }}</td>
+            <td>{{ event.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="3">No recent risk events.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </article>
+
+  <article class="card">
+    <h2>Audit Events</h2>
+    <table>
+      <thead><tr><th>Category</th><th>Action</th><th>Message</th><th>Created</th></tr></thead>
+      <tbody>
+        {% for audit in audits %}
+          <tr>
+            <td>{{ audit.category }}</td>
+            <td>{{ audit.action }}</td>
+            <td>{{ audit.message }}</td>
+            <td>{{ audit.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="4">No audit events.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </article>
+</section>
+{% endblock %}

@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+
+{% block title %}Home · Algorithm Vault{% endblock %}
+
+{% block content %}
+<section class="home-hero">
+  <div class="hero-copy">
+    <span class="eyebrow">Wallet + Automated Vault</span>
+    <h1>Allocate crypto into risk-gated algorithm cycles.</h1>
+    <p>Choose a wallet balance, lock an amount, select a duration, and settle back into your preferred asset when the cycle completes.</p>
+    <div class="hero-actions">
+      <a href="{{ url_for('consumer.vault') }}" class="button-link primary">Start a Cycle</a>
+      <a href="{{ url_for('consumer.wallet') }}" class="button-link secondary">View Wallet</a>
+    </div>
+  </div>
+  <aside class="vault-card hero-status">
+    <span class="muted">Portfolio Value</span>
+    <strong class="hero-value">${{ "%.2f"|format(portfolio_total) }}</strong>
+    {% if active_cycle %}
+      <div class="status-row">
+        <span>Active Cycle</span>
+        <strong>{{ active_cycle.algorithm_profile }}</strong>
+      </div>
+      <div class="countdown-chip" data-countdown data-unlocks-at="{{ active_cycle.unlocks_at.isoformat() }}Z">Calculating...</div>
+    {% else %}
+      <p class="muted">No active vault cycle. Available balances can be allocated from the Vault page.</p>
+    {% endif %}
+  </aside>
+</section>
+
+<section class="grid three-up">
+  <article class="wallet-card">
+    <span class="card-kicker">Wallet</span>
+    <h2>Balances</h2>
+    <p class="muted">Available and locked balances stay visible before, during, and after each vault cycle.</p>
+    <a href="{{ url_for('consumer.wallet') }}" class="button-link secondary">Open Wallet</a>
+  </article>
+  <article class="wallet-card">
+    <span class="card-kicker">Vault</span>
+    <h2>Algorithm Allocation</h2>
+    <p class="muted">The strategy profile is selected automatically from duration and market conditions.</p>
+    <a href="{{ url_for('consumer.vault') }}" class="button-link secondary">Open Vault</a>
+  </article>
+  <article class="wallet-card">
+    <span class="card-kicker">Activity</span>
+    <h2>Cycle History</h2>
+    <p class="muted">Track allocations, settlement, and wallet activity without trading-terminal details.</p>
+    <a href="{{ url_for('consumer.activity') }}" class="button-link secondary">View Activity</a>
+  </article>
+</section>
+
+<section class="card">
+  <div class="section-heading">
+    <div>
+      <span class="card-kicker">Recent Activity</span>
+      <h2>Wallet Updates</h2>
+    </div>
+    <a href="{{ url_for('consumer.activity') }}" class="text-link">All activity</a>
+  </div>
+  <table>
+    <thead><tr><th>Type</th><th>Asset</th><th>Amount</th><th>Status</th><th>Time</th></tr></thead>
+    <tbody>
+      {% for item in recent_transactions %}
+        <tr>
+          <td>{{ item.transaction_type|title }}</td>
+          <td>{{ item.asset }}</td>
+          <td>{{ "%.6f"|format(item.amount) }}</td>
+          <td>{{ item.status|title }}</td>
+          <td>{{ item.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="5">No wallet activity yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}
+
+{% block page_scripts %}
+<script src="{{ url_for('static', filename='js/vault.js') }}"></script>
+{% endblock %}

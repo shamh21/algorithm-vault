@@ -1,0 +1,128 @@
+{% extends "base.html" %}
+
+{% block content %}
+<main id="orders-app">
+<section class="grid two-up">
+  <article class="card animate-entry">
+    <h2>Manual Order Entry</h2>
+    <p class="muted">Live-only manual order entry. Opening orders require a stop loss and an active verified trading connection.</p>
+    <form method="post" action="{{ url_for('orders.place') }}" class="form-grid">
+      {{ csrf_input()|safe }}
+      <label>Symbol
+        <select name="symbol">
+          {% for symbol in current_app.config['ALLOWED_SYMBOLS'] %}
+            <option value="{{ symbol }}">{{ symbol }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Side
+        <select name="side">
+          <option value="buy" class="buy">buy</option>
+          <option value="sell" class="sell">sell</option>
+        </select>
+      </label>
+      <label>Quantity
+        <input type="number" name="quantity" step="0.0001" min="0" required inputmode="decimal">
+      </label>
+      <label>Order Type
+        <select name="order_type">
+          <option value="market">market</option>
+          <option value="limit">limit</option>
+        </select>
+      </label>
+      <p id="limit-hint" class="muted" style="display:none;">Limit orders require a price.</p>
+      <label>Limit Price
+        <input type="number" name="limit_price" step="0.0001" inputmode="decimal">
+      </label>
+      <label>Stop Loss
+        <input type="number" name="stop_loss" step="0.0001" required inputmode="decimal">
+      </label>
+      <label>Take Profit
+        <input type="number" name="take_profit" step="0.0001" inputmode="decimal">
+      </label>
+      <label>Leverage
+        <input type="number" name="leverage" step="0.1" min="1" value="1" inputmode="decimal">
+      </label>
+      <label>Slippage %
+        <input type="number" name="slippage_pct" step="0.0001" min="0" value="0.005" inputmode="decimal">
+      </label>
+      <button type="submit" id="order-submit-btn">Submit {{ mode|upper }} Order</button>
+    </form>
+    <div class="mobile-submit-bar" style="position:sticky; bottom:0; padding-top:0.5rem; background:linear-gradient(180deg, transparent, var(--bg));">
+      <button type="submit" form="" class="primary" style="width:100%;">Quick Submit</button>
+    </div>
+  </article>
+
+  <article class="card animate-entry">
+    <h2>Safety Notes</h2>
+    <ul class="compact-list">
+      <li>Live orders use the authenticated user's active trading connection only.</li>
+      <li>Risk rules block orders when stop loss, daily loss, leverage, notional, symbol, or slippage limits are breached.</li>
+    </ul>
+  </article>
+</section>
+
+<section class="card animate-entry">
+  <h2>Order History</h2>
+  <table>
+    <thead><tr><th>ID</th><th>Mode</th><th>Symbol</th><th>Side</th><th>Status</th><th>Qty</th><th>Avg Fill</th><th>Action</th></tr></thead>
+    <tbody>
+      {% for order in orders %}
+        <tr class="animate-entry">
+          <td>{{ order.id }}</td>
+          <td>{{ order.mode }}</td>
+          <td>{{ order.symbol }}</td>
+          <td class="{{ 'buy' if order.side == 'buy' else 'sell' }}">{{ order.side }}</td>
+          <td><span class="muted">{{ order.status }}</span></td>
+          <td>{{ "%.4f"|format(order.quantity) }}</td>
+          <td>{{ "%.4f"|format(order.average_fill_price or 0) }}</td>
+          <td>
+            {% if order.status in ['open', 'submitted', 'pending'] %}
+              <form method="post" action="{{ url_for('orders.cancel', order_id=order.id) }}">
+                {{ csrf_input()|safe }}
+                <button type="submit" class="secondary" onclick="this.disabled=true;this.innerText='Cancelling...';">Cancel</button>
+              </form>
+            {% else %}
+              {{ order.risk_status }}
+            {% endif %}
+          </td>
+        </tr>
+      {% else %}
+        <tr><td colspan="8">No orders yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+</main>
+<script>
+  (function () {
+    const typeSelect = document.querySelector('select[name="order_type"]');
+    const limitInput = document.querySelector('input[name="limit_price"]');
+    const hint = document.getElementById('limit-hint');
+
+    function syncLimitUI() {
+      const isLimit = typeSelect && typeSelect.value === 'limit';
+      if (limitInput) {
+        limitInput.required = isLimit;
+        limitInput.parentElement.style.opacity = isLimit ? '1' : '0.6';
+      }
+      if (hint) {
+        hint.style.display = isLimit ? 'block' : 'none';
+      }
+    }
+
+    if (typeSelect) {
+      typeSelect.addEventListener('change', syncLimitUI, { passive: true });
+      syncLimitUI();
+    }
+
+    const submitBtn = document.getElementById('order-submit-btn');
+    if (submitBtn) {
+      submitBtn.addEventListener('click', function () {
+        submitBtn.disabled = true;
+        submitBtn.innerText = 'Submitting...';
+      }, { passive: true });
+    }
+  })();
+</script>
+{% endblock %}

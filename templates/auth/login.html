@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+
+{% block title %}Sign In · Algorithm Vault{% endblock %}
+
+{% block content %}
+<section class="auth-shell">
+  <article class="vault-card auth-card">
+    <span class="card-kicker">Secure Access</span>
+    <h1>Sign In</h1>
+    <p class="muted">Use your password and, when enabled, your 6-digit authenticator code.</p>
+    <form method="post" action="{{ url_for('auth.login_post', next=request.args.get('next', '')) }}" class="form-grid" data-disable-on-submit>
+      {{ csrf_input()|safe }}
+      <label>Username
+        <input type="text" name="username" value="{{ username or '' }}" autocomplete="username" required>
+      </label>
+      <label>Password
+        <input type="password" name="password" autocomplete="current-password" required>
+      </label>
+      <label>Authenticator Code
+        <input type="text" name="totp_code" inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code" placeholder="000000" {% if require_2fa %}autofocus{% endif %}>
+      </label>
+      <button type="submit" class="primary" data-loading-label="Signing in...">Sign In</button>
+    </form>
+    <p class="muted">New users need an invite code. <a class="text-link" href="{{ url_for('auth.register') }}">Create account</a></p>
+  </article>
+</section>
+{% endblock %}

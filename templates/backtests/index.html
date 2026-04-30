@@ -1,0 +1,659 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="grid two-up">
+  <article class="card">
+    <h2>Run Backtest</h2>
+    <p class="muted">Historical candle simulation only. Backtest results are not live performance.</p>
+    <form method="post" action="{{ url_for('backtests.run') }}" class="form-grid">
+      {{ csrf_input()|safe }}
+      <label>Strategy
+        <select name="strategy_name">
+          {% for strategy in strategies %}
+            <option value="{{ strategy.name }}">{{ strategy.name }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Symbol
+        <select name="symbol">
+          {% for symbol in current_app.config['ALLOWED_SYMBOLS'] %}
+            <option value="{{ symbol }}">{{ symbol }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Timeframe
+        <select name="timeframe">
+          {% for timeframe in ['1m', '5m', '15m', '1h'] %}
+            <option value="{{ timeframe }}">{{ timeframe }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Initial Balance
+        <input type="number" name="initial_balance" step="0.01" min="{{ current_app.config['PAPER_BALANCE_MIN'] }}" max="{{ current_app.config['PAPER_BALANCE_MAX'] }}" value="{{ current_app.config['DEFAULT_PAPER_BALANCE'] }}">
+      </label>
+      <label>Fee (bps)
+        <input type="number" name="fee_bps" step="0.01" value="{{ current_app.config['FEE_BPS'] }}">
+      </label>
+      <label>Slippage (bps)
+        <input type="number" name="slippage_bps" step="0.01" value="{{ current_app.config['SIM_SLIPPAGE_BPS'] }}">
+      </label>
+      <label>Stop Loss %
+        <input type="number" name="stop_loss_pct" step="0.001" value="0.01">
+      </label>
+      <label>Take Profit %
+        <input type="number" name="take_profit_pct" step="0.001" value="0.02">
+      </label>
+      <label>Position Size Fraction
+        <input type="number" name="position_size_fraction" step="0.01" min="0.01" max="1" value="0.1">
+      </label>
+      <label>Allocation Amount
+        <input type="number" name="allocation_amount_usd" step="0.01" min="0" value="0">
+      </label>
+      <label>Leverage
+        <input type="number" name="leverage" step="0.1" min="1" max="{{ current_app.config['MAX_LEVERAGE'] }}" value="1">
+      </label>
+      <label>Funding Cost (bps)
+        <input type="number" name="funding_cost_bps" step="0.01" min="0" value="0">
+      </label>
+      <label>Minimum Liquidation Buffer %
+        <input type="number" name="min_liquidation_buffer_pct" step="0.001" min="0" value="{{ current_app.config['MIN_LIQUIDATION_BUFFER_PCT'] }}">
+      </label>
+      <label>Sizing Mode
+        <select name="sizing_mode">
+          <option value="fixed_fraction">fixed_fraction</option>
+          <option value="fixed_dollar">fixed_dollar</option>
+          <option value="risk_based">risk_based</option>
+        </select>
+      </label>
+      <label>Fixed Dollar Size
+        <input type="number" name="fixed_dollar_size" step="0.01" value="{{ current_app.config['FIXED_DOLLAR_SIZE'] }}">
+      </label>
+      <label>Risk Per Trade %
+        <input type="number" name="risk_per_trade_pct" step="0.001" value="{{ current_app.config['RISK_PER_TRADE_PCT'] }}">
+      </label>
+      <label>Max Daily Loss
+        <input type="number" name="max_daily_loss" step="0.01" value="{{ current_app.config['MAX_DAILY_LOSS_USDC'] }}">
+      </label>
+      <label>Max Drawdown Kill %
+        <input type="number" name="max_drawdown_pct" step="0.01" value="{{ current_app.config['MAX_BACKTEST_DRAWDOWN_PCT'] }}">
+      </label>
+      <label>Intrabar Model
+        <select name="intrabar_model">
+          <option value="conservative">conservative</option>
+          <option value="optimistic">optimistic</option>
+          <option value="open_high_low_close">open_high_low_close</option>
+          <option value="open_low_high_close">open_low_high_close</option>
+        </select>
+      </label>
+      <h3>Rule-Based Signal Controls</h3>
+      <label>EMA Fast / Slow
+        <span class="inline-inputs">
+          <input type="number" name="ema_fast_period" min="1" value="8">
+          <input type="number" name="ema_slow_period" min="2" value="21">
+        </span>
+      </label>
+      <label>RSI Period / Oversold / Overbought
+        <span class="inline-inputs">
+          <input type="number" name="rsi_period" min="2" value="7">
+          <input type="number" name="rsi_oversold" step="0.1" value="35">
+          <input type="number" name="rsi_overbought" step="0.1" value="65">
+        </span>
+      </label>
+      <label>ATR Stop / Take Multipliers
+        <span class="inline-inputs">
+          <input type="number" name="atr_stop_multiplier" step="0.1" value="1.5">
+          <input type="number" name="atr_take_multiplier" step="0.1" value="2.25">
+        </span>
+      </label>
+      <label>Volume Spike Threshold
+        <input type="number" name="volume_spike_multiplier" step="0.1" value="1.5">
+      </label>
+      <label>Feature Weights Trend / RSI / Volume / Fibonacci
+        <span class="inline-inputs">
+          <input type="number" name="trend_weight" step="0.01" value="0.55">
+          <input type="number" name="rsi_weight" step="0.01" value="0.3">
+          <input type="number" name="volume_weight" step="0.01" value="0.15">
+          <input type="number" name="fibonacci_filter_weight" step="0.01" value="0.05">
+        </span>
+      </label>
+      <label>External Weight / Minimum Signal Score
+        <span class="inline-inputs">
+          <input type="number" name="external_weight" step="0.01" value="0">
+          <input type="number" name="minimum_signal_score" step="0.01" value="0.85">
+        </span>
+      </label>
+      <label>Parameters JSON
+        <textarea name="parameters_json" rows="4">{}</textarea>
+      </label>
+      <button type="submit">Run Backtest</button>
+    </form>
+  </article>
+
+  <article class="card">
+    <h2>Latest Result</h2>
+    {% if latest_result %}
+      <ul class="compact-list">
+        <li>Total Return: {{ "%.2f"|format(latest_result.total_return * 100) }}%</li>
+        <li>Net Return After Costs: {{ "%.2f"|format((latest_result.net_return_after_costs or latest_result.total_return) * 100) }}%</li>
+        <li>Max Drawdown: {{ "%.2f"|format(latest_result.max_drawdown * 100) }}%</li>
+        <li>Win Rate: {{ "%.2f"|format(latest_result.win_rate * 100) }}%</li>
+        <li>Sharpe-like: {{ "%.2f"|format(latest_result.sharpe_like) }}</li>
+        <li>Sortino-like: {{ "%.2f"|format(latest_result.sortino_like) }}</li>
+        <li>Profit Factor: {{ "%.2f"|format(latest_result.profit_factor) }}</li>
+        <li>Trade Count: {{ latest_result.trade_count }}</li>
+        <li>Trades / Day: {{ "%.2f"|format(latest_result.trades_per_day) }}</li>
+        <li>Avg Duration: {{ "%.1f"|format(latest_result.average_trade_duration_minutes) }} min</li>
+        <li>Turnover: {{ "%.2f"|format(latest_result.capital_turnover_rate) }}x</li>
+        <li>Turnover After Fees: {{ "%.2f"|format(latest_result.turnover_after_fees or 0) }}x</li>
+        <li>Fees Paid: {{ "%.4f"|format(latest_result.fees_paid) }}</li>
+        <li>Risk Events: {{ latest_result.risk_event_count or 0 }}</li>
+        <li>Edge Score: {{ "%.2f"|format(latest_result.edge_score or 0) }} bps</li>
+        <li>Expectancy: {{ "%.4f"|format(latest_result.expectancy or 0) }}</li>
+        <li>Cost Drag: {{ "%.2f"|format(latest_result.cost_drag_bps or 0) }} bps</li>
+        <li>Feature Logs: {{ latest_result.feature_audit_summary.feature_logged_trades if latest_result.feature_audit_summary else 0 }}</li>
+        <li>Avg Rule Score: {{ "%.2f"|format(latest_result.feature_audit_summary.average_rule_score if latest_result.feature_audit_summary else 0) }}</li>
+      </ul>
+      <table>
+        <thead><tr><th>Time</th><th>Equity</th></tr></thead>
+        <tbody>
+          {% for point in latest_result.equity_curve[-10:] %}
+            <tr><td>{{ point.timestamp }}</td><td>{{ "%.4f"|format(point.equity) }}</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p>No backtest has been run yet.</p>
+    {% endif %}
+  </article>
+</section>
+
+<section class="card">
+  <h2>Latest Fibonacci Zones</h2>
+  {% if latest_fibonacci.error is defined %}
+    <p class="muted">{{ latest_fibonacci.error }}</p>
+  {% else %}
+    <ul class="compact-list">
+      <li>Trend: {{ latest_fibonacci.trend }}</li>
+      <li>Swing High: {{ "%.4f"|format(latest_fibonacci.swing_high) }}</li>
+      <li>Swing Low: {{ "%.4f"|format(latest_fibonacci.swing_low) }}</li>
+      <li>Golden Zone: {{ "%.4f"|format(latest_fibonacci.golden_zone.lower) }} - {{ "%.4f"|format(latest_fibonacci.golden_zone.upper) }}</li>
+    </ul>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Opportunity Lab</h2>
+  <p class="muted">Admin-only scan of liquid candidates. Execution remains gated by spread, liquidity, slippage, leverage, drawdown, and live validation controls.</p>
+  <table>
+    <thead>
+      <tr>
+        <th>Symbol</th>
+        <th>Source</th>
+        <th>Mid</th>
+        <th>Spread</th>
+        <th>Liquidity</th>
+        <th>Volatility</th>
+        <th>Score</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for candidate in universe_candidates %}
+        <tr>
+          <td>{{ candidate.symbol }}</td>
+          <td>{{ candidate.source }}</td>
+          <td>{{ "%.4f"|format(candidate.mid or 0) }}</td>
+          <td>{{ "%.2f"|format(candidate.spread_bps or 0) }} bps</td>
+          <td>${{ "%.0f"|format(candidate.liquidity_usd or 0) }}</td>
+          <td>{{ "%.2f"|format(candidate.volatility_pct or 0) }}%</td>
+          <td>{{ "%.3f"|format(candidate.score or 0) }}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="7">No universe candidates available.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="grid two-up">
+  <article class="card">
+    <h2>Short-Term Optimizer</h2>
+    <form method="post" action="{{ url_for('backtests.optimize') }}" class="form-grid">
+      {{ csrf_input()|safe }}
+      <label>Strategy
+        <select name="strategy_name">
+          <option value="all">all</option>
+          {% for strategy in strategies %}
+            <option value="{{ strategy.name }}">{{ strategy.name }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Symbols
+        <select name="symbols" multiple>
+          {% for symbol in current_app.config['ALLOWED_SYMBOLS'] %}
+            <option value="{{ symbol }}" {% if loop.first %}selected{% endif %}>{{ symbol }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Timeframes
+        <select name="timeframes" multiple>
+          {% for timeframe in ['1m', '5m', '15m', '1h'] %}
+            <option value="{{ timeframe }}" {% if timeframe == current_app.config['DEFAULT_TIMEFRAME'] %}selected{% endif %}>{{ timeframe }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Profile
+        <select name="profile">
+          <option value="short_term">short_term</option>
+          <option value="medium_term">medium_term</option>
+          <option value="long_term">long_term</option>
+          <option value="aggressive_risk_adjusted">aggressive_risk_adjusted</option>
+          <option value="dynamic_intraday">Dynamic Intraday</option>
+          {% if aggressive_enabled %}
+            <option value="aggressive_1h">Aggressive 1H Experimental</option>
+          {% endif %}
+          {% if extreme_roi_enabled %}
+            <option value="extreme_roi_experimental">Extreme ROI Experimental</option>
+          {% endif %}
+        </select>
+      </label>
+      {% if ml_ranker_enabled %}
+        <p class="flash warning">ML ranker learns from historical optimization outcomes and does not guarantee future profits. Different timeframes require different indicators and strategy parameters.</p>
+      {% endif %}
+      <p class="flash warning">
+        Dynamic Intraday uses dynamic liquid-universe discovery, 1m/5m/15m candles, cost-aware rankings, and live-readiness diagnostics before any gated live eligibility.
+        {{ dynamic_intraday_warning }}
+      </p>
+      <p class="muted">
+        High-upside profile: {{ "enabled" if high_upside_status.profile_enabled else "disabled" }},
+        live eligible: {{ "yes" if high_upside_status.live_eligible else "no" }},
+        auto-disabled: {{ "yes" if high_upside_status.auto_disabled else "no" }}.
+      </p>
+      <p class="muted">
+        Offline ML: {{ "enabled" if offline_ml_status.enabled else "disabled" }},
+        blend: {{ "enabled" if offline_ml_status.blend_enabled else "diagnostics only" }},
+        promoted 1H model: {{ "ready" if offline_ml_status.readiness.ready else "not ready" }}.
+        {% if offline_ml_status.readiness.blockers %}Blockers: {{ offline_ml_status.readiness.blockers|join(", ") }}.{% endif %}
+      </p>
+      {% if aggressive_enabled %}
+        <p class="flash warning">
+          Aggressive 1H Experimental uses 72h training / 1h testing windows, 1m and 5m candles, and is Very High Risk.
+          {{ aggressive_warning }}
+        </p>
+      {% endif %}
+      {% if extreme_roi_enabled %}
+        <p class="flash warning">
+          Extreme ROI Experimental is for historical simulation research on 1h cycles. It uses the full feature, Fibonacci, ML, and market-quality stack, while live trading remains gated.
+          {{ extreme_roi_warning }}
+        </p>
+      {% endif %}
+      <label>Training Window Days
+        <input type="number" name="training_window_days" min="1" value="{{ current_app.config['OPTIMIZER_TRAINING_WINDOW_DAYS'] }}">
+      </label>
+      <label>Testing Window Days
+        <input type="number" name="testing_window_days" min="1" value="{{ current_app.config['OPTIMIZER_TESTING_WINDOW_DAYS'] }}">
+      </label>
+      <label>Step Days
+        <input type="number" name="step_days" min="1" value="{{ current_app.config['OPTIMIZER_STEP_DAYS'] }}">
+      </label>
+      <label>Decay Factor
+        <input type="number" name="decay_factor" step="0.01" min="0.01" max="1" value="{{ current_app.config['OPTIMIZER_DECAY_FACTOR'] }}">
+      </label>
+      <label>Min Trade Count
+        <input type="number" name="min_trade_count" min="1" value="5">
+      </label>
+      <label>Max Parameter Sets / Strategy
+        <input type="number" name="max_parameter_sets" min="1" max="100" value="8">
+      </label>
+      <label>Allocation Amount
+        <input type="number" name="allocation_amount_usd" step="0.01" min="0" value="0">
+      </label>
+      <label>Lock Duration Hours
+        <input type="number" name="lock_duration_hours" min="0" value="1">
+      </label>
+      <label>Universe
+        <select name="universe_mode">
+          <option value="configured">configured</option>
+          <option value="dynamic_liquid">dynamic_liquid</option>
+        </select>
+      </label>
+      <label>Max Vault Legs
+        <input type="number" name="max_parallel_legs" min="1" max="{{ current_app.config['VAULT_MAX_PARALLEL_LEGS'] }}" value="{{ current_app.config['VAULT_MAX_PARALLEL_LEGS'] }}">
+      </label>
+      <label>Top N For Live Review
+        <input type="number" name="auto_deploy_top_n" min="0" max="5" value="1">
+      </label>
+      <label class="checkbox-row">
+        <input type="checkbox" name="allow_leverage_experiment">
+        Allow leverage experiment
+      </label>
+      <label class="checkbox-row">
+        <input type="checkbox" name="use_full_history">
+        Use full history with recency weighting
+      </label>
+      <label class="checkbox-row">
+        <input type="checkbox" name="high_upside_profile">
+        Tag candidates for high-upside readiness diagnostics
+      </label>
+      <button type="submit">Run Optimization</button>
+    </form>
+  </article>
+
+  <article class="card">
+    <h2>Latest Rankings</h2>
+    {% if latest_optimizer %}
+      <p class="muted">Optimizer run {{ latest_optimizer.id }}: {{ latest_optimizer.status }}</p>
+      {% for warning in latest_optimizer.warnings %}
+        <p class="flash warning">{{ warning }}</p>
+      {% endfor %}
+      <table>
+        <thead>
+          <tr>
+            <th>Strategy</th>
+            <th>Profile</th>
+            <th>Score</th>
+            {% if ml_ranker_enabled %}
+              <th>ML</th>
+            {% endif %}
+            <th>Net ROI</th>
+            <th>Net</th>
+            <th>Recent</th>
+            <th>1H Return</th>
+            <th>Edge</th>
+            <th>PF</th>
+            <th>Sharpe / Sortino</th>
+            <th>Win</th>
+            <th>Expectancy</th>
+            <th>Cost Drag</th>
+            <th>Turnover</th>
+            <th>Stability</th>
+            <th>Lev / Liq</th>
+            <th>Capacity</th>
+            <th>Fees</th>
+            <th>DD</th>
+            <th>Trades</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for ranking in rankings %}
+            <tr>
+              <td>{{ ranking.strategy_name }}<br><span class="muted">{{ ranking.symbol }} {{ ranking.timeframe }}</span></td>
+              <td>
+                {% if ranking.experimental %}
+                  {{ "Extreme ROI Experimental" if ranking.profile == "extreme_roi_experimental" else "Aggressive 1H Experimental" }}<br><span class="flash warning">{{ ranking.risk_label }}</span>
+                {% else %}
+                  {{ ranking.profile or "short_term" }}
+                {% endif %}
+              </td>
+              <td>{{ "%.3f"|format(ranking.score) }}</td>
+              {% if ml_ranker_enabled %}
+                <td>
+                  {{ "%.3f"|format(ranking.ml_score or 0) }}<br>
+                  <span class="muted">{{ "warming up" if ranking.ml_warmup else "adjusted " ~ "%.3f"|format(ranking.ml_adjusted_score or ranking.score) }}</span>
+                  {% if ranking.ml_explanation.get("offline_model") %}
+                    <br><span class="muted">offline {{ ranking.ml_explanation.offline_model.status }} {{ "%.3f"|format(ranking.ml_explanation.offline_model.prediction or 0) }}</span>
+                  {% endif %}
+                </td>
+              {% endif %}
+              <td>
+                {{ "%.3f"|format(ranking.ml_explanation.get("net_roi", {}).get("net_roi_score", 0) if ranking.ml_explanation else 0) }}<br>
+                <span class="muted">v2 {{ "%.3f"|format(ranking.ml_explanation.get("net_roi_v2", {}).get("net_roi_v2_score", 0) if ranking.ml_explanation else 0) }}</span><br>
+                <span class="muted">{{ ranking.ml_explanation.get("net_roi_v2", {}).get("roi_quality_grade", "D") if ranking.ml_explanation else "D" }} / {{ ranking.ml_explanation.get("net_roi_v2", {}).get("regime_support", "regime-neutral") if ranking.ml_explanation else "regime-neutral" }}</span><br>
+                <span class="muted">fill {{ "%.2f"|format(ranking.ml_explanation.get("net_roi", {}).get("expected_fill_quality", 0) if ranking.ml_explanation else 0) }}</span>
+              </td>
+              <td>{{ "%.2f"|format((ranking.net_return_after_costs or ranking.total_return or 0) * 100) }}%</td>
+              <td>{{ "%.2f"|format(ranking.recent_performance_score * 100) }}%</td>
+              <td>{{ "%.2f"|format((ranking.recent_1h_return or 0) * 100) }}%</td>
+              <td>{{ "%.2f"|format(ranking.edge_score or 0) }} bps</td>
+              <td>{{ "%.2f"|format(ranking.profit_factor or 0) }}</td>
+              <td>{{ "%.2f"|format(ranking.sharpe_like or 0) }} / {{ "%.2f"|format(ranking.sortino_like or 0) }}</td>
+              <td>{{ "%.2f"|format((ranking.win_rate or 0) * 100) }}%</td>
+              <td>{{ "%.4f"|format(ranking.expectancy or 0) }}</td>
+              <td>{{ "%.2f"|format(ranking.cost_drag_bps or 0) }} bps</td>
+              <td>{{ "%.2f"|format(ranking.turnover_after_fees or ranking.turnover_rate or 0) }}x</td>
+              <td>{{ "%.2f"|format((ranking.window_stability or 0) * 100) }}%<br><span class="muted">{{ "%.2f"|format((ranking.accepted_window_ratio or 0) * 100) }}% accepted</span></td>
+              <td>{{ "%.2f"|format(ranking.leverage or 1) }}x<br><span class="muted">{{ "%.2f"|format((ranking.liquidation_buffer_pct or 0) * 100) }}%</span></td>
+              <td>${{ "%.0f"|format(ranking.capacity_usd or 0) }}<br><span class="muted">{{ ranking.universe_source or "configured" }}</span></td>
+              <td>${{ "%.2f"|format(ranking.estimated_fees or 0) }}</td>
+              <td>{{ "%.2f"|format(ranking.max_drawdown * 100) }}%</td>
+              <td>{{ ranking.trade_count or 0 }}</td>
+              <td>{{ "rejected: " ~ ranking.rejection_reason if ranking.rejected else "accepted" }}{% if ranking.no_trade_reason %}<br><span class="muted">{{ ranking.no_trade_reason }}</span>{% endif %}</td>
+            </tr>
+            {% if ranking.experimental %}
+              <tr>
+                <td colspan="{{ 22 if ml_ranker_enabled else 21 }}" class="muted">{{ aggressive_warning }}</td>
+              </tr>
+            {% endif %}
+            {% if ml_ranker_enabled and ranking.ml_explanation %}
+              <tr>
+                <td colspan="{{ 22 if ml_ranker_enabled else 21 }}" class="muted">
+                  ML updates: {{ ranking.ml_explanation.get("update_count", 0) }}.
+                  Positive:
+                  {% for item in ranking.ml_explanation.get("top_positive", [])[:3] %}
+                    {{ item.feature }} {{ "%.3f"|format(item.contribution) }}{% if not loop.last %}, {% endif %}
+                  {% else %}
+                    none
+                  {% endfor %}
+                  Negative:
+                  {% for item in ranking.ml_explanation.get("top_negative", [])[:3] %}
+                    {{ item.feature }} {{ "%.3f"|format(item.contribution) }}{% if not loop.last %}, {% endif %}
+                  {% else %}
+                    none
+                  {% endfor %}
+                </td>
+              </tr>
+            {% endif %}
+          {% else %}
+            <tr><td colspan="{{ 22 if ml_ranker_enabled else 21 }}">No rankings for this optimizer run.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% if ml_ranker_enabled and ml_model_states %}
+        <ul class="compact-list">
+          {% for state in ml_model_states %}
+            <li>{{ state.horizon }} ML updates: {{ state.update_count }}{% if state.update_count < current_app.config["ML_MIN_TRAINING_EVENTS"] %} (warming up){% endif %}</li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+      {% if offline_ml_models %}
+        <ul class="compact-list">
+          {% for model in offline_ml_models %}
+            <li>{{ model.horizon }} {{ model.model_type }} offline model {{ model.id }}: {{ model.status }}, loss {{ "%.4f"|format(model.validation_loss or 0) }}, calibration {{ "%.4f"|format(model.metrics.get("calibration_error", 0) if model.metrics else 0) }}, top-decile precision {{ "%.2f"|format(model.metrics.get("top_decile_precision", 0) if model.metrics else 0) }}, rows {{ model.training_rows + model.validation_rows }}</li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+    {% else %}
+      <p>No optimization run yet.</p>
+    {% endif %}
+  </article>
+</section>
+
+<section class="card">
+  <h2>Upside Scanner Diagnostics</h2>
+  <p class="muted">Accepted and rejected scanner candidates are keyed to the same scan so rejection rates and cost diagnostics are traceable before any live review.</p>
+  {% if scanner_diagnostics.error %}
+    <p class="flash warning">{{ scanner_diagnostics.error }}</p>
+  {% endif %}
+  <p class="muted">
+    Rejection rate: {{ "%.2f"|format((scanner_diagnostics.rejection_rate or 0) * 100) }}%
+    (limit {{ "%.2f"|format((high_upside_status.max_scanner_rejection_rate or 0) * 100) }}%).
+    {% if scanner_diagnostics.high_upside_auto_disabled %}High-upside profile was auto-disabled by scanner diagnostics.{% endif %}
+  </p>
+  <div class="grid two-up">
+    <div>
+      <h3>Top Accepted</h3>
+      <table>
+        <thead><tr><th>Symbol</th><th>Source</th><th>Net ROI</th><th>Fill</th><th>Upside</th><th>Spread</th><th>Cost</th><th>Regime</th></tr></thead>
+        <tbody>
+          {% for candidate in scanner_diagnostics.accepted[:5] %}
+            <tr>
+              <td>{{ candidate.symbol }}</td>
+              <td>{{ candidate.source }}</td>
+              <td>{{ "%.3f"|format(candidate.net_roi_score or 0) }}<br><span class="muted">v2 {{ "%.3f"|format(candidate.net_roi_v2_score or 0) }} {{ candidate.roi_quality_grade or "D" }}</span></td>
+              <td>{{ "%.2f"|format(candidate.expected_fill_quality or 0) }}</td>
+              <td>{{ "%.3f"|format(candidate.upside_screen_score or 0) }}</td>
+              <td>{{ "%.2f"|format(candidate.spread_bps or 0) }} bps</td>
+              <td>{{ "%.2f"|format(candidate.cost_drag_bps or 0) }} bps</td>
+              <td>{{ candidate.volatility_regime }}<br><span class="muted">{{ candidate.regime_support or "regime-neutral" }}</span></td>
+            </tr>
+          {% else %}
+            <tr><td colspan="8">No accepted scanner candidates.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div>
+      <h3>Top Rejected</h3>
+      <table>
+        <thead><tr><th>Symbol</th><th>Reason</th><th>Net ROI</th><th>Fill</th><th>Upside</th><th>Spread</th><th>Cost</th><th>Stale</th></tr></thead>
+        <tbody>
+          {% for candidate in scanner_diagnostics.rejected[:5] %}
+            <tr>
+              <td>{{ candidate.symbol }}</td>
+              <td>{{ candidate.rejection_reason }}</td>
+              <td>{{ "%.3f"|format(candidate.net_roi_score or 0) }}<br><span class="muted">v2 {{ "%.3f"|format(candidate.net_roi_v2_score or 0) }} {{ candidate.roi_rejection_risk or "high" }}</span></td>
+              <td>{{ "%.2f"|format(candidate.expected_fill_quality or 0) }}</td>
+              <td>{{ "%.3f"|format(candidate.upside_screen_score or 0) }}</td>
+              <td>{{ "%.2f"|format(candidate.spread_bps or 0) }} bps</td>
+              <td>{{ "%.2f"|format(candidate.cost_drag_bps or 0) }} bps</td>
+              <td>{{ "yes" if candidate.stale_data else "no" }}</td>
+            </tr>
+          {% else %}
+            <tr><td colspan="8">No rejected scanner candidates.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+{% if aggressive_comparisons %}
+<section class="card">
+  <h2>Aggressive Experiment Comparison</h2>
+  <p class="muted">Admin-only comparison of experimental candidates after costs. These are simulations, not expected live results.</p>
+  <table>
+    <thead>
+      <tr>
+        <th>Strategy</th>
+        <th>Symbol</th>
+        <th>Timeframe</th>
+        <th>Best Score</th>
+        <th>Net ROI v2</th>
+        <th>Convex Edge</th>
+        <th>MFE / MAE</th>
+        <th>Capacity</th>
+        <th>Decay</th>
+        <th>1H Return</th>
+        <th>Edge</th>
+        <th>Expectancy</th>
+        <th>Cost Drag</th>
+        <th>Accepted / Rejected</th>
+        <th>No-Trade / Rejection</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in aggressive_comparisons %}
+        <tr>
+          <td>{{ row.strategy_name }}<br><span class="flash warning">Aggressive 1H Experimental</span></td>
+          <td>{{ row.symbol }}</td>
+          <td>{{ row.timeframe }}</td>
+          <td>{{ "%.3f"|format(row.best_score) }}</td>
+          <td>{{ "%.3f"|format(row.net_roi_v2_score or 0) }}<br><span class="muted">{{ row.roi_quality_grade or "D" }} / {{ row.regime_support or "regime-neutral" }}</span></td>
+          <td>{{ "%.3f"|format(row.convex_edge_score or 0) }}</td>
+          <td>{{ "%.2f"|format(row.mfe_mae_ratio or 0) }}x</td>
+          <td>{{ "%.2f"|format(row.capacity_multiple or 0) }}x</td>
+          <td>{{ "%.3f"|format(row.decay_penalty or 0) }}</td>
+          <td>{{ "%.2f"|format(row.recent_1h_return * 100) }}%</td>
+          <td>{{ "%.2f"|format(row.edge_score) }} bps</td>
+          <td>{{ "%.4f"|format(row.expectancy) }}</td>
+          <td>{{ "%.2f"|format(row.cost_drag_bps) }} bps</td>
+          <td>{{ row.accepted }} / {{ row.rejected }}</td>
+          <td>{{ row.no_trade_reason or "none" }}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+{% if rankings %}
+<section class="card">
+  <h2>Profit Lab</h2>
+  <p class="muted">Experimental diagnostics only. These fields explain ranking quality and skipped trades; they do not guarantee returns.</p>
+  <table>
+    <thead>
+      <tr>
+        <th>Candidate</th>
+        <th>Profile</th>
+        <th>Edge / Cost</th>
+        <th>Net ROI</th>
+        <th>Convex</th>
+        <th>ML</th>
+        <th>Leverage</th>
+        <th>Risk / Reward</th>
+        <th>Execution</th>
+        <th>Decision</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for ranking in rankings[:10] %}
+        <tr>
+          <td>{{ ranking.strategy_name }}<br><span class="muted">{{ ranking.symbol }} {{ ranking.timeframe }}</span></td>
+          <td>{{ ranking.profile }}</td>
+          <td>{{ "%.2f"|format(ranking.edge_score or 0) }} bps<br><span class="muted">{{ "%.2f"|format(ranking.cost_drag_bps or 0) }} bps cost</span></td>
+          <td>
+            {{ "%.3f"|format(ranking.ml_explanation.get("net_roi", {}).get("net_roi_score", 0) if ranking.ml_explanation else 0) }}<br>
+            <span class="muted">v2 {{ "%.3f"|format(ranking.ml_explanation.get("net_roi_v2", {}).get("net_roi_v2_score", 0) if ranking.ml_explanation else 0) }}</span><br>
+            <span class="muted">{{ ranking.ml_explanation.get("net_roi_v2", {}).get("regime_support", "regime-neutral") if ranking.ml_explanation else "regime-neutral" }}</span><br>
+            <span class="muted">churn {{ "%.2f"|format(ranking.ml_explanation.get("net_roi", {}).get("churn_penalty", 0) if ranking.ml_explanation else 0) }}</span>
+          </td>
+          <td>{{ "%.3f"|format(ranking.convex_edge_score or 0) }}<br><span class="muted">{{ "%.2f"|format(ranking.mfe_mae_ratio or 0) }}x MFE/MAE</span></td>
+          <td>
+            {% if ml_ranker_enabled %}
+              {{ "%.3f"|format(ranking.ml_score or 0) }}<br><span class="muted">{{ "warming up" if ranking.ml_warmup else "active" }}</span>
+            {% else %}
+              disabled
+            {% endif %}
+          </td>
+          <td>{{ "%.2f"|format(ranking.leverage or 1) }}x<br><span class="muted">liq {{ "%.2f"|format((ranking.liquidation_buffer_pct or 0) * 100) }}%</span></td>
+          <td>
+            RR {{ "%.2f"|format(ranking.win_loss_ratio or 0) }}<br>
+            <span class="muted">DD {{ "%.2f"|format((ranking.max_drawdown or 0) * 100) }}%</span>
+          </td>
+          <td>{{ ranking.execution_style or "market" }}<br><span class="muted">${{ "%.0f"|format(ranking.capacity_usd or 0) }} cap</span></td>
+          <td>{{ "rejected: " ~ ranking.rejection_reason if ranking.rejected else "accepted" }}{% if ranking.no_trade_reason %}<br><span class="muted">{{ ranking.no_trade_reason }}</span>{% endif %}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+<section class="card">
+  <h2>Saved Backtests</h2>
+  <table>
+    <thead><tr><th>ID</th><th>Strategy</th><th>Symbol</th><th>Timeframe</th><th>Net Return</th><th>Fees</th><th>DD</th><th>PF</th><th>Sharpe / Sortino</th><th>Trades</th><th>Trades/Day</th><th>Expectancy</th><th>Cost Drag</th><th>Risk Events</th></tr></thead>
+    <tbody>
+      {% for run in runs %}
+        <tr>
+          <td>{{ run.id }}</td>
+          <td>{{ run.strategy_name }}</td>
+          <td>{{ run.symbol }}</td>
+          <td>{{ run.timeframe }}</td>
+          <td>{{ "%.2f"|format((run.result.net_return_after_costs or run.result.total_return) * 100) }}%</td>
+          <td>${{ "%.2f"|format(run.result.fees_paid or 0) }}</td>
+          <td>{{ "%.2f"|format((run.result.max_drawdown or 0) * 100) }}%</td>
+          <td>{{ "%.2f"|format(run.result.profit_factor or 0) }}</td>
+          <td>{{ "%.2f"|format(run.result.sharpe_like or 0) }} / {{ "%.2f"|format(run.result.sortino_like or 0) }}</td>
+          <td>{{ run.result.trade_count }}</td>
+          <td>{{ "%.2f"|format(run.result.trades_per_day or 0) }}</td>
+          <td>{{ "%.4f"|format(run.result.expectancy or 0) }}</td>
+          <td>{{ "%.2f"|format(run.result.cost_drag_bps or 0) }} bps</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="14">No saved backtest runs.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

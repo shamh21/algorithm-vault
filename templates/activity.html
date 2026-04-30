@@ -1,0 +1,60 @@
+{% extends "base.html" %}
+
+{% block title %}Activity · Algorithm Vault{% endblock %}
+
+{% block content %}
+<section class="page-heading">
+  <span class="card-kicker">Activity</span>
+  <h1>Wallet and Vault History</h1>
+  <p class="muted">Allocation, settlement, and wallet events are shown without strategy internals.</p>
+</section>
+
+<section class="grid two-up">
+  <article class="card">
+    <h2>Wallet Transactions</h2>
+    <table>
+      <thead><tr><th>Type</th><th>Asset</th><th>Amount</th><th>Status</th><th>Network</th><th>Destination</th><th>Note</th><th>Created</th></tr></thead>
+      <tbody>
+        {% for item in transactions %}
+          <tr>
+            <td>{{ item.transaction_type|title }}</td>
+            <td>{{ item.asset }}</td>
+            <td>{{ "%.6f"|format(item.amount) }}</td>
+            <td>{{ item.status|title }}</td>
+            <td>{{ item.network or "n/a" }}</td>
+            <td>{{ item.withdraw_address[:18] ~ "..." if item.withdraw_address else "n/a" }}</td>
+            <td>{{ item.note or "Wallet update" }}</td>
+            <td>{{ item.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="8">No wallet transactions yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </article>
+
+  <article class="card">
+    <h2>Vault Cycles</h2>
+    <table>
+      <thead><tr><th>Status</th><th>Deposit</th><th>Profile</th><th>Est. PnL</th><th>Settlement</th><th>Started</th><th>Unlocked</th><th></th></tr></thead>
+      <tbody>
+        {% for cycle in cycles %}
+          <tr>
+            <td>{{ cycle.execution_substatus.replace("_", " ")|title }}</td>
+            <td>{{ "%.6f"|format(cycle.deposit_amount) }} {{ cycle.deposit_asset }}</td>
+            <td>{{ cycle.algorithm_profile }}</td>
+            {% set cycle_pnl = cycle.selection_metadata.get("total_pnl_usd", 0.0) %}
+            <td class="{{ 'positive' if cycle_pnl >= 0 else 'negative' }}">${{ "%.2f"|format(cycle_pnl) }}</td>
+            <td>{{ cycle.settlement_asset }}</td>
+            <td>{{ cycle.started_at.strftime("%Y-%m-%d %H:%M") }}</td>
+            <td>{{ cycle.unlocks_at.strftime("%Y-%m-%d %H:%M") }}</td>
+            <td><a href="{{ url_for('consumer.cycle_detail', cycle_id=cycle.id) }}" class="text-link">Details</a></td>
+          </tr>
+        {% else %}
+          <tr><td colspan="8">No vault cycles yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </article>
+</section>
+{% endblock %}

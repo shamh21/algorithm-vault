@@ -1,0 +1,168 @@
+{% extends "base.html" %}
+
+{% block title %}Live Readiness · Admin{% endblock %}
+
+{% block content %}
+<section class="page-heading advanced-only">
+  <span class="card-kicker">Advanced / Admin</span>
+  <h1>Live Readiness</h1>
+  <p class="muted">Operational view for vault-level validation, exchange access, risk gates, and recent execution blocks.</p>
+</section>
+
+<section class="grid four-up">
+  <article class="metric-card">
+    <span>Runtime Mode</span>
+    <strong>{{ mode|upper }}</strong>
+  </article>
+  <article class="metric-card">
+    <span>Live Credentials</span>
+    <strong>{{ "Ready" if can_trade else "Unavailable" }}</strong>
+  </article>
+  <article class="metric-card">
+    <span>Account Address</span>
+    <strong>{{ "Present" if has_account else "Missing" }}</strong>
+  </article>
+  <article class="metric-card">
+    <span>Panic Lock</span>
+    <strong>{{ "Active" if risk_status.panic_lock else "Clear" }}</strong>
+  </article>
+</section>
+
+<section class="grid two-up">
+  <article class="card">
+    <h2>Active Vault Execution</h2>
+    <table>
+      <thead><tr><th>Cycle</th><th>User</th><th>Profile</th><th>Substatus</th><th>Validation</th><th>Mode</th><th>Reason</th></tr></thead>
+      <tbody>
+        {% for cycle in active_cycles %}
+          <tr>
+            <td>#{{ cycle.id }}</td>
+            <td>{{ cycle.user.username if cycle.user else "n/a" }}</td>
+            <td>{{ cycle.algorithm_profile }}</td>
+            <td>{{ cycle.execution_substatus.replace("_", " ")|title }}</td>
+            <td>{{ cycle.live_validation_status.replace("_", " ")|title }}</td>
+            <td>{{ cycle.execution_mode }}</td>
+            <td>{{ cycle.validation_failure_reason or "n/a" }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="7">No active vault cycles.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </article>
+
+  <article class="card">
+    <h2>Risk Gates</h2>
+    <dl class="cycle-details">
+      <div><dt>Daily Realized PnL</dt><dd>{{ "%.4f"|format(risk_status.daily_realized_pnl) }}</dd></div>
+      <div><dt>Daily Loss Limit</dt><dd>{{ "%.4f"|format(risk_status.daily_loss_limit) }}</dd></div>
+      <div><dt>Cooldown</dt><dd>{{ risk_status.cooldown_minutes_remaining }} min</dd></div>
+      <div><dt>Max Leverage</dt><dd>{{ risk_status.max_leverage }}</dd></div>
+      <div><dt>Max Notional</dt><dd>${{ "%.2f"|format(risk_status.max_position_notional) }}</dd></div>
+      <div><dt>Max Slippage</dt><dd>{{ "%.4f"|format(risk_status.max_slippage_pct) }}</dd></div>
+      <div><dt>High-Upside Profile</dt><dd>{{ "Enabled" if risk_status.high_upside.profile_enabled else "Disabled" }}</dd></div>
+      <div><dt>High-Upside Live Eligible</dt><dd>{{ "Yes" if risk_status.high_upside.live_eligible else "No" }}</dd></div>
+      <div><dt>High-Upside Auto Disable</dt><dd>{{ "Active" if risk_status.high_upside.auto_disabled else "Clear" }}</dd></div>
+      <div><dt>High-Upside Max Notional</dt><dd>${{ "%.2f"|format(risk_status.high_upside.max_position_notional or 0) }}</dd></div>
+      <div><dt>High-Upside Daily Loss</dt><dd>${{ "%.2f"|format(risk_status.high_upside.max_daily_loss or 0) }}</dd></div>
+    </dl>
+  </article>
+</section>
+
+<section class="grid two-up">
+  <article class="card">
+    <h2>Wallet Readiness</h2>
+    <dl class="cycle-details">
+      <div><dt>Real Addresses</dt><dd>{{ "Enabled" if wallet_readiness.use_real_addresses else "Disabled" }}</dd></div>
+      <div><dt>Real Custody</dt><dd>{{ "Enabled" if wallet_readiness.real_custody_enabled else "Disabled" }}</dd></div>
+      <div><dt>In-App Keygen</dt><dd>{{ "Enabled" if wallet_readiness.keygen_enabled else "Disabled" }}</dd></div>
+      <div><dt>Encryption Key</dt><dd>{{ "Valid" if wallet_readiness.valid_encryption_key else "Missing or invalid" }}</dd></div>
+      <div><dt>Withdrawals</dt><dd>{{ "Enabled" if wallet_readiness.withdrawals_enabled else "Disabled" }}</dd></div>
+      <div><dt>Withdrawal Approval</dt><dd>{{ "Required" if wallet_readiness.approval_required else "Not Required" }}</dd></div>
+      <div><dt>Pending Withdrawals</dt><dd>{{ wallet_readiness.pending_withdrawals }}</dd></div>
+      <div><dt>Generated Addresses</dt><dd>{{ wallet_readiness.generated_address_count }}</dd></div>
+      <div><dt>Sync Failures</dt><dd>{{ wallet_readiness.sync_failures }}</dd></div>
+    </dl>
+    {% if wallet_readiness.blockers %}
+      <ul class="compact-list">
+        {% for blocker in wallet_readiness.blockers[:6] %}
+          <li>{{ blocker }}</li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+    <p class="muted">Mainnet wallet actions fail closed unless keygen, encryption, RPC/indexer, caps, idempotency, audit logging, and signer/broadcast support are configured.</p>
+    <a href="{{ url_for('admin.wallet_withdrawals') }}" class="button-link secondary">Review Withdrawals</a>
+  </article>
+
+  <article class="card">
+    <h2>Recent Wallet Workflows</h2>
+    <table>
+      <thead><tr><th>Type</th><th>Status</th><th>Asset</th><th>Amount ETH</th><th>Reason</th></tr></thead>
+      <tbody>
+        {% for withdrawal in recent_wallet_withdrawals %}
+          <tr>
+            <td>{{ withdrawal.workflow_type.replace("_", " ")|title }}</td>
+            <td>{{ withdrawal.status.replace("_", " ")|title }}</td>
+            <td>{{ withdrawal.asset }}</td>
+            <td>{{ "%.6f"|format(withdrawal.amount_eth) }}</td>
+            <td>{{ withdrawal.failure_reason or "n/a" }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="5">No wallet workflows recorded.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </article>
+</section>
+
+<section class="grid two-up">
+  <article class="card">
+    <h2>Recent Orders</h2>
+    <table>
+      <thead><tr><th>ID</th><th>Mode</th><th>Symbol</th><th>Side</th><th>Status</th><th>Risk</th></tr></thead>
+      <tbody>
+        {% for order in recent_orders %}
+          <tr>
+            <td>#{{ order.id }}</td>
+            <td>{{ order.mode }}</td>
+            <td>{{ order.symbol }}</td>
+            <td>{{ order.side }}</td>
+            <td>{{ order.status }}</td>
+            <td>{{ order.risk_status }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="6">No orders recorded.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </article>
+
+  <article class="card">
+    <h2>Recent Blocks and Audit</h2>
+    <table>
+      <thead><tr><th>Type</th><th>Action</th><th>Message</th><th>Time</th></tr></thead>
+      <tbody>
+        {% for event in recent_risk %}
+          <tr>
+            <td>Risk</td>
+            <td>{{ event.rule_name }}</td>
+            <td>{{ event.reason }}</td>
+            <td>{{ event.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+          </tr>
+        {% endfor %}
+        {% for audit in recent_audits %}
+          <tr>
+            <td>Audit</td>
+            <td>{{ audit.action }}</td>
+            <td>{{ audit.message }}</td>
+            <td>{{ audit.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+          </tr>
+        {% endfor %}
+        {% if not recent_risk and not recent_audits %}
+          <tr><td colspan="4">No recent blocks or audits.</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </article>
+</section>
+{% endblock %}

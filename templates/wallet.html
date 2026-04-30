@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+
+{% block title %}Wallet · Algorithm Vault{% endblock %}
+
+{% block content %}
+<section class="wallet-summary">
+  <article class="vault-card total-card">
+    <span class="card-kicker">Total Portfolio Value</span>
+    <strong class="hero-value">${{ "%.2f"|format(portfolio_total) }}</strong>
+    <p class="muted">Balances include available funds and amounts locked in active vault cycles.</p>
+    <div class="wallet-actions">
+      <a href="{{ url_for('consumer.vault') }}" class="button-link primary">Transfer / Allocate</a>
+    </div>
+  </article>
+
+  <article class="wallet-card settlement-panel">
+    <span class="card-kicker">Settlement Currency</span>
+    <h2>Preferred Asset</h2>
+    <div class="asset-selector compact-selector" role="list" aria-label="Settlement assets">
+      {% for asset in settlement_assets %}
+        <button type="button" class="asset-option {% if asset == 'USDC' %}is-selected{% endif %}" data-asset-option>
+          <span class="coin-icon" aria-hidden="true">{{ asset[:1] }}</span>
+          <strong>{{ asset }}</strong>
+        </button>
+      {% endfor %}
+    </div>
+    <p class="muted">Settlement asset selection is used when a vault cycle completes. Conversion availability depends on backend execution constraints.</p>
+  </article>
+</section>
+
+<section class="grid three-up balance-grid">
+  {% for balance in balances %}
+    <article class="wallet-card balance-card">
+      <div class="balance-card-head">
+        <span class="coin-icon" aria-hidden="true">{{ balance.asset[:1] }}</span>
+        <div>
+          <h2>{{ balance.asset }}</h2>
+          <span class="muted">Wallet Balance</span>
+        </div>
+      </div>
+      <strong class="balance-amount">{{ "%.6f"|format(balance.total_balance) }}</strong>
+      <div class="balance-pill-row">
+        <span class="balance-pill positive">Available {{ "%.6f"|format(balance.available_balance) }}</span>
+        <span class="balance-pill warning">Locked {{ "%.6f"|format(balance.locked_balance) }}</span>
+      </div>
+      <span class="muted">Est. ${{ "%.2f"|format(balance.estimated_usd_value) }}</span>
+      <div class="wallet-card-actions">
+        <a href="{{ url_for('consumer.deposit', asset=balance.asset) }}" class="button-link secondary">Deposit</a>
+        <a href="{{ url_for('consumer.withdraw', asset=balance.asset) }}" class="button-link secondary">Withdraw</a>
+      </div>
+      {% if balance.active_deposit_address %}
+        <span class="muted address-preview">{{ balance.active_deposit_address.address[:18] }}...</span>
+      {% endif %}
+    </article>
+  {% endfor %}
+</section>
+
+<section class="card">
+  <div class="section-heading">
+    <div>
+      <span class="card-kicker">Wallet Activity</span>
+      <h2>Recent Transactions</h2>
+    </div>
+    <a href="{{ url_for('consumer.activity') }}" class="text-link">Full history</a>
+  </div>
+  <table>
+    <thead><tr><th>Type</th><th>Asset</th><th>Amount</th><th>Status</th><th>Network</th><th>Note</th><th>Created</th></tr></thead>
+    <tbody>
+      {% for item in transactions %}
+        <tr>
+          <td>{{ item.transaction_type|title }}</td>
+          <td>{{ item.asset }}</td>
+          <td>{{ "%.6f"|format(item.amount) }}</td>
+          <td>{{ item.status|title }}</td>
+          <td>{{ item.network or "n/a" }}</td>
+          <td>{{ item.note or "Wallet update" }}</td>
+          <td>{{ item.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="7">No wallet activity yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}
+
+{% block page_scripts %}
+<script src="{{ url_for('static', filename='js/vault.js') }}"></script>
+{% endblock %}

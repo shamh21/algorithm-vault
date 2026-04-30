@@ -1,0 +1,212 @@
+{% extends "base.html" %}
+
+{% block title %}Trading Connections · Algorithm Vault{% endblock %}
+
+{% block content %}
+<section class="page-heading">
+  <span class="card-kicker">Live Trading</span>
+  <h1>Easy Connect</h1>
+  <p class="muted">Connect, verify, and activate a provider before live wallet, vault, or order execution can run.</p>
+</section>
+
+<section class="easy-connect-layout">
+  <article class="connection-wizard">
+    <div class="wizard-steps" aria-label="Connection setup steps">
+      <span class="is-complete">1 Provider</span>
+      <span class="{% if selected_spec %}is-complete{% endif %}">2 Credentials</span>
+      <span class="{% if selected_connection %}is-complete{% endif %}">3 Safety</span>
+      <span class="{% if selected_connection and selected_connection.verification_status == 'verified' %}is-complete{% endif %}">4 Verify</span>
+    </div>
+
+    <section class="wizard-section">
+      <div class="section-heading">
+        <div>
+          <span class="card-kicker">Step 1</span>
+          <h2>Choose Provider</h2>
+        </div>
+      </div>
+      <div class="provider-grid">
+        {% for key, spec in providers.items() %}
+          {% set existing = trading_connections|selectattr("provider", "equalto", key)|list|first %}
+          <a class="provider-tile {% if selected_provider == key %}is-selected{% endif %}" href="{{ url_for('settings.connection_provider', provider=key) }}">
+            <span class="provider-title">{{ spec.label }}</span>
+            <span class="provider-summary">{{ spec.summary }}</span>
+            <span class="status-badge {{ 'positive-badge' if spec.tradable else 'muted-badge' }}">
+              {{ "Live Ready" if spec.tradable else "Draft Only" }}
+            </span>
+            {% if existing %}
+              <small>Saved · {{ existing.verification_status.replace("_", " ")|title }}</small>
+            {% endif %}
+          </a>
+        {% endfor %}
+      </div>
+    </section>
+
+    <section class="wizard-section">
+      <div class="section-heading">
+        <div>
+          <span class="card-kicker">Step 2</span>
+          <h2>{{ selected_spec.label }} Setup</h2>
+        </div>
+      </div>
+      <p class="muted">{{ selected_spec.setup_hint }}</p>
+      {% if selected_spec.help_steps %}
+        <ol class="provider-steps">
+          {% for step in selected_spec.help_steps %}
+            <li>{{ step }}</li>
+          {% endfor %}
+        </ol>
+      {% endif %}
+      <form method="post" action="{{ url_for('settings.save_connection') }}" class="form-grid" data-disable-on-submit>
+        {{ csrf_input()|safe }}
+        <input type="hidden" name="provider" value="{{ selected_spec.key }}">
+        <input type="hidden" name="connection_type" value="{{ selected_spec.connection_type }}">
+        {% for field in selected_spec.fields %}
+          {% set metadata = selected_connection.provider_metadata if selected_connection else {} %}
+          {% set saved_secret = selected_connection and ((field.name == 'api_key' and selected_connection.encrypted_api_key) or (field.name == 'api_secret' and selected_connection.encrypted_api_secret) or (field.name == 'passphrase' and selected_connection.encrypted_passphrase)) %}
+          {% set metadata_value = metadata.get(field.name, '') if field.storage == 'metadata' and not field.sensitive else '' %}
+          <label>{{ field.label }}{% if field.required %}<span class="required-dot">Required</span>{% endif %}
+            <input
+              type="{{ field.type }}"
+              name="{{ field.name }}"
+              autocomplete="off"
+              placeholder="{{ 'Saved - leave blank to keep current value' if saved_secret else field.placeholder }}"
+              value="{{ selected_connection.wallet_address if selected_connection and field.name == 'wallet_address' else metadata_value }}"
+              {% if field.required and not saved_secret and not (selected_connection and field.name == 'wallet_address' and selected_connection.wallet_address) and not metadata_value %}required{% endif %}
+            >
+          </label>
+        {% endfor %}
+
+        <div class="risk-note">
+          <strong>Never enter seed phrases or wallet private keys.</strong>
+          <span>Exchange and permissioned trading secrets are encrypted. Wallet providers require public addresses and explicit delegation limits.</span>
+        </div>
+        <button type="submit" class="primary" data-loading-label="Saving...">
+          {{ "Save Draft" if not selected_spec.tradable else "Save Connection" }}
+        </button>
+      </form>
+    </section>
+
+    <section class="wizard-section">
+      <div class="section-heading">
+        <div>
+          <span class="card-kicker">Step 3</span>
+          <h2>Safety Review</h2>
+        </div>
+      </div>
+      <ul class="compact-list">
+        <li>Only verified live-ready connections can become active for execution.</li>
+        <li>Binance, KuCoin, and dYdX target perpetuals only in this app.</li>
+        <li>Uniswap requires approved wallet delegation, expiry, notional cap, and daily loss cap.</li>
+        <li>Withdrawals remain disabled unless explicitly enabled in configuration.</li>
+      </ul>
+      {% if selected_spec.capabilities %}
+        <div class="capability-row">
+          {% for capability in selected_spec.capabilities %}
+            <span class="status-badge positive-badge">{{ capability }}</span>
+          {% endfor %}
+        </div>
+      {% endif %}
+    </section>
+  </article>
+
+  <aside class="connection-status-panel">
+    <span class="card-kicker">Step 4</span>
+    <h2>Verify And Activate</h2>
+    {% if selected_connection %}
+      {% set status = selected_connection.verification_status or 'needs_verification' %}
+      {% set selected_can_activate = selected_spec.tradable and status == 'verified' %}
+      <dl class="cycle-details compact-details">
+        <div><dt>Provider</dt><dd>{{ selected_spec.label }}</dd></div>
+        <div><dt>Status</dt><dd><span class="connection-status status-{{ status }}">{{ status.replace("_", " ")|title }}</span></dd></div>
+        <div><dt>Active</dt><dd>{{ "Yes" if selected_connection.is_active else "No" }}</dd></div>
+        <div><dt>Wallet</dt><dd>{{ selected_connection.wallet_address[:18] ~ "..." if selected_connection.wallet_address else "Not set" }}</dd></div>
+        {% for field in selected_spec.fields if field.storage == 'metadata' and not field.sensitive %}
+          {% set metadata_value = selected_connection.provider_metadata.get(field.name) %}
+          {% if metadata_value %}
+            <div><dt>{{ field.label }}</dt><dd>{{ metadata_value }}</dd></div>
+          {% endif %}
+        {% endfor %}
+        <div><dt>Last Verified</dt><dd>{{ selected_connection.last_verified_at.strftime("%Y-%m-%d %H:%M") if selected_connection.last_verified_at else "Never" }}</dd></div>
+      </dl>
+      {% if selected_connection.last_verification_error %}
+        <div class="risk-note danger-note">
+          <strong>Action needed</strong>
+          <span>{{ selected_connection.last_verification_error }}</span>
+        </div>
+      {% endif %}
+      <div class="connection-actions">
+        {% if selected_spec.verification_supported %}
+          <form method="post" action="{{ url_for('settings.verify_connection', connection_id=selected_connection.id) }}" data-disable-on-submit>
+            {{ csrf_input()|safe }}
+            <button type="submit" class="secondary" data-loading-label="Verifying...">Verify Connection</button>
+          </form>
+        {% else %}
+          <button type="button" class="secondary" disabled>Verification Not Available</button>
+        {% endif %}
+        <form method="post" action="{{ url_for('settings.activate_connection', connection_id=selected_connection.id) }}" data-disable-on-submit>
+          {{ csrf_input()|safe }}
+          <button type="submit" class="primary" {% if not selected_can_activate %}disabled{% endif %} data-loading-label="Activating...">Activate</button>
+        </form>
+      </div>
+      {% if selected_connection.is_active and selected_can_activate %}
+        <a class="button-link primary" href="{{ url_for('consumer.home') }}">Continue</a>
+      {% endif %}
+    {% else %}
+      <p class="muted">Save provider details first. Verification and activation controls will appear here.</p>
+      <div class="empty-state">
+        <span class="coin-icon" aria-hidden="true">C</span>
+        <strong>No saved {{ selected_spec.label }} connection</strong>
+      </div>
+    {% endif %}
+  </aside>
+</section>
+
+<section class="card">
+  <div class="section-heading">
+    <div>
+      <span class="card-kicker">Connections</span>
+      <h2>Saved Providers</h2>
+    </div>
+    <a class="text-link" href="{{ url_for('settings.index') }}">Settings</a>
+  </div>
+  <table>
+    <thead><tr><th>Provider</th><th>Type</th><th>Status</th><th>Active</th><th>Wallet</th><th>Updated</th><th>Action</th></tr></thead>
+    <tbody>
+      {% for connection in trading_connections %}
+        {% set spec = providers.get(connection.provider) %}
+        {% set can_activate = spec and spec.tradable and connection.verification_status == 'verified' %}
+        <tr>
+          <td>{{ spec.label if spec else connection.provider|title }}</td>
+          <td>{{ connection.connection_type.replace("_", " ")|title }}</td>
+          <td><span class="connection-status status-{{ connection.verification_status }}">{{ connection.verification_status.replace("_", " ")|title }}</span></td>
+          <td>{{ "Active" if connection.is_active else "Inactive" }}</td>
+          <td>{{ connection.wallet_address[:18] ~ "..." if connection.wallet_address else "n/a" }}</td>
+          <td>{{ connection.updated_at.strftime("%Y-%m-%d %H:%M") }}</td>
+          <td>
+            <div class="table-actions">
+              <a class="button-link secondary" href="{{ url_for('settings.connection_provider', provider=connection.provider, connection_id=connection.id) }}">Open</a>
+              {% if spec and spec.verification_supported %}
+                <form method="post" action="{{ url_for('settings.verify_connection', connection_id=connection.id) }}">
+                  {{ csrf_input()|safe }}
+                  <button type="submit" class="secondary">Verify</button>
+                </form>
+              {% endif %}
+              <form method="post" action="{{ url_for('settings.activate_connection', connection_id=connection.id) }}">
+                {{ csrf_input()|safe }}
+                <button type="submit" class="primary" {% if not can_activate %}disabled{% endif %}>Activate</button>
+              </form>
+              <form method="post" action="{{ url_for('settings.delete_connection', connection_id=connection.id) }}">
+                {{ csrf_input()|safe }}
+                <button type="submit" class="danger-button">Delete</button>
+              </form>
+            </div>
+          </td>
+        </tr>
+      {% else %}
+        <tr><td colspan="7">No trading connections yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

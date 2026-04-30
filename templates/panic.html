@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+
+{% block content %}
+<main id="panic-app">
+<section class="grid two-up">
+  <article class="card danger-card animate-entry">
+    <h2>Panic Button</h2>
+    <p>This action cancels open orders, attempts to flatten positions where supported, and disables strategy execution until manually reset.</p>
+    <p><strong>Current Mode:</strong> {{ mode|upper }}</p>
+    <p><strong>Panic Lock:</strong> {{ "ON" if panic_lock else "OFF" }}</p>
+    <form method="post" action="{{ url_for('panic.activate') }}">
+      {{ csrf_input()|safe }}
+      <button type="submit" class="danger-button" id="panic-btn">Activate Panic Button</button>
+    </form>
+    <p class="muted" id="panic-confirm" style="display:none;">Confirming panic activation...</p>
+  </article>
+
+  <article class="card animate-entry">
+    <h2>Recent Panic Audit Logs</h2>
+    <ul class="compact-list">
+      {% for audit in audits %}
+        <li>{{ audit.created_at }}: {{ audit.message }}</li>
+      {% else %}
+        <li>No panic events recorded.</li>
+      {% endfor %}
+    </ul>
+  </article>
+</section>
+</main>
+<script>
+  (function () {
+    const btn = document.getElementById('panic-btn');
+    const confirmText = document.getElementById('panic-confirm');
+
+    if (btn) {
+      btn.addEventListener('click', function () {
+        btn.disabled = true;
+        btn.innerText = 'Activating...';
+        if (confirmText) confirmText.style.display = 'block';
+      }, { passive: true });
+    }
+  })();
+</script>
+{% endblock %}
