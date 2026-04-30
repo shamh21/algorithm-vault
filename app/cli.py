@@ -1523,6 +1523,7 @@ def _optimizer_live_canary_readiness(config: object) -> dict[str, object]:
         "submit_flag_required_for_live_order": "--submit",
         "optimizer_research_only": True,
         "uses_existing_live_caps": True,
+        "canary_preview_only": bool(current_app.config.get("CANARY_PREVIEW_ONLY", True)),
     }
 
 

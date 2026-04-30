@@ -604,6 +604,7 @@ class StrategyOptimizer:
             ensemble_backtest = self._ensemble_backtest_summary(rankings, optimizer_config)
             duration_ensemble_backtest = self._duration_ensemble_backtest_summary(rankings, optimizer_config)
             rejection_breakdown = self._rejection_breakdown(rankings)
+            raw_upside_report = self._raw_upside_report(rankings, optimizer_config)
             max_return_summary = self._max_return_summary(rankings, optimizer_config, duration_ensemble_backtest)
             pair_screening_summary = self._pair_screening_summary(rankings, optimizer_config, duration_ensemble_backtest)
             one_hour_diagnostics = self._one_hour_diagnostics(rankings, optimizer_config)
@@ -611,6 +612,11 @@ class StrategyOptimizer:
                 "ranking_count": len(rankings),
                 "accepted_count": len([item for item in rankings if not item["rejected"]]),
                 "top": rankings[:10],
+                "raw_upside_report": raw_upside_report,
+                "raw_upside_leaderboard": raw_upside_report.get("top_by_raw_upside", []),
+                "max_return_candidate": raw_upside_report.get("max_return_candidate", {}),
+                "target_roi_pct": raw_upside_report.get("target_roi_pct", 1000.0),
+                "target_roi_hit": raw_upside_report.get("target_roi_hit", False),
                 "one_hour_diagnostics": one_hour_diagnostics,
                 "one_hour_rejection_breakdown": one_hour_diagnostics.get("rejection_breakdown", {}),
                 "net_roi_v2_enabled": bool(self.config.get("NET_ROI_V2_ENABLED", True)),
@@ -1100,6 +1106,23 @@ class StrategyOptimizer:
                 rejection_reason = rejection_reason or "low_net_roi_edge"
                 warnings.append("Expected edge after costs was below the net ROI threshold.")
 
+        raw_upside_payload = self._raw_upside_candidate_metrics(
+            total_return=weighted_return,
+            net_return_after_costs=net_return_after_costs,
+            recent_1h_return=recent_1h_return,
+            max_favorable_excursion=max_favorable_excursion,
+            leverage=leverage,
+            rejected=rejected,
+            rejection_reason=rejection_reason,
+            weighted_drawdown=weighted_drawdown,
+            expected_fill_quality=float(roi_payload["expected_fill_quality"]),
+            window_stability=window_stability,
+            churn_penalty=float(roi_payload["churn_penalty"]),
+            regime_support=str(roi_v2_payload["regime_support"]),
+            data_age_seconds=float(roi_payload["data_age_seconds"]),
+            optimizer_config=optimizer_config,
+        )
+
         ml_payload = self._ml_score_payload(
             score=score,
             rejected=rejected,
@@ -1178,6 +1201,12 @@ class StrategyOptimizer:
             "offline_ml_model_id": ml_payload["offline_ml_model_id"],
             "total_return": weighted_return,
             "net_return_after_costs": net_return_after_costs,
+            "raw_upside_score": raw_upside_payload["raw_upside_score"],
+            "raw_total_return_pct": raw_upside_payload["raw_total_return_pct"],
+            "raw_net_return_pct": raw_upside_payload["raw_net_return_pct"],
+            "target_roi_pct": raw_upside_payload["target_roi_pct"],
+            "target_roi_hit": raw_upside_payload["target_roi_hit"],
+            "live_blockers": raw_upside_payload["live_blockers"],
             "recent_performance_score": recent_performance_score,
             "recent_1h_return": recent_1h_return,
             "estimated_fees": estimated_fees,
@@ -2394,6 +2423,14 @@ class StrategyOptimizer:
                 "cost_adjusted_breakout_potential": result.get("cost_adjusted_breakout_potential", 0.0),
                 "components": result.get("net_roi_v2_components", {}),
             },
+            "raw_upside": {
+                "raw_upside_score": result.get("raw_upside_score", 0.0),
+                "raw_total_return_pct": result.get("raw_total_return_pct", 0.0),
+                "raw_net_return_pct": result.get("raw_net_return_pct", 0.0),
+                "target_roi_pct": result.get("target_roi_pct", 1000.0),
+                "target_roi_hit": bool(result.get("target_roi_hit", False)),
+                "live_blockers": result.get("live_blockers", []),
+            },
         }
         db.session.add(ranking)
         # Flush rather than commit to keep the transaction open; commit happens in run().
@@ -2916,6 +2953,147 @@ class StrategyOptimizer:
                     return 0.0
         return 0.0
 
+    def _raw_upside_candidate_metrics(
+        self,
+        *,
+        total_return: float,
+        net_return_after_costs: float,
+        recent_1h_return: float,
+        max_favorable_excursion: float,
+        leverage: float,
+        rejected: bool,
+        rejection_reason: str,
+        weighted_drawdown: float,
+        expected_fill_quality: float,
+        window_stability: float,
+        churn_penalty: float,
+        regime_support: str,
+        data_age_seconds: float,
+        optimizer_config: OptimizerConfig,
+    ) -> dict[str, Any]:
+        """Score historical raw upside while keeping live-readiness blockers explicit."""
+
+        target_roi_pct = float(self.config.get("RAW_UPSIDE_TARGET_ROI_PCT", 1000.0) or 1000.0)
+        raw_total_return_pct = float(total_return or 0.0) * 100.0
+        raw_net_return_pct = float(net_return_after_costs or 0.0) * 100.0
+        raw_upside_score = (
+            raw_total_return_pct
+            + max(float(recent_1h_return or 0.0), 0.0) * 100.0
+            + max(float(max_favorable_excursion or 0.0), 0.0) * 100.0
+            + max(float(leverage or 1.0) - 1.0, 0.0) * 5.0
+        )
+        blockers: list[str] = []
+        if rejected:
+            blockers.append(f"candidate_rejected:{rejection_reason or 'unknown'}")
+        if float(weighted_drawdown or 0.0) <= -abs(float(optimizer_config.max_drawdown_pct or 0.0)):
+            blockers.append("excessive_drawdown")
+        if float(expected_fill_quality or 0.0) < float(self.config.get("NET_ROI_MIN_FILL_QUALITY", 0.55) or 0.55):
+            blockers.append("low_fill_quality")
+        if float(window_stability or 0.0) < float(self.config.get("AGGRESSIVE_1H_MIN_WINDOW_STABILITY", 0.55) or 0.55):
+            blockers.append("weak_signal_stability")
+        if float(churn_penalty or 0.0) > float(self.config.get("NET_ROI_MAX_CHURN_PENALTY", 0.35) or 0.35):
+            blockers.append("high_churn")
+        if str(regime_support or "").lower() == "regime-fragile":
+            blockers.append("fragile_regime")
+        if float(data_age_seconds or 0.0) > 3600.0:
+            blockers.append("stale_data")
+        if bool(self.config.get("HIGH_UPSIDE_REQUIRE_PROMOTED_ML", True)):
+            blockers.append("promoted_ml_required_for_high_upside")
+        if bool(self.config.get("CANARY_PREVIEW_ONLY", True)):
+            blockers.append("canary_preview_only_enabled")
+        blockers.extend(
+            [
+                "strict_readiness_required",
+                "funded_account_required",
+                "active_verified_live_connection_required",
+            ]
+        )
+        return {
+            "raw_upside_score": float(raw_upside_score),
+            "raw_total_return_pct": float(raw_total_return_pct),
+            "raw_net_return_pct": float(raw_net_return_pct),
+            "target_roi_pct": float(target_roi_pct),
+            "target_roi_hit": bool(raw_total_return_pct >= target_roi_pct),
+            "live_blockers": list(dict.fromkeys(blockers)),
+        }
+
+    def _raw_upside_report(self, rankings: list[dict[str, Any]], optimizer_config: OptimizerConfig) -> dict[str, Any]:
+        target_roi_pct = float(self.config.get("RAW_UPSIDE_TARGET_ROI_PCT", 1000.0) or 1000.0)
+        sorted_raw = sorted(
+            rankings,
+            key=lambda item: float(item.get("raw_upside_score", item.get("raw_total_return_pct", 0.0)) or 0.0),
+            reverse=True,
+        )
+        sorted_net = sorted(
+            rankings,
+            key=lambda item: float(item.get("net_roi_v2_score", item.get("net_roi_score", 0.0)) or 0.0),
+            reverse=True,
+        )
+        target_hits = [
+            item for item in sorted_raw if float(item.get("raw_total_return_pct", 0.0) or 0.0) >= target_roi_pct
+        ]
+        approaching = [
+            item for item in sorted_raw if float(item.get("raw_total_return_pct", 0.0) or 0.0) >= target_roi_pct * 0.5
+        ]
+        if not approaching:
+            approaching = sorted_raw[:3]
+        accepted = [item for item in sorted_net if not item.get("rejected")]
+        rejected_high_raw = [item for item in sorted_raw if item.get("rejected")]
+        return {
+            "enabled": True,
+            "research_only": True,
+            "profile": optimizer_config.profile,
+            "target_roi_pct": target_roi_pct,
+            "target_roi_hit": bool(target_hits),
+            "target_roi_hit_count": len(target_hits),
+            "candidate_count": len(rankings),
+            "accepted_count": len(accepted),
+            "rejected_count": len(rejected_high_raw),
+            "max_return_candidate": self._raw_upside_payload(sorted_raw[0]) if sorted_raw else {},
+            "top_by_raw_upside": [self._raw_upside_payload(item) for item in sorted_raw[:10]],
+            "top_by_net_roi_v2": [self._raw_upside_payload(item) for item in sorted_net[:10]],
+            "target_or_near_target_candidates": [self._raw_upside_payload(item) for item in approaching[:10]],
+            "rejected_high_raw_upside": [self._raw_upside_payload(item) for item in rejected_high_raw[:10]],
+            "best_preview_candidate": self._raw_upside_payload(accepted[0]) if accepted else {},
+            "live_orders_created": False,
+            "canary_preview_only_required": True,
+        }
+
+    @staticmethod
+    def _raw_upside_payload(item: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "strategy_name": item.get("strategy_name"),
+            "symbol": item.get("symbol"),
+            "timeframe": item.get("timeframe"),
+            "profile": item.get("profile"),
+            "rejected": bool(item.get("rejected")),
+            "rejection_reason": item.get("rejection_reason") or "",
+            "raw_upside_score": float(item.get("raw_upside_score", 0.0) or 0.0),
+            "raw_total_return_pct": float(item.get("raw_total_return_pct", 0.0) or 0.0),
+            "raw_net_return_pct": float(item.get("raw_net_return_pct", 0.0) or 0.0),
+            "target_roi_pct": float(item.get("target_roi_pct", 1000.0) or 1000.0),
+            "target_roi_hit": bool(item.get("target_roi_hit", False)),
+            "live_blockers": list(item.get("live_blockers", []) or []),
+            "total_return": float(item.get("total_return", 0.0) or 0.0),
+            "net_return_after_costs": float(item.get("net_return_after_costs", 0.0) or 0.0),
+            "net_roi_v2_score": float(item.get("net_roi_v2_score", 0.0) or 0.0),
+            "net_roi_score": float(item.get("net_roi_score", 0.0) or 0.0),
+            "roi_quality_grade": item.get("roi_quality_grade", "D"),
+            "roi_rejection_risk": item.get("roi_rejection_risk", "high"),
+            "regime_support": item.get("regime_support", "regime-neutral"),
+            "max_drawdown": float(item.get("max_drawdown", 0.0) or 0.0),
+            "expected_fill_quality": float(item.get("expected_fill_quality", 0.0) or 0.0),
+            "churn_penalty": float(item.get("churn_penalty", 0.0) or 0.0),
+            "cost_drag_bps": float(item.get("cost_drag_bps", 0.0) or 0.0),
+            "spread_bps": float(item.get("spread_bps", 0.0) or 0.0),
+            "window_stability": float(item.get("window_stability", 0.0) or 0.0),
+            "mfe_mae_ratio": float(item.get("mfe_mae_ratio", 0.0) or 0.0),
+            "max_favorable_excursion": float(item.get("max_favorable_excursion", 0.0) or 0.0),
+            "max_adverse_excursion": float(item.get("max_adverse_excursion", 0.0) or 0.0),
+            "trade_count": int(item.get("trade_count", 0) or 0),
+            "parameters": dict(item.get("parameters", {}) or {}),
+        }
+
     def _one_hour_diagnostics(self, rankings: list[dict[str, Any]], optimizer_config: OptimizerConfig) -> dict[str, Any]:
         if optimizer_config.profile != Profile.AGGRESSIVE_1H.value:
             return {"enabled": False}
@@ -3231,6 +3409,16 @@ class StrategyOptimizer:
             "ml_explanation": {},
             "total_return": 0.0,
             "net_return_after_costs": 0.0,
+            "raw_upside_score": 0.0,
+            "raw_total_return_pct": 0.0,
+            "raw_net_return_pct": 0.0,
+            "target_roi_pct": 1000.0,
+            "target_roi_hit": False,
+            "live_blockers": [
+                f"candidate_rejected:{reason}",
+                "strict_readiness_required",
+                "canary_preview_only_enabled",
+            ],
             "recent_performance_score": 0.0,
             "recent_1h_return": 0.0,
             "estimated_fees": 0.0,

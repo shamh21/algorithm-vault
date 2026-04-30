@@ -11,12 +11,14 @@ from app.models import (
     AuditLog,
     MLModelState,
     MLTrainingEvent,
+    Order,
     OptimizerRun,
     Setting,
     StrategyRanking,
     StrategyRun,
     TradingConnection,
     User,
+    VaultCycle,
 )
 from app.ml.online_ranker import extract_features
 from app.strategies.base import Signal
@@ -245,8 +247,13 @@ def test_optimizer_persists_rankings_with_walk_forward_windows(app) -> None:
     result = optimizer.run(config)
 
     assert result["ranking_count"] == 2
+    assert result["raw_upside_report"]["live_orders_created"] is False
+    assert "raw_upside_leaderboard" in result
     assert OptimizerRun.query.first().status == "completed"
     assert StrategyRanking.query.count() == 2
+    assert StrategyRun.query.count() == 0
+    assert Order.query.count() == 0
+    assert VaultCycle.query.count() == 0
 
 
 def test_optimizer_reports_pair_screening_summary(app) -> None:
@@ -484,6 +491,61 @@ def test_run_optimization_reports_high_upside_readiness_and_scanner_diagnostics(
     assert payload["scanner_diagnostics"]["accepted"][0]["symbol"] == "BTC"
     assert payload["high_upside_live_readiness"]["requested"] is True
     assert "HIGH_UPSIDE_PROFILE_ENABLED=false" in payload["high_upside_live_readiness"]["blockers"]
+
+
+def test_run_optimization_outputs_raw_upside_research_report(app, monkeypatch) -> None:
+    optimizer = app.extensions["services"]["strategy_optimizer"]
+    captured = {}
+
+    def fake_run(config):
+        captured["profile"] = config.profile
+        return {
+            "ok": True,
+            "profile": config.profile,
+            "top": [],
+            "raw_upside_report": {
+                "enabled": True,
+                "research_only": True,
+                "target_roi_pct": 1000.0,
+                "target_roi_hit": True,
+                "live_orders_created": False,
+                "top_by_raw_upside": [
+                    {
+                        "symbol": "BTC",
+                        "strategy_name": "scalping",
+                        "raw_total_return_pct": 1200.0,
+                        "target_roi_hit": True,
+                        "rejected": True,
+                        "rejection_reason": "high_drawdown",
+                        "live_blockers": ["candidate_rejected:high_drawdown"],
+                    }
+                ],
+                "top_by_net_roi_v2": [],
+                "rejected_high_raw_upside": [],
+                "best_preview_candidate": {},
+            },
+        }
+
+    monkeypatch.setattr(optimizer, "run", fake_run)
+
+    for profile in ("extreme_roi_experimental", "aggressive_1h"):
+        result = app.test_cli_runner().invoke(
+            args=[
+                "run-optimization",
+                "--profile",
+                profile,
+                "--auto-deploy-top-n",
+                "0",
+            ]
+        )
+
+        assert result.exit_code == 0
+        payload = json.loads(result.output)
+        assert captured["profile"] == profile
+        assert payload["raw_upside_report"]["research_only"] is True
+        assert payload["raw_upside_report"]["live_orders_created"] is False
+        assert payload["raw_upside_report"]["top_by_raw_upside"][0]["raw_total_return_pct"] == 1200.0
+        assert payload["live_canary_readiness"]["canary_preview_only"] is True
 
 
 def test_run_optimization_timeout_returns_actionable_diagnostics(app, monkeypatch) -> None:
@@ -815,6 +877,68 @@ def test_extreme_roi_keeps_hard_rejections(app) -> None:
     assert high_drawdown["rejection_reason"] == "high_drawdown"
 
 
+def test_extreme_roi_raw_upside_keeps_rejected_high_return_visible(app) -> None:
+    optimizer = app.extensions["services"]["strategy_optimizer"]
+    config = optimizer.default_config(symbols=["BTC"], strategy_names=["scalping"], profile="extreme_roi_experimental")
+    config.min_trade_count = 1
+
+    result = optimizer._aggregate_candidate(
+        "BTC",
+        "1m",
+        "scalping",
+        {"leverage": 2.0},
+        [_aggressive_window(total_return=10.5, max_drawdown=-0.9, edge_score=80.0, trade_count=20)],
+        config,
+    )
+
+    assert result["rejected"] is True
+    assert result["rejection_reason"] == "high_drawdown"
+    assert result["raw_total_return_pct"] == 1050.0
+    assert result["target_roi_pct"] == 1000.0
+    assert result["target_roi_hit"] is True
+    assert result["raw_upside_score"] >= result["raw_total_return_pct"]
+    assert "candidate_rejected:high_drawdown" in result["live_blockers"]
+    assert "excessive_drawdown" in result["live_blockers"]
+    assert "net_roi_v2_score" in result
+    assert "expected_fill_quality" in result
+    assert "churn_penalty" in result
+
+
+def test_raw_upside_report_surfaces_raw_and_net_roi_leaders(app) -> None:
+    optimizer = app.extensions["services"]["strategy_optimizer"]
+    config = optimizer.default_config(symbols=["BTC"], strategy_names=["scalping"], profile="extreme_roi_experimental")
+    config.min_trade_count = 1
+    accepted = optimizer._aggregate_candidate(
+        "BTC",
+        "1m",
+        "scalping",
+        {},
+        [_aggressive_window(total_return=0.04, edge_score=45.0, trade_count=20)],
+        config,
+    )
+    rejected_raw = optimizer._aggregate_candidate(
+        "ETH",
+        "1m",
+        "scalping",
+        {"leverage": 2.0},
+        [_aggressive_window(total_return=10.2, max_drawdown=-0.9, edge_score=80.0, trade_count=20)],
+        config,
+    )
+
+    report = optimizer._raw_upside_report([accepted, rejected_raw], config)
+
+    assert report["enabled"] is True
+    assert report["research_only"] is True
+    assert report["live_orders_created"] is False
+    assert report["target_roi_hit"] is True
+    assert report["max_return_candidate"]["symbol"] == "ETH"
+    assert report["max_return_candidate"]["rejected"] is True
+    assert report["top_by_raw_upside"][0]["symbol"] == "ETH"
+    assert report["rejected_high_raw_upside"][0]["rejection_reason"] == "high_drawdown"
+    assert report["top_by_net_roi_v2"][0]["net_roi_v2_score"] >= report["top_by_net_roi_v2"][-1]["net_roi_v2_score"]
+    assert report["best_preview_candidate"]["symbol"] == "BTC"
+
+
 def test_aggressive_warning_payload_and_acceptance(app) -> None:
     optimizer = app.extensions["services"]["strategy_optimizer"]
     config = optimizer.default_config(symbols=["BTC"], strategy_names=["scalping"], profile="aggressive_1h")
@@ -839,6 +963,10 @@ def test_aggressive_warning_payload_and_acceptance(app) -> None:
     assert round(result["expectancy"], 6) == 1.5
     assert round(result["cost_drag_bps"], 6) == 4.5
     assert result["net_roi_score"] > 0
+    assert result["raw_total_return_pct"] > 2.0
+    assert result["raw_upside_score"] >= result["raw_total_return_pct"]
+    assert result["target_roi_hit"] is False
+    assert "strict_readiness_required" in result["live_blockers"]
     assert result["expected_fill_quality"] >= app.config["NET_ROI_MIN_FILL_QUALITY"]
     assert "net_return" in result["net_roi_components"]
     assert result["convex_edge_score"] > 0
@@ -1090,6 +1218,9 @@ def test_optimizer_persists_cost_adjusted_metrics(app) -> None:
     assert ranking.net_return_after_costs == result["net_return_after_costs"]
     assert ranking.turnover_after_fees == result["turnover_after_fees"]
     assert ranking.win_rate == result["win_rate"]
+    assert ranking.ml_explanation["raw_upside"]["raw_total_return_pct"] == result["raw_total_return_pct"]
+    assert ranking.ml_explanation["raw_upside"]["target_roi_pct"] == 1000.0
+    assert ranking.ml_explanation["raw_upside"]["live_blockers"] == result["live_blockers"]
 
 
 def test_optimizer_rejects_high_turnover_low_net_return(app) -> None:
