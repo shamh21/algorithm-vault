@@ -121,6 +121,7 @@ def rotate_address(asset: str):
     if old_address is not None:
         old_address.is_active = False
         old_address.expired_at = datetime.utcnow()
+        _deactivate_wallet_address_for_deposit(old_address)
     balance.active_deposit_address_id = new_address.id
     try:
         withdrawal = get_service("self_custody_wallet").handle_rotated_address(
@@ -988,7 +989,7 @@ def _new_deposit_address(
     )
     version = (latest.version if latest is not None else 0) + 1
     try:
-        configured_address = generate_deposit_address(asset, user_id, network)
+        configured_address = generate_deposit_address(asset, user_id, network, force_new=rotated_from is not None)
     except Exception as exc:  # noqa: BLE001
         current_app.logger.exception("Deposit address generation failed for %s/%s.", asset, network)
         db.session.add(
@@ -996,6 +997,16 @@ def _new_deposit_address(
                 category="wallet",
                 action="deposit_address_generation_failed",
                 message=f"Deposit address generation failed for {asset} on {network}: {exc}",
+            )
+        )
+        return None
+    existing_address = DepositAddress.query.filter_by(address=configured_address).one_or_none()
+    if existing_address is not None:
+        db.session.add(
+            AuditLog(
+                category="wallet",
+                action="deposit_address_generation_duplicate",
+                message=f"Deposit address generation returned an already registered {asset} address on {network}.",
             )
         )
         return None
@@ -1032,6 +1043,21 @@ def _new_deposit_address(
     except Exception:  # noqa: BLE001
         current_app.logger.exception("Failed to record public wallet address metadata.")
     return address
+
+
+def _deactivate_wallet_address_for_deposit(deposit_address: DepositAddress) -> None:
+    wallet_address = (
+        WalletAddress.query.filter_by(
+            user_id=deposit_address.user_id,
+            asset=deposit_address.asset,
+            network=deposit_address.network,
+            address=deposit_address.address,
+        )
+        .order_by(WalletAddress.rotation_index.desc())
+        .first()
+    )
+    if wallet_address is not None:
+        wallet_address.status = "inactive"
 
 def _asset_usd_price(asset: str) -> float:
     asset = asset.upper()

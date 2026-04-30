@@ -518,6 +518,29 @@ def test_rotation_without_replacement_keeps_current_address_active(app) -> None:
     assert DepositAddress.query.filter_by(user_id=user.id, asset="USDC").count() == 1
 
 
+def test_generated_rotation_duplicate_replacement_fails_closed_without_500(app) -> None:
+    _patch_market_data(app)
+    _enable_live_wallets(app)
+    user, secret = _create_user(username="dupaddr")
+    client = app.test_client()
+    _login(client, user.username, secret)
+
+    deposit = client.get("/wallet/deposit/ETH")
+    assert deposit.status_code == 200
+    old = DepositAddress.query.filter_by(user_id=user.id, asset="ETH", is_active=True).one()
+
+    response = client.post("/wallet/rotate-address/ETH", data={"confirm_rotate": "on"}, follow_redirects=True)
+
+    assert response.status_code == 200
+    assert b"No replacement deposit address is configured for that asset/network." in response.data
+    refreshed = db.session.get(DepositAddress, old.id)
+    assert refreshed.is_active is True
+    assert refreshed.expired_at is None
+    assert DepositAddress.query.filter_by(user_id=user.id, asset="ETH").count() == 1
+    wallet_address = WalletAddress.query.filter_by(user_id=user.id, asset="ETH", address=old.address).one()
+    assert wallet_address.status == "active"
+
+
 def test_configured_deposit_lookup_is_case_insensitive(app) -> None:
     _patch_market_data(app)
     Setting.set_json("use_real_addresses", True)

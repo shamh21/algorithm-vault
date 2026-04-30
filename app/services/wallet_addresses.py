@@ -188,7 +188,7 @@ class WalletAddressService:
         return list(dict.fromkeys(assets))
 
 
-def generate_deposit_address(asset: str, user: Any, network: str = "native") -> str:
+def generate_deposit_address(asset: str, user: Any, network: str = "native", *, force_new: bool = False) -> str:
     """Generate or acquire a deposit address for the current address mode."""
 
     asset_key = _asset_key(asset)
@@ -208,6 +208,7 @@ def generate_deposit_address(asset: str, user: Any, network: str = "native") -> 
                 user_id=user_id,
                 asset=asset_key,
                 network=network_name,
+                force_new=force_new,
             )
             return wallet_address.address
     raise RuntimeError(f"No real wallet address provider is configured for {asset_key} on {network_name}.")

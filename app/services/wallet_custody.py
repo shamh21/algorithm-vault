@@ -177,6 +177,7 @@ class RealWalletCustodyService:
         asset: str,
         network: str,
         deposit_address_id: int | None = None,
+        force_new: bool = False,
     ) -> WalletAddress:
         asset_key = self._asset_key(asset)
         network_name = str(network or "").strip() or self._default_network(asset_key)
@@ -195,12 +196,24 @@ class RealWalletCustodyService:
             .order_by(WalletAddress.rotation_index.desc())
             .first()
         )
-        if existing is not None:
+        if existing is not None and not force_new:
             if deposit_address_id is not None and existing.deposit_address_id is None:
                 existing.deposit_address_id = deposit_address_id
             return existing
 
         generated = adapter.generate_wallet(asset_key, network_name)
+        duplicate = (
+            WalletAddress.query.filter_by(
+                user_id=user_id,
+                asset=asset_key,
+                network=network_name,
+                address=generated.address,
+            )
+            .order_by(WalletAddress.rotation_index.desc())
+            .first()
+        )
+        if duplicate is not None:
+            raise RuntimeError("Generated replacement wallet address matched an existing address.")
         account = self._account_for(user_id, asset_key, network_name)
         latest = (
             WalletAddress.query.filter_by(user_id=user_id, asset=asset_key, network=network_name)

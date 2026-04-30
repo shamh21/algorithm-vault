@@ -107,6 +107,21 @@ def test_real_wallet_generates_mainnet_style_addresses_without_test_prefix(app) 
     assert private_key not in eth.encrypted_metadata_json
 
 
+def test_force_new_real_wallet_address_generates_replacement(app) -> None:
+    _enable_generated_wallets(app)
+    custody = app.extensions["services"]["wallet_custody"]
+    user, _ = _create_user("rotatebtc")
+
+    first = custody.get_or_create_address(user_id=user.id, asset="BTC", network="Bitcoin")
+    second = custody.get_or_create_address(user_id=user.id, asset="BTC", network="Bitcoin", force_new=True)
+
+    assert second.id != first.id
+    assert second.address != first.address
+    assert second.rotation_index == first.rotation_index + 1
+    assert first.status == "active"
+    assert second.status == "active"
+
+
 def test_real_wallet_generation_fails_closed_when_keygen_disabled(app) -> None:
     _enable_generated_wallets(app)
     app.config["WALLET_ALLOW_IN_APP_KEYGEN"] = False
