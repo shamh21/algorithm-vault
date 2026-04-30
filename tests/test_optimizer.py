@@ -249,11 +249,99 @@ def test_optimizer_persists_rankings_with_walk_forward_windows(app) -> None:
     assert result["ranking_count"] == 2
     assert result["raw_upside_report"]["live_orders_created"] is False
     assert "raw_upside_leaderboard" in result
+    assert result["optimizer_runtime"]["evaluated_candidates"] == 2
+    assert result["optimizer_runtime"]["backtest_runs"] > 0
+    assert result["optimizer_runtime"]["window_count"] > 0
+    assert "phase_seconds" in result["optimizer_runtime"]
+    assert result["optimizer_runtime"]["signal_history_limit"] == app.config["OPTIMIZER_SIGNAL_HISTORY_LIMIT"]
     assert OptimizerRun.query.first().status == "completed"
     assert StrategyRanking.query.count() == 2
     assert StrategyRun.query.count() == 0
     assert Order.query.count() == 0
     assert VaultCycle.query.count() == 0
+
+
+def test_optimizer_window_slices_match_legacy_filtering(app) -> None:
+    optimizer = app.extensions["services"]["strategy_optimizer"]
+    candles = _optimizer_candles()
+    config = optimizer.default_config(symbols=["BTC"], timeframes=["15m"], strategy_names=["scalping"])
+    config.training_window_days = 1
+    config.testing_window_days = 1
+    config.step_days = 1
+
+    windows = optimizer._rolling_windows(candles, config)
+    slices = optimizer._window_slices(candles, windows)
+
+    assert len(slices) == len(windows)
+    for window, sliced in zip(windows, slices):
+        train_start, _test_start, test_end = window
+        legacy = [row for row in candles if train_start <= int(row["timestamp"]) <= test_end]
+        assert sliced.candles == legacy
+
+
+def test_optimizer_cooperative_deadline_returns_partial_rankings(app, monkeypatch) -> None:
+    optimizer = app.extensions["services"]["strategy_optimizer"]
+    optimizer.market_data.get_candles = lambda symbol, timeframe, mode, limit: _optimizer_candles()
+    config = optimizer.default_config(symbols=["BTC"], timeframes=["15m"], strategy_names=["scalping"])
+    config.training_window_days = 1
+    config.testing_window_days = 1
+    config.step_days = 1
+    config.max_parameter_sets = 3
+    config.min_trade_count = 1
+    config.auto_deploy_top_n = 0
+    checks = {"count": 0}
+
+    def deadline_reached(_config):
+        checks["count"] += 1
+        return checks["count"] >= 3
+
+    monkeypatch.setattr(optimizer, "_deadline_reached", deadline_reached)
+
+    result = optimizer.run(config)
+
+    assert result["partial_result"] is True
+    assert result["timed_out"] is True
+    assert result["partial_reason"] == "optimizer_deadline_reached"
+    assert result["ranking_count"] == 1
+    assert result["optimizer_runtime"]["evaluated_candidates"] == 1
+    assert result["optimizer_runtime"]["partial_result"] is True
+    assert OptimizerRun.query.first().status == "partial"
+    assert StrategyRanking.query.count() == 1
+    assert StrategyRun.query.count() == 0
+    assert Order.query.count() == 0
+    assert VaultCycle.query.count() == 0
+
+
+def test_optimizer_prefilter_skips_untestable_candidates_with_reason(app) -> None:
+    optimizer = app.extensions["services"]["strategy_optimizer"]
+    optimizer.market_data.get_candles = lambda symbol, timeframe, mode, limit: _minute_candles(hours=0)[:20]
+    app.config["OPTIMIZER_PREFILTER_ENABLED"] = True
+    config = optimizer.default_config(symbols=["BTC"], timeframes=["1m"], strategy_names=["scalping"])
+    config.max_parameter_sets = 1
+    config.auto_deploy_top_n = 0
+
+    result = optimizer.run(config)
+
+    assert result["ranking_count"] >= 1
+    assert result["optimizer_runtime"]["skipped_candidates"] == result["ranking_count"]
+    assert result["optimizer_runtime"]["skipped_reasons"] == {"insufficient_window_candles": result["ranking_count"]}
+    assert all(row["rejected"] for row in result["top"])
+    assert {row["rejection_reason"] for row in result["top"]} == {"insufficient_window_candles"}
+    assert all("candidate_rejected:insufficient_window_candles" in row["live_blockers"] for row in result["top"])
+
+
+def test_configured_optimizer_does_not_scan_dynamic_universe_for_capacity(app) -> None:
+    optimizer = app.extensions["services"]["strategy_optimizer"]
+    config = optimizer.default_config(symbols=["BTC"], timeframes=["1m"], strategy_names=["scalping"])
+    config.universe_mode = "configured"
+
+    def fail_liquid_universe(*_args, **_kwargs):
+        raise AssertionError("configured optimizer should not scan the dynamic universe")
+
+    optimizer.universe_service.liquid_universe = fail_liquid_universe
+
+    assert optimizer._capacity_usd("BTC", config) == float(config.allocation_amount_usd or 0.0)
+    assert optimizer._universe_source("BTC", config) == "configured"
 
 
 def test_optimizer_reports_pair_screening_summary(app) -> None:
@@ -574,6 +662,91 @@ def test_run_optimization_timeout_returns_actionable_diagnostics(app, monkeypatc
     assert payload["optimizer_runtime"]["source"] == "OPTIMIZER_MARKET_DATA_TIMEOUT_SECONDS"
     assert "No live orders are created by run-optimization." in payload["warnings"]
     assert payload["offline_ml_readiness"]["horizon"] == "1h"
+
+
+def test_run_optimization_preserves_cooperative_partial_runtime(app, monkeypatch) -> None:
+    optimizer = app.extensions["services"]["strategy_optimizer"]
+
+    def partial_run(config):
+        return {
+            "profile": config.profile,
+            "ranking_count": 1,
+            "accepted_count": 1,
+            "top": [{"symbol": "BTC", "strategy_name": "scalping"}],
+            "partial_result": True,
+            "timed_out": True,
+            "partial_reason": "optimizer_deadline_reached",
+            "warnings": ["No live orders are created by run-optimization."],
+            "optimizer_runtime": {
+                "evaluated_candidates": 1,
+                "skipped_candidates": 0,
+                "backtest_runs": 2,
+                "window_count": 2,
+                "phase_seconds": {"backtest": 0.1},
+                "slowest_market": {"symbol": "BTC", "timeframe": "1m", "seconds": 0.2},
+                "partial_result": True,
+                "partial_reason": "optimizer_deadline_reached",
+            },
+        }
+
+    monkeypatch.setattr(optimizer, "run", partial_run)
+
+    result = app.test_cli_runner().invoke(
+        args=[
+            "run-optimization",
+            "--profile",
+            "aggressive_1h",
+        ]
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["partial_result"] is True
+    assert payload["timed_out"] is True
+    assert payload["optimizer_runtime"]["timed_out"] is True
+    assert payload["optimizer_runtime"]["evaluated_candidates"] == 1
+    assert payload["optimizer_runtime"]["backtest_runs"] == 2
+    assert payload["optimizer_runtime"]["partial_reason"] == "optimizer_deadline_reached"
+    assert payload["live_canary_readiness"]["optimizer_research_only"] is True
+    assert payload["live_canary_readiness"]["canary_preview_only"] is True
+
+
+def test_hourly_experimental_fetch_uses_bounded_buffer(app) -> None:
+    optimizer = app.extensions["services"]["strategy_optimizer"]
+    captured: dict[str, int] = {}
+    optimizer.market_data.get_candles = lambda symbol, timeframe, mode, limit: captured.setdefault("limit", limit) or _minute_candles()
+    config = optimizer.default_config(symbols=["BTC"], timeframes=["1m"], strategy_names=["scalping"], profile="extreme_roi_experimental")
+    config.lock_duration_hours = 1
+
+    optimizer._fetch_candles("BTC", "1m", config)
+
+    assert captured["limit"] <= 6_000
+
+
+def test_optimizer_passes_configured_signal_history_limit(app, monkeypatch) -> None:
+    optimizer = app.extensions["services"]["strategy_optimizer"]
+    optimizer.market_data.get_candles = lambda symbol, timeframe, mode, limit: _optimizer_candles()
+    app.config["OPTIMIZER_SIGNAL_HISTORY_LIMIT"] = 64
+    captured_limits: list[int] = []
+    original_run = optimizer.runner.run
+
+    def capture_run(backtest_config, candles):
+        captured_limits.append(backtest_config.signal_history_limit)
+        return original_run(backtest_config, candles)
+
+    monkeypatch.setattr(optimizer.runner, "run", capture_run)
+    config = optimizer.default_config(symbols=["BTC"], timeframes=["15m"], strategy_names=["scalping"])
+    config.training_window_days = 1
+    config.testing_window_days = 1
+    config.step_days = 1
+    config.max_parameter_sets = 1
+    config.auto_deploy_top_n = 0
+
+    result = optimizer.run(config)
+
+    assert captured_limits
+    assert set(captured_limits) == {64}
+    assert result["optimizer_runtime"]["signal_history_limit"] == 64
 
 
 def test_promote_live_ranker_cli_guardrail_failure_auto_disables_high_upside(app) -> None:

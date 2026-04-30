@@ -24,6 +24,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from math import inf, sqrt
 from statistics import mean
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..features.engine import FeatureEngine
@@ -132,6 +133,8 @@ class BacktestConfig:
     trade_window_minutes: int = 60
     intrabar_model: str = "conservative"
     evaluation_start_timestamp: Optional[int] = None
+    runtime_deadline_monotonic: float = 0.0
+    signal_history_limit: int = 0
     allocation_amount_usd: float = 0.0
     leverage: float = 1.0
     min_liquidation_buffer_pct: float = 0.0
@@ -277,10 +280,22 @@ class BacktestEngine:
         fixed_dollar_size: float = backtest.fixed_dollar_size or float(self.config.get("FIXED_DOLLAR_SIZE", 0.0))
         leverage: float = max(1.0, float(backtest.leverage or 1.0))
         min_liquidation_buffer_pct: float = max(0.0, float(backtest.min_liquidation_buffer_pct or 0.0))
+        runtime_deadline: float = max(0.0, float(backtest.runtime_deadline_monotonic or 0.0))
+        signal_history_limit: int = max(0, int(backtest.signal_history_limit or 0))
 
         # Main simulation loop: start after 25th candle to allow indicator
         # values to populate for typical technical indicators.
         for index in range(25, len(candles)):
+            if runtime_deadline > 0 and index % 25 == 0:
+                if time.monotonic() >= runtime_deadline:
+                    risk_events.append(
+                        {
+                            "timestamp": int(candles[index].get("timestamp", 0)),
+                            "rule": "optimizer_deadline_reached",
+                            "message": "Backtest stopped early because the optimizer deadline was reached.",
+                        }
+                    )
+                    break
             candle = candles[index]
             price: float = float(candle.get("close", 0.0))
             timestamp: int = int(candle.get("timestamp", 0))
@@ -345,14 +360,18 @@ class BacktestEngine:
                     position = _Position()
                 break
 
-            # Generate a signal from the strategy using all candles up to the current one.
+            # Optimizer runs can cap history to keep short-interval research bounded.
+            history_start = max(0, index + 1 - signal_history_limit) if signal_history_limit else 0
+            signal_history = candles[history_start : index + 1]
+
+            # Generate a signal from the strategy using candle history up to the current one.
             signal = strategy.generate_signal(
                 symbol=backtest.symbol,
                 timeframe=backtest.timeframe,
-                candles=candles[: index + 1],
+                candles=signal_history,
                 position={"quantity": position.quantity, "entry_price": position.entry_price},
             )
-            feature_payload = self._feature_payload(backtest.symbol, backtest.timeframe, candles[: index + 1], signal)
+            feature_payload = self._feature_payload(backtest.symbol, backtest.timeframe, signal_history, signal)
             signal_metadata: Dict[str, Any] = getattr(signal, "metadata", {}) or {}
 
             # Handle exiting an open position before considering new entries.

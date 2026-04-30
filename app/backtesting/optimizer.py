@@ -19,11 +19,13 @@ if an exception occurs during evaluation.
 
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from itertools import product
 from statistics import mean, pstdev
+import time
 from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -171,6 +173,66 @@ class OptimizerConfig:
     pair_max_spread_zscore: float = 2.5
     dynamic_intraday_live_eligible: bool = False
     high_upside_profile: bool = False
+    runtime_deadline_monotonic: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class WindowSlice:
+    train_start: int
+    test_start: int
+    test_end: int
+    candles: List[Dict[str, Any]]
+
+
+@dataclass(slots=True)
+class OptimizerRuntimeStats:
+    started_at: float = field(default_factory=time.perf_counter)
+    evaluated_candidates: int = 0
+    skipped_candidates: int = 0
+    backtest_runs: int = 0
+    window_count: int = 0
+    candle_fetch_seconds: float = 0.0
+    slicing_seconds: float = 0.0
+    backtest_seconds: float = 0.0
+    persistence_seconds: float = 0.0
+    finalize_seconds: float = 0.0
+    skipped_reasons: dict[str, int] = field(default_factory=dict)
+    market_timings: list[dict[str, Any]] = field(default_factory=list)
+
+    def record_skip(self, reason: str) -> None:
+        self.skipped_candidates += 1
+        self.skipped_reasons[reason] = self.skipped_reasons.get(reason, 0) + 1
+
+    def record_market(self, symbol: str, timeframe: str, seconds: float, candle_count: int, window_count: int) -> None:
+        self.market_timings.append(
+            {
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "seconds": max(float(seconds or 0.0), 0.0),
+                "candle_count": int(candle_count or 0),
+                "window_count": int(window_count or 0),
+            }
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        phase_seconds = {
+            "candle_fetch": self.candle_fetch_seconds,
+            "slicing": self.slicing_seconds,
+            "backtest": self.backtest_seconds,
+            "persistence": self.persistence_seconds,
+            "finalize": self.finalize_seconds,
+        }
+        slowest = max(self.market_timings, key=lambda item: float(item.get("seconds", 0.0)), default={})
+        return {
+            "elapsed_seconds": max(time.perf_counter() - self.started_at, 0.0),
+            "evaluated_candidates": self.evaluated_candidates,
+            "skipped_candidates": self.skipped_candidates,
+            "backtest_runs": self.backtest_runs,
+            "window_count": self.window_count,
+            "phase_seconds": phase_seconds,
+            "skipped_reasons": dict(self.skipped_reasons),
+            "slowest_market": dict(slowest),
+        }
 
 
 AGGRESSIVE_1H_WARNING = (
@@ -559,91 +621,99 @@ class StrategyOptimizer:
         db.session.commit()
 
         rankings: List[Dict[str, Any]] = []
+        stats = OptimizerRuntimeStats()
+        partial_result = False
+        partial_reason = ""
         try:
             strategy_names = optimizer_config.strategy_names or self.registry.names()
             symbols = self._optimizer_symbols(optimizer_config)
             run.symbols = symbols
+            stop_requested = False
             for symbol in symbols:
+                if stop_requested:
+                    break
                 for timeframe in optimizer_config.timeframes:
-                    # Fetch all required candles up front.
+                    if stop_requested:
+                        break
+                    if self._deadline_reached(optimizer_config) and rankings:
+                        partial_result = True
+                        partial_reason = "optimizer_deadline_reached"
+                        stop_requested = True
+                        break
+                    market_started = time.perf_counter()
+                    candle_count = 0
+                    window_slices: list[WindowSlice] = []
+
+                    fetch_started = time.perf_counter()
                     candles = self._fetch_candles(symbol, timeframe, optimizer_config)
-                    # Precompute rolling windows.
+                    stats.candle_fetch_seconds += time.perf_counter() - fetch_started
+                    candle_count = len(candles)
+
+                    slicing_started = time.perf_counter()
                     windows = self._rolling_windows(candles, optimizer_config)
+                    window_slices = self._window_slices(candles, windows)
+                    stats.slicing_seconds += time.perf_counter() - slicing_started
+                    stats.window_count += len(window_slices)
+
                     for strategy_name in strategy_names:
+                        if stop_requested:
+                            break
                         # Determine parameter sets to evaluate, capped by max_parameter_sets.
                         for parameters in self._parameter_sets(
                             strategy_name,
                             optimizer_config.max_parameter_sets,
                             optimizer_config,
                         ):
+                            if self._deadline_reached(optimizer_config) and rankings:
+                                partial_result = True
+                                partial_reason = "optimizer_deadline_reached"
+                                stop_requested = True
+                                break
                             if optimizer_config.high_upside_profile:
                                 parameters = {
                                     **parameters,
                                     "high_upside_profile": True,
                                     "duration_hours": int(optimizer_config.lock_duration_hours or 0),
                                 }
-                            result = self._evaluate_candidate(
-                                symbol=symbol,
-                                timeframe=timeframe,
-                                strategy_name=strategy_name,
-                                parameters=parameters,
-                                candles=candles,
-                                windows=windows,
-                                optimizer_config=optimizer_config,
-                            )
+                            skip_reason = self._prefilter_rejection_reason(parameters, window_slices, optimizer_config)
+                            if skip_reason:
+                                result = self._rejected_candidate(
+                                    symbol,
+                                    timeframe,
+                                    strategy_name,
+                                    parameters,
+                                    skip_reason,
+                                    optimizer_config,
+                                )
+                                stats.record_skip(skip_reason)
+                            else:
+                                stats.evaluated_candidates += 1
+                                result = self._evaluate_candidate(
+                                    symbol=symbol,
+                                    timeframe=timeframe,
+                                    strategy_name=strategy_name,
+                                    parameters=parameters,
+                                    candles=candles,
+                                    window_slices=window_slices,
+                                    optimizer_config=optimizer_config,
+                                    runtime_stats=stats,
+                                )
                             rankings.append(result)
                             # Persist each ranking incrementally to avoid large transactions.
+                            persist_started = time.perf_counter()
                             self._persist_ranking(run, result)
+                            stats.persistence_seconds += time.perf_counter() - persist_started
+                    stats.record_market(symbol, timeframe, time.perf_counter() - market_started, candle_count, len(window_slices))
 
-            self._train_ranker_from_results(run, rankings, optimizer_config)
-            # Sort by rejection status then by descending score.
-            rankings.sort(key=lambda item: self._ranking_sort_key(item, optimizer_config))
-            # Persist optional validations for the top N non‑rejected strategies.
-            self._persist_backtest_validations(rankings[: optimizer_config.auto_deploy_top_n])
-            run.status = "completed"
-            ensemble_backtest = self._ensemble_backtest_summary(rankings, optimizer_config)
-            duration_ensemble_backtest = self._duration_ensemble_backtest_summary(rankings, optimizer_config)
-            rejection_breakdown = self._rejection_breakdown(rankings)
-            raw_upside_report = self._raw_upside_report(rankings, optimizer_config)
-            max_return_summary = self._max_return_summary(rankings, optimizer_config, duration_ensemble_backtest)
-            pair_screening_summary = self._pair_screening_summary(rankings, optimizer_config, duration_ensemble_backtest)
-            one_hour_diagnostics = self._one_hour_diagnostics(rankings, optimizer_config)
-            run.result = {
-                "ranking_count": len(rankings),
-                "accepted_count": len([item for item in rankings if not item["rejected"]]),
-                "top": rankings[:10],
-                "raw_upside_report": raw_upside_report,
-                "raw_upside_leaderboard": raw_upside_report.get("top_by_raw_upside", []),
-                "max_return_candidate": raw_upside_report.get("max_return_candidate", {}),
-                "target_roi_pct": raw_upside_report.get("target_roi_pct", 1000.0),
-                "target_roi_hit": raw_upside_report.get("target_roi_hit", False),
-                "one_hour_diagnostics": one_hour_diagnostics,
-                "one_hour_rejection_breakdown": one_hour_diagnostics.get("rejection_breakdown", {}),
-                "net_roi_v2_enabled": bool(self.config.get("NET_ROI_V2_ENABLED", True)),
-                "net_roi_v2_summary": self._net_roi_v2_summary(rankings),
-                "ensemble_backtest": ensemble_backtest,
-                "duration_ensemble_backtest": duration_ensemble_backtest,
-                "baseline_single_strategy": duration_ensemble_backtest.get("baseline_single_strategy", ensemble_backtest.get("baseline_best", {})),
-                "baseline_current_basket": duration_ensemble_backtest.get("baseline_current_basket", {}),
-                "allocation_conservation": duration_ensemble_backtest.get("allocation_conservation", ensemble_backtest.get("allocation_conservation", {})),
-                "overfit_rejections": duration_ensemble_backtest.get("overfit_rejections", {}),
-                "cap_rejections": duration_ensemble_backtest.get("cap_rejections", {}),
-                "max_return_summary": max_return_summary,
-                "market_structure_feature_coverage": self._market_structure_feature_coverage(rankings),
-                "duration_return_leaders": self._duration_return_leaders(rankings, optimizer_config),
-                "rejection_breakdown": rejection_breakdown,
-                "live_eligibility_summary": self._live_eligibility_summary(optimizer_config),
-                "dynamic_intraday_diagnostics": self._dynamic_intraday_diagnostics(rankings, optimizer_config),
-                "high_upside_readiness": self._high_upside_readiness(optimizer_config),
-                "offline_ml_readiness": self.offline_ranker.readiness(horizon_from_duration(optimizer_config.lock_duration_hours or 1)),
-                "pair_screening_summary": pair_screening_summary,
-                "pair_candidates": pair_screening_summary.get("pair_candidates", []),
-                "pair_rejection_breakdown": pair_screening_summary.get("pair_rejection_breakdown", {}),
-                "pair_baseline_comparison": pair_screening_summary.get("pair_baseline_comparison", {}),
-            }
-            run.completed_at = datetime.utcnow()
-            db.session.commit()
-            return run.result | {"optimizer_run_id": run.id, "warnings": warnings}
+            return self._finalize_optimizer_run(
+                run,
+                rankings,
+                optimizer_config,
+                warnings,
+                stats,
+                partial_result=partial_result,
+                partial_reason=partial_reason,
+            )
         except Exception as exc:
             # Mark the run as failed and propagate the exception after recording.
             run.status = "failed"
@@ -651,6 +721,83 @@ class StrategyOptimizer:
             run.completed_at = datetime.utcnow()
             db.session.commit()
             raise
+
+    def _finalize_optimizer_run(
+        self,
+        run: OptimizerRun,
+        rankings: list[dict[str, Any]],
+        optimizer_config: OptimizerConfig,
+        warnings: list[str],
+        stats: OptimizerRuntimeStats,
+        *,
+        partial_result: bool = False,
+        partial_reason: str = "",
+    ) -> dict[str, Any]:
+        finalize_started = time.perf_counter()
+        if partial_result and "Partial optimizer result; no optional validations were created." not in warnings:
+            warnings.append("Partial optimizer result; no optional validations were created.")
+
+        self._train_ranker_from_results(run, rankings, optimizer_config)
+        rankings.sort(key=lambda item: self._ranking_sort_key(item, optimizer_config))
+        if not partial_result:
+            self._persist_backtest_validations(rankings[: optimizer_config.auto_deploy_top_n])
+
+        run.status = "partial" if partial_result else "completed"
+        ensemble_backtest = self._ensemble_backtest_summary(rankings, optimizer_config)
+        duration_ensemble_backtest = self._duration_ensemble_backtest_summary(rankings, optimizer_config)
+        rejection_breakdown = self._rejection_breakdown(rankings)
+        raw_upside_report = self._raw_upside_report(rankings, optimizer_config)
+        max_return_summary = self._max_return_summary(rankings, optimizer_config, duration_ensemble_backtest)
+        pair_screening_summary = self._pair_screening_summary(rankings, optimizer_config, duration_ensemble_backtest)
+        one_hour_diagnostics = self._one_hour_diagnostics(rankings, optimizer_config)
+        stats.finalize_seconds += time.perf_counter() - finalize_started
+        runtime_payload = {
+            **stats.as_dict(),
+            "partial_result": bool(partial_result),
+            "timed_out": bool(partial_result),
+            "partial_reason": partial_reason if partial_result else "",
+            "signal_history_limit": self._optimizer_signal_history_limit(optimizer_config),
+        }
+        run.result = {
+            "ranking_count": len(rankings),
+            "accepted_count": len([item for item in rankings if not item["rejected"]]),
+            "top": rankings[:10],
+            "partial_result": bool(partial_result),
+            "timed_out": bool(partial_result),
+            "partial_reason": partial_reason if partial_result else "",
+            "raw_upside_report": raw_upside_report,
+            "raw_upside_leaderboard": raw_upside_report.get("top_by_raw_upside", []),
+            "max_return_candidate": raw_upside_report.get("max_return_candidate", {}),
+            "target_roi_pct": raw_upside_report.get("target_roi_pct", 1000.0),
+            "target_roi_hit": raw_upside_report.get("target_roi_hit", False),
+            "one_hour_diagnostics": one_hour_diagnostics,
+            "one_hour_rejection_breakdown": one_hour_diagnostics.get("rejection_breakdown", {}),
+            "net_roi_v2_enabled": bool(self.config.get("NET_ROI_V2_ENABLED", True)),
+            "net_roi_v2_summary": self._net_roi_v2_summary(rankings),
+            "ensemble_backtest": ensemble_backtest,
+            "duration_ensemble_backtest": duration_ensemble_backtest,
+            "baseline_single_strategy": duration_ensemble_backtest.get("baseline_single_strategy", ensemble_backtest.get("baseline_best", {})),
+            "baseline_current_basket": duration_ensemble_backtest.get("baseline_current_basket", {}),
+            "allocation_conservation": duration_ensemble_backtest.get("allocation_conservation", ensemble_backtest.get("allocation_conservation", {})),
+            "overfit_rejections": duration_ensemble_backtest.get("overfit_rejections", {}),
+            "cap_rejections": duration_ensemble_backtest.get("cap_rejections", {}),
+            "max_return_summary": max_return_summary,
+            "market_structure_feature_coverage": self._market_structure_feature_coverage(rankings),
+            "duration_return_leaders": self._duration_return_leaders(rankings, optimizer_config),
+            "rejection_breakdown": rejection_breakdown,
+            "live_eligibility_summary": self._live_eligibility_summary(optimizer_config),
+            "dynamic_intraday_diagnostics": self._dynamic_intraday_diagnostics(rankings, optimizer_config),
+            "high_upside_readiness": self._high_upside_readiness(optimizer_config),
+            "offline_ml_readiness": self.offline_ranker.readiness(horizon_from_duration(optimizer_config.lock_duration_hours or 1)),
+            "pair_screening_summary": pair_screening_summary,
+            "pair_candidates": pair_screening_summary.get("pair_candidates", []),
+            "pair_rejection_breakdown": pair_screening_summary.get("pair_rejection_breakdown", {}),
+            "pair_baseline_comparison": pair_screening_summary.get("pair_baseline_comparison", {}),
+            "optimizer_runtime": runtime_payload,
+        }
+        run.completed_at = datetime.utcnow()
+        db.session.commit()
+        return run.result | {"optimizer_run_id": run.id, "warnings": warnings}
 
     # ------------------------------------------------------------------
     # Candidate evaluation
@@ -663,8 +810,9 @@ class StrategyOptimizer:
         strategy_name: str,
         parameters: Dict[str, Any],
         candles: List[Dict[str, Any]],
-        windows: List[Tuple[int, int, int]],
+        window_slices: List[WindowSlice],
         optimizer_config: OptimizerConfig,
+        runtime_stats: OptimizerRuntimeStats | None = None,
     ) -> Dict[str, Any]:
         """Evaluate a single strategy candidate across all rolling windows.
 
@@ -690,9 +838,8 @@ class StrategyOptimizer:
             A dictionary summarising performance and metrics for the candidate.
         """
         window_results: List[Dict[str, Any]] = []
-        for train_start, test_start, test_end in windows:
-            # Extract only the candles within the current train+test window.
-            window_candles = [row for row in candles if train_start <= int(row["timestamp"]) <= test_end]
+        for window in window_slices:
+            window_candles = window.candles
             # Ensure enough candles for a reliable backtest.
             if len(window_candles) < 30:
                 continue
@@ -717,15 +864,21 @@ class StrategyOptimizer:
                 max_trades_per_window=int(self.config.get("MAX_TRADES_PER_WINDOW", 0)),
                 trade_window_minutes=int(self.config.get("TRADE_WINDOW_MINUTES", 60)),
                 intrabar_model="conservative",
-                evaluation_start_timestamp=test_start,
+                evaluation_start_timestamp=window.test_start,
+                runtime_deadline_monotonic=float(optimizer_config.runtime_deadline_monotonic or 0.0),
+                signal_history_limit=self._optimizer_signal_history_limit(optimizer_config),
                 allocation_amount_usd=float(optimizer_config.allocation_amount_usd or 0.0),
                 leverage=self._candidate_leverage(parameters, optimizer_config),
                 min_liquidation_buffer_pct=float(self.config.get("MIN_LIQUIDATION_BUFFER_PCT", 0.015)),
                 funding_cost_bps=float(parameters.get("funding_cost_bps", self.config.get("FUNDING_COST_BPS", 0.0))),
             )
+            backtest_started = time.perf_counter()
             result = self.runner.run(backtest_config, window_candles)
-            result["window_start"] = test_start
-            result["window_end"] = test_end
+            if runtime_stats is not None:
+                runtime_stats.backtest_seconds += time.perf_counter() - backtest_started
+                runtime_stats.backtest_runs += 1
+            result["window_start"] = window.test_start
+            result["window_end"] = window.test_end
             window_results.append(result)
         market_structure = self._market_structure_features(symbol, timeframe, optimizer_config, candles=candles)
         return self._aggregate_candidate(
@@ -2035,6 +2188,61 @@ class StrategyOptimizer:
             )
         return windows
 
+    @staticmethod
+    def _window_slices(candles: List[Dict[str, Any]], windows: List[Tuple[int, int, int]]) -> list[WindowSlice]:
+        timestamps = [int(row["timestamp"]) for row in candles]
+        slices: list[WindowSlice] = []
+        for train_start, test_start, test_end in windows:
+            start_index = bisect_left(timestamps, train_start)
+            end_index = bisect_right(timestamps, test_end)
+            slices.append(
+                WindowSlice(
+                    train_start=train_start,
+                    test_start=test_start,
+                    test_end=test_end,
+                    candles=[dict(row) for row in candles[start_index:end_index]],
+                )
+            )
+        return slices
+
+    def _prefilter_rejection_reason(
+        self,
+        parameters: dict[str, Any],
+        window_slices: list[WindowSlice],
+        optimizer_config: OptimizerConfig,
+    ) -> str:
+        if not bool(self.config.get("OPTIMIZER_PREFILTER_ENABLED", True)):
+            return ""
+        if not window_slices or not any(len(window.candles) >= 30 for window in window_slices):
+            return "insufficient_window_candles"
+        if self._safe_float(parameters.get("stop_loss_pct"), 0.01) <= 0:
+            return "invalid_stop_loss_pct"
+        if self._safe_float(parameters.get("take_profit_pct"), 0.02) <= 0:
+            return "invalid_take_profit_pct"
+        if self._safe_float(parameters.get("leverage"), 1.0) <= 0:
+            return "invalid_leverage"
+        if self._safe_float(parameters.get("risk_fraction"), self._risk_per_trade_pct(optimizer_config)) < 0:
+            return "invalid_risk_fraction"
+        return ""
+
+    @staticmethod
+    def _deadline_reached(optimizer_config: OptimizerConfig) -> bool:
+        deadline = float(getattr(optimizer_config, "runtime_deadline_monotonic", 0.0) or 0.0)
+        return deadline > 0 and time.monotonic() >= deadline
+
+    def _optimizer_signal_history_limit(self, optimizer_config: OptimizerConfig) -> int:
+        limit = self._safe_float(self.config.get("OPTIMIZER_SIGNAL_HISTORY_LIMIT"), 120.0)
+        if limit <= 0:
+            return 0
+        return max(int(limit), 120 if self._is_hourly_experimental(optimizer_config.profile) else 0)
+
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
     # ------------------------------------------------------------------
     # Parameter grid handling
     #
@@ -2053,7 +2261,10 @@ class StrategyOptimizer:
 
     def _duration_hours(self, optimizer_config: OptimizerConfig, *, include_buffer: bool = False) -> float:
         train, test, step = self._window_durations(optimizer_config)
-        buffer_hours = max(7 * 24, step.total_seconds() / 3600 * 8) if include_buffer else 0
+        if self._is_hourly_experimental(optimizer_config.profile):
+            buffer_hours = max(step.total_seconds() / 3600 * 8, 24.0) if include_buffer else 0
+        else:
+            buffer_hours = max(7 * 24, step.total_seconds() / 3600 * 8) if include_buffer else 0
         if optimizer_config.use_full_history:
             buffer_hours = max(buffer_hours, 30 * 24)
         return (train + test).total_seconds() / 3600 + buffer_hours
@@ -2316,7 +2527,7 @@ class StrategyOptimizer:
         return expanded
 
     def _capacity_usd(self, symbol: str, optimizer_config: OptimizerConfig) -> float:
-        if self.universe_service is None:
+        if self.universe_service is None or optimizer_config.universe_mode != "dynamic_liquid":
             return float(optimizer_config.allocation_amount_usd or 0.0)
         timeframe = optimizer_config.timeframes[0] if optimizer_config.timeframes else "5m"
         for candidate in self.universe_service.liquid_universe(optimizer_config.mode, timeframe):
@@ -2325,7 +2536,7 @@ class StrategyOptimizer:
         return float(optimizer_config.allocation_amount_usd or 0.0)
 
     def _universe_source(self, symbol: str, optimizer_config: OptimizerConfig) -> str:
-        if self.universe_service is None:
+        if self.universe_service is None or optimizer_config.universe_mode != "dynamic_liquid":
             return "configured"
         timeframe = optimizer_config.timeframes[0] if optimizer_config.timeframes else "5m"
         for candidate in self.universe_service.liquid_universe(optimizer_config.mode, timeframe):

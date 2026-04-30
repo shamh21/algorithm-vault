@@ -45,6 +45,17 @@ class _SellThenReduceStrategy:
         return Signal("sell", "open short", timeframe, candles[-1]["close"] * 1.01, candles[-1]["close"] * 0.98, 0.2)
 
 
+class _HistoryLengthStrategy:
+    parameters: dict[str, Any] = {}
+
+    def __init__(self) -> None:
+        self.history_lengths: list[int] = []
+
+    def generate_signal(self, *, symbol: str, timeframe: str, candles: list[dict[str, Any]], position: dict[str, Any]) -> Signal:
+        self.history_lengths.append(len(candles))
+        return Signal("hold", "observe history", timeframe, None, None, 0.0, {"signal_timestamp": candles[-1]["timestamp"]})
+
+
 class _CustomRegistry:
     def __init__(self, strategy):
         self.strategy = strategy
@@ -118,6 +129,17 @@ def test_backtest_tracks_short_term_metrics() -> None:
     assert result["max_favorable_excursion"] >= result["max_adverse_excursion"]
     assert result["equity_curve"]
     assert result["drawdown_curve"]
+
+
+def test_signal_history_limit_bounds_strategy_and_feature_history() -> None:
+    strategy = _HistoryLengthStrategy()
+    engine = BacktestEngine({}, _CustomRegistry(strategy), _MarketData())
+
+    engine.run(_config(signal_history_limit=40), _candles(100))
+
+    assert strategy.history_lengths
+    assert max(strategy.history_lengths) == 40
+    assert strategy.history_lengths[0] == 26
 
 
 def test_conservative_intrabar_uses_stop_when_stop_and_take_hit() -> None:

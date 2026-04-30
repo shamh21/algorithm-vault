@@ -256,6 +256,7 @@ def register_cli(app: Flask) -> None:
             config.pair_max_spread_zscore = pair_max_spread_zscore
         timeout_seconds = _optimizer_timeout_seconds()
         started_at = time.monotonic()
+        config.runtime_deadline_monotonic = _optimizer_cooperative_deadline(started_at, timeout_seconds)
         try:
             with _optimizer_deadline(timeout_seconds):
                 result = optimizer.run(config)
@@ -1152,6 +1153,14 @@ def _optimizer_timeout_seconds() -> float:
         return 120.0
 
 
+def _optimizer_cooperative_deadline(started_at: float, timeout_seconds: float) -> float:
+    timeout = max(0.0, float(timeout_seconds or 0.0))
+    if timeout <= 0:
+        return 0.0
+    headroom = min(max(timeout * 0.05, 0.5), 5.0)
+    return float(started_at) + max(timeout - headroom, timeout * 0.5)
+
+
 @contextmanager
 def _optimizer_deadline(timeout_seconds: float):
     timeout = max(0.0, float(timeout_seconds or 0.0))
@@ -1184,14 +1193,17 @@ def _optimization_result_with_diagnostics(
     timed_out: bool,
 ) -> dict[str, object]:
     elapsed = max(time.monotonic() - started_at, 0.0)
+    existing_runtime = dict((result or {}).get("optimizer_runtime") or {})
+    timed_out_effective = bool(timed_out or (result or {}).get("timed_out", False) or existing_runtime.get("timed_out", False))
     payload: dict[str, object] = {
         **dict(result or {}),
         "offline_ml_readiness": _offline_ml_readiness(_duration_bucket(getattr(config, "lock_duration_hours", 1) or 1)),
         "live_canary_readiness": _optimizer_live_canary_readiness(config),
         "optimizer_runtime": {
+            **existing_runtime,
             "timeout_seconds": timeout_seconds,
             "elapsed_seconds": elapsed,
-            "timed_out": timed_out,
+            "timed_out": timed_out_effective,
             "source": "OPTIMIZER_MARKET_DATA_TIMEOUT_SECONDS",
             "market_data_cache": _market_data_cache_stats(),
         },
