@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json
 import math
+import re
 import secrets
 import urllib.request
 from dataclasses import dataclass
@@ -353,6 +354,126 @@ class RealWalletCustodyService:
         db.session.flush()
         return {"credited": delta, "checked": True}
 
+    def recover_evm_token_deposit(
+        self,
+        *,
+        user_id: int,
+        asset: str,
+        address: str,
+        tx_hash: str,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        asset_key = self._asset_key(asset)
+        network = "Ethereum"
+        address_value = str(address or "").strip()
+        tx_hash_value = str(tx_hash or "").strip()
+        blockers: list[str] = []
+
+        if asset_key not in {"USDC", "USDT"}:
+            blockers.append("Only supported ERC-20 recovery assets are allowed: USDC, USDT")
+        if not re.fullmatch(r"0x[a-fA-F0-9]{40}", address_value):
+            blockers.append("Recovery address must be a valid EVM 0x address")
+        if not tx_hash_value:
+            blockers.append("Transaction hash is required")
+        if not self.enabled:
+            blockers.append("Real wallet custody is disabled")
+        if not self._real_address_mode_enabled():
+            blockers.append("USE_REAL_ADDRESSES is disabled")
+        if not self._has_valid_encryption_key():
+            blockers.append("TOTP_ENCRYPTION_KEY must be a valid Fernet key")
+        if not self._adapter_for(asset_key, network):
+            blockers.append("No EVM adapter supports the requested token")
+        if not EvmWalletAdapter(self.config)._rpc_url(network):
+            blockers.append("EVM RPC URL is not configured")
+        if asset_key in {"USDC", "USDT"} and not EvmWalletAdapter(self.config)._token_contract(asset_key, network):
+            blockers.append(f"{asset_key} token contract is not configured")
+
+        source = self._recoverable_evm_source(user_id, address_value, asset_key)
+        if source is None:
+            blockers.append("Address is not an existing generated in-app EVM wallet for this user")
+        else:
+            try:
+                self._private_key(source)
+            except Exception:  # noqa: BLE001
+                blockers.append("Source wallet private key is unavailable or cannot be decrypted")
+
+        duplicate = self._wallet_address_by_address(user_id, asset_key, network, address_value, status="active")
+        reusable_recovery = self._is_matching_recovery(duplicate, source, tx_hash_value) if duplicate is not None else False
+        if duplicate is not None and not reusable_recovery:
+            blockers.append(f"Active {asset_key}/{network} wallet address already exists for this address")
+
+        payload: dict[str, Any] = {
+            "preview_only": not confirm,
+            "ready": not blockers,
+            "recovered": False,
+            "asset": asset_key,
+            "network": network,
+            "address": address_value,
+            "tx_hash": tx_hash_value,
+            "blockers": list(dict.fromkeys(blockers)),
+            "source_wallet_address_id": source.id if source is not None else None,
+            "source_deposit_address_id": source.deposit_address_id if source is not None else None,
+            "existing_recovery_wallet_address_id": duplicate.id if duplicate is not None and reusable_recovery else None,
+            "sync": {},
+        }
+
+        self._audit(
+            user_id=user_id,
+            wallet_account_id=source.wallet_account_id if source is not None else None,
+            action="recover_evm_token_deposit_preview" if not confirm else "recover_evm_token_deposit_validation",
+            status="ready" if not blockers else "blocked",
+            message=f"ERC-20 {asset_key} recovery validation for {address_value}.",
+            metadata=payload,
+        )
+        if blockers or not confirm:
+            return payload
+
+        if duplicate is not None and reusable_recovery:
+            recovered = duplicate
+            created = False
+        else:
+            assert source is not None
+            recovered = self._create_recovered_evm_token_wallet(
+                source=source,
+                asset=asset_key,
+                network=network,
+                address=address_value,
+                tx_hash=tx_hash_value,
+            )
+            created = True
+
+        sync_result = self.sync_address(recovered)
+        if not bool(sync_result.get("checked", False)):
+            self._audit(
+                user_id=user_id,
+                wallet_account_id=recovered.wallet_account_id,
+                action="recover_evm_token_deposit_sync_failed",
+                status="failed",
+                message=f"Recovered {asset_key} wallet linked, but token balance sync failed.",
+                metadata={**payload, "wallet_address_id": recovered.id, "sync": sync_result},
+            )
+        else:
+            self._audit(
+                user_id=user_id,
+                wallet_account_id=recovered.wallet_account_id,
+                action="recover_evm_token_deposit_complete",
+                status="complete",
+                message=f"Recovered {asset_key} ERC-20 deposit tracking for {address_value}.",
+                metadata={**payload, "wallet_address_id": recovered.id, "sync": sync_result},
+            )
+
+        payload.update(
+            {
+                "recovered": True,
+                "created_wallet_address": created,
+                "wallet_address_id": recovered.id,
+                "wallet_account_id": recovered.wallet_account_id,
+                "sync": sync_result,
+                "credited": float(sync_result.get("credited", 0.0) or 0.0),
+            }
+        )
+        return payload
+
     def sign_and_broadcast(self, withdrawal: WalletWithdrawal, *, mode: str) -> BroadcastResult:
         if str(mode or "").lower() != "live":
             raise RuntimeError("Real wallet withdrawals can only be broadcast in live mode.")
@@ -388,6 +509,109 @@ class RealWalletCustodyService:
         if source is None:
             raise RuntimeError("No active source wallet address is available for withdrawal.")
         return source
+
+    def _recoverable_evm_source(self, user_id: int, address: str, target_asset: str) -> WalletAddress | None:
+        matches = [
+            row
+            for row in WalletAddress.query.filter_by(user_id=user_id, network="Ethereum").order_by(WalletAddress.id.desc()).all()
+            if str(row.address or "").lower() == str(address or "").lower()
+        ]
+        for row in matches:
+            metadata = row.encrypted_metadata
+            if row.asset == target_asset:
+                continue
+            if metadata.get("custody") == "in_app":
+                return row
+        return None
+
+    def _wallet_address_by_address(
+        self,
+        user_id: int,
+        asset: str,
+        network: str,
+        address: str,
+        *,
+        status: str | None = None,
+    ) -> WalletAddress | None:
+        query = WalletAddress.query.filter_by(user_id=user_id, asset=asset, network=network)
+        if status is not None:
+            query = query.filter_by(status=status)
+        for row in query.order_by(WalletAddress.id.desc()).all():
+            if str(row.address or "").lower() == str(address or "").lower():
+                return row
+        return None
+
+    @staticmethod
+    def _is_matching_recovery(existing: WalletAddress | None, source: WalletAddress | None, tx_hash: str) -> bool:
+        if existing is None or source is None:
+            return False
+        recovery = (existing.encrypted_metadata or {}).get("recovery") or {}
+        return (
+            recovery.get("type") == "evm_token_sent_to_existing_address"
+            and int(recovery.get("source_wallet_address_id") or 0) == int(source.id)
+            and str(recovery.get("tx_hash") or "").lower() == str(tx_hash or "").lower()
+        )
+
+    def _create_recovered_evm_token_wallet(
+        self,
+        *,
+        source: WalletAddress,
+        asset: str,
+        network: str,
+        address: str,
+        tx_hash: str,
+    ) -> WalletAddress:
+        source_metadata = dict(source.encrypted_metadata or {})
+        account = self._account_for(source.user_id, asset, network)
+        latest = (
+            WalletAddress.query.filter_by(user_id=source.user_id, asset=asset, network=network)
+            .order_by(WalletAddress.rotation_index.desc())
+            .first()
+        )
+        recovered = WalletAddress(
+            wallet_account_id=account.id,
+            user_id=source.user_id,
+            asset=asset,
+            network=network,
+            address=address,
+            status="active",
+            rotation_index=(latest.rotation_index if latest else 0) + 1,
+            rotated_from_id=source.id,
+        )
+        recovered.encrypted_metadata = {
+            "custody": "in_app",
+            "provider": source_metadata.get("provider", "evm"),
+            "key_type": source_metadata.get("key_type", "secp256k1"),
+            "public_key": source_metadata.get("public_key", address),
+            "encrypted_private_key": source_metadata.get("encrypted_private_key", ""),
+            "sync_status": "not_synced",
+            "last_sync_cursor": "",
+            "recovery": {
+                "type": "evm_token_sent_to_existing_address",
+                "source_wallet_address_id": source.id,
+                "source_wallet_asset": source.asset,
+                "source_deposit_address_id": source.deposit_address_id,
+                "tx_hash": tx_hash,
+            },
+        }
+        db.session.add(recovered)
+        db.session.flush()
+        self._audit(
+            user_id=source.user_id,
+            wallet_account_id=account.id,
+            action="recover_evm_token_wallet_linked",
+            status="active",
+            message=f"Linked recovered {asset} wallet tracking to existing EVM custody address.",
+            metadata={
+                "asset": asset,
+                "network": network,
+                "address": address,
+                "source_wallet_address_id": source.id,
+                "source_deposit_address_id": source.deposit_address_id,
+                "tx_hash": tx_hash,
+            },
+        )
+        return recovered
 
     def _private_key(self, wallet_address: WalletAddress) -> str:
         encrypted = str((wallet_address.encrypted_metadata or {}).get("encrypted_private_key") or "")

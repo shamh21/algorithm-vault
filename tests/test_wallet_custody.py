@@ -5,11 +5,12 @@ from datetime import datetime
 from typing import Any
 
 import pyotp
+import pytest
 from cryptography.fernet import Fernet
 
 from app.auth import encrypt_totp_secret, password_hash
 from app.extensions import db
-from app.models import Setting, User, WalletAddress, WalletBalance, WalletLedgerEvent, WalletTransaction, WalletWithdrawal
+from app.models import Setting, User, WalletAddress, WalletAuditLog, WalletBalance, WalletLedgerEvent, WalletTransaction, WalletWithdrawal
 from app.services.wallet_custody import BroadcastResult, GeneratedWallet, RealWalletCustodyService, WalletBalanceSnapshot
 
 
@@ -153,6 +154,183 @@ def test_deposit_sync_credits_once_with_idempotent_ledger(app) -> None:
     assert balance.available_balance == 5.0
     assert WalletLedgerEvent.query.count() == 1
     assert WalletTransaction.query.filter_by(transaction_type="deposit").count() == 1
+
+
+def _recovery_custody(app, *, amount: float = 5.0) -> RealWalletCustodyService:
+    _enable_generated_wallets(app)
+    fake = _FakeAdapter(amount=amount)
+    custody = RealWalletCustodyService(app.config, adapters=[fake])
+    app.extensions["services"]["wallet_custody"] = custody
+    return custody
+
+
+def test_recover_evm_token_deposit_preview_does_not_create_wallet_or_credit(app) -> None:
+    custody = _recovery_custody(app)
+    user, _ = _create_user("previewrecover")
+    source = custody.get_or_create_address(user_id=user.id, asset="ETH", network="Ethereum")
+
+    result = custody.recover_evm_token_deposit(
+        user_id=user.id,
+        asset="USDT",
+        address=source.address.lower(),
+        tx_hash="0x" + ("a" * 64),
+        confirm=False,
+    )
+
+    assert result["preview_only"] is True
+    assert result["ready"] is True
+    assert result["recovered"] is False
+    assert WalletAddress.query.filter_by(user_id=user.id, asset="USDT").count() == 0
+    assert WalletBalance.query.filter_by(user_id=user.id, asset="USDT").one_or_none() is None
+    assert WalletLedgerEvent.query.count() == 0
+    assert WalletAuditLog.query.filter_by(action="recover_evm_token_deposit_preview", status="ready").count() == 1
+
+
+def test_recover_evm_token_deposit_links_existing_evm_key_and_credits_once(app) -> None:
+    custody = _recovery_custody(app, amount=7.25)
+    user, _ = _create_user("confirmrecover")
+    source = custody.get_or_create_address(user_id=user.id, asset="ETH", network="Ethereum")
+    tx_hash = "0x" + ("b" * 64)
+
+    first = custody.recover_evm_token_deposit(
+        user_id=user.id,
+        asset="USDT",
+        address=source.address,
+        tx_hash=tx_hash,
+        confirm=True,
+    )
+    second = custody.recover_evm_token_deposit(
+        user_id=user.id,
+        asset="USDT",
+        address=source.address,
+        tx_hash=tx_hash,
+        confirm=True,
+    )
+
+    recovered = WalletAddress.query.filter_by(user_id=user.id, asset="USDT", network="Ethereum", address=source.address).one()
+    assert first["recovered"] is True
+    assert first["created_wallet_address"] is True
+    assert first["credited"] == 7.25
+    assert second["recovered"] is True
+    assert second["created_wallet_address"] is False
+    assert second["credited"] == 0.0
+    assert recovered.deposit_address_id is None
+    assert recovered.rotated_from_id == source.id
+    assert recovered.encrypted_metadata["encrypted_private_key"] == source.encrypted_metadata["encrypted_private_key"]
+    assert recovered.encrypted_metadata["recovery"]["tx_hash"] == tx_hash
+    assert WalletBalance.query.filter_by(user_id=user.id, asset="USDT").one().available_balance == 7.25
+    assert WalletLedgerEvent.query.filter_by(asset="USDT", address=source.address).count() == 1
+    assert WalletTransaction.query.filter_by(user_id=user.id, asset="USDT", transaction_type="deposit").count() == 1
+
+
+def test_recover_evm_token_deposit_cli_requires_exact_confirmation(app) -> None:
+    custody = _recovery_custody(app, amount=3.0)
+    user, _ = _create_user("clirecover")
+    source = custody.get_or_create_address(user_id=user.id, asset="ETH", network="Ethereum")
+    tx_hash = "0x" + ("c" * 64)
+
+    preview = app.test_cli_runner().invoke(
+        args=[
+            "recover-evm-token-deposit",
+            "--user-id",
+            str(user.id),
+            "--asset",
+            "USDT",
+            "--address",
+            source.address,
+            "--tx-hash",
+            tx_hash,
+        ]
+    )
+    assert preview.exit_code == 0
+    assert '"preview_only": true' in preview.output
+    assert WalletAddress.query.filter_by(user_id=user.id, asset="USDT").count() == 0
+
+    confirmed = app.test_cli_runner().invoke(
+        args=[
+            "recover-evm-token-deposit",
+            "--user-id",
+            str(user.id),
+            "--asset",
+            "USDT",
+            "--address",
+            source.address,
+            "--tx-hash",
+            tx_hash,
+            "--confirm",
+            "RECOVER-EVM-TOKEN",
+        ]
+    )
+
+    assert confirmed.exit_code == 0
+    assert '"preview_only": false' in confirmed.output
+    assert '"credited": 3.0' in confirmed.output
+    assert WalletAddress.query.filter_by(user_id=user.id, asset="USDT").count() == 1
+
+
+@pytest.mark.parametrize(
+    ("case", "mutate", "expected_blocker"),
+    [
+        ("wrong_user", lambda custody, user, source: _create_user("otherrecover")[0].id, "Address is not an existing generated in-app EVM wallet for this user"),
+        ("unsupported_token", lambda custody, user, source: "asset:ETH", "Only supported ERC-20 recovery assets are allowed"),
+        ("missing_contract", lambda custody, user, source: custody.config.__setitem__("WALLET_EVM_TOKEN_CONTRACTS", {}), "USDT token contract is not configured"),
+        ("missing_key", lambda custody, user, source: _remove_wallet_private_key(source), "Source wallet private key is unavailable or cannot be decrypted"),
+        ("non_evm_address", lambda custody, user, source: "address:bc1notanevmaddress", "Recovery address must be a valid EVM 0x address"),
+        ("active_duplicate", lambda custody, user, source: _create_duplicate_target_wallet(custody, user, source), "Active USDT/Ethereum wallet address already exists for this address"),
+    ],
+)
+def test_recover_evm_token_deposit_fails_closed_for_invalid_inputs(app, case, mutate, expected_blocker) -> None:
+    custody = _recovery_custody(app)
+    user, _ = _create_user(f"fail{case}")
+    source = custody.get_or_create_address(user_id=user.id, asset="ETH", network="Ethereum")
+    user_id = user.id
+    asset = "USDT"
+    address = source.address
+    result = mutate(custody, user, source)
+    if isinstance(result, int):
+        user_id = result
+    elif isinstance(result, str) and result.startswith("asset:"):
+        asset = result.split(":", 1)[1]
+    elif isinstance(result, str) and result.startswith("address:"):
+        address = result.split(":", 1)[1]
+
+    payload = custody.recover_evm_token_deposit(
+        user_id=user_id,
+        asset=asset,
+        address=address,
+        tx_hash="0x" + ("d" * 64),
+        confirm=True,
+    )
+
+    assert payload["ready"] is False
+    assert any(expected_blocker in blocker for blocker in payload["blockers"])
+    assert payload["recovered"] is False
+    assert WalletLedgerEvent.query.filter_by(asset="USDT").count() == 0
+
+
+def _remove_wallet_private_key(wallet_address: WalletAddress) -> None:
+    metadata = wallet_address.encrypted_metadata
+    metadata.pop("encrypted_private_key", None)
+    wallet_address.encrypted_metadata = metadata
+    db.session.flush()
+
+
+def _create_duplicate_target_wallet(custody: RealWalletCustodyService, user: User, source: WalletAddress) -> None:
+    account = custody._account_for(user.id, "USDT", "Ethereum")
+    duplicate = WalletAddress(
+        wallet_account_id=account.id,
+        user_id=user.id,
+        asset="USDT",
+        network="Ethereum",
+        address=source.address,
+        status="active",
+    )
+    duplicate.encrypted_metadata = {
+        "custody": "external",
+        "encrypted_private_key": source.encrypted_metadata["encrypted_private_key"],
+    }
+    db.session.add(duplicate)
+    db.session.flush()
 
 
 def test_real_withdrawal_requires_live_mode_and_broadcasts_when_live(app) -> None:

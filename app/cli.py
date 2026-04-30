@@ -376,6 +376,29 @@ def register_cli(app: Flask) -> None:
 
         click.echo(json.dumps(_wallet_readiness_payload(), indent=2, default=str))
 
+    @app.cli.command("recover-evm-token-deposit")
+    @click.option("--user-id", required=True, type=int)
+    @click.option("--asset", required=True, help="Supported ERC-20 token asset, such as USDT.")
+    @click.option("--address", required=True, help="Existing generated EVM address that received the token.")
+    @click.option("--tx-hash", required=True, help="On-chain ERC-20 transfer transaction hash.")
+    @click.option("--confirm", default="", help="Must be RECOVER-EVM-TOKEN to write recovery records.")
+    @with_appcontext
+    def recover_evm_token_deposit(user_id: int, asset: str, address: str, tx_hash: str, confirm: str) -> None:
+        """Recover supported ERC-20 tokens sent to an existing generated EVM address."""
+
+        confirmed = confirm == "RECOVER-EVM-TOKEN"
+        result = get_service("wallet_custody").recover_evm_token_deposit(
+            user_id=user_id,
+            asset=asset,
+            address=address,
+            tx_hash=tx_hash,
+            confirm=confirmed,
+        )
+        db.session.commit()
+        click.echo(json.dumps(result, indent=2, default=str))
+        if confirmed and result.get("blockers"):
+            raise click.exceptions.Exit(1)
+
     @app.cli.command("production-readiness")
     @click.option("--strict", is_flag=True, default=False, help="Exit nonzero when production blockers are present.")
     @with_appcontext
