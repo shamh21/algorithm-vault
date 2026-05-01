@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
 
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken
 from flask import current_app
 
 from ..extensions import db
@@ -474,12 +474,13 @@ class TradingConnectionService:
 
     def credentials_for_execution(self, user_id: int, connection_id: int) -> TradingCredentials:
         connection = self.get_for_user(user_id, connection_id)
+        spec = self.provider_spec(connection.provider)
         return TradingCredentials(
             provider=connection.provider,
             connection_type=connection.connection_type,
-            api_key=self._decrypt(connection.encrypted_api_key),
-            api_secret=self._decrypt(connection.encrypted_api_secret),
-            passphrase=self._decrypt(connection.encrypted_passphrase),
+            api_key=self._decrypt_connection_secret(spec, "api_key", connection.encrypted_api_key),
+            api_secret=self._decrypt_connection_secret(spec, "api_secret", connection.encrypted_api_secret),
+            passphrase=self._decrypt_connection_secret(spec, "passphrase", connection.encrypted_passphrase),
             wallet_address=connection.wallet_address or "",
         )
 
@@ -619,3 +620,28 @@ class TradingConnectionService:
         if not value:
             return ""
         return self._fernet().decrypt(value.encode("utf-8")).decode("utf-8")
+
+    def _decrypt_connection_secret(self, spec: dict[str, Any], field_name: str, value: str | None) -> str:
+        if not value:
+            return ""
+        try:
+            return self._decrypt(value)
+        except InvalidToken as exc:
+            if self._field_required(spec, field_name):
+                label = self._field_label(spec, field_name)
+                raise RuntimeError(
+                    f"Saved {label} cannot be decrypted with current TOTP_ENCRYPTION_KEY. "
+                    "Re-enter or delete this connection."
+                ) from exc
+            return ""
+
+    @staticmethod
+    def _field_required(spec: dict[str, Any], field_name: str) -> bool:
+        return any(field.get("name") == field_name and bool(field.get("required")) for field in spec.get("fields", []))
+
+    @staticmethod
+    def _field_label(spec: dict[str, Any], field_name: str) -> str:
+        for field in spec.get("fields", []):
+            if field.get("name") == field_name:
+                return str(field.get("label") or field_name.replace("_", " ").title())
+        return field_name.replace("_", " ").title()

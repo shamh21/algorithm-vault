@@ -4,6 +4,7 @@ from datetime import datetime
 
 import pyotp
 import pytest
+from cryptography.fernet import Fernet
 
 from app.auth import decrypt_totp_secret, encrypt_totp_secret, password_hash
 from app.extensions import db
@@ -84,6 +85,51 @@ def test_trading_connection_encrypts_and_decrypts_only_for_execution(app) -> Non
     assert credentials.wallet_address == "0x" + ("3" * 40)
     assert connection.verification_status == "needs_verification"
     assert not connection.is_active
+
+
+def test_stale_required_connection_secret_has_actionable_error(app) -> None:
+    user = _create_user("stale-required")
+    service = app.extensions["services"]["trading_connections"]
+    old_fernet = Fernet(Fernet.generate_key())
+    connection = service.create_or_update(
+        user_id=user.id,
+        provider="hyperliquid",
+        connection_type="cex_api_key",
+        api_secret="0x" + ("1" * 64),
+        wallet_address="0x" + ("3" * 40),
+    )
+    connection.encrypted_api_secret = old_fernet.encrypt(b"0x" + b"4" * 64).decode("utf-8")
+    db.session.commit()
+
+    with pytest.raises(RuntimeError, match="Saved API Wallet Secret cannot be decrypted"):
+        service.credentials_for_execution(user.id, connection.id)
+
+    result = service.verify_connection(user.id, connection.id)
+    assert result["ok"] is False
+    assert "Re-enter or delete this connection" in result["error"]
+    assert connection.verification_status == "action_needed"
+
+
+def test_stale_optional_hyperliquid_label_does_not_block_required_credentials(app) -> None:
+    user = _create_user("stale-optional")
+    service = app.extensions["services"]["trading_connections"]
+    old_fernet = Fernet(Fernet.generate_key())
+    connection = service.create_or_update(
+        user_id=user.id,
+        provider="hyperliquid",
+        connection_type="cex_api_key",
+        api_key="account-label",
+        api_secret="0x" + ("1" * 64),
+        wallet_address="0x" + ("3" * 40),
+    )
+    connection.encrypted_api_key = old_fernet.encrypt(b"old-label").decode("utf-8")
+    db.session.commit()
+
+    credentials = service.credentials_for_execution(user.id, connection.id)
+
+    assert credentials.api_key == ""
+    assert credentials.api_secret == "0x" + ("1" * 64)
+    assert credentials.wallet_address == "0x" + ("3" * 40)
 
 
 def test_trading_connection_rejects_seed_phrases_and_cross_user_access(app) -> None:
