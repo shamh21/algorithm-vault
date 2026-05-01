@@ -224,6 +224,152 @@ def net_roi_v2_diagnostics(payload: Mapping[str, Any], config: Mapping[str, Any]
     }
 
 
+def one_hour_edge_v2_diagnostics(payload: Mapping[str, Any], config: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Return shared 1-hour profitability diagnostics for research ranking.
+
+    This helper intentionally produces additive metadata only. It is suitable
+    for scanner rows, optimizer rankings, runtime signal snapshots, and vault
+    selection because all inputs are optional and missing values fail toward a
+    conservative grade.
+    """
+
+    config = config or {}
+    base = net_roi_diagnostics(payload, config)
+    v2 = net_roi_v2_diagnostics(payload, config)
+
+    raw_total_return_pct = _float(payload.get("raw_total_return_pct"))
+    if raw_total_return_pct == 0.0:
+        raw_total_return_pct = _float(_first(payload, "total_return", "gross_return")) * 100.0
+    raw_net_return_pct = _float(payload.get("raw_net_return_pct"))
+    if raw_net_return_pct == 0.0:
+        raw_net_return_pct = _float(_first(payload, "net_return_after_costs", "total_return")) * 100.0
+    raw_vs_net_gap = max(raw_total_return_pct - raw_net_return_pct, 0.0)
+
+    raw_upside_score = max(_float(payload.get("raw_upside_score")), 0.0)
+    recent = max(
+        _float(_first(payload, "recent_1h_return", "recent_performance_score")),
+        _float(payload.get("cost_adjusted_recent_1h_return")),
+    )
+    fill_quality = _float(base.get("expected_fill_quality"))
+    churn = _float(base.get("churn_penalty"))
+    edge_after_cost = _float(base.get("edge_after_cost_bps"))
+    cost_drag_bps = _float(payload.get("cost_drag_bps"))
+    spread_bps = _float(payload.get("spread_bps"))
+    stability = max(
+        _float(payload.get("window_stability")),
+        _float(payload.get("accepted_window_ratio")),
+        _float(payload.get("signal_stability")),
+    )
+    capacity_multiple = _float(base.get("capacity_multiple"))
+    market_structure = _float(_first(payload, "market_structure_score", "market_structure_trend"))
+    favorable = max(_float(payload.get("max_favorable_excursion")), 0.0)
+    adverse = abs(min(_float(payload.get("max_adverse_excursion")), 0.0))
+    mfe_mae = _float(payload.get("mfe_mae_ratio"))
+    if mfe_mae <= 0 and favorable > 0 and adverse > 0:
+        mfe_mae = favorable / max(adverse, 1e-9)
+    drawdown_abs = abs(min(_float(_first(payload, "max_drawdown", "drawdown")), 0.0))
+    decay = max(_float(payload.get("decay_penalty")), 0.0) + max(-_float(_first(payload, "recent_decay", "performance_decay_rate")), 0.0)
+    stale = bool(base.get("stale_data")) or bool(payload.get("stale_data"))
+
+    min_fill = _float(config.get("ONE_HOUR_MIN_EXECUTION_QUALITY"), 0.60)
+    max_gap = _float(config.get("ONE_HOUR_MAX_RAW_NET_GAP_PCT"), 35.0)
+    min_edge = _float(config.get("NET_ROI_MIN_EDGE_BPS"), 4.0)
+    max_churn = _float(config.get("NET_ROI_MAX_CHURN_PENALTY"), 0.35)
+    max_cost = _float(config.get("AGGRESSIVE_1H_MAX_COST_DRAG_BPS"), 18.0)
+    min_stability = _float(config.get("AGGRESSIVE_1H_MIN_WINDOW_STABILITY"), 0.55)
+    min_mfe_mae = _float(config.get("AGGRESSIVE_1H_MIN_MFE_MAE"), 1.5)
+    min_capacity = _float(config.get("AGGRESSIVE_1H_MIN_CAPACITY_MULTIPLE"), 2.0)
+
+    cost_quality = max(0.0, 1.0 - max(cost_drag_bps - 4.0, 0.0) / max(max_cost * 2.0, 1.0))
+    spread_quality = max(0.0, 1.0 - max(spread_bps, 0.0) / 30.0)
+    capacity_quality = min(max(capacity_multiple, 0.0) / max(min_capacity * 3.0, 1.0), 1.0)
+    execution_quality = (
+        fill_quality * 0.45
+        + max(stability, 0.0) * 0.18
+        + capacity_quality * 0.14
+        + max(market_structure, 0.0) * 0.10
+        + cost_quality * 0.08
+        + spread_quality * 0.05
+    )
+    if stale:
+        execution_quality -= 0.25
+    expected_execution_quality = max(0.0, min(execution_quality, 1.0))
+
+    blockers: list[str] = []
+    if edge_after_cost < min_edge:
+        blockers.append("low_edge_after_costs")
+    if expected_execution_quality < min_fill:
+        blockers.append("low_expected_execution_quality")
+    if raw_vs_net_gap > max_gap:
+        blockers.append("high_raw_vs_net_roi_gap")
+    if churn > max_churn:
+        blockers.append("excessive_churn")
+    if cost_drag_bps > max_cost:
+        blockers.append("cost_drag_above_threshold")
+    if stability > 0 and stability < min_stability:
+        blockers.append("low_window_stability")
+    if capacity_multiple > 0 and capacity_multiple < min_capacity:
+        blockers.append("insufficient_liquidity_capacity")
+    if mfe_mae > 0 and mfe_mae < min_mfe_mae:
+        blockers.append("weak_mfe_mae")
+    if recent <= 0:
+        blockers.append("non_positive_recent_1h_return")
+    if str(v2.get("regime_support", "")).lower() == "regime-fragile":
+        blockers.append("fragile_regime")
+    if str(v2.get("roi_rejection_risk", "")).lower() == "high":
+        blockers.append("high_roi_rejection_risk")
+    if stale:
+        blockers.append("stale_data")
+
+    score = (
+        _float(v2.get("net_roi_v2_score")) * 1.30
+        + _float(base.get("net_roi_score")) * 0.35
+        + raw_upside_score * 0.045
+        + max(raw_net_return_pct, 0.0) * 0.025
+        + max(recent, 0.0) * 190.0
+        + min(max(mfe_mae, 0.0), 8.0) * 1.35
+        + min(max(capacity_multiple, 0.0), 8.0) * 0.95
+        + expected_execution_quality * 15.0
+        + max(market_structure, 0.0) * 6.0
+        - drawdown_abs * 95.0
+        - churn * 16.0
+        - max(cost_drag_bps - 4.0, 0.0) * 0.28
+        - max(raw_vs_net_gap - max_gap, 0.0) * 0.22
+        - max(decay, 0.0) * 20.0
+    )
+    if not bool(config.get("ONE_HOUR_EDGE_V2_ENABLED", True)):
+        score = _float(v2.get("net_roi_v2_score"))
+    score = float(score if math.isfinite(score) else 0.0)
+    grade = _one_hour_edge_grade(score, blockers, expected_execution_quality)
+
+    return {
+        "one_hour_edge_v2": score,
+        "one_hour_edge_grade": grade,
+        "expected_execution_quality": float(expected_execution_quality),
+        "profitability_blockers": list(dict.fromkeys(blockers)),
+        "raw_vs_net_roi_gap": float(raw_vs_net_gap),
+        "candidate_quality_breakdown": {
+            "net_roi_v2_score": _float(v2.get("net_roi_v2_score")),
+            "net_roi_score": _float(base.get("net_roi_score")),
+            "raw_upside_score": raw_upside_score,
+            "raw_total_return_pct": raw_total_return_pct,
+            "raw_net_return_pct": raw_net_return_pct,
+            "recent_1h_return": recent,
+            "mfe_mae_ratio": mfe_mae,
+            "drawdown_abs": drawdown_abs,
+            "expected_fill_quality": fill_quality,
+            "expected_execution_quality": expected_execution_quality,
+            "capacity_multiple": capacity_multiple,
+            "market_structure_score": market_structure,
+            "cost_drag_bps": cost_drag_bps,
+            "spread_bps": spread_bps,
+            "churn_penalty": churn,
+            "regime_support": v2.get("regime_support"),
+            "roi_rejection_risk": v2.get("roi_rejection_risk"),
+        },
+    }
+
+
 def expected_fill_quality(
     *,
     spread_bps: float,
@@ -405,6 +551,25 @@ def _roi_quality_grade(score: float, rejection_risk: str, fill_quality: float, s
     if score >= 18.0 and rejection_risk in {"low", "medium"} and fill_quality >= 0.55:
         return "B"
     if score >= 8.0 and rejection_risk != "high":
+        return "C"
+    return "D"
+
+
+def _one_hour_edge_grade(score: float, blockers: list[str], execution_quality: float) -> str:
+    blocker_count = len(blockers)
+    critical = {
+        "low_edge_after_costs",
+        "low_expected_execution_quality",
+        "fragile_regime",
+        "high_roi_rejection_risk",
+        "stale_data",
+    }
+    has_critical = any(item in critical for item in blockers)
+    if score >= 55.0 and execution_quality >= 0.72 and blocker_count == 0:
+        return "A"
+    if score >= 32.0 and execution_quality >= 0.60 and blocker_count <= 1 and not has_critical:
+        return "B"
+    if score >= 16.0 and execution_quality >= 0.48 and not has_critical:
         return "C"
     return "D"
 

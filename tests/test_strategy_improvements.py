@@ -232,6 +232,43 @@ def test_live_signal_quality_blocks_low_fill_quality_and_reports_net_roi(app) ->
     assert "churn_penalty" in payload
 
 
+def test_live_signal_quality_blocks_excessive_churn_with_one_hour_diagnostics(app) -> None:
+    app.config["ML_RANKER_ENABLED"] = False
+    evaluator = SignalQualityEvaluator(app.config)
+    signal = Signal("buy", "fast churn setup", "1m", 99.0, 105.0, 0.1)
+
+    payload = evaluator.evaluate(
+        symbol="BTC",
+        timeframe="1m",
+        mode="live",
+        run_parameters={
+            "take_profit_pct": 0.05,
+            "turnover_after_fees": 12.0,
+            "trades_per_day": 72.0,
+            "avg_trade_return": 0.0002,
+            "recent_1h_return": 0.02,
+            "mfe_mae_ratio": 2.0,
+        },
+        signal=signal,
+        feature_payload={"atr_pct": 0.001, "trend_strength": 0.6},
+        mid=100.0,
+        market_snapshot={
+            "source": "websocket",
+            "spread_bps": 1.0,
+            "liquidity_usd": 100_000.0,
+            "volatility_pct": 0.4,
+            "signal_stability": 0.95,
+            "market_structure_score": 0.8,
+        },
+    )
+
+    assert payload["no_trade_reason"] == "excessive_churn"
+    assert payload["churn_penalty"] > app.config["NET_ROI_MAX_CHURN_PENALTY"]
+    assert payload["one_hour_edge_v2"] > 0
+    assert "excessive_churn" in payload["profitability_blockers"]
+    assert payload["signal_quality_breakdown"]["risk"]["profitability_blockers"] == payload["profitability_blockers"]
+
+
 def test_live_signal_quality_debounces_repeated_signal(app) -> None:
     app.config["ML_RANKER_ENABLED"] = False
     evaluator = SignalQualityEvaluator(app.config)

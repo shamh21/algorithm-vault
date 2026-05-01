@@ -12,7 +12,7 @@ from ..ml.online_ranker import OnlineRanker, extract_features, horizon_from_dura
 from ..models import StrategyRanking
 from ..runtime import market_mode_for
 from .ensemble_allocator import DURATION_ENSEMBLE_VERSION, ENSEMBLE_VERSION, EnhancedEnsembleAllocator
-from .net_roi import net_roi_diagnostics, net_roi_v2_diagnostics
+from .net_roi import net_roi_diagnostics, net_roi_v2_diagnostics, one_hour_edge_v2_diagnostics
 
 
 SUPPORTED_VAULT_TIMEFRAMES = {"1m", "5m", "15m", "1h"}
@@ -114,6 +114,7 @@ class VaultStrategySelector:
         profile = str(base["profile"])
         ranking_roi_payload = self._ranking_net_roi_payload(ranking)
         ranking_roi_v2_payload = self._ranking_net_roi_v2_payload(ranking)
+        ranking_one_hour_edge_payload = self._ranking_one_hour_edge_payload(ranking)
 
         metadata: dict[str, Any] = {
             "asset": asset,
@@ -147,6 +148,12 @@ class VaultStrategySelector:
             "optimizer_decay_penalty": float(getattr(ranking, "decay_penalty", 0.0)) if ranking else None,
             "optimizer_net_roi_score": ranking_roi_payload["net_roi_score"] if ranking else None,
             "optimizer_net_roi_v2_score": ranking_roi_v2_payload["net_roi_v2_score"] if ranking else None,
+            "optimizer_one_hour_edge_v2": ranking_one_hour_edge_payload.get("one_hour_edge_v2") if ranking else None,
+            "optimizer_one_hour_edge_grade": ranking_one_hour_edge_payload.get("one_hour_edge_grade") if ranking else None,
+            "optimizer_expected_execution_quality": ranking_one_hour_edge_payload.get("expected_execution_quality") if ranking else None,
+            "optimizer_profitability_blockers": ranking_one_hour_edge_payload.get("profitability_blockers", []) if ranking else [],
+            "optimizer_raw_vs_net_roi_gap": ranking_one_hour_edge_payload.get("raw_vs_net_roi_gap") if ranking else None,
+            "optimizer_candidate_quality_breakdown": ranking_one_hour_edge_payload.get("candidate_quality_breakdown", {}) if ranking else {},
             "optimizer_roi_quality_grade": ranking_roi_v2_payload["roi_quality_grade"] if ranking else None,
             "optimizer_roi_rejection_risk": ranking_roi_v2_payload["roi_rejection_risk"] if ranking else None,
             "optimizer_regime_support": ranking_roi_v2_payload["regime_support"] if ranking else None,
@@ -358,15 +365,34 @@ class VaultStrategySelector:
                 return False
             roi_payload = self._ranking_net_roi_payload(ranking)
             roi_v2_payload = self._ranking_net_roi_v2_payload(ranking)
+            one_hour_edge = self._ranking_one_hour_edge_payload(ranking)
             explanation = ranking.ml_explanation if isinstance(ranking.ml_explanation, dict) else {}
             has_net_roi_payload = isinstance(explanation.get("net_roi"), dict)
             has_net_roi_v2_payload = isinstance(explanation.get("net_roi_v2"), dict)
+            has_one_hour_edge_payload = isinstance(explanation.get("one_hour_edge_v2"), dict)
             edge_after_cost = self._safe_float(roi_payload.get("edge_after_cost_bps"))
             if has_net_roi_payload and edge_after_cost < self._safe_float(self.config.get("NET_ROI_MIN_EDGE_BPS"), 4.0):
                 return False
             fill_quality = self._safe_float(roi_payload.get("expected_fill_quality"))
             if has_net_roi_payload and fill_quality < self._safe_float(self.config.get("NET_ROI_MIN_FILL_QUALITY"), 0.55):
                 return False
+            if has_one_hour_edge_payload:
+                min_grade = str(self.config.get("ONE_HOUR_MIN_EDGE_GRADE", "B") or "B").upper()
+                grade = str(one_hour_edge.get("one_hour_edge_grade", "D") or "D").upper()
+                grade_order = {"A": 4, "B": 3, "C": 2, "D": 1}
+                if grade_order.get(grade, 0) < grade_order.get(min_grade, 3):
+                    return False
+                if self._safe_float(one_hour_edge.get("expected_execution_quality")) < self._safe_float(self.config.get("ONE_HOUR_MIN_EXECUTION_QUALITY"), 0.60):
+                    return False
+                hard_blockers = {
+                    "low_edge_after_costs",
+                    "low_expected_execution_quality",
+                    "fragile_regime",
+                    "high_roi_rejection_risk",
+                    "stale_data",
+                }
+                if hard_blockers.intersection(set(one_hour_edge.get("profitability_blockers", []) or [])):
+                    return False
             if has_net_roi_v2_payload and str(roi_v2_payload.get("roi_rejection_risk", "high") or "high").lower() == "high":
                 return False
             if has_net_roi_v2_payload and str(roi_v2_payload.get("regime_support", "regime-neutral") or "").lower() == "regime-fragile":
@@ -429,12 +455,19 @@ class VaultStrategySelector:
         return True
 
     def _one_hour_candidate_score(self, ranking: StrategyRanking, duration_hours: int) -> float:
+        one_hour_edge = self._ranking_one_hour_edge_payload(ranking)
+        explanation = ranking.ml_explanation if isinstance(ranking.ml_explanation, dict) else {}
+        has_stored_one_hour_edge = isinstance(explanation.get("one_hour_edge_v2"), dict)
+        edge_v2 = self._safe_float(one_hour_edge.get("one_hour_edge_v2"))
+        execution_quality = self._safe_float(one_hour_edge.get("expected_execution_quality"))
         live_pref = self._ranking_one_hour_live_preference_payload(ranking)
         high_upside_score = self._safe_float(live_pref.get("one_hour_high_upside_score")) if live_pref else 0.0
         live_pref_rank = self._safe_float(live_pref.get("one_hour_live_preference_rank")) if live_pref else 0.0
         net_roi_v2 = self._ranking_net_roi_v2_score(ranking)
         net_roi = self._ranking_net_roi_score(ranking)
         convex = self._safe_float(getattr(ranking, "convex_edge_score", 0.0))
+        if has_stored_one_hour_edge and edge_v2:
+            return edge_v2 + max(execution_quality, 0.0) * 4.0 + max(net_roi_v2, 0.0) * 0.04
         if high_upside_score:
             return high_upside_score + max(live_pref_rank, 0.0) * 0.1 + max(net_roi_v2, 0.0) * 0.05
         if net_roi_v2:
@@ -516,6 +549,52 @@ class VaultStrategySelector:
         explanation = ranking.ml_explanation if isinstance(ranking.ml_explanation, dict) else {}
         payload = explanation.get("one_hour_live_preference")
         return payload if isinstance(payload, dict) else {}
+
+    def _ranking_one_hour_edge_payload(self, ranking: StrategyRanking | None) -> dict[str, Any]:
+        if ranking is None:
+            return {}
+        explanation = ranking.ml_explanation if isinstance(ranking.ml_explanation, dict) else {}
+        stored = explanation.get("one_hour_edge_v2") if isinstance(explanation.get("one_hour_edge_v2"), dict) else {}
+        if stored and "one_hour_edge_v2" in stored:
+            return {
+                "one_hour_edge_v2": self._safe_float(stored.get("one_hour_edge_v2")),
+                "one_hour_edge_grade": str(stored.get("one_hour_edge_grade", "D") or "D"),
+                "expected_execution_quality": self._safe_float(stored.get("expected_execution_quality")),
+                "profitability_blockers": list(stored.get("profitability_blockers", []) or []),
+                "raw_vs_net_roi_gap": self._safe_float(stored.get("raw_vs_net_roi_gap")),
+                "candidate_quality_breakdown": stored.get("candidate_quality_breakdown", {}) if isinstance(stored.get("candidate_quality_breakdown"), dict) else {},
+            }
+        return one_hour_edge_v2_diagnostics(
+            {
+                "net_return_after_costs": ranking.net_return_after_costs,
+                "total_return": ranking.total_return,
+                "recent_performance_score": ranking.recent_performance_score,
+                "recent_1h_return": ranking.recent_1h_return,
+                "cost_adjusted_recent_1h_return": ranking.cost_adjusted_recent_1h_return,
+                "max_drawdown": ranking.max_drawdown,
+                "profit_factor": ranking.profit_factor,
+                "window_stability": ranking.window_stability,
+                "accepted_window_ratio": ranking.accepted_window_ratio,
+                "edge_score": ranking.edge_score + ranking.cost_drag_bps,
+                "expectancy": ranking.expectancy,
+                "avg_win": ranking.avg_win,
+                "avg_loss": ranking.avg_loss,
+                "cost_drag_bps": ranking.cost_drag_bps,
+                "turnover_after_fees": ranking.turnover_after_fees,
+                "turnover_rate": ranking.turnover_rate,
+                "trades_per_day": ranking.trades_per_day,
+                "avg_trade_return": ranking.avg_trade_return,
+                "allocation_amount_usd": ranking.allocation_amount_usd,
+                "capacity_usd": ranking.capacity_usd,
+                "capacity_multiple": ranking.capacity_multiple,
+                "max_favorable_excursion": ranking.max_favorable_excursion,
+                "max_adverse_excursion": ranking.max_adverse_excursion,
+                "mfe_mae_ratio": ranking.mfe_mae_ratio,
+                "decay_penalty": ranking.decay_penalty,
+                "ml_score": ranking.ml_score,
+            },
+            self.config,
+        )
 
     def _ranking_net_roi_score(self, ranking: StrategyRanking | None) -> float:
         if ranking is None:
@@ -919,6 +998,13 @@ class VaultStrategySelector:
             roi_v2_payload = self._ranking_net_roi_v2_payload(ranking)
             params["net_roi_score"] = roi_payload["net_roi_score"]
             params["net_roi_v2_score"] = roi_v2_payload["net_roi_v2_score"]
+            one_hour_edge_payload = self._ranking_one_hour_edge_payload(ranking)
+            params["one_hour_edge_v2"] = one_hour_edge_payload.get("one_hour_edge_v2")
+            params["one_hour_edge_grade"] = one_hour_edge_payload.get("one_hour_edge_grade")
+            params["expected_execution_quality"] = one_hour_edge_payload.get("expected_execution_quality")
+            params["profitability_blockers"] = one_hour_edge_payload.get("profitability_blockers", [])
+            params["raw_vs_net_roi_gap"] = one_hour_edge_payload.get("raw_vs_net_roi_gap")
+            params["candidate_quality_breakdown"] = one_hour_edge_payload.get("candidate_quality_breakdown", {})
             params["roi_quality_grade"] = roi_v2_payload["roi_quality_grade"]
             params["roi_rejection_risk"] = roi_v2_payload["roi_rejection_risk"]
             params["regime_support"] = roi_v2_payload["regime_support"]
@@ -943,6 +1029,12 @@ class VaultStrategySelector:
                 "edge_score": self._safe_float(ranking.edge_score),
                 "net_roi_score": roi_payload["net_roi_score"],
                 "net_roi_v2_score": roi_v2_payload["net_roi_v2_score"],
+                "one_hour_edge_v2": one_hour_edge_payload.get("one_hour_edge_v2"),
+                "one_hour_edge_grade": one_hour_edge_payload.get("one_hour_edge_grade"),
+                "expected_execution_quality": one_hour_edge_payload.get("expected_execution_quality"),
+                "profitability_blockers": one_hour_edge_payload.get("profitability_blockers", []),
+                "raw_vs_net_roi_gap": one_hour_edge_payload.get("raw_vs_net_roi_gap"),
+                "candidate_quality_breakdown": one_hour_edge_payload.get("candidate_quality_breakdown", {}),
                 "roi_quality_grade": roi_v2_payload["roi_quality_grade"],
                 "roi_rejection_risk": roi_v2_payload["roi_rejection_risk"],
                 "regime_support": roi_v2_payload["regime_support"],
@@ -1079,6 +1171,12 @@ class VaultStrategySelector:
             params["rejection_reason"] = candidate.rejection_reason
             params["net_roi_score"] = candidate.features.get("net_roi_score")
             params["net_roi_v2_score"] = candidate.features.get("net_roi_v2_score")
+            params["one_hour_edge_v2"] = candidate.features.get("one_hour_edge_v2")
+            params["one_hour_edge_grade"] = candidate.features.get("one_hour_edge_grade")
+            params["expected_execution_quality"] = candidate.features.get("expected_execution_quality")
+            params["profitability_blockers"] = candidate.features.get("profitability_blockers", [])
+            params["raw_vs_net_roi_gap"] = candidate.features.get("raw_vs_net_roi_gap")
+            params["candidate_quality_breakdown"] = candidate.features.get("candidate_quality_breakdown", {})
             params["roi_quality_grade"] = candidate.features.get("roi_quality_grade")
             params["roi_rejection_risk"] = candidate.features.get("roi_rejection_risk")
             params["regime_support"] = candidate.features.get("regime_support")
@@ -1102,6 +1200,12 @@ class VaultStrategySelector:
                     "edge_score": candidate.score,
                     "net_roi_score": candidate.features.get("net_roi_score"),
                     "net_roi_v2_score": candidate.features.get("net_roi_v2_score"),
+                    "one_hour_edge_v2": candidate.features.get("one_hour_edge_v2"),
+                    "one_hour_edge_grade": candidate.features.get("one_hour_edge_grade"),
+                    "expected_execution_quality": candidate.features.get("expected_execution_quality"),
+                    "profitability_blockers": candidate.features.get("profitability_blockers", []),
+                    "raw_vs_net_roi_gap": candidate.features.get("raw_vs_net_roi_gap"),
+                    "candidate_quality_breakdown": candidate.features.get("candidate_quality_breakdown", {}),
                     "roi_quality_grade": candidate.features.get("roi_quality_grade"),
                     "roi_rejection_risk": candidate.features.get("roi_rejection_risk"),
                     "regime_support": candidate.features.get("regime_support"),
@@ -1152,8 +1256,15 @@ class VaultStrategySelector:
         params = dict(parameters)
         roi_payload = self._ranking_net_roi_payload(ranking)
         roi_v2_payload = self._ranking_net_roi_v2_payload(ranking)
+        one_hour_edge_payload = self._ranking_one_hour_edge_payload(ranking)
         params["net_roi_score"] = roi_payload["net_roi_score"]
         params["net_roi_v2_score"] = roi_v2_payload["net_roi_v2_score"]
+        params["one_hour_edge_v2"] = one_hour_edge_payload.get("one_hour_edge_v2")
+        params["one_hour_edge_grade"] = one_hour_edge_payload.get("one_hour_edge_grade")
+        params["expected_execution_quality"] = one_hour_edge_payload.get("expected_execution_quality")
+        params["profitability_blockers"] = one_hour_edge_payload.get("profitability_blockers", [])
+        params["raw_vs_net_roi_gap"] = one_hour_edge_payload.get("raw_vs_net_roi_gap")
+        params["candidate_quality_breakdown"] = one_hour_edge_payload.get("candidate_quality_breakdown", {})
         params["roi_quality_grade"] = roi_v2_payload["roi_quality_grade"]
         params["roi_rejection_risk"] = roi_v2_payload["roi_rejection_risk"]
         params["regime_support"] = roi_v2_payload["regime_support"]
@@ -1177,6 +1288,12 @@ class VaultStrategySelector:
             "edge_score": self._safe_float(ranking.edge_score) if ranking else 0.0,
             "net_roi_score": roi_payload["net_roi_score"],
             "net_roi_v2_score": roi_v2_payload["net_roi_v2_score"],
+            "one_hour_edge_v2": one_hour_edge_payload.get("one_hour_edge_v2"),
+            "one_hour_edge_grade": one_hour_edge_payload.get("one_hour_edge_grade"),
+            "expected_execution_quality": one_hour_edge_payload.get("expected_execution_quality"),
+            "profitability_blockers": one_hour_edge_payload.get("profitability_blockers", []),
+            "raw_vs_net_roi_gap": one_hour_edge_payload.get("raw_vs_net_roi_gap"),
+            "candidate_quality_breakdown": one_hour_edge_payload.get("candidate_quality_breakdown", {}),
             "roi_quality_grade": roi_v2_payload["roi_quality_grade"],
             "roi_rejection_risk": roi_v2_payload["roi_rejection_risk"],
             "regime_support": roi_v2_payload["regime_support"],

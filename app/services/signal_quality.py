@@ -6,7 +6,7 @@ from typing import Any
 
 from ..features.fibonacci import FibonacciLevels, FibonacciService
 from ..ml.online_ranker import extract_features, horizon_from_duration
-from .net_roi import net_roi_diagnostics, net_roi_v2_diagnostics
+from .net_roi import net_roi_diagnostics, net_roi_v2_diagnostics, one_hour_edge_v2_diagnostics
 
 
 EXPERIMENTAL_PROFILES = {"aggressive_1h", "dynamic_intraday", "extreme_roi_experimental"}
@@ -153,6 +153,17 @@ class SignalQualityEvaluator:
         }
         roi_payload = net_roi_diagnostics(roi_context, self.config)
         roi_v2_payload = net_roi_v2_diagnostics(roi_context, self.config)
+        one_hour_edge_payload = one_hour_edge_v2_diagnostics(
+            {
+                **roi_context,
+                **roi_payload,
+                **roi_v2_payload,
+                "raw_upside_score": run_parameters.get("raw_upside_score", 0.0),
+                "raw_total_return_pct": run_parameters.get("raw_total_return_pct", 0.0),
+                "raw_net_return_pct": run_parameters.get("raw_net_return_pct", 0.0),
+            },
+            self.config,
+        )
         if mode == "live" and not no_trade_reason:
             debounce_age = self._float(run_parameters.get("last_signal_age_seconds"), 1_000_000.0)
             debounce_seconds = self._float(self.config.get("SIGNAL_DEBOUNCE_SECONDS"), 45.0)
@@ -173,6 +184,10 @@ class SignalQualityEvaluator:
                 no_trade_reason = "fragile_roi_v2_regime"
             elif str(roi_v2_payload.get("roi_rejection_risk", "")).lower() == "high":
                 no_trade_reason = "high_roi_v2_rejection_risk"
+            elif self._float(one_hour_edge_payload.get("expected_execution_quality")) < self._float(self.config.get("ONE_HOUR_MIN_EXECUTION_QUALITY"), 0.60):
+                no_trade_reason = "low_one_hour_execution_quality"
+            elif str(one_hour_edge_payload.get("one_hour_edge_grade", "D")).upper() not in {"A", "B"}:
+                no_trade_reason = "low_one_hour_edge_grade"
 
         signal_quality_breakdown = {
             "raw_strategy": {
@@ -207,6 +222,8 @@ class SignalQualityEvaluator:
             "risk": {
                 "roi_quality_grade": roi_v2_payload["roi_quality_grade"],
                 "roi_rejection_risk": roi_v2_payload["roi_rejection_risk"],
+                "one_hour_edge_grade": one_hour_edge_payload["one_hour_edge_grade"],
+                "profitability_blockers": one_hour_edge_payload["profitability_blockers"],
                 "no_trade_reason": no_trade_reason,
             },
         }
@@ -215,6 +232,12 @@ class SignalQualityEvaluator:
             "edge_score": edge_score,
             "net_roi_score": roi_payload["net_roi_score"],
             "net_roi_v2_score": roi_v2_payload["net_roi_v2_score"],
+            "one_hour_edge_v2": one_hour_edge_payload["one_hour_edge_v2"],
+            "one_hour_edge_grade": one_hour_edge_payload["one_hour_edge_grade"],
+            "expected_execution_quality": one_hour_edge_payload["expected_execution_quality"],
+            "profitability_blockers": one_hour_edge_payload["profitability_blockers"],
+            "raw_vs_net_roi_gap": one_hour_edge_payload["raw_vs_net_roi_gap"],
+            "candidate_quality_breakdown": one_hour_edge_payload["candidate_quality_breakdown"],
             "roi_quality_grade": roi_v2_payload["roi_quality_grade"],
             "roi_rejection_risk": roi_v2_payload["roi_rejection_risk"],
             "regime_support": roi_v2_payload["regime_support"],

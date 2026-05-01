@@ -233,6 +233,10 @@ def test_market_scanner_includes_tradability_in_dynamic_scores(app) -> None:
     assert "cost_adjusted_expected_move_persistence" in scored[0].features
     assert "expected_fill_quality" in scored[0].features
     assert "churn_penalty" in scored[0].features
+    assert "one_hour_edge_v2" in scored[0].features
+    assert "one_hour_edge_grade" in scored[0].features
+    assert "expected_execution_quality" in scored[0].features
+    assert "candidate_quality_breakdown" in scored[0].features
 
 
 def test_market_scanner_high_upside_diagnostics_align_accepted_and_rejected(app) -> None:
@@ -275,6 +279,9 @@ def test_market_scanner_high_upside_diagnostics_align_accepted_and_rejected(app)
     assert diagnostics["accepted"][0]["roi_quality_grade"] in {"A", "B", "C", "D"}
     assert diagnostics["accepted"][0]["regime_support"] in {"regime-supported", "regime-neutral", "regime-fragile"}
     assert diagnostics["accepted"][0]["expected_fill_quality"] >= app.config["NET_ROI_MIN_FILL_QUALITY"]
+    assert diagnostics["accepted"][0]["one_hour_edge_grade"] in {"A", "B", "C", "D"}
+    assert "one_hour_edge_v2" in diagnostics["accepted"][0]["score_breakdown"]
+    assert "candidate_quality_breakdown" in diagnostics["accepted"][0]
     assert "volume_persistence" in diagnostics["accepted"][0]["score_breakdown"]
     assert "net_roi" in diagnostics["accepted"][0]["score_breakdown"]
     assert "net_roi_v2" in diagnostics["accepted"][0]["score_breakdown"]

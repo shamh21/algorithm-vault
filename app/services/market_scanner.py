@@ -13,7 +13,7 @@ from ..features.engine import FeatureEngine
 from ..ml.online_ranker import extract_features, horizon_from_duration
 from ..models import AuditLog, Setting
 from .market_data import MarketDataService
-from .net_roi import net_roi_diagnostics, net_roi_v2_diagnostics
+from .net_roi import net_roi_diagnostics, net_roi_v2_diagnostics, one_hour_edge_v2_diagnostics
 from .tradability import (
     best_bid_ask,
     book_liquidity_usd,
@@ -329,6 +329,20 @@ class MarketScannerService:
                 self.config,
             )
             roi_v2_payload = net_roi_v2_diagnostics(roi_context, self.config)
+            one_hour_edge_payload = one_hour_edge_v2_diagnostics(
+                {
+                    **roi_context,
+                    **roi_payload,
+                    **roi_v2_payload,
+                    "raw_upside_score": high_upside_metrics["raw_upside_score"],
+                    "recent_1h_return": high_upside_metrics["momentum_acceleration"],
+                    "window_stability": high_upside_metrics["depth_stability"],
+                    "capacity_multiple": roi_payload.get("capacity_multiple", 0.0),
+                    "mfe_mae_ratio": features.get("mfe_mae_ratio", 0.0),
+                    "market_structure_score": tradability["market_structure_score"],
+                },
+                self.config,
+            )
             offline_payload = self._offline_score_payload(
                 {
                     **roi_context,
@@ -358,13 +372,17 @@ class MarketScannerService:
             roi_context["score"] = upside_screen_score
             features.update(roi_payload)
             features.update(roi_v2_payload)
+            features.update(one_hour_edge_payload)
             features["upside_screen_score"] = upside_screen_score
             score_breakdown["net_roi"] = float(roi_payload["net_roi_score"])
             score_breakdown["net_roi_v2"] = float(roi_v2_payload["net_roi_v2_score"])
+            score_breakdown["one_hour_edge_v2"] = float(one_hour_edge_payload["one_hour_edge_v2"])
             features["scanner_score_breakdown"] = dict(score_breakdown)
             score = upside_screen_score + float(roi_payload["net_roi_score"])
             if bool(self.config.get("NET_ROI_V2_ENABLED", True)):
                 score += float(roi_v2_payload["net_roi_v2_score"]) * 0.25
+            if bool(self.config.get("ONE_HOUR_EDGE_V2_ENABLED", True)):
+                score += float(one_hour_edge_payload["one_hour_edge_v2"]) * 0.20
             source = "pair_screening" if pair_bonus > hot_score and pair_bonus > 0 else "hot_token" if hot_score > 0 else "configured"
             rejection_reason = self._scanner_rejection_reason(tradability, {**high_upside_metrics, **roi_payload, **roi_v2_payload}, score)
             candidate = ScoredCandidate(
@@ -677,6 +695,12 @@ class MarketScannerService:
                 "score": 0.0,
                 "net_roi_score": 0.0,
                 "net_roi_v2_score": 0.0,
+                "one_hour_edge_v2": 0.0,
+                "one_hour_edge_grade": "D",
+                "expected_execution_quality": 0.0,
+                "profitability_blockers": [rejection_reason],
+                "raw_vs_net_roi_gap": 0.0,
+                "candidate_quality_breakdown": {},
                 "roi_quality_grade": "D",
                 "roi_rejection_risk": "high",
                 "regime_bucket": {},
@@ -722,6 +746,12 @@ class MarketScannerService:
             "score": candidate.score,
             "net_roi_score": self._float(features.get("net_roi_score")),
             "net_roi_v2_score": self._float(features.get("net_roi_v2_score")),
+            "one_hour_edge_v2": self._float(features.get("one_hour_edge_v2")),
+            "one_hour_edge_grade": str(features.get("one_hour_edge_grade", "D")),
+            "expected_execution_quality": self._float(features.get("expected_execution_quality")),
+            "profitability_blockers": list(features.get("profitability_blockers", []) or []),
+            "raw_vs_net_roi_gap": self._float(features.get("raw_vs_net_roi_gap")),
+            "candidate_quality_breakdown": dict(features.get("candidate_quality_breakdown") or {}),
             "roi_quality_grade": str(features.get("roi_quality_grade", "D")),
             "roi_rejection_risk": str(features.get("roi_rejection_risk", "high")),
             "regime_bucket": dict(features.get("regime_bucket") or {}),

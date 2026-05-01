@@ -35,7 +35,7 @@ from ..ml.online_ranker import OnlineRanker, extract_features, horizon_from_dura
 from ..models import OptimizerRun, Setting, StrategyRanking, StrategyValidation
 from ..services.ensemble_allocator import EnhancedEnsembleAllocator
 from ..services.market_data import MarketDataService
-from ..services.net_roi import net_roi_diagnostics, net_roi_v2_diagnostics
+from ..services.net_roi import net_roi_diagnostics, net_roi_v2_diagnostics, one_hour_edge_v2_diagnostics
 from ..strategies.registry import StrategyRegistry
 from .engine import BacktestConfig, BacktestEngine
 
@@ -1275,12 +1275,34 @@ class StrategyOptimizer:
             data_age_seconds=float(roi_payload["data_age_seconds"]),
             optimizer_config=optimizer_config,
         )
+        one_hour_edge_payload = one_hour_edge_v2_diagnostics(
+            {
+                **roi_context,
+                **raw_upside_payload,
+                **roi_payload,
+                **roi_v2_payload,
+                "raw_upside_score": raw_upside_payload["raw_upside_score"],
+                "raw_total_return_pct": raw_upside_payload["raw_total_return_pct"],
+                "raw_net_return_pct": raw_upside_payload["raw_net_return_pct"],
+                "recent_1h_return": recent_1h_return,
+                "cost_drag_bps": cost_drag_bps,
+                "spread_bps": spread_bps,
+                "window_stability": window_stability,
+                "liquidity_capacity_usd": liquidity_capacity_usd,
+                "capacity_multiple": convex_metrics["capacity_multiple"],
+                "market_structure_score": market_structure_score,
+                "mfe_mae_ratio": convex_metrics["mfe_mae_ratio"],
+                "max_drawdown": weighted_drawdown,
+            },
+            self.config,
+        )
         one_hour_live_payload = self._one_hour_live_preference_payload(
             rejected=rejected,
             rejection_reason=rejection_reason,
             raw_upside=raw_upside_payload,
             net_roi_v2=roi_v2_payload,
             net_roi=roi_payload,
+            one_hour_edge=one_hour_edge_payload,
             recent_1h_return=recent_1h_return,
             cost_drag_bps=cost_drag_bps,
             spread_bps=spread_bps,
@@ -1322,6 +1344,11 @@ class StrategyOptimizer:
                 "cost_drag_bps": cost_drag_bps,
                 "turnover_after_fees": turnover_after_fees,
                 "turnover_rate": turnover,
+                "one_hour_edge_v2": one_hour_edge_payload["one_hour_edge_v2"],
+                "one_hour_edge_grade": one_hour_edge_payload["one_hour_edge_grade"],
+                "expected_execution_quality": one_hour_edge_payload["expected_execution_quality"],
+                "raw_vs_net_roi_gap": one_hour_edge_payload["raw_vs_net_roi_gap"],
+                "profitability_blockers": one_hour_edge_payload["profitability_blockers"],
                 "estimated_fees": estimated_fees,
                 "allocation_amount_usd": float(optimizer_config.allocation_amount_usd or 0.0),
                 "lock_duration_hours": int(optimizer_config.lock_duration_hours or 0),
@@ -1381,6 +1408,12 @@ class StrategyOptimizer:
             "one_hour_live_preference_rank": one_hour_live_payload["one_hour_live_preference_rank"],
             "accepted_for_one_hour_live_preview": one_hour_live_payload["accepted_for_one_hour_live_preview"],
             "one_hour_live_blockers": one_hour_live_payload["one_hour_live_blockers"],
+            "one_hour_edge_v2": one_hour_edge_payload["one_hour_edge_v2"],
+            "one_hour_edge_grade": one_hour_edge_payload["one_hour_edge_grade"],
+            "expected_execution_quality": one_hour_edge_payload["expected_execution_quality"],
+            "profitability_blockers": one_hour_edge_payload["profitability_blockers"],
+            "raw_vs_net_roi_gap": one_hour_edge_payload["raw_vs_net_roi_gap"],
+            "candidate_quality_breakdown": one_hour_edge_payload["candidate_quality_breakdown"],
             "recent_performance_score": recent_performance_score,
             "recent_1h_return": recent_1h_return,
             "estimated_fees": estimated_fees,
@@ -2064,6 +2097,7 @@ class StrategyOptimizer:
         if optimizer_config.profile in {Profile.AGGRESSIVE_1H.value, Profile.EXTREME_ROI_EXPERIMENTAL.value}:
             return (
                 0,
+                -float(item.get("one_hour_edge_v2", 0.0) or 0.0),
                 -float(item.get("one_hour_high_upside_score", 0.0) or 0.0),
                 0 if bool(item.get("accepted_for_one_hour_live_preview", False)) else 1,
                 -float(item.get("net_roi_v2_score", item.get("net_roi_score", 0.0)) or 0.0),
@@ -2673,6 +2707,14 @@ class StrategyOptimizer:
                 "accepted_for_one_hour_live_preview": bool(result.get("accepted_for_one_hour_live_preview", False)),
                 "one_hour_live_blockers": result.get("one_hour_live_blockers", []),
             },
+            "one_hour_edge_v2": {
+                "one_hour_edge_v2": result.get("one_hour_edge_v2", 0.0),
+                "one_hour_edge_grade": result.get("one_hour_edge_grade", "D"),
+                "expected_execution_quality": result.get("expected_execution_quality", 0.0),
+                "profitability_blockers": result.get("profitability_blockers", []),
+                "raw_vs_net_roi_gap": result.get("raw_vs_net_roi_gap", 0.0),
+                "candidate_quality_breakdown": result.get("candidate_quality_breakdown", {}),
+            },
         }
         db.session.add(ranking)
         # Flush rather than commit to keep the transaction open; commit happens in run().
@@ -2723,6 +2765,12 @@ class StrategyOptimizer:
                 "data_age_seconds": ranking.get("data_age_seconds", 0.0),
                 "net_roi_components": ranking.get("net_roi_components", {}),
                 "net_roi_v2_components": ranking.get("net_roi_v2_components", {}),
+                "one_hour_edge_v2": ranking.get("one_hour_edge_v2", 0.0),
+                "one_hour_edge_grade": ranking.get("one_hour_edge_grade", "D"),
+                "expected_execution_quality": ranking.get("expected_execution_quality", 0.0),
+                "profitability_blockers": ranking.get("profitability_blockers", []),
+                "raw_vs_net_roi_gap": ranking.get("raw_vs_net_roi_gap", 0.0),
+                "candidate_quality_breakdown": ranking.get("candidate_quality_breakdown", {}),
                 "convex_edge_score": ranking.get("convex_edge_score", 0.0),
                 "mfe_mae_ratio": ranking.get("mfe_mae_ratio", 0.0),
                 "capacity_multiple": ranking.get("capacity_multiple", 0.0),
@@ -3268,6 +3316,7 @@ class StrategyOptimizer:
         raw_upside: dict[str, Any],
         net_roi_v2: dict[str, Any],
         net_roi: dict[str, Any],
+        one_hour_edge: dict[str, Any],
         recent_1h_return: float,
         cost_drag_bps: float,
         spread_bps: float,
@@ -3299,6 +3348,13 @@ class StrategyOptimizer:
             blockers.append("non_positive_recent_1h_return")
         if float(net_roi.get("expected_fill_quality", 0.0) or 0.0) < float(self.config.get("NET_ROI_MIN_FILL_QUALITY", 0.55) or 0.55):
             blockers.append("low_expected_fill_quality")
+        min_grade = str(self.config.get("ONE_HOUR_MIN_EDGE_GRADE", "B") or "B").upper()
+        grade = str(one_hour_edge.get("one_hour_edge_grade", "D") or "D").upper()
+        grade_order = {"A": 4, "B": 3, "C": 2, "D": 1}
+        if grade_order.get(grade, 0) < grade_order.get(min_grade, 3):
+            blockers.append("low_one_hour_edge_grade")
+        for blocker in one_hour_edge.get("profitability_blockers", []) or []:
+            blockers.append(str(blocker))
         if str(net_roi_v2.get("roi_rejection_risk", "high") or "high").lower() == "high":
             blockers.append("high_roi_rejection_risk")
         if str(net_roi_v2.get("regime_support", "regime-neutral") or "").lower() == "regime-fragile":
@@ -3316,6 +3372,8 @@ class StrategyOptimizer:
             max(float(raw_upside.get("raw_upside_score", 0.0) or 0.0), 0.0) * 0.05
             + max(float(raw_upside.get("raw_total_return_pct", 0.0) or 0.0), 0.0) * 0.02
             + max(float(net_roi_v2.get("net_roi_v2_score", 0.0) or 0.0), 0.0) * 2.0
+            + max(float(one_hour_edge.get("one_hour_edge_v2", 0.0) or 0.0), 0.0) * 1.6
+            + max(float(one_hour_edge.get("expected_execution_quality", 0.0) or 0.0), 0.0) * 8.0
             + max(float(net_roi.get("expected_fill_quality", 0.0) or 0.0), 0.0) * 12.0
             + max(float(recent_1h_return or 0.0), 0.0) * 250.0
             + min(max(float(mfe_mae_ratio or 0.0), 0.0), 8.0) * 2.0
@@ -3395,6 +3453,12 @@ class StrategyOptimizer:
             "one_hour_live_preference_rank": float(item.get("one_hour_live_preference_rank", 0.0) or 0.0),
             "accepted_for_one_hour_live_preview": bool(item.get("accepted_for_one_hour_live_preview", False)),
             "one_hour_live_blockers": list(item.get("one_hour_live_blockers", []) or []),
+            "one_hour_edge_v2": float(item.get("one_hour_edge_v2", 0.0) or 0.0),
+            "one_hour_edge_grade": item.get("one_hour_edge_grade", "D"),
+            "expected_execution_quality": float(item.get("expected_execution_quality", 0.0) or 0.0),
+            "profitability_blockers": list(item.get("profitability_blockers", []) or []),
+            "raw_vs_net_roi_gap": float(item.get("raw_vs_net_roi_gap", 0.0) or 0.0),
+            "candidate_quality_breakdown": dict(item.get("candidate_quality_breakdown", {}) or {}),
             "total_return": float(item.get("total_return", 0.0) or 0.0),
             "net_return_after_costs": float(item.get("net_return_after_costs", 0.0) or 0.0),
             "net_roi_v2_score": float(item.get("net_roi_v2_score", 0.0) or 0.0),
@@ -3416,12 +3480,12 @@ class StrategyOptimizer:
         }
 
     def _one_hour_diagnostics(self, rankings: list[dict[str, Any]], optimizer_config: OptimizerConfig) -> dict[str, Any]:
-        if optimizer_config.profile != Profile.AGGRESSIVE_1H.value:
+        if optimizer_config.profile not in {Profile.AGGRESSIVE_1H.value, Profile.EXTREME_ROI_EXPERIMENTAL.value}:
             return {"enabled": False}
 
         accepted = [item for item in rankings if not item.get("rejected")]
         rejected = [item for item in rankings if item.get("rejected")]
-        sort_field = "net_roi_v2_score" if bool(self.config.get("NET_ROI_V2_ENABLED", True)) else "net_roi_score"
+        sort_field = "one_hour_edge_v2" if bool(self.config.get("ONE_HOUR_EDGE_V2_ENABLED", True)) else "net_roi_v2_score" if bool(self.config.get("NET_ROI_V2_ENABLED", True)) else "net_roi_score"
         accepted.sort(key=lambda item: float(item.get(sort_field, item.get("net_roi_score", item.get("convex_edge_score", item.get("score", 0.0)))) or 0.0), reverse=True)
         rejected.sort(key=lambda item: float(item.get(sort_field, item.get("net_roi_score", item.get("convex_edge_score", item.get("score", 0.0)))) or 0.0), reverse=True)
 
@@ -3436,6 +3500,12 @@ class StrategyOptimizer:
                 "net_roi_score": float(item.get("net_roi_score", 0.0) or 0.0),
                 "net_roi_v2_score": float(item.get("net_roi_v2_score", 0.0) or 0.0),
                 "one_hour_high_upside_score": float(item.get("one_hour_high_upside_score", 0.0) or 0.0),
+                "one_hour_edge_v2": float(item.get("one_hour_edge_v2", 0.0) or 0.0),
+                "one_hour_edge_grade": item.get("one_hour_edge_grade", "D"),
+                "expected_execution_quality": float(item.get("expected_execution_quality", 0.0) or 0.0),
+                "profitability_blockers": list(item.get("profitability_blockers", []) or []),
+                "raw_vs_net_roi_gap": float(item.get("raw_vs_net_roi_gap", 0.0) or 0.0),
+                "candidate_quality_breakdown": dict(item.get("candidate_quality_breakdown", {}) or {}),
                 "accepted_for_one_hour_live_preview": bool(item.get("accepted_for_one_hour_live_preview", False)),
                 "one_hour_live_blockers": list(item.get("one_hour_live_blockers", []) or []),
                 "roi_quality_grade": item.get("roi_quality_grade", "D"),
@@ -3748,6 +3818,12 @@ class StrategyOptimizer:
             "one_hour_live_preference_rank": 0.0,
             "accepted_for_one_hour_live_preview": False,
             "one_hour_live_blockers": [f"candidate_rejected:{reason}"],
+            "one_hour_edge_v2": 0.0,
+            "one_hour_edge_grade": "D",
+            "expected_execution_quality": 0.0,
+            "profitability_blockers": [f"candidate_rejected:{reason}"],
+            "raw_vs_net_roi_gap": 0.0,
+            "candidate_quality_breakdown": {},
             "recent_performance_score": 0.0,
             "recent_1h_return": 0.0,
             "estimated_fees": 0.0,

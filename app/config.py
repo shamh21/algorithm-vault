@@ -226,6 +226,10 @@ class BaseConfig:
     NET_ROI_MIN_FILL_QUALITY = _as_float(os.getenv("NET_ROI_MIN_FILL_QUALITY"), 0.55)
     NET_ROI_V2_ENABLED = _as_bool(os.getenv("NET_ROI_V2_ENABLED"), default=True)
     NET_ROI_V2_MIN_QUALITY_GRADE = os.getenv("NET_ROI_V2_MIN_QUALITY_GRADE", "B").strip().upper() or "B"
+    ONE_HOUR_EDGE_V2_ENABLED = _as_bool(os.getenv("ONE_HOUR_EDGE_V2_ENABLED"), default=True)
+    ONE_HOUR_MIN_EDGE_GRADE = os.getenv("ONE_HOUR_MIN_EDGE_GRADE", "B").strip().upper() or "B"
+    ONE_HOUR_MAX_RAW_NET_GAP_PCT = _as_float(os.getenv("ONE_HOUR_MAX_RAW_NET_GAP_PCT"), 35.0)
+    ONE_HOUR_MIN_EXECUTION_QUALITY = _as_float(os.getenv("ONE_HOUR_MIN_EXECUTION_QUALITY"), 0.60)
     SIGNAL_DEBOUNCE_SECONDS = _as_float(os.getenv("SIGNAL_DEBOUNCE_SECONDS"), 45.0)
     CANARY_PREVIEW_ONLY = _as_bool(os.getenv("CANARY_PREVIEW_ONLY"), default=True)
     AGGRESSIVE_1H_ENABLED = _as_bool(os.getenv("AGGRESSIVE_1H_ENABLED"), default=False)
@@ -482,6 +486,10 @@ class BaseConfig:
             "NET_ROI_MIN_FILL_QUALITY": cls.NET_ROI_MIN_FILL_QUALITY,
             "NET_ROI_V2_ENABLED": cls.NET_ROI_V2_ENABLED,
             "NET_ROI_V2_MIN_QUALITY_GRADE": cls.NET_ROI_V2_MIN_QUALITY_GRADE,
+            "ONE_HOUR_EDGE_V2_ENABLED": cls.ONE_HOUR_EDGE_V2_ENABLED,
+            "ONE_HOUR_MIN_EDGE_GRADE": cls.ONE_HOUR_MIN_EDGE_GRADE,
+            "ONE_HOUR_MAX_RAW_NET_GAP_PCT": cls.ONE_HOUR_MAX_RAW_NET_GAP_PCT,
+            "ONE_HOUR_MIN_EXECUTION_QUALITY": cls.ONE_HOUR_MIN_EXECUTION_QUALITY,
             "SIGNAL_DEBOUNCE_SECONDS": cls.SIGNAL_DEBOUNCE_SECONDS,
             "CANARY_PREVIEW_ONLY": cls.CANARY_PREVIEW_ONLY,
             "AGGRESSIVE_1H_ENABLED": cls.AGGRESSIVE_1H_ENABLED,

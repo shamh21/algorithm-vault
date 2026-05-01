@@ -191,6 +191,7 @@ def _aggressive_window(
     max_drawdown: float = -0.05,
     profit_factor: float = 1.4,
     trade_count: int = 8,
+    trades_per_day: float = 48.0,
     hours_ago: int = 0,
     edge_score: float = 12.0,
     cost_drag_bps: float = 4.5,
@@ -208,7 +209,7 @@ def _aggressive_window(
         "sharpe_like": 1.0,
         "sortino_like": 1.2,
         "trade_count": trade_count,
-        "trades_per_day": 48.0,
+        "trades_per_day": trades_per_day,
         "average_return_per_trade": 0.002,
         "capital_turnover_rate": 1.1,
         "fees_paid": 1.25,
@@ -624,11 +625,22 @@ def test_run_optimization_outputs_raw_upside_research_report(app, monkeypatch) -
                         "rejected": True,
                         "rejection_reason": "high_drawdown",
                         "live_blockers": ["candidate_rejected:high_drawdown"],
+                        "one_hour_edge_v2": 12.0,
+                        "one_hour_edge_grade": "D",
+                        "expected_execution_quality": 0.25,
+                        "profitability_blockers": ["high_drawdown"],
+                        "raw_vs_net_roi_gap": 950.0,
                     }
                 ],
                 "top_by_net_roi_v2": [],
                 "rejected_high_raw_upside": [],
                 "best_preview_candidate": {},
+            },
+            "one_hour_diagnostics": {
+                "enabled": True,
+                "primary_sort": "one_hour_edge_v2",
+                "top_accepted": [],
+                "top_rejected": [{"symbol": "BTC", "one_hour_edge_v2": 12.0, "profitability_blockers": ["high_drawdown"]}],
             },
         }
 
@@ -651,6 +663,9 @@ def test_run_optimization_outputs_raw_upside_research_report(app, monkeypatch) -
         assert payload["raw_upside_report"]["research_only"] is True
         assert payload["raw_upside_report"]["live_orders_created"] is False
         assert payload["raw_upside_report"]["top_by_raw_upside"][0]["raw_total_return_pct"] == 1200.0
+        assert payload["raw_upside_report"]["top_by_raw_upside"][0]["one_hour_edge_grade"] == "D"
+        assert payload["one_hour_diagnostics"]["primary_sort"] == "one_hour_edge_v2"
+        assert payload["one_hour_diagnostics"]["top_rejected"][0]["profitability_blockers"] == ["high_drawdown"]
         assert payload["live_canary_readiness"]["canary_preview_only"] is True
 
 
@@ -1217,7 +1232,7 @@ def test_aggressive_warning_payload_and_acceptance(app) -> None:
         "1m",
         "scalping",
         {},
-        [_aggressive_window(hours_ago=2), _aggressive_window(total_return=0.03)],
+        [_aggressive_window(hours_ago=2, trades_per_day=12.0), _aggressive_window(total_return=0.03, trades_per_day=12.0)],
         config,
     )
 
@@ -1241,6 +1256,11 @@ def test_aggressive_warning_payload_and_acceptance(app) -> None:
     assert result["target_roi_hit"] is False
     assert "strict_readiness_required" in result["live_blockers"]
     assert result["expected_fill_quality"] >= app.config["NET_ROI_MIN_FILL_QUALITY"]
+    assert result["one_hour_edge_v2"] > 0
+    assert result["one_hour_edge_grade"] in {"A", "B"}
+    assert result["expected_execution_quality"] >= app.config["ONE_HOUR_MIN_EXECUTION_QUALITY"]
+    assert result["profitability_blockers"] == []
+    assert "net_roi_v2_score" in result["candidate_quality_breakdown"]
     assert "net_return" in result["net_roi_components"]
     assert result["convex_edge_score"] > 0
     assert result["mfe_mae_ratio"] == 2.0
@@ -1320,6 +1340,8 @@ def test_aggressive_1h_net_roi_penalizes_costly_raw_return_leader(app) -> None:
     assert not cleaner_edge["rejected"]
     assert cleaner_edge["net_roi_score"] > low_quality["net_roi_score"]
     assert cleaner_edge["net_roi_v2_score"] > low_quality["net_roi_v2_score"]
+    assert cleaner_edge["one_hour_edge_v2"] > low_quality["one_hour_edge_v2"]
+    assert "excessive_churn" in low_quality["profitability_blockers"]
     assert cleaner_edge["roi_rejection_risk"] != "high"
     ranked = sorted([low_quality, cleaner_edge], key=lambda item: optimizer._ranking_sort_key(item, config))
     assert ranked[0]["symbol"] == "ETH"
@@ -1393,10 +1415,12 @@ def test_aggressive_1h_diagnostics_report_top_accepted_and_rejected(app) -> None
     diagnostics = optimizer._one_hour_diagnostics([accepted, rejected], config)
 
     assert diagnostics["enabled"] is True
-    assert diagnostics["primary_sort"] == "net_roi_v2_score"
+    assert diagnostics["primary_sort"] == "one_hour_edge_v2"
     assert diagnostics["rejection_breakdown"] == {"cost_drag_above_threshold": 1}
     assert diagnostics["top_accepted"][0]["convex_edge_score"] == accepted["convex_edge_score"]
     assert diagnostics["top_accepted"][0]["net_roi_v2_score"] == accepted["net_roi_v2_score"]
+    assert diagnostics["top_accepted"][0]["one_hour_edge_v2"] == accepted["one_hour_edge_v2"]
+    assert diagnostics["top_accepted"][0]["expected_execution_quality"] == accepted["expected_execution_quality"]
     assert diagnostics["top_rejected"][0]["rejection_reason"] == "cost_drag_above_threshold"
 
 
