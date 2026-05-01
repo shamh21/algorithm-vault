@@ -11,7 +11,8 @@ from cryptography.fernet import Fernet
 from app.auth import encrypt_totp_secret, password_hash
 from app.extensions import db
 from app.models import Setting, User, WalletAddress, WalletAuditLog, WalletBalance, WalletLedgerEvent, WalletTransaction, WalletWithdrawal
-from app.services.wallet_custody import BroadcastResult, GeneratedWallet, RealWalletCustodyService, WalletBalanceSnapshot
+from app.services import wallet_custody as wallet_custody_module
+from app.services.wallet_custody import BroadcastResult, EvmWalletAdapter, GeneratedWallet, RealWalletCustodyService, WalletBalanceSnapshot
 
 
 def _create_user(username: str = "custody") -> tuple[User, str]:
@@ -154,6 +155,68 @@ def test_deposit_sync_credits_once_with_idempotent_ledger(app) -> None:
     assert balance.available_balance == 5.0
     assert WalletLedgerEvent.query.count() == 1
     assert WalletTransaction.query.filter_by(transaction_type="deposit").count() == 1
+
+
+def test_evm_balance_uses_lowercase_required_confirmation_key(monkeypatch) -> None:
+    config = {
+        "WALLET_EVM_NETWORKS": {"ETHEREUM": {"rpc_url": "https://evm.example.invalid", "chain_id": 1}},
+        "WALLET_EVM_TOKEN_CONTRACTS": {
+            "ETHEREUM": {
+                "USDT": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+                "USDT_DECIMALS": 6,
+            }
+        },
+        "WALLET_REQUIRED_CONFIRMATIONS": {"ethereum": 12.0},
+    }
+    calls: list[str] = []
+
+    def fake_rpc(url: str, method: str, params: list[Any]) -> str:
+        calls.append(method)
+        if method == "eth_call":
+            return hex(10 * 10**6)
+        if method == "eth_blockNumber":
+            return "0x123"
+        raise AssertionError(f"unexpected RPC method {method}")
+
+    monkeypatch.setattr(wallet_custody_module, "_json_rpc", fake_rpc)
+
+    snapshot = EvmWalletAdapter(config).get_balance(
+        "0xBff167B7407f4Bfa125D0b03325B8cCb4a885051",
+        "USDT",
+        "Ethereum",
+    )
+
+    assert snapshot.checked is True
+    assert snapshot.amount == 10.0
+    assert snapshot.confirmations == 12
+    assert calls == ["eth_call", "eth_blockNumber"]
+
+
+def test_json_rpc_sends_wallet_sync_user_agent(monkeypatch) -> None:
+    captured_headers: dict[str, str] = {}
+
+    class _Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def read(self) -> bytes:
+            return b'{"jsonrpc":"2.0","id":1,"result":"0x1"}'
+
+    def fake_urlopen(request, timeout: float):
+        captured_headers.update(dict(request.header_items()))
+        assert timeout == 5.0
+        return _Response()
+
+    monkeypatch.setattr(wallet_custody_module.urllib.request, "urlopen", fake_urlopen)
+
+    result = wallet_custody_module._json_rpc("https://evm.example.invalid", "eth_blockNumber", [])
+
+    assert result == "0x1"
+    assert captured_headers["Content-type"] == "application/json"
+    assert captured_headers["User-agent"] == "TradingBotWalletSync/1.0"
 
 
 def _recovery_custody(app, *, amount: float = 5.0) -> RealWalletCustodyService:

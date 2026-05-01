@@ -775,11 +775,22 @@ class EvmWalletAdapter:
                 decimals = self._token_decimals(asset_key, network)
                 amount = int(str(raw or "0x0"), 16) / 10**decimals
             block = self._rpc("eth_blockNumber", [], network=network)
+            confirmation_map = self.config.get("WALLET_REQUIRED_CONFIRMATIONS", {})
+            network_key = _network_key(network)
+            confirmations = 1
+            if isinstance(confirmation_map, dict):
+                confirmations = int(
+                    confirmation_map.get(network_key)
+                    or confirmation_map.get(network_key.lower())
+                    or confirmation_map.get(network)
+                    or confirmation_map.get(str(network).lower())
+                    or 1
+                )
             return WalletBalanceSnapshot(
                 amount=amount,
                 asset=asset_key,
                 checked=True,
-                confirmations=max(int(self.config.get("WALLET_REQUIRED_CONFIRMATIONS", {}).get(_network_key(network), 1) or 1), 1),
+                confirmations=max(confirmations, 1),
                 provider_reference=f"evm-balance:{_network_key(network)}:{address}:{asset_key}:{amount:.12f}:{block}",
                 metadata={"block": block},
             )
@@ -1144,7 +1155,12 @@ def _json_rpc(url: str, method: str, params: list[Any]) -> Any:
     if not url:
         raise RuntimeError("RPC URL is not configured")
     payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode("utf-8")
-    request = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+    request = urllib.request.Request(
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json", "User-Agent": "TradingBotWalletSync/1.0"},
+        method="POST",
+    )
     with urllib.request.urlopen(request, timeout=5.0) as response:
         body = json.loads(response.read().decode("utf-8"))
     if "error" in body:
