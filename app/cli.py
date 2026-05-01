@@ -37,7 +37,12 @@ from .models import (
     WalletWithdrawal,
 )
 from .runtime import get_service
-from .services.connection_health import active_connection_health, parse_exchange_failure
+from .services.connection_health import (
+    active_connection_health,
+    build_connection_health,
+    parse_exchange_failure,
+    store_connection_health,
+)
 from .services.order_manager import OrderIntent
 from .services.signal_quality import SignalQualityEvaluator
 
@@ -812,10 +817,16 @@ def _live_canary_connection(user_id: int, connection_id: int | None) -> tuple[Tr
                 return None, "active_verified_live_connection_missing"
             if not bool(service.provider_spec(connection.provider).get("tradable", False)):
                 return None, "active_verified_live_connection_missing"
+            health = _fresh_connection_health(connection, service)
+            if not bool(health.get("can_trade", False)):
+                return None, "active_connection_cannot_trade"
             return connection, ""
         connection = service.active_tradable_connection(user_id)
         if connection is None:
             return None, "active_verified_live_connection_missing"
+        health = _fresh_connection_health(connection, service)
+        if not bool(health.get("can_trade", False)):
+            return None, "active_connection_cannot_trade"
         return connection, ""
     except Exception:  # noqa: BLE001
         return None, "active_verified_live_connection_missing"
@@ -1596,7 +1607,7 @@ def _production_readiness_payload() -> dict[str, object]:
     wallet = _wallet_readiness_payload()
     dependencies = _dependency_status()
     risk_status = get_service("risk_engine").status("live")
-    connection_health = active_connection_health()
+    connection_health = _refresh_active_connection_health()
     db_uri = str(current_app.config.get("SQLALCHEMY_DATABASE_URI", ""))
     secret_key = str(current_app.config.get("SECRET_KEY", "") or "")
     totp_key = str(current_app.config.get("TOTP_ENCRYPTION_KEY", "") or "").strip()
@@ -1684,6 +1695,58 @@ def _production_readiness_payload() -> dict[str, object]:
         "offline_ml": _offline_ml_readiness("1h"),
         "dependencies": dependencies,
     }
+
+
+def _refresh_active_connection_health() -> list[dict[str, object]]:
+    service = get_service("trading_connections")
+    refreshed: list[dict[str, object]] = []
+    connections = TradingConnection.query.filter_by(is_active=True).order_by(
+        TradingConnection.updated_at.desc(),
+        TradingConnection.id.desc(),
+    )
+    for connection in connections:
+        refreshed.append(_fresh_connection_health(connection, service))
+    if refreshed:
+        db.session.commit()
+    return refreshed or active_connection_health()
+
+
+def _fresh_connection_health(connection: TradingConnection, service: object | None = None) -> dict[str, object]:
+    service = service or get_service("trading_connections")
+    try:
+        provider_spec = service.provider_spec(connection.provider)
+        if not bool(provider_spec.get("tradable", False)):
+            health = build_connection_health(
+                connection,
+                can_trade=False,
+                alerts=[f"{connection.provider.title()} is not a tradable provider."],
+            )
+            return store_connection_health(connection, health)
+        if str(connection.verification_status) != "verified":
+            health = build_connection_health(
+                connection,
+                can_trade=False,
+                alerts=["Connection is active but not verified."],
+            )
+            return store_connection_health(connection, health)
+        snapshot = service.account_snapshot(connection.user_id, "live", connection.id)
+        alerts = [str(item) for item in (snapshot.alerts or []) if str(item).strip()]
+        can_trade = bool(service.can_trade(connection.user_id, "live", connection.id)) and not alerts
+        if not can_trade and not alerts:
+            alerts = ["Trading connector reports live trading unavailable."]
+        health = build_connection_health(
+            connection,
+            can_trade=can_trade,
+            alerts=alerts,
+        )
+    except Exception as exc:  # noqa: BLE001
+        health = build_connection_health(
+            connection,
+            can_trade=False,
+            alerts=[str(exc)],
+            failure_reason=str(exc),
+        )
+    return store_connection_health(connection, health)
 
 
 def _sqlite_database_path() -> str | None:

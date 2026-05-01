@@ -6,6 +6,8 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 
+from cryptography.fernet import Fernet
+
 from app.extensions import db
 from app.models import (
     AuditLog,
@@ -24,6 +26,7 @@ from app.ml.online_ranker import extract_features
 from app.strategies.base import Signal
 from app.backtesting.optimizer import AGGRESSIVE_1H_WARNING, DYNAMIC_INTRADAY_WARNING, EXTREME_ROI_WARNING
 from app.routes.backtests import _auto_deploy_rankings
+from app.services.hyperliquid_client import ClientSnapshot
 
 
 def _optimizer_candles(days: int = 5) -> list[dict[str, Any]]:
@@ -135,11 +138,12 @@ def _add_canary_ranking(*, profile: str = "short_term") -> tuple[User, TradingCo
     return user, connection, ranking
 
 
-def _patch_canary_market(app, monkeypatch) -> None:
+def _patch_canary_market(app, monkeypatch, *, patch_connection_health: bool = True) -> None:
     market_data = app.extensions["services"]["market_data"]
     realtime_market = app.extensions["services"]["realtime_market"]
     market_structure = app.extensions["services"]["market_structure"]
     registry = app.extensions["services"]["strategy_registry"]
+    trading_connections = app.extensions["services"]["trading_connections"]
     candles = [
         {"timestamp": index, "open": 100.0, "high": 101.0, "low": 99.5, "close": 100.0 + index * 0.01, "volume": 1000.0}
         for index in range(200)
@@ -165,6 +169,20 @@ def _patch_canary_market(app, monkeypatch) -> None:
     )
     monkeypatch.setattr(market_structure, "snapshot", lambda symbol, timeframe, mode="live": {"score": 0.8, "trend_score": 0.8})
     monkeypatch.setattr(registry, "build", lambda name, parameters=None: _CanaryStrategy())
+    if patch_connection_health:
+        monkeypatch.setattr(
+            trading_connections,
+            "account_snapshot",
+            lambda user_id, mode, connection_id=None: ClientSnapshot(
+                mode,
+                [{"asset": "USDC", "type": "margin", "value": 100.0, "withdrawable": 100.0}],
+                [],
+                [],
+                [],
+                [],
+            ),
+        )
+        monkeypatch.setattr(trading_connections, "can_trade", lambda user_id, mode, connection_id=None: mode == "live")
 
 
 def _aggressive_window(
@@ -913,6 +931,46 @@ def test_live_canary_blocks_missing_verified_connection(app, monkeypatch) -> Non
     assert "active_verified_live_connection_missing" in payload["blockers"]
     assert "risk:credentials_missing" in payload["blockers"]
     assert payload["submitted"] is False
+
+
+def test_live_canary_blocks_stale_encrypted_active_connection(app, monkeypatch) -> None:
+    user, connection, ranking = _add_canary_ranking()
+    service = app.extensions["services"]["trading_connections"]
+    connection.encrypted_api_secret = service._encrypt("0x" + ("1" * 64))
+    db.session.commit()
+    app.config["TOTP_ENCRYPTION_KEY"] = Fernet.generate_key().decode("utf-8")
+    _patch_canary_market(app, monkeypatch, patch_connection_health=False)
+
+    def fail_place_order(intent):
+        raise AssertionError("stale encrypted credentials must block order submission")
+
+    monkeypatch.setattr(app.extensions["services"]["order_manager"], "place_order", fail_place_order)
+
+    result = app.test_cli_runner().invoke(
+        args=[
+            "live-canary-trade",
+            "--ranking-id",
+            str(ranking.id),
+            "--user-id",
+            str(user.id),
+            "--connection-id",
+            str(connection.id),
+            "--submit",
+            "--confirm",
+            "LIVE-CANARY-TRADE",
+        ]
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["ready"] is False
+    assert payload["submitted"] is False
+    assert payload["real_order_submitted"] is False
+    assert "active_connection_cannot_trade" in payload["blockers"]
+    assert "risk:credentials_missing" in payload["blockers"]
+    health = Setting.get_json(f"connection_health:{connection.id}", {})
+    assert health["can_trade"] is False
+    assert "cannot be decrypted" in health["failure_reason"]
 
 
 def test_live_canary_blocks_one_hour_ranking_not_accepted_for_preview(app, monkeypatch) -> None:

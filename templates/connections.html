@@ -155,6 +155,13 @@
             {% endif %}
           </span>
         </div>
+        {% set health_failure = selected_connection_health.get("failure_reason", "")|lower %}
+        {% if "cannot be decrypted" in health_failure or "totp_encryption_key" in health_failure %}
+          <div class="risk-note danger-note">
+            <strong>Saved credentials need re-entry</strong>
+            <span>The active connection was encrypted under a different key than this running app is using. Keep the current TOTP_ENCRYPTION_KEY, then delete or re-save this connection with every required secret filled in.</span>
+          </div>
+        {% endif %}
       {% endif %}
       <div class="connection-actions">
         {% if selected_spec.verification_supported %}

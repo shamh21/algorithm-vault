@@ -10,7 +10,7 @@ from ..auth import current_user, require_admin_user, require_authenticated_user
 from ..extensions import db
 from ..models import AuditLog, Setting, TradingConnection, WalletBalance
 from ..runtime import available_modes, get_current_mode, get_service
-from ..services.connection_health import latest_connection_health
+from ..services.connection_health import build_connection_health, latest_connection_health, store_connection_health
 
 
 settings_bp = Blueprint("settings", __name__, url_prefix="/settings")
@@ -141,6 +141,17 @@ def verify_connection(connection_id: int):
         flash("Trading connection was not found.", "danger")
         return redirect(url_for("settings.connections"))
     connection = result["connection"]
+    if connection.is_active or connection.verification_status == "verified":
+        snapshot = result.get("snapshot")
+        alerts = list(getattr(snapshot, "alerts", []) or []) if snapshot is not None else []
+        error = str(result.get("error") or "")
+        health = build_connection_health(
+            connection,
+            can_trade=bool(result["ok"]) and not alerts,
+            alerts=alerts or ([error] if error else []),
+            failure_reason=error or "; ".join(alerts),
+        )
+        store_connection_health(connection, health)
     _audit(
         "trading_connection_verified" if result["ok"] else "trading_connection_verification_failed",
         f"{connection.provider.title()} connection verification {'passed' if result['ok'] else 'failed'}.",
