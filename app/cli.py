@@ -555,6 +555,15 @@ def _live_canary_trade_payload(
         blockers.append("ranking_rejected")
     if str(ranking.rejection_reason or "").strip():
         blockers.append("ranking_has_rejection_reason")
+    explanation = ranking.ml_explanation if isinstance(ranking.ml_explanation, dict) else {}
+    one_hour_pref = explanation.get("one_hour_live_preference")
+    if (
+        ranking.profile in {"aggressive_1h", "extreme_roi_experimental"}
+        and isinstance(one_hour_pref, dict)
+        and one_hour_pref.get("accepted_for_one_hour_live_preview") is False
+    ):
+        blockers.extend(str(item) for item in one_hour_pref.get("one_hour_live_blockers", []) or [])
+        blockers.append("ranking_not_accepted_for_one_hour_live_preview")
 
     connection, connection_blocker = _live_canary_connection(user_id, connection_id)
     if connection_blocker:
@@ -1070,6 +1079,7 @@ def _live_canary_order_intent(
 def _ranking_canary_summary(ranking: StrategyRanking) -> dict[str, object]:
     explanation = ranking.ml_explanation if isinstance(ranking.ml_explanation, dict) else {}
     net_roi_v2 = explanation.get("net_roi_v2") if isinstance(explanation.get("net_roi_v2"), dict) else {}
+    one_hour_pref = explanation.get("one_hour_live_preference") if isinstance(explanation.get("one_hour_live_preference"), dict) else {}
     return {
         "id": ranking.id,
         "profile": ranking.profile,
@@ -1083,6 +1093,9 @@ def _ranking_canary_summary(ranking: StrategyRanking) -> dict[str, object]:
         "roi_quality_grade": net_roi_v2.get("roi_quality_grade", "D"),
         "roi_rejection_risk": net_roi_v2.get("roi_rejection_risk", "high"),
         "regime_support": net_roi_v2.get("regime_support", "regime-neutral"),
+        "one_hour_high_upside_score": one_hour_pref.get("one_hour_high_upside_score", 0.0),
+        "accepted_for_one_hour_live_preview": one_hour_pref.get("accepted_for_one_hour_live_preview"),
+        "one_hour_live_blockers": one_hour_pref.get("one_hour_live_blockers", []),
     }
 
 

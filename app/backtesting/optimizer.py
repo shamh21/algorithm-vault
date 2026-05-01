@@ -1275,6 +1275,22 @@ class StrategyOptimizer:
             data_age_seconds=float(roi_payload["data_age_seconds"]),
             optimizer_config=optimizer_config,
         )
+        one_hour_live_payload = self._one_hour_live_preference_payload(
+            rejected=rejected,
+            rejection_reason=rejection_reason,
+            raw_upside=raw_upside_payload,
+            net_roi_v2=roi_v2_payload,
+            net_roi=roi_payload,
+            recent_1h_return=recent_1h_return,
+            cost_drag_bps=cost_drag_bps,
+            spread_bps=spread_bps,
+            window_stability=window_stability,
+            liquidity_capacity_usd=liquidity_capacity_usd,
+            capacity_multiple=convex_metrics["capacity_multiple"],
+            market_structure_score=market_structure_score,
+            mfe_mae_ratio=convex_metrics["mfe_mae_ratio"],
+            optimizer_config=optimizer_config,
+        )
 
         ml_payload = self._ml_score_payload(
             score=score,
@@ -1359,7 +1375,12 @@ class StrategyOptimizer:
             "raw_net_return_pct": raw_upside_payload["raw_net_return_pct"],
             "target_roi_pct": raw_upside_payload["target_roi_pct"],
             "target_roi_hit": raw_upside_payload["target_roi_hit"],
+            "distance_to_target_roi_pct": raw_upside_payload["distance_to_target_roi_pct"],
             "live_blockers": raw_upside_payload["live_blockers"],
+            "one_hour_high_upside_score": one_hour_live_payload["one_hour_high_upside_score"],
+            "one_hour_live_preference_rank": one_hour_live_payload["one_hour_live_preference_rank"],
+            "accepted_for_one_hour_live_preview": one_hour_live_payload["accepted_for_one_hour_live_preview"],
+            "one_hour_live_blockers": one_hour_live_payload["one_hour_live_blockers"],
             "recent_performance_score": recent_performance_score,
             "recent_1h_return": recent_1h_return,
             "estimated_fees": estimated_fees,
@@ -2040,11 +2061,14 @@ class StrategyOptimizer:
     def _ranking_sort_key(item: dict[str, Any], optimizer_config: OptimizerConfig) -> tuple[Any, ...]:
         if item.get("rejected"):
             return (1, 0.0, 0.0, 0.0)
-        if optimizer_config.profile == Profile.AGGRESSIVE_1H.value:
+        if optimizer_config.profile in {Profile.AGGRESSIVE_1H.value, Profile.EXTREME_ROI_EXPERIMENTAL.value}:
             return (
                 0,
+                -float(item.get("one_hour_high_upside_score", 0.0) or 0.0),
+                0 if bool(item.get("accepted_for_one_hour_live_preview", False)) else 1,
                 -float(item.get("net_roi_v2_score", item.get("net_roi_score", 0.0)) or 0.0),
                 -float(item.get("net_roi_score", 0.0) or 0.0),
+                -float(item.get("raw_upside_score", 0.0) or 0.0),
                 -float(item.get("convex_edge_score", item.get("score", 0.0)) or 0.0),
                 -float(item.get("cost_adjusted_recent_1h_return", 0.0) or 0.0),
                 -float(item.get("mfe_mae_ratio", 0.0) or 0.0),
@@ -2640,7 +2664,14 @@ class StrategyOptimizer:
                 "raw_net_return_pct": result.get("raw_net_return_pct", 0.0),
                 "target_roi_pct": result.get("target_roi_pct", 1000.0),
                 "target_roi_hit": bool(result.get("target_roi_hit", False)),
+                "distance_to_target_roi_pct": result.get("distance_to_target_roi_pct", 1000.0),
                 "live_blockers": result.get("live_blockers", []),
+            },
+            "one_hour_live_preference": {
+                "one_hour_high_upside_score": result.get("one_hour_high_upside_score", 0.0),
+                "one_hour_live_preference_rank": result.get("one_hour_live_preference_rank", 0.0),
+                "accepted_for_one_hour_live_preview": bool(result.get("accepted_for_one_hour_live_preview", False)),
+                "one_hour_live_blockers": result.get("one_hour_live_blockers", []),
             },
         }
         db.session.add(ranking)
@@ -3225,7 +3256,81 @@ class StrategyOptimizer:
             "raw_net_return_pct": float(raw_net_return_pct),
             "target_roi_pct": float(target_roi_pct),
             "target_roi_hit": bool(raw_total_return_pct >= target_roi_pct),
+            "distance_to_target_roi_pct": float(max(target_roi_pct - raw_total_return_pct, 0.0)),
             "live_blockers": list(dict.fromkeys(blockers)),
+        }
+
+    def _one_hour_live_preference_payload(
+        self,
+        *,
+        rejected: bool,
+        rejection_reason: str,
+        raw_upside: dict[str, Any],
+        net_roi_v2: dict[str, Any],
+        net_roi: dict[str, Any],
+        recent_1h_return: float,
+        cost_drag_bps: float,
+        spread_bps: float,
+        window_stability: float,
+        liquidity_capacity_usd: float,
+        capacity_multiple: float,
+        market_structure_score: float,
+        mfe_mae_ratio: float,
+        optimizer_config: OptimizerConfig,
+    ) -> dict[str, Any]:
+        if optimizer_config.profile not in {Profile.AGGRESSIVE_1H.value, Profile.EXTREME_ROI_EXPERIMENTAL.value}:
+            return {
+                "one_hour_high_upside_score": 0.0,
+                "one_hour_live_preference_rank": 0.0,
+                "accepted_for_one_hour_live_preview": False,
+                "one_hour_live_blockers": ["not_one_hour_high_upside_profile"],
+            }
+
+        blockers: list[str] = []
+        if rejected:
+            blockers.append(f"candidate_rejected:{rejection_reason or 'unknown'}")
+        if str(rejection_reason or "").strip():
+            blockers.append("ranking_has_rejection_reason")
+        if float(net_roi_v2.get("net_roi_v2_score", 0.0) or 0.0) <= 0:
+            blockers.append("non_positive_net_roi_v2")
+        if float(net_roi.get("edge_after_cost_bps", 0.0) or 0.0) < float(self.config.get("NET_ROI_MIN_EDGE_BPS", 4.0) or 4.0):
+            blockers.append("low_edge_after_costs")
+        if float(recent_1h_return or 0.0) <= 0:
+            blockers.append("non_positive_recent_1h_return")
+        if float(net_roi.get("expected_fill_quality", 0.0) or 0.0) < float(self.config.get("NET_ROI_MIN_FILL_QUALITY", 0.55) or 0.55):
+            blockers.append("low_expected_fill_quality")
+        if str(net_roi_v2.get("roi_rejection_risk", "high") or "high").lower() == "high":
+            blockers.append("high_roi_rejection_risk")
+        if str(net_roi_v2.get("regime_support", "regime-neutral") or "").lower() == "regime-fragile":
+            blockers.append("fragile_regime")
+        if float(cost_drag_bps or 0.0) > float(self.config.get("AGGRESSIVE_1H_MAX_COST_DRAG_BPS", 18.0) or 18.0):
+            blockers.append("cost_drag_above_threshold")
+        if float(window_stability or 0.0) < float(self.config.get("AGGRESSIVE_1H_MIN_WINDOW_STABILITY", 0.55) or 0.55):
+            blockers.append("low_window_stability")
+        min_capacity = float(self.config.get("AGGRESSIVE_1H_MIN_CAPACITY_MULTIPLE", 2.0) or 2.0)
+        if float(capacity_multiple or 0.0) > 0 and float(capacity_multiple or 0.0) < min_capacity:
+            blockers.append("insufficient_liquidity_capacity")
+
+        accepted = not blockers
+        one_hour_score = (
+            max(float(raw_upside.get("raw_upside_score", 0.0) or 0.0), 0.0) * 0.05
+            + max(float(raw_upside.get("raw_total_return_pct", 0.0) or 0.0), 0.0) * 0.02
+            + max(float(net_roi_v2.get("net_roi_v2_score", 0.0) or 0.0), 0.0) * 2.0
+            + max(float(net_roi.get("expected_fill_quality", 0.0) or 0.0), 0.0) * 12.0
+            + max(float(recent_1h_return or 0.0), 0.0) * 250.0
+            + min(max(float(mfe_mae_ratio or 0.0), 0.0), 8.0) * 2.0
+            + min(max(float(capacity_multiple or 0.0), 0.0), 8.0) * 1.5
+            + max(float(market_structure_score or 0.0), 0.0) * 8.0
+            - max(float(cost_drag_bps or 0.0) - 4.0, 0.0) * 0.25
+            - max(float(spread_bps or 0.0) - 2.0, 0.0) * 0.2
+        )
+        if not accepted:
+            one_hour_score = max(one_hour_score * 0.25, 0.0)
+        return {
+            "one_hour_high_upside_score": float(one_hour_score),
+            "one_hour_live_preference_rank": float(one_hour_score if accepted else 0.0),
+            "accepted_for_one_hour_live_preview": bool(accepted),
+            "one_hour_live_blockers": list(dict.fromkeys(blockers)),
         }
 
     def _raw_upside_report(self, rankings: list[dict[str, Any]], optimizer_config: OptimizerConfig) -> dict[str, Any]:
@@ -3284,7 +3389,12 @@ class StrategyOptimizer:
             "raw_net_return_pct": float(item.get("raw_net_return_pct", 0.0) or 0.0),
             "target_roi_pct": float(item.get("target_roi_pct", 1000.0) or 1000.0),
             "target_roi_hit": bool(item.get("target_roi_hit", False)),
+            "distance_to_target_roi_pct": float(item.get("distance_to_target_roi_pct", 1000.0) or 0.0),
             "live_blockers": list(item.get("live_blockers", []) or []),
+            "one_hour_high_upside_score": float(item.get("one_hour_high_upside_score", 0.0) or 0.0),
+            "one_hour_live_preference_rank": float(item.get("one_hour_live_preference_rank", 0.0) or 0.0),
+            "accepted_for_one_hour_live_preview": bool(item.get("accepted_for_one_hour_live_preview", False)),
+            "one_hour_live_blockers": list(item.get("one_hour_live_blockers", []) or []),
             "total_return": float(item.get("total_return", 0.0) or 0.0),
             "net_return_after_costs": float(item.get("net_return_after_costs", 0.0) or 0.0),
             "net_roi_v2_score": float(item.get("net_roi_v2_score", 0.0) or 0.0),
@@ -3325,6 +3435,9 @@ class StrategyOptimizer:
                 "score": float(item.get("score", 0.0) or 0.0),
                 "net_roi_score": float(item.get("net_roi_score", 0.0) or 0.0),
                 "net_roi_v2_score": float(item.get("net_roi_v2_score", 0.0) or 0.0),
+                "one_hour_high_upside_score": float(item.get("one_hour_high_upside_score", 0.0) or 0.0),
+                "accepted_for_one_hour_live_preview": bool(item.get("accepted_for_one_hour_live_preview", False)),
+                "one_hour_live_blockers": list(item.get("one_hour_live_blockers", []) or []),
                 "roi_quality_grade": item.get("roi_quality_grade", "D"),
                 "roi_rejection_risk": item.get("roi_rejection_risk", "high"),
                 "regime_bucket": item.get("regime_bucket", {}),
@@ -3625,11 +3738,16 @@ class StrategyOptimizer:
             "raw_net_return_pct": 0.0,
             "target_roi_pct": 1000.0,
             "target_roi_hit": False,
+            "distance_to_target_roi_pct": 1000.0,
             "live_blockers": [
                 f"candidate_rejected:{reason}",
                 "strict_readiness_required",
                 "canary_preview_only_enabled",
             ],
+            "one_hour_high_upside_score": 0.0,
+            "one_hour_live_preference_rank": 0.0,
+            "accepted_for_one_hour_live_preview": False,
+            "one_hour_live_blockers": [f"candidate_rejected:{reason}"],
             "recent_performance_score": 0.0,
             "recent_1h_return": 0.0,
             "estimated_fees": 0.0,

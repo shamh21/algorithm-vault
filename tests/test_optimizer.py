@@ -915,6 +915,40 @@ def test_live_canary_blocks_missing_verified_connection(app, monkeypatch) -> Non
     assert payload["submitted"] is False
 
 
+def test_live_canary_blocks_one_hour_ranking_not_accepted_for_preview(app, monkeypatch) -> None:
+    user, connection, ranking = _add_canary_ranking(profile="aggressive_1h")
+    ranking.ml_explanation = {
+        **ranking.ml_explanation,
+        "one_hour_live_preference": {
+            "one_hour_high_upside_score": 120.0,
+            "accepted_for_one_hour_live_preview": False,
+            "one_hour_live_blockers": ["low_expected_fill_quality"],
+        },
+    }
+    db.session.commit()
+    _patch_canary_market(app, monkeypatch)
+
+    result = app.test_cli_runner().invoke(
+        args=[
+            "live-canary-trade",
+            "--ranking-id",
+            str(ranking.id),
+            "--user-id",
+            str(user.id),
+            "--connection-id",
+            str(connection.id),
+        ]
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["ready"] is False
+    assert "low_expected_fill_quality" in payload["blockers"]
+    assert "ranking_not_accepted_for_one_hour_live_preview" in payload["blockers"]
+    assert payload["ranking"]["accepted_for_one_hour_live_preview"] is False
+    assert payload["real_order_submitted"] is False
+
+
 def test_live_canary_preview_only_blocks_submit_even_with_confirmation(app, monkeypatch) -> None:
     user, connection, ranking = _add_canary_ranking()
     _patch_canary_market(app, monkeypatch)
@@ -1069,7 +1103,10 @@ def test_extreme_roi_raw_upside_keeps_rejected_high_return_visible(app) -> None:
     assert result["raw_total_return_pct"] == 1050.0
     assert result["target_roi_pct"] == 1000.0
     assert result["target_roi_hit"] is True
+    assert result["distance_to_target_roi_pct"] == 0.0
     assert result["raw_upside_score"] >= result["raw_total_return_pct"]
+    assert result["accepted_for_one_hour_live_preview"] is False
+    assert "candidate_rejected:high_drawdown" in result["one_hour_live_blockers"]
     assert "candidate_rejected:high_drawdown" in result["live_blockers"]
     assert "excessive_drawdown" in result["live_blockers"]
     assert "net_roi_v2_score" in result
@@ -1108,6 +1145,8 @@ def test_raw_upside_report_surfaces_raw_and_net_roi_leaders(app) -> None:
     assert report["max_return_candidate"]["rejected"] is True
     assert report["top_by_raw_upside"][0]["symbol"] == "ETH"
     assert report["rejected_high_raw_upside"][0]["rejection_reason"] == "high_drawdown"
+    assert "distance_to_target_roi_pct" in report["top_by_raw_upside"][0]
+    assert "accepted_for_one_hour_live_preview" in report["top_by_raw_upside"][0]
     assert report["top_by_net_roi_v2"][0]["net_roi_v2_score"] >= report["top_by_net_roi_v2"][-1]["net_roi_v2_score"]
     assert report["best_preview_candidate"]["symbol"] == "BTC"
 
@@ -1133,6 +1172,9 @@ def test_aggressive_warning_payload_and_acceptance(app) -> None:
     assert result["recent_1h_return"] == 0.03
     assert result["estimated_fees"] == 2.5
     assert round(result["edge_score"], 6) == 12.0
+    assert result["one_hour_high_upside_score"] > 0
+    assert result["accepted_for_one_hour_live_preview"] is True
+    assert result["one_hour_live_blockers"] == []
     assert round(result["expectancy"], 6) == 1.5
     assert round(result["cost_drag_bps"], 6) == 4.5
     assert result["net_roi_score"] > 0

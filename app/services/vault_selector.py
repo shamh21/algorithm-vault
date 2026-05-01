@@ -321,7 +321,7 @@ class VaultStrategySelector:
                 key=lambda row: (
                     self._duration_match_score(row.lock_duration_hours, duration_hours),
                     self._one_hour_candidate_score(row, duration_hours)
-                    if optimizer_profile == "aggressive_1h"
+                    if optimizer_profile in {"aggressive_1h", "extreme_roi_experimental"}
                     else self._ranking_score(row, duration_hours),
                     row.strategy_name == preferred_strategy,
                     row.created_at,
@@ -350,7 +350,29 @@ class VaultStrategySelector:
         max_drawdown = self._safe_float(ranking.max_drawdown)
         drawdown_cap = self._safe_float(self.config.get("MAX_BACKTEST_DRAWDOWN_PCT"), 0.2)
         if optimizer_profile in {"aggressive_1h", "extreme_roi_experimental"}:
+            if str(ranking.rejection_reason or "").strip():
+                return False
+            if self._safe_float(ranking.net_return_after_costs) < 0:
+                return False
             if self._safe_float(ranking.recent_1h_return) <= 0:
+                return False
+            roi_payload = self._ranking_net_roi_payload(ranking)
+            roi_v2_payload = self._ranking_net_roi_v2_payload(ranking)
+            explanation = ranking.ml_explanation if isinstance(ranking.ml_explanation, dict) else {}
+            has_net_roi_payload = isinstance(explanation.get("net_roi"), dict)
+            has_net_roi_v2_payload = isinstance(explanation.get("net_roi_v2"), dict)
+            edge_after_cost = self._safe_float(roi_payload.get("edge_after_cost_bps"))
+            if has_net_roi_payload and edge_after_cost < self._safe_float(self.config.get("NET_ROI_MIN_EDGE_BPS"), 4.0):
+                return False
+            fill_quality = self._safe_float(roi_payload.get("expected_fill_quality"))
+            if has_net_roi_payload and fill_quality < self._safe_float(self.config.get("NET_ROI_MIN_FILL_QUALITY"), 0.55):
+                return False
+            if has_net_roi_v2_payload and str(roi_v2_payload.get("roi_rejection_risk", "high") or "high").lower() == "high":
+                return False
+            if has_net_roi_v2_payload and str(roi_v2_payload.get("regime_support", "regime-neutral") or "").lower() == "regime-fragile":
+                return False
+            live_pref = self._ranking_one_hour_live_preference_payload(ranking)
+            if live_pref and live_pref.get("accepted_for_one_hour_live_preview") is False:
                 return False
             min_pf = 1.0 if optimizer_profile == "extreme_roi_experimental" else 1.2
             if self._safe_float(ranking.profit_factor) < min_pf:
@@ -407,9 +429,14 @@ class VaultStrategySelector:
         return True
 
     def _one_hour_candidate_score(self, ranking: StrategyRanking, duration_hours: int) -> float:
+        live_pref = self._ranking_one_hour_live_preference_payload(ranking)
+        high_upside_score = self._safe_float(live_pref.get("one_hour_high_upside_score")) if live_pref else 0.0
+        live_pref_rank = self._safe_float(live_pref.get("one_hour_live_preference_rank")) if live_pref else 0.0
         net_roi_v2 = self._ranking_net_roi_v2_score(ranking)
         net_roi = self._ranking_net_roi_score(ranking)
         convex = self._safe_float(getattr(ranking, "convex_edge_score", 0.0))
+        if high_upside_score:
+            return high_upside_score + max(live_pref_rank, 0.0) * 0.1 + max(net_roi_v2, 0.0) * 0.05
         if net_roi_v2:
             return net_roi_v2 + max(net_roi, 0.0) * 0.05 + max(convex, 0.0) * 0.01
         if net_roi:
@@ -481,6 +508,14 @@ class VaultStrategySelector:
             },
             self.config,
         )
+
+    @staticmethod
+    def _ranking_one_hour_live_preference_payload(ranking: StrategyRanking | None) -> dict[str, Any]:
+        if ranking is None:
+            return {}
+        explanation = ranking.ml_explanation if isinstance(ranking.ml_explanation, dict) else {}
+        payload = explanation.get("one_hour_live_preference")
+        return payload if isinstance(payload, dict) else {}
 
     def _ranking_net_roi_score(self, ranking: StrategyRanking | None) -> float:
         if ranking is None:

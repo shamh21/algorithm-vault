@@ -260,6 +260,111 @@ def test_one_hour_vault_selector_prefers_net_roi_v2_before_legacy_score(app) -> 
     assert selection.legs[0]["regime_support"] == "regime-supported"
 
 
+def test_one_hour_vault_selector_prefers_live_preview_high_upside_score(app) -> None:
+    _patch_market(app)
+    optimizer_run = OptimizerRun(profile="aggressive_1h", status="completed")
+    db.session.add(optimizer_run)
+    db.session.flush()
+    v2_leader = _aggressive_1h_ranking(
+        optimizer_run.id,
+        strategy="scalping",
+        score=90.0,
+        convex_edge_score=80.0,
+    )
+    v2_leader.ml_explanation = {
+        "net_roi": {
+            "net_roi_score": 120.0,
+            "expected_fill_quality": 0.9,
+            "churn_penalty": 0.1,
+            "edge_after_cost_bps": 18.0,
+        },
+        "net_roi_v2": {
+            "net_roi_v2_score": 90.0,
+            "roi_quality_grade": "A",
+            "roi_rejection_risk": "low",
+            "regime_support": "regime-supported",
+        },
+        "one_hour_live_preference": {
+            "one_hour_high_upside_score": 110.0,
+            "one_hour_live_preference_rank": 110.0,
+            "accepted_for_one_hour_live_preview": True,
+            "one_hour_live_blockers": [],
+        },
+    }
+    high_upside_leader = _aggressive_1h_ranking(
+        optimizer_run.id,
+        strategy="breakout",
+        score=40.0,
+        convex_edge_score=35.0,
+    )
+    high_upside_leader.ml_explanation = {
+        "net_roi": {
+            "net_roi_score": 80.0,
+            "expected_fill_quality": 0.95,
+            "churn_penalty": 0.05,
+            "edge_after_cost_bps": 24.0,
+        },
+        "net_roi_v2": {
+            "net_roi_v2_score": 50.0,
+            "roi_quality_grade": "B",
+            "roi_rejection_risk": "low",
+            "regime_support": "regime-supported",
+        },
+        "one_hour_live_preference": {
+            "one_hour_high_upside_score": 180.0,
+            "one_hour_live_preference_rank": 180.0,
+            "accepted_for_one_hour_live_preview": True,
+            "one_hour_live_blockers": [],
+        },
+    }
+    db.session.add_all([v2_leader, high_upside_leader])
+    db.session.commit()
+
+    selection = app.extensions["services"]["vault_strategy_selector"].select("BTC", 1, "live", 10.0)
+
+    assert selection.strategy_name == "breakout"
+    assert selection.metadata["optimizer_ranking_id"] == high_upside_leader.id
+
+
+def test_one_hour_vault_selector_skips_ranking_blocked_for_live_preview(app) -> None:
+    _patch_market(app)
+    optimizer_run = OptimizerRun(profile="aggressive_1h", status="completed")
+    db.session.add(optimizer_run)
+    db.session.flush()
+    blocked = _aggressive_1h_ranking(
+        optimizer_run.id,
+        strategy="scalping",
+        score=95.0,
+        convex_edge_score=95.0,
+    )
+    blocked.ml_explanation = {
+        "net_roi": {
+            "net_roi_score": 140.0,
+            "expected_fill_quality": 0.2,
+            "churn_penalty": 0.1,
+            "edge_after_cost_bps": 30.0,
+        },
+        "net_roi_v2": {
+            "net_roi_v2_score": 120.0,
+            "roi_quality_grade": "A",
+            "roi_rejection_risk": "low",
+            "regime_support": "regime-supported",
+        },
+        "one_hour_live_preference": {
+            "one_hour_high_upside_score": 300.0,
+            "accepted_for_one_hour_live_preview": False,
+            "one_hour_live_blockers": ["low_expected_fill_quality"],
+        },
+    }
+    db.session.add(blocked)
+    db.session.commit()
+
+    selection = app.extensions["services"]["vault_strategy_selector"].select("BTC", 1, "live", 10.0)
+
+    assert selection.metadata["optimizer_ranking_id"] is None
+    assert selection.strategy_name == "scalping"
+
+
 def test_one_hour_vault_selector_fallback_stays_live_safe_without_accepted_candidate(app) -> None:
     _patch_market(app)
     optimizer_run = OptimizerRun(profile="aggressive_1h", status="completed")
