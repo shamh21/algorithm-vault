@@ -67,20 +67,20 @@ def test_trading_connection_encrypts_and_decrypts_only_for_execution(app) -> Non
         provider="hyperliquid",
         connection_type="cex_api_key",
         api_key="account-label",
-        api_secret="super-secret-key",
+        api_secret="0x" + ("1" * 64),
         passphrase="exchange-passphrase",
         wallet_address="0x" + ("3" * 40),
         is_active=True,
     )
     db.session.commit()
 
-    assert connection.encrypted_api_secret != "super-secret-key"
-    assert "super-secret-key" not in connection.encrypted_api_secret
+    assert connection.encrypted_api_secret != "0x" + ("1" * 64)
+    assert "0x" + ("1" * 64) not in connection.encrypted_api_secret
 
     credentials = service.credentials_for_execution(user.id, connection.id)
 
     assert credentials.api_key == "account-label"
-    assert credentials.api_secret == "super-secret-key"
+    assert credentials.api_secret == "0x" + ("1" * 64)
     assert credentials.passphrase == "exchange-passphrase"
     assert credentials.wallet_address == "0x" + ("3" * 40)
     assert connection.verification_status == "needs_verification"
@@ -148,6 +148,65 @@ def test_trading_connection_rejects_seed_phrases_and_cross_user_access(app) -> N
 
     with pytest.raises(PermissionError):
         service.get_for_user(other.id, connection.id)
+
+
+def test_hyperliquid_accepts_full_0x_api_wallet_private_key(app) -> None:
+    user = _create_user("hl-secret")
+    service = app.extensions["services"]["trading_connections"]
+
+    connection = service.create_or_update(
+        user_id=user.id,
+        provider="hyperliquid",
+        connection_type="cex_api_key",
+        api_secret="0x" + ("abcdef1234567890" * 4),
+        wallet_address="0x" + ("3" * 40),
+    )
+    db.session.commit()
+
+    credentials = service.credentials_for_execution(user.id, connection.id)
+    assert credentials.api_secret == "0x" + ("abcdef1234567890" * 4)
+
+
+def test_hyperliquid_rejects_truncated_or_invalid_api_wallet_private_key(app) -> None:
+    user = _create_user("hl-invalid-secret")
+    service = app.extensions["services"]["trading_connections"]
+
+    with pytest.raises(ValueError, match="full 0x private key"):
+        service.create_or_update(
+            user_id=user.id,
+            provider="hyperliquid",
+            connection_type="cex_api_key",
+            api_secret="0x4e4etc....",
+            wallet_address="0x" + ("3" * 40),
+        )
+
+    with pytest.raises(ValueError, match="no spaces"):
+        service.create_or_update(
+            user_id=user.id,
+            provider="hyperliquid",
+            connection_type="cex_api_key",
+            api_secret="0x" + ("1" * 32) + " " + ("2" * 32),
+            wallet_address="0x" + ("3" * 40),
+        )
+
+
+def test_long_exchange_tokens_are_not_seed_phrases_for_other_cex_providers(app) -> None:
+    user = _create_user("long-token")
+    service = app.extensions["services"]["trading_connections"]
+    long_secret = "abc123def456ghi789jkl012mno345pqr678stu901vwx234yz"
+
+    connection = service.create_or_update(
+        user_id=user.id,
+        provider="kucoin",
+        connection_type="cex_api_key",
+        api_key="key123",
+        api_secret=long_secret,
+        passphrase="pass123",
+    )
+    db.session.commit()
+
+    credentials = service.credentials_for_execution(user.id, connection.id)
+    assert credentials.api_secret == long_secret
 
 
 def test_dydx_permissioned_key_metadata_is_required_and_secret_is_encrypted(app) -> None:
@@ -233,7 +292,7 @@ def test_verify_connection_sets_verified_or_action_needed(app, monkeypatch) -> N
         user_id=user.id,
         provider="hyperliquid",
         connection_type="cex_api_key",
-        api_secret="secret",
+        api_secret="0x" + ("1" * 64),
         wallet_address="0x" + ("7" * 40),
     )
 

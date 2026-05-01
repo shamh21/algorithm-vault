@@ -312,6 +312,7 @@ class TradingConnectionService:
         self._reject_seed_phrase(passphrase, "Passphrase")
         for key, value in (metadata or {}).items():
             self._reject_seed_phrase(str(value), str(key).replace("_", " ").title())
+        self._validate_provider_secret_shape(provider, api_secret)
 
         connection = TradingConnection.query.filter_by(
             user_id=user_id,
@@ -592,12 +593,29 @@ class TradingConnectionService:
 
     @staticmethod
     def _reject_seed_phrase(value: str, label: str) -> None:
-        words = re.findall(r"[A-Za-z]+", str(value or ""))
-        if len(words) >= 12:
+        raw = str(value or "").strip()
+        if not raw or re.fullmatch(r"0x[0-9a-fA-F]{64}", raw):
+            return
+        words = re.findall(r"[A-Za-z]+", raw)
+        parts = raw.split()
+        if len(parts) in {12, 15, 18, 21, 24} and len(words) == len(parts):
             raise ValueError(
                 f"{label} looks like a seed phrase. Seed phrases are not accepted. "
                 "Use an exchange API secret or a Hyperliquid API wallet/agent secret instead."
             )
+
+    @staticmethod
+    def _validate_provider_secret_shape(provider: str, api_secret: str) -> None:
+        if provider != "hyperliquid" or not api_secret:
+            return
+        value = str(api_secret).strip()
+        if re.fullmatch(r"0x[0-9a-fA-F]{64}", value):
+            return
+        if "..." in value or len(value) < 66:
+            raise ValueError("Hyperliquid API Wallet Secret must be the full 0x private key with 64 hex characters. Do not paste a shortened example.")
+        if any(character.isspace() for character in value):
+            raise ValueError("Hyperliquid API Wallet Secret must be one 0x private key string with no spaces.")
+        raise ValueError("Hyperliquid API Wallet Secret must be a 0x private key with exactly 64 hex characters.")
 
     @staticmethod
     def _fernet() -> Fernet:
