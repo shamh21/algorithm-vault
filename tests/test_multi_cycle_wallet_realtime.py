@@ -97,10 +97,16 @@ def _start_cycle(client, amount: str, duration: str = "24"):
     )
 
 
+def _seed_custody_usdc(user: User, amount: float = 1000.0) -> None:
+    db.session.add(WalletBalance(user_id=user.id, asset="USDC", available_balance=amount, estimated_usd_value=amount))
+    db.session.commit()
+
+
 def test_multiple_vault_cycles_can_run_at_once(app) -> None:
     _patch_market_data(app)
     app.extensions["services"]["strategy_manager"].start = lambda run_id: None
     user, secret = _create_user()
+    _seed_custody_usdc(user)
     client = app.test_client()
     _login(client, user.username, secret)
     client.get("/wallet")
@@ -112,7 +118,7 @@ def test_multiple_vault_cycles_can_run_at_once(app) -> None:
     assert second.status_code == 200
     assert VaultCycle.query.filter_by(user_id=user.id, status="active").count() == 2
     balance = WalletBalance.query.filter_by(user_id=user.id, asset="USDC").one()
-    assert balance.available_balance == 1000
+    assert balance.available_balance == 800
     assert balance.locked_balance == 200
     vault = client.get("/vault")
     assert b"2 Active Cycles" in vault.data
@@ -123,6 +129,7 @@ def test_vault_concentration_rejects_excess_asset_exposure(app) -> None:
     app.config["VAULT_MAX_ASSET_EXPOSURE_PCT"] = 0.20
     app.extensions["services"]["strategy_manager"].start = lambda run_id: None
     user, secret = _create_user(username="concentration")
+    _seed_custody_usdc(user)
     client = app.test_client()
     _login(client, user.username, secret)
     client.get("/wallet")
@@ -140,6 +147,7 @@ def test_cycle_settlement_persists_trade_risk_leverage_reward_summary(app) -> No
     app.extensions["services"]["strategy_manager"].stop = lambda run_id: None
     app.extensions["services"]["order_manager"].current_position = lambda *args, **kwargs: {"unrealized_pnl": 2.0}
     user, secret = _create_user(username="summary")
+    _seed_custody_usdc(user)
     client = app.test_client()
     _login(client, user.username, secret)
     client.get("/wallet")
@@ -209,6 +217,7 @@ def test_standard_duration_cycles_start_and_settle(app) -> None:
     app.extensions["services"]["strategy_manager"].stop = lambda run_id: None
     app.extensions["services"]["order_manager"].current_position = lambda *args, **kwargs: {"unrealized_pnl": 0.0}
     user, secret = _create_user(username="durations")
+    _seed_custody_usdc(user)
     client = app.test_client()
     _login(client, user.username, secret)
     client.get("/wallet")

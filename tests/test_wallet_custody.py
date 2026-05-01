@@ -157,6 +157,41 @@ def test_deposit_sync_credits_once_with_idempotent_ledger(app) -> None:
     assert WalletTransaction.query.filter_by(transaction_type="deposit").count() == 1
 
 
+def test_reconcile_custody_balance_restores_completed_deposits_idempotently(app) -> None:
+    _enable_generated_wallets(app)
+    custody = app.extensions["services"]["wallet_custody"]
+    user, _ = _create_user("reconcileusdt")
+    db.session.add(WalletBalance(user_id=user.id, asset="USDT", available_balance=0.0000000065, locked_balance=2.0))
+    db.session.add(
+        WalletLedgerEvent(
+            user_id=user.id,
+            asset="USDT",
+            network="Ethereum",
+            address="0x" + ("b" * 40),
+            event_type="deposit",
+            provider_reference="recovered-usdt",
+            idempotency_key="deposit:recovered-usdt",
+            amount=10.0,
+            confirmations=12,
+            status="complete",
+        )
+    )
+    db.session.commit()
+
+    first = custody.reconcile_custody_balance(user.id, "USDT")
+    db.session.commit()
+    second = custody.reconcile_custody_balance(user.id, "USDT")
+    db.session.commit()
+
+    balance = WalletBalance.query.filter_by(user_id=user.id, asset="USDT").one()
+    assert first["changed"] is True
+    assert first["available_balance"] == 8.0
+    assert second["changed"] is False
+    assert balance.available_balance == 8.0
+    assert balance.locked_balance == 2.0
+    assert WalletAuditLog.query.filter_by(user_id=user.id, action="wallet_balance_reconciled").count() == 2
+
+
 def test_evm_balance_uses_lowercase_required_confirmation_key(monkeypatch) -> None:
     config = {
         "WALLET_EVM_NETWORKS": {"ETHEREUM": {"rpc_url": "https://evm.example.invalid", "chain_id": 1}},

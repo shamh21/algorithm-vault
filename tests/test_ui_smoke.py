@@ -9,7 +9,7 @@ from werkzeug.security import check_password_hash
 from app import create_app
 from app.auth import decrypt_totp_secret, encrypt_totp_secret, password_hash
 from app.extensions import db
-from app.models import DepositAddress, Fill, OptimizerRun, Order, Setting, StrategyRanking, StrategyRun, StrategyValidation, User, VaultCycle, WalletAddress, WalletBalance, WalletTransaction, WalletWithdrawal
+from app.models import DepositAddress, Fill, OptimizerRun, Order, Setting, StrategyRanking, StrategyRun, StrategyValidation, User, VaultCycle, WalletAddress, WalletBalance, WalletLedgerEvent, WalletTransaction, WalletWithdrawal
 from app.services.hyperliquid_client import ClientSnapshot
 from app.services.wallet_custody import BroadcastResult, GeneratedWallet, RealWalletCustodyService, WalletBalanceSnapshot
 
@@ -618,6 +618,8 @@ def test_withdraw_rejects_invalid_2fa_and_over_balance_then_locks_valid_amount(a
     _patch_market_data(app)
     app.config["WALLET_WITHDRAWALS_ENABLED"] = True
     user, secret = _create_user()
+    db.session.add(WalletBalance(user_id=user.id, asset="USDC", available_balance=1000.0, estimated_usd_value=1000.0))
+    db.session.commit()
     client = app.test_client()
     _login(client, user.username, secret)
     client.get("/wallet")
@@ -666,6 +668,49 @@ def test_withdraw_rejects_invalid_2fa_and_over_balance_then_locks_valid_amount(a
     assert withdrawal.workflow_type == "manual_withdrawal"
     assert balance.available_balance == 1000
     assert balance.locked_balance == 0
+
+
+def test_exchange_snapshot_does_not_overwrite_custody_usdt_balance(app) -> None:
+    _patch_market_data(app)
+    user, secret = _create_user(username="custodyusdt")
+    db.session.add(WalletBalance(user_id=user.id, asset="USDT", available_balance=10.0, estimated_usd_value=10.0))
+    db.session.add(
+        WalletLedgerEvent(
+            user_id=user.id,
+            asset="USDT",
+            network="Ethereum",
+            address="0x" + ("a" * 40),
+            event_type="deposit",
+            provider_reference="test-usdt-recovery",
+            idempotency_key="deposit:test-usdt-recovery",
+            amount=10.0,
+            confirmations=12,
+            status="complete",
+        )
+    )
+    db.session.commit()
+    client = app.test_client()
+    _login(client, user.username, secret)
+    app.extensions["services"]["trading_connections"].account_snapshot = lambda user_id, mode, connection_id=None: ClientSnapshot(
+        mode,
+        [{"asset": "USDT", "type": "margin", "value": 0.0000000065, "withdrawable": 0.0000000065}],
+        [],
+        [],
+        [],
+        [],
+    )
+
+    response = client.get("/wallet")
+
+    assert response.status_code == 200
+    assert b"Exchange Margin" in response.data
+    assert b"0.0000000065" in response.data
+    assert b"10.000000" in response.data
+    balance = WalletBalance.query.filter_by(user_id=user.id, asset="USDT").one()
+    assert balance.available_balance == 10.0
+    snapshot = Setting.get_json(f"exchange_balance_snapshot:{user.id}", {})
+    assert snapshot["balances"][0]["asset"] == "USDT"
+    assert snapshot["balances"][0]["withdrawable"] == 0.0000000065
 
 
 def test_live_wallet_withdrawal_requires_admin_approval_and_releases_on_reject(app) -> None:
@@ -763,6 +808,8 @@ def test_vault_cycle_start_locks_wallet_and_links_strategy(app) -> None:
     _patch_market_data(app)
     app.extensions["services"]["strategy_manager"].start = lambda run_id: None
     user, secret = _create_user()
+    db.session.add(WalletBalance(user_id=user.id, asset="USDC", available_balance=1000.0, estimated_usd_value=1000.0))
+    db.session.commit()
     client = app.test_client()
     _login(client, user.username, secret)
     client.get("/wallet")
@@ -802,6 +849,8 @@ def test_one_hour_vault_cycle_uses_short_horizon_strategy(app) -> None:
     _patch_deep_book(app)
     app.extensions["services"]["strategy_manager"].start = lambda run_id: None
     user, secret = _create_user(username="onehour")
+    db.session.add(WalletBalance(user_id=user.id, asset="USDC", available_balance=1000.0, estimated_usd_value=1000.0))
+    db.session.commit()
     client = app.test_client()
     _login(client, user.username, secret)
     client.get("/wallet")
@@ -970,6 +1019,8 @@ def test_live_vault_cycle_starts_with_active_connection(app) -> None:
     db.session.commit()
     user, secret = _create_user()
     connection = _create_live_connection(app, user)
+    db.session.add(WalletBalance(user_id=user.id, asset="USDC", available_balance=1000.0, estimated_usd_value=1000.0))
+    db.session.commit()
     client = app.test_client()
     _login(client, user.username, secret)
     client.get("/wallet")

@@ -492,6 +492,65 @@ class RealWalletCustodyService:
         balance.locked_balance = max(0.0, float(balance.locked_balance or 0.0) - amount)
         balance.available_balance = float(balance.available_balance or 0.0) + amount
 
+    def reconcile_custody_balance(self, user_id: int, asset: str) -> dict[str, Any]:
+        """Repair the custody balance row from completed custody ledger activity."""
+        asset_key = self._asset_key(asset)
+        balance = WalletBalance.query.filter_by(user_id=user_id, asset=asset_key).one_or_none()
+        if balance is None:
+            balance = WalletBalance(user_id=user_id, asset=asset_key)
+            db.session.add(balance)
+            db.session.flush()
+
+        deposit_total = sum(
+            float(event.amount or 0.0)
+            for event in WalletLedgerEvent.query.filter_by(
+                user_id=user_id,
+                asset=asset_key,
+                event_type="deposit",
+                status="complete",
+            ).all()
+        )
+        completed_withdrawal_total = sum(
+            float(withdrawal.amount or 0.0)
+            for withdrawal in WalletWithdrawal.query.filter_by(
+                user_id=user_id,
+                asset=asset_key,
+                workflow_type="manual_withdrawal",
+                status="complete",
+            ).all()
+        )
+        locked = max(0.0, float(balance.locked_balance or 0.0))
+        expected_available = max(0.0, deposit_total - completed_withdrawal_total - locked)
+        before = float(balance.available_balance or 0.0)
+        balance.available_balance = expected_available
+        if asset_key in {"USDC", "USDT", "USD"}:
+            balance.estimated_usd_value = expected_available + locked
+        self._audit(
+            user_id=user_id,
+            action="wallet_balance_reconciled",
+            status="complete",
+            message=f"Reconciled {asset_key} custody balance from completed wallet ledger events.",
+            metadata={
+                "asset": asset_key,
+                "before_available": before,
+                "after_available": expected_available,
+                "deposit_total": deposit_total,
+                "completed_withdrawal_total": completed_withdrawal_total,
+                "locked_balance": locked,
+            },
+        )
+        db.session.flush()
+        return {
+            "user_id": user_id,
+            "asset": asset_key,
+            "before_available": before,
+            "available_balance": expected_available,
+            "locked_balance": locked,
+            "deposit_total": deposit_total,
+            "completed_withdrawal_total": completed_withdrawal_total,
+            "changed": not math.isclose(before, expected_available, rel_tol=1e-12, abs_tol=1e-12),
+        }
+
     def _withdrawal_source(self, withdrawal: WalletWithdrawal) -> WalletAddress:
         if withdrawal.source_wallet_address_id:
             source = db.session.get(WalletAddress, int(withdrawal.source_wallet_address_id))

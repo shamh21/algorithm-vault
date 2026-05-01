@@ -28,6 +28,36 @@
   </article>
 </section>
 
+{% if exchange_snapshot and exchange_snapshot.balances %}
+<section class="card">
+  <div class="section-heading">
+    <div>
+      <span class="card-kicker">Exchange Margin</span>
+      <h2>{{ exchange_snapshot.provider|default("Exchange")|title }} Live Account</h2>
+    </div>
+    <span class="muted">Synced {{ exchange_snapshot.synced_at or "recently" }}</span>
+  </div>
+  <table>
+    <thead><tr><th>Asset</th><th>Type</th><th>Value</th><th>Withdrawable</th><th>Est. USD</th></tr></thead>
+    <tbody>
+      {% for item in exchange_snapshot.balances %}
+        <tr>
+          <td>{{ item.asset }}</td>
+          <td>{{ item.type|title }}</td>
+          <td>{{ "%.10f"|format(item.value) }}</td>
+          <td>{{ "%.10f"|format(item.withdrawable) }}</td>
+          <td>${{ "%.2f"|format(item.estimated_usd_value) }}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% if exchange_snapshot.alerts %}
+    <p class="status-pill danger">Exchange alerts: {{ exchange_snapshot.alerts|join(", ") }}</p>
+  {% endif %}
+  <p class="muted">Exchange margin is shown separately from in-app custody wallet balances.</p>
+</section>
+{% endif %}
+
 <section class="grid three-up balance-grid">
   {% for balance in balances %}
     <article class="wallet-card balance-card">

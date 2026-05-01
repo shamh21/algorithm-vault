@@ -50,12 +50,14 @@ def home():
     user = current_user()
     _sync_completed_cycles(user)
     balances = _wallet_balances(user)
+    exchange_snapshot = _exchange_balance_snapshot(user)
     active_cycles = _active_cycles(user)
     active_cycle = active_cycles[0] if active_cycles else None
     recent_transactions = WalletTransaction.query.filter_by(user_id=user.id).order_by(WalletTransaction.created_at.desc()).limit(5).all()
     return render_template(
         "home.html",
         balances=balances,
+        exchange_snapshot=exchange_snapshot,
         portfolio_total=_portfolio_total(balances),
         active_cycle=active_cycle,
         recent_transactions=recent_transactions,
@@ -67,10 +69,12 @@ def wallet():
     user = current_user()
     _sync_completed_cycles(user)
     balances = _wallet_balances(user)
+    exchange_snapshot = _exchange_balance_snapshot(user)
     transactions = WalletTransaction.query.filter_by(user_id=user.id).order_by(WalletTransaction.created_at.desc()).limit(20).all()
     return render_template(
         "wallet.html",
         balances=balances,
+        exchange_snapshot=exchange_snapshot,
         portfolio_total=_portfolio_total(balances),
         transactions=transactions,
         settlement_assets=_wallet_assets(),
@@ -638,7 +642,6 @@ def legacy_panic_activate():
 
 
 def _wallet_balances(user) -> list[WalletBalance]:
-    _sync_connection_balances(user)
     _sync_real_wallet_balances(user)
     balances = WalletBalance.query.filter_by(user_id=user.id).order_by(WalletBalance.asset.asc()).all()
     wallet_assets = _wallet_assets()
@@ -702,22 +705,47 @@ def _sync_connection_balances(user) -> None:
     if connection is None:
         return
     snapshot = get_service("trading_connections").account_snapshot(user.id, "live", connection.id)
-    changed = False
+    balances: list[dict[str, float | str]] = []
     for item in snapshot.balances:
         asset = str(item.get("asset", "") or "").upper()
         if not asset:
             continue
         value = float(item.get("value", 0.0) or 0.0)
         withdrawable = float(item.get("withdrawable", value) or 0.0)
-        balance = WalletBalance.query.filter_by(user_id=user.id, asset=asset).one_or_none()
-        if balance is None:
-            balance = WalletBalance(user_id=user.id, asset=asset)
-            db.session.add(balance)
-        balance.available_balance = max(withdrawable, 0.0)
-        balance.estimated_usd_value = value if asset in {"USDC", "USDT", "USD"} else value * _asset_usd_price(asset)
-        changed = True
-    if changed:
+        balances.append(
+            {
+                "asset": asset,
+                "type": str(item.get("type", "margin") or "margin"),
+                "value": value,
+                "withdrawable": max(withdrawable, 0.0),
+                "estimated_usd_value": value if asset in {"USDC", "USDT", "USD"} else value * _asset_usd_price(asset),
+            }
+        )
+    if balances or snapshot.alerts:
+        Setting.set_json(
+            _exchange_balance_snapshot_key(user.id),
+            {
+                "mode": "live",
+                "connection_id": connection.id,
+                "provider": connection.provider,
+                "balances": balances,
+                "positions_count": len(snapshot.positions or []),
+                "open_orders_count": len(snapshot.open_orders or []),
+                "alerts": snapshot.alerts or [],
+                "synced_at": datetime.utcnow().isoformat() + "Z",
+            },
+        )
         commit_with_retry()
+
+
+def _exchange_balance_snapshot(user) -> dict:
+    _sync_connection_balances(user)
+    value = Setting.get_json(_exchange_balance_snapshot_key(user.id), {})
+    return value if isinstance(value, dict) else {}
+
+
+def _exchange_balance_snapshot_key(user_id: int) -> str:
+    return f"exchange_balance_snapshot:{int(user_id)}"
 
 
 def _wallet_balance_for(user, asset: str) -> WalletBalance:
