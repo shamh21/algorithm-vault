@@ -100,6 +100,7 @@
         {% for cycle in active_cycles %}
           {% set cycle_pnl = cycle.selection_metadata.get("total_pnl_usd", 0.0) %}
           {% set summary = cycle.cycle_summary %}
+          {% set no_order_reason = cycle.selection_metadata.get("no_order_failure_reason") or cycle.validation_failure_reason or summary.get("no_order_failure_reason") %}
           {% set leverage = namespace(value=summary.get("max_leverage", 1.0)) %}
           {% for leg in cycle.allocation_legs %}
             {% if leg.leverage > leverage.value %}{% set leverage.value = leg.leverage %}{% endif %}
@@ -120,6 +121,12 @@
               <div><dt>Risk</dt><dd>{{ "%.0f"|format((1 - cycle.selection_metadata.get("signal_stability", 1.0)) * 100) }}%</dd></div>
               <div><dt>Reward/Risk</dt><dd>{{ "%.2f"|format(summary.get("risk_reward", 0.0)) }}</dd></div>
             </dl>
+            {% if no_order_reason %}
+              <div class="risk-note danger-note">
+                <strong>No live order submitted</strong>
+                <span>{{ no_order_reason }}</span>
+              </div>
+            {% endif %}
             <div class="cycle-item-footer">
               <div class="countdown-chip" data-countdown data-unlocks-at="{{ cycle.unlocks_at.isoformat() }}Z">Calculating...</div>
               <a class="text-link" href="{{ url_for('consumer.cycle_detail', cycle_id=cycle.id) }}">Details</a>
@@ -151,8 +158,12 @@
     <thead><tr><th>Status</th><th>Asset</th><th>Amount</th><th>Profile</th><th>Est. PnL</th><th>Settlement</th><th>Unlocks</th><th></th></tr></thead>
     <tbody>
       {% for cycle in recent_cycles %}
+        {% set no_order_reason = cycle.selection_metadata.get("no_order_failure_reason") or cycle.validation_failure_reason %}
         <tr>
-          <td>{{ cycle.execution_substatus.replace("_", " ")|title }}</td>
+          <td>
+            {{ cycle.execution_substatus.replace("_", " ")|title }}
+            {% if no_order_reason %}<br><span class="muted">No live order submitted</span>{% endif %}
+          </td>
           <td>{{ cycle.deposit_asset }}</td>
           <td>{{ "%.6f"|format(cycle.deposit_amount) }}</td>
           <td>{{ cycle.algorithm_profile }}</td>

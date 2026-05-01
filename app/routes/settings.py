@@ -10,6 +10,7 @@ from ..auth import current_user, require_admin_user, require_authenticated_user
 from ..extensions import db
 from ..models import AuditLog, Setting, TradingConnection, WalletBalance
 from ..runtime import available_modes, get_current_mode, get_service
+from ..services.connection_health import latest_connection_health
 
 
 settings_bp = Blueprint("settings", __name__, url_prefix="/settings")
@@ -68,6 +69,7 @@ def _render_connections(provider: str | None = None):
         selected_connection = next((record for record in records if record.id == selected_connection_id), None)
     if selected_connection is None:
         selected_connection = next((record for record in records if record.provider == selected_provider), None)
+    connection_health_by_id = {record.id: latest_connection_health(record.id) for record in records}
     return render_template(
         "connections.html",
         trading_connections=records,
@@ -76,6 +78,8 @@ def _render_connections(provider: str | None = None):
         selected_provider=selected_provider,
         selected_spec=provider_specs[selected_provider],
         selected_connection=selected_connection,
+        selected_connection_health=connection_health_by_id.get(selected_connection.id, {}) if selected_connection else {},
+        connection_health_by_id=connection_health_by_id,
     )
 
 

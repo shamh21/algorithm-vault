@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
 
 import pyotp
@@ -9,7 +10,7 @@ from werkzeug.security import check_password_hash
 from app import create_app
 from app.auth import decrypt_totp_secret, encrypt_totp_secret, password_hash
 from app.extensions import db
-from app.models import DepositAddress, Fill, OptimizerRun, Order, Setting, StrategyRanking, StrategyRun, StrategyValidation, User, VaultCycle, WalletAddress, WalletBalance, WalletLedgerEvent, WalletTransaction, WalletWithdrawal
+from app.models import AuditLog, DepositAddress, Fill, OptimizerRun, Order, Setting, StrategyRanking, StrategyRun, StrategyValidation, User, VaultCycle, VaultAllocationLeg, WalletAddress, WalletBalance, WalletLedgerEvent, WalletTransaction, WalletWithdrawal
 from app.services.hyperliquid_client import ClientSnapshot
 from app.services.wallet_custody import BroadcastResult, GeneratedWallet, RealWalletCustodyService, WalletBalanceSnapshot
 
@@ -1050,6 +1051,213 @@ def test_live_vault_cycle_starts_with_active_connection(app) -> None:
     assert b"Executing" in vault.data
     assert b"Algorithm Profile" in vault.data
     assert b"volatility_breakout" not in vault.data
+
+
+def test_live_vault_cycle_blocks_when_exchange_ip_check_fails(app) -> None:
+    _patch_market_data(app)
+    _patch_deep_book(app)
+    app.extensions["services"]["strategy_manager"].start = lambda run_id: (_ for _ in ()).throw(AssertionError("strategy must not start"))
+    user, secret = _create_user(username="ipblocked")
+    db.session.add(WalletBalance(user_id=user.id, asset="USDC", available_balance=1000.0, estimated_usd_value=1000.0))
+    db.session.commit()
+    client = app.test_client()
+    _login(client, user.username, secret)
+    connection = app.extensions["services"]["trading_connections"].active_tradable_connection(user.id)
+    failure = '{"code":"400006","msg":"Invalid request ip, the current clientIp is:209.52.132.232"}'
+    app.extensions["services"]["trading_connections"].account_snapshot = lambda user_id, mode, connection_id=None: ClientSnapshot(
+        mode,
+        [],
+        [],
+        [],
+        [],
+        [failure],
+    )
+
+    response = client.post(
+        "/vault/start",
+        data={
+            "deposit_amount": "100",
+            "deposit_asset": "USDC",
+            "lock_duration": "1",
+            "settlement_asset": "USDC",
+        },
+        follow_redirects=True,
+    )
+
+    balance = WalletBalance.query.filter_by(user_id=user.id, asset="USDC").one()
+    health = Setting.get_json(f"connection_health:{connection.id}", {})
+    assert response.status_code == 200
+    assert VaultCycle.query.filter_by(user_id=user.id).count() == 0
+    assert balance.available_balance == 1000.0
+    assert balance.locked_balance == 0.0
+    assert health["can_trade"] is False
+    assert health["provider_code"] == "400006"
+    assert health["client_ip"] == "209.52.132.232"
+    assert b"Whitelist current client IP 209.52.132.232" in response.data
+
+
+def test_no_order_cycle_failure_is_visible_in_vault_and_detail(app) -> None:
+    _patch_market_data(app)
+    user, secret = _create_user(username="visiblefail")
+    client = app.test_client()
+    _login(client, user.username, secret)
+    run = StrategyRun(
+        user_id=user.id,
+        strategy_name="scalping",
+        symbol="BTC",
+        timeframe="1m",
+        mode="live",
+        status="error",
+        last_error='{"code":"400006","msg":"Invalid request ip, the current clientIp is:209.52.132.232"}',
+    )
+    db.session.add(run)
+    db.session.flush()
+    cycle = VaultCycle(
+        user_id=user.id,
+        strategy_run_id=run.id,
+        deposit_asset="USDC",
+        deposit_amount=5.0,
+        settlement_asset="USDC",
+        lock_duration_hours=1,
+        status="active",
+        execution_substatus="limited",
+        execution_mode="live",
+        validation_failure_reason=run.last_error,
+        algorithm_profile="Aggressive",
+        selected_strategy_name="scalping",
+        selected_timeframe="1m",
+        started_at=datetime.utcnow(),
+        unlocks_at=datetime.utcnow() + timedelta(hours=1),
+        starting_value_usd=5.0,
+        current_estimated_value_usd=5.0,
+    )
+    db.session.add(cycle)
+    db.session.flush()
+    run.parameters = {"consumer_vault": True, "vault_cycle_id": cycle.id}
+    db.session.add(VaultAllocationLeg(vault_cycle_id=cycle.id, strategy_run_id=run.id, symbol="BTC", timeframe="1m", allocation_cap_usd=5.0))
+    db.session.commit()
+
+    vault = client.get("/vault")
+    detail = client.get(f"/vault/cycles/{cycle.id}")
+
+    assert b"No live order submitted" in vault.data
+    assert b"No live order submitted" in detail.data
+    assert b"Invalid request ip" in detail.data
+
+
+def test_repair_limited_cycle_releases_no_order_failed_cycle(app) -> None:
+    user, _ = _create_user(username="repairable")
+    db.session.add(WalletBalance(user_id=user.id, asset="USDT", available_balance=5.0, locked_balance=5.0, estimated_usd_value=10.0))
+    run = StrategyRun(
+        user_id=user.id,
+        strategy_name="scalping",
+        symbol="BTC",
+        timeframe="1m",
+        mode="live",
+        status="error",
+        last_error='{"code":"400006","msg":"Invalid request ip, the current clientIp is:209.52.132.232"}',
+    )
+    db.session.add(run)
+    db.session.flush()
+    cycle = VaultCycle(
+        user_id=user.id,
+        strategy_run_id=run.id,
+        deposit_asset="USDT",
+        deposit_amount=5.0,
+        settlement_asset="USDT",
+        lock_duration_hours=1,
+        status="active",
+        execution_substatus="limited",
+        execution_mode="live",
+        validation_failure_reason=run.last_error,
+        algorithm_profile="Aggressive",
+        selected_strategy_name="scalping",
+        selected_timeframe="1m",
+        started_at=datetime.utcnow(),
+        unlocks_at=datetime.utcnow() + timedelta(hours=1),
+        starting_value_usd=5.0,
+        current_estimated_value_usd=5.0,
+    )
+    db.session.add(cycle)
+    db.session.flush()
+    run.parameters = {"consumer_vault": True, "vault_cycle_id": cycle.id}
+    db.session.add(VaultAllocationLeg(vault_cycle_id=cycle.id, strategy_run_id=run.id, symbol="BTC", timeframe="1m", allocation_cap_usd=5.0))
+    db.session.commit()
+
+    preview = app.test_cli_runner().invoke(args=["repair-limited-cycle", "--cycle-id", str(cycle.id)])
+    assert preview.exit_code == 0
+    assert json.loads(preview.output)["preview_only"] is True
+    wrong = app.test_cli_runner().invoke(args=["repair-limited-cycle", "--cycle-id", str(cycle.id), "--confirm", "NOPE"])
+    assert wrong.exit_code == 1
+    assert "confirmation_required" in json.loads(wrong.output)["blockers"]
+
+    result = app.test_cli_runner().invoke(args=["repair-limited-cycle", "--cycle-id", str(cycle.id), "--confirm", "REPAIR-LIMITED-CYCLE"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    db.session.refresh(cycle)
+    balance = WalletBalance.query.filter_by(user_id=user.id, asset="USDT").one()
+    assert payload["repaired"] is True
+    assert cycle.status == "complete"
+    assert cycle.execution_substatus == "failed_no_execution"
+    assert cycle.final_settlement_amount == 5.0
+    assert balance.available_balance == 10.0
+    assert balance.locked_balance == 0.0
+    assert WalletTransaction.query.filter_by(user_id=user.id, vault_cycle_id=cycle.id, transaction_type="settlement").count() == 1
+    assert AuditLog.query.filter_by(action="repair_limited_cycle").count() == 1
+
+    again = app.test_cli_runner().invoke(args=["repair-limited-cycle", "--cycle-id", str(cycle.id), "--confirm", "REPAIR-LIMITED-CYCLE"])
+    assert again.exit_code == 0
+    assert json.loads(again.output)["already_repaired"] is True
+    db.session.refresh(balance)
+    assert balance.available_balance == 10.0
+    assert WalletTransaction.query.filter_by(user_id=user.id, vault_cycle_id=cycle.id, transaction_type="settlement").count() == 1
+
+
+def test_repair_limited_cycle_refuses_cycles_with_orders(app) -> None:
+    user, _ = _create_user(username="orderedcycle")
+    db.session.add(WalletBalance(user_id=user.id, asset="USDT", available_balance=5.0, locked_balance=5.0, estimated_usd_value=10.0))
+    run = StrategyRun(user_id=user.id, strategy_name="scalping", symbol="BTC", timeframe="1m", mode="live", status="error", last_error="Invalid request ip")
+    db.session.add(run)
+    db.session.flush()
+    cycle = VaultCycle(
+        user_id=user.id,
+        strategy_run_id=run.id,
+        deposit_asset="USDT",
+        deposit_amount=5.0,
+        settlement_asset="USDT",
+        lock_duration_hours=1,
+        status="active",
+        execution_substatus="limited",
+        execution_mode="live",
+        validation_failure_reason="Invalid request ip",
+        started_at=datetime.utcnow(),
+        unlocks_at=datetime.utcnow() + timedelta(hours=1),
+        starting_value_usd=5.0,
+        current_estimated_value_usd=5.0,
+    )
+    db.session.add(cycle)
+    db.session.flush()
+    order = Order(
+        user_id=user.id,
+        client_order_id="repair-block-order",
+        mode="live",
+        symbol="BTC",
+        side="buy",
+        order_type="market",
+        status="submitted",
+        quantity=0.001,
+    )
+    order.details = {"vault_cycle_id": cycle.id}
+    db.session.add(order)
+    db.session.commit()
+
+    result = app.test_cli_runner().invoke(args=["repair-limited-cycle", "--cycle-id", str(cycle.id), "--confirm", "REPAIR-LIMITED-CYCLE"])
+    payload = json.loads(result.output)
+    balance = WalletBalance.query.filter_by(user_id=user.id, asset="USDT").one()
+    assert result.exit_code == 1
+    assert "cycle_has_orders" in payload["blockers"]
+    assert balance.available_balance == 5.0
+    assert balance.locked_balance == 5.0
 
 
 def test_vault_live_gate_passes_and_failure_limits_cycle(app) -> None:

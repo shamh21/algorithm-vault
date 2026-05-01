@@ -135,6 +135,27 @@
           <span>{{ selected_connection.last_verification_error }}</span>
         </div>
       {% endif %}
+      {% if selected_connection.provider == 'kucoin' %}
+        <div class="risk-note">
+          <strong>KuCoin IP whitelist</strong>
+          <span>Live vault cycles require this app's current egress IP to match the KuCoin API key whitelist. Use a stable VPS, VPN, or static egress IP before relying on live cycles.</span>
+        </div>
+      {% endif %}
+      {% if selected_connection_health %}
+        <div class="risk-note {% if not selected_connection_health.get('can_trade') %}danger-note{% endif %}">
+          <strong>Latest live access check</strong>
+          <span>
+            {{ "Can trade" if selected_connection_health.get("can_trade") else "Blocked" }}
+            · {{ selected_connection_health.get("last_checked_at", "not checked") }}
+            {% if selected_connection_health.get("client_ip") %}
+              · client IP {{ selected_connection_health.get("client_ip") }}
+            {% endif %}
+            {% if selected_connection_health.get("failure_reason") %}
+              · {{ selected_connection_health.get("failure_reason") }}
+            {% endif %}
+          </span>
+        </div>
+      {% endif %}
       <div class="connection-actions">
         {% if selected_spec.verification_supported %}
           <form method="post" action="{{ url_for('settings.verify_connection', connection_id=selected_connection.id) }}" data-disable-on-submit>
@@ -176,11 +197,17 @@
       {% for connection in trading_connections %}
         {% set spec = providers.get(connection.provider) %}
         {% set can_activate = spec and spec.tradable and connection.verification_status == 'verified' %}
+        {% set health = connection_health_by_id.get(connection.id, {}) %}
         <tr>
           <td>{{ spec.label if spec else connection.provider|title }}</td>
           <td>{{ connection.connection_type.replace("_", " ")|title }}</td>
           <td><span class="connection-status status-{{ connection.verification_status }}">{{ connection.verification_status.replace("_", " ")|title }}</span></td>
-          <td>{{ "Active" if connection.is_active else "Inactive" }}</td>
+          <td>
+            {{ "Active" if connection.is_active else "Inactive" }}
+            {% if health %}
+              <br><span class="muted">{{ "Can trade" if health.get("can_trade") else "Blocked" }}{% if health.get("client_ip") %} · {{ health.get("client_ip") }}{% endif %}</span>
+            {% endif %}
+          </td>
           <td>{{ connection.wallet_address[:18] ~ "..." if connection.wallet_address else "n/a" }}</td>
           <td>{{ connection.updated_at.strftime("%Y-%m-%d %H:%M") }}</td>
           <td>

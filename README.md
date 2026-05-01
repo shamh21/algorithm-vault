@@ -64,6 +64,10 @@ flask live-canary-trade --ranking-id <id> --user-id <id> --submit --confirm LIVE
 
 The canary command computes size from existing live caps, allocation/risk config, stop distance, and current price; it does not accept arbitrary oversized quantity input.
 
+## Exchange Egress IP
+
+KuCoin and other IP-restricted exchange API keys must whitelist the machine's current public egress IP before any live vault cycle can start. For reliable production use, run the app behind a stable VPS, VPN, or static egress IP and update the exchange whitelist before activating live cycles. If a provider returns `Invalid request ip`, the app records the latest connection health and blocks new cycles before locking funds.
+
 Train and promote offline ranker candidates only after reviewing guardrails:
 
 ```bash

@@ -23,15 +23,21 @@ from .models import (
     AuditLog,
     BacktestRun,
     MLOfflineModel,
+    Order,
     Setting,
     StrategyRanking,
+    StrategyRun,
     TradingConnection,
     User,
+    VaultCycle,
     WalletAddress,
     WalletAuditLog,
+    WalletBalance,
+    WalletTransaction,
     WalletWithdrawal,
 )
 from .runtime import get_service
+from .services.connection_health import active_connection_health, parse_exchange_failure
 from .services.order_manager import OrderIntent
 from .services.signal_quality import SignalQualityEvaluator
 
@@ -397,6 +403,19 @@ def register_cli(app: Flask) -> None:
         db.session.commit()
         click.echo(json.dumps(result, indent=2, default=str))
         if confirmed and result.get("blockers"):
+            raise click.exceptions.Exit(1)
+
+    @app.cli.command("repair-limited-cycle")
+    @click.option("--cycle-id", required=True, type=int)
+    @click.option("--confirm", default="", help="Must be REPAIR-LIMITED-CYCLE to release funds.")
+    @with_appcontext
+    def repair_limited_cycle(cycle_id: int, confirm: str) -> None:
+        """Release funds from a live no-order cycle that failed before execution."""
+
+        confirmed = confirm == "REPAIR-LIMITED-CYCLE"
+        result = _repair_limited_cycle_payload(cycle_id, confirmed=confirmed, confirmation_value=confirm)
+        click.echo(json.dumps(result, indent=2, default=str))
+        if result.get("blockers"):
             raise click.exceptions.Exit(1)
 
     @app.cli.command("production-readiness")
@@ -1394,12 +1413,190 @@ def _wallet_readiness_payload() -> dict[str, object]:
     return readiness
 
 
+def _repair_limited_cycle_payload(cycle_id: int, *, confirmed: bool, confirmation_value: str = "") -> dict[str, object]:
+    cycle = db.session.get(VaultCycle, int(cycle_id))
+    if cycle is None:
+        return {
+            "cycle_id": cycle_id,
+            "preview_only": not confirmed,
+            "ready": False,
+            "repaired": False,
+            "blockers": ["cycle_not_found"],
+        }
+
+    orders = _orders_for_cycle(cycle)
+    fills = [fill for order in orders for fill in order.fills]
+    run_ids = {leg.strategy_run_id for leg in cycle.allocation_legs if leg.strategy_run_id}
+    if cycle.strategy_run_id:
+        run_ids.add(cycle.strategy_run_id)
+    runs = [db.session.get(StrategyRun, int(run_id)) for run_id in run_ids if run_id]
+    runs = [run for run in runs if run is not None]
+    reason = _cycle_no_execution_failure_reason(cycle, runs)
+    already_repaired = cycle.execution_substatus == "failed_no_execution" and cycle.status in {"complete", "failed", "failed_no_execution"}
+
+    blockers: list[str] = []
+    if confirmation_value and not confirmed:
+        blockers.append("confirmation_required")
+    if orders:
+        blockers.append("cycle_has_orders")
+    if fills:
+        blockers.append("cycle_has_fills")
+    if cycle.status not in {"active", "settling", "error", "limited", "failed", "complete"} and not already_repaired:
+        blockers.append("cycle_status_not_repairable")
+    if cycle.execution_substatus not in {"limited", "error", "failed", "failed_no_execution", "validating_market", "initializing"} and not already_repaired:
+        blockers.append("cycle_substatus_not_repairable")
+    if not any((run.status == "error" or run.last_error) for run in runs) and not already_repaired:
+        blockers.append("failed_strategy_run_missing")
+    if not reason and not already_repaired:
+        blockers.append("live_access_failure_missing")
+
+    balance = WalletBalance.query.filter_by(user_id=cycle.user_id, asset=cycle.deposit_asset).one_or_none()
+    release_amount = min(float(cycle.deposit_amount or 0.0), float(balance.locked_balance or 0.0)) if balance else 0.0
+    result: dict[str, object] = {
+        "cycle_id": cycle.id,
+        "preview_only": not confirmed,
+        "ready": not blockers,
+        "repaired": False,
+        "already_repaired": already_repaired,
+        "blockers": list(dict.fromkeys(blockers)),
+        "order_count": len(orders),
+        "fill_count": len(fills),
+        "strategy_run_ids": [run.id for run in runs],
+        "failure_reason": reason,
+        "release_amount": release_amount,
+        "asset": cycle.deposit_asset,
+    }
+    if blockers or not confirmed or already_repaired:
+        return result
+
+    now = datetime.utcnow()
+    if balance is not None and release_amount > 0:
+        balance.locked_balance = max(0.0, float(balance.locked_balance or 0.0) - release_amount)
+        balance.available_balance = float(balance.available_balance or 0.0) + release_amount
+        if cycle.deposit_asset in {"USDC", "USDT", "USD"}:
+            balance.estimated_usd_value = float(balance.available_balance or 0.0) + float(balance.locked_balance or 0.0)
+
+    for run in runs:
+        run.status = "stopped"
+        run.manual_enabled = False
+        if reason:
+            run.last_error = run.last_error or reason
+    for leg in cycle.allocation_legs:
+        leg.status = "complete"
+    metadata = cycle.selection_metadata
+    metadata["no_order_failure_reason"] = reason
+    metadata["repair_released_amount"] = release_amount
+    metadata["repaired_at"] = now.isoformat() + "Z"
+    cycle.selection_metadata = metadata
+    summary = cycle.cycle_summary
+    summary.update(
+        {
+            "no_order_failure_reason": reason,
+            "order_count": 0,
+            "fill_count": 0,
+            "final_settlement_amount": float(cycle.deposit_amount or 0.0),
+            "repair_released_amount": release_amount,
+            "repaired_at": now.isoformat() + "Z",
+        }
+    )
+    cycle.cycle_summary = summary
+    cycle.status = "complete"
+    cycle.execution_substatus = "failed_no_execution"
+    cycle.live_validation_status = "failed"
+    cycle.validation_failure_reason = reason
+    cycle.final_settlement_amount = float(cycle.deposit_amount or 0.0)
+    cycle.current_estimated_value_usd = float(cycle.starting_value_usd or cycle.current_estimated_value_usd or 0.0)
+    cycle.settled_at = now
+    db.session.add(
+        WalletTransaction(
+            vault_cycle_id=cycle.id,
+            user_id=cycle.user_id,
+            asset=cycle.deposit_asset,
+            amount=release_amount,
+            transaction_type="settlement",
+            status="complete",
+            note=f"No live order submitted; failed live connection cycle repaired. {reason}",
+        )
+    )
+    audit = AuditLog(
+        category="vault",
+        action="repair_limited_cycle",
+        message=f"Repaired no-order vault cycle {cycle.id}; released {release_amount:.8f} {cycle.deposit_asset}.",
+    )
+    audit.details = {
+        "cycle_id": cycle.id,
+        "user_id": cycle.user_id,
+        "strategy_run_ids": [run.id for run in runs],
+        "failure_reason": reason,
+        "released_amount": release_amount,
+        "order_count": 0,
+        "fill_count": 0,
+    }
+    db.session.add(audit)
+    db.session.commit()
+    result.update(
+        {
+            "ready": True,
+            "repaired": True,
+            "status": cycle.status,
+            "execution_substatus": cycle.execution_substatus,
+            "final_settlement_amount": cycle.final_settlement_amount,
+        }
+    )
+    return result
+
+
+def _orders_for_cycle(cycle: VaultCycle) -> list[Order]:
+    query = Order.query.filter_by(user_id=cycle.user_id)
+    if cycle.execution_mode:
+        query = query.filter_by(mode=cycle.execution_mode)
+    return [
+        order
+        for order in query.order_by(Order.created_at.asc()).all()
+        if order.details.get("vault_cycle_id") == cycle.id
+    ]
+
+
+def _cycle_no_execution_failure_reason(cycle: VaultCycle, runs: list[StrategyRun]) -> str:
+    candidates = [cycle.validation_failure_reason or ""]
+    candidates.extend(run.last_error or "" for run in runs)
+    latest_audit = (
+        AuditLog.query.filter(AuditLog.message.like(f"%Strategy run {cycle.strategy_run_id}%"))
+        .order_by(AuditLog.created_at.desc())
+        .first()
+        if cycle.strategy_run_id
+        else None
+    )
+    if latest_audit is not None:
+        candidates.append(latest_audit.message or "")
+    for raw in candidates:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        parsed = parse_exchange_failure(text)
+        lowered = text.lower()
+        if parsed.get("ip_whitelist_blocked") or any(
+            token in lowered
+            for token in (
+                "invalid request ip",
+                "exchange data unavailable",
+                "credentials",
+                "connection",
+                "api",
+                "providerrequesterror",
+            )
+        ):
+            return text
+    return ""
+
+
 def _production_readiness_payload() -> dict[str, object]:
     blockers: list[str] = []
     warnings: list[str] = []
     wallet = _wallet_readiness_payload()
     dependencies = _dependency_status()
     risk_status = get_service("risk_engine").status("live")
+    connection_health = active_connection_health()
     db_uri = str(current_app.config.get("SQLALCHEMY_DATABASE_URI", ""))
     secret_key = str(current_app.config.get("SECRET_KEY", "") or "")
     totp_key = str(current_app.config.get("TOTP_ENCRYPTION_KEY", "") or "").strip()
@@ -1434,6 +1631,13 @@ def _production_readiness_payload() -> dict[str, object]:
     missing_ml = [name for name in ("joblib", "numpy", "scipy", "sklearn", "xgboost") if not dependencies.get(name, False)]
     if bool(current_app.config.get("ML_OFFLINE_MODELS_ENABLED", False)) and missing_ml:
         blockers.append("Missing offline ML dependencies: " + ", ".join(missing_ml))
+    for health in connection_health:
+        if not bool(health.get("can_trade", False)):
+            provider = str(health.get("provider") or "exchange").title()
+            reason = str(health.get("failure_reason") or "latest live access check failed")
+            blockers.append(f"{provider} active connection cannot trade: {reason}")
+            if health.get("client_ip"):
+                warnings.append(f"{provider} API key whitelist must include current client IP {health.get('client_ip')}")
     if not bool(wallet.get("ready", False)):
         blockers.extend(str(item) for item in wallet.get("blockers", []))
     for asset in required_cap_assets:
@@ -1475,6 +1679,7 @@ def _production_readiness_payload() -> dict[str, object]:
             "signup_invite_configured": bool(current_app.config.get("SIGNUP_INVITE_CODE")),
         },
         "risk": risk_status,
+        "connection_health": connection_health,
         "wallet": wallet,
         "offline_ml": _offline_ml_readiness("1h"),
         "dependencies": dependencies,

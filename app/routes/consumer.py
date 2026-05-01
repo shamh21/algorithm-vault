@@ -13,6 +13,7 @@ from ..extensions import db
 from ..ml.online_ranker import extract_features, horizon_from_duration, outcome_from_result
 from ..models import AuditLog, DepositAddress, Fill, Order, Setting, StrategyRun, TradingConnection, VaultAllocationLeg, VaultCycle, WalletAddress, WalletBalance, WalletTransaction
 from ..runtime import get_current_mode, get_service, market_mode_for
+from ..services.connection_health import build_connection_health, operator_connection_message, store_connection_health
 from ..services.db_retry import commit_with_retry, is_database_locked
 from ..services.wallet_addresses import generate_deposit_address, use_real_addresses, validate_withdraw_address
 from ..utils import format_duration_seconds
@@ -354,6 +355,11 @@ def start_cycle():
         return redirect(url_for("consumer.vault"))
 
     starting_value_usd = amount * price
+    live_block_reason = _fresh_live_connection_block_reason(user, connection)
+    if live_block_reason:
+        flash(live_block_reason, "danger")
+        return redirect(url_for("settings.connection_provider", provider=connection.provider, connection_id=connection.id))
+
     allowed_symbols = _requested_allowed_symbols()
     selection = get_service("vault_strategy_selector").select(
         asset,
@@ -768,6 +774,31 @@ def _live_connection_required() -> bool:
 
 def _active_trading_connection(user) -> TradingConnection | None:
     return get_service("trading_connections").active_tradable_connection(user.id)
+
+
+def _fresh_live_connection_block_reason(user, connection: TradingConnection | None) -> str | None:
+    if not _live_connection_required():
+        return None
+    if connection is None:
+        return "Connect your trading account before starting a live vault cycle."
+    service = get_service("trading_connections")
+    try:
+        snapshot = service.account_snapshot(user.id, "live", connection.id)
+        alerts = [str(alert) for alert in (snapshot.alerts or []) if str(alert).strip()]
+        can_trade = bool(service.can_trade(user.id, "live", connection.id)) and not alerts
+        health = build_connection_health(
+            connection,
+            can_trade=can_trade,
+            alerts=alerts,
+            failure_reason="; ".join(alerts) if alerts else None,
+        )
+    except Exception as exc:  # noqa: BLE001
+        health = build_connection_health(connection, can_trade=False, alerts=[str(exc)], failure_reason=str(exc))
+    store_connection_health(connection, health)
+    commit_with_retry()
+    if not bool(health.get("can_trade", False)):
+        return operator_connection_message(health)
+    return None
 
 
 def _active_cycle(user) -> VaultCycle | None:
@@ -1382,6 +1413,8 @@ def _cycle_summary(cycle: VaultCycle) -> dict[str, object]:
     summary = {
         "cycle_id": cycle.id,
         "status": cycle.status,
+        "execution_substatus": cycle.execution_substatus,
+        "no_order_failure_reason": cycle.selection_metadata.get("no_order_failure_reason") or cycle.validation_failure_reason,
         "deposit_asset": cycle.deposit_asset,
         "deposit_amount": float(cycle.deposit_amount or 0.0),
         "settlement_asset": cycle.settlement_asset,

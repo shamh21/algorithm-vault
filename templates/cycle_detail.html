@@ -32,6 +32,12 @@
       <div><dt>Reward/Risk</dt><dd>{{ "%.2f"|format(summary.get("risk_reward", 0)) }}</dd></div>
       <div><dt>Slippage</dt><dd>{{ "%.2f"|format(summary.get("slippage_bps", 0)) }} bps</dd></div>
     </dl>
+    {% if summary.get("no_order_failure_reason") %}
+      <div class="risk-note danger-note">
+        <strong>No live order submitted</strong>
+        <span>{{ summary.get("no_order_failure_reason") }}</span>
+      </div>
+    {% endif %}
   </article>
 
   <article class="card">
@@ -99,7 +105,11 @@
           <td>{{ "%.2f"|format(order.get("edge_score", 0)) }} bps<br><span class="muted">{{ "%.0f"|format(order.get("signal_confidence", 0) * 100) }}% {{ order.get("market_source") or "" }}</span></td>
         </tr>
       {% else %}
-        <tr><td colspan="11">No cycle orders recorded yet.</td></tr>
+        <tr>
+          <td colspan="11">
+            No live order submitted{% if summary.get("no_order_failure_reason") %}: {{ summary.get("no_order_failure_reason") }}{% else %}.{% endif %}
+          </td>
+        </tr>
       {% endfor %}
     </tbody>
   </table>
