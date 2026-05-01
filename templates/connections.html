@@ -78,8 +78,8 @@
         {% endfor %}
 
         <div class="risk-note">
-          <strong>Never enter seed phrases or wallet private keys.</strong>
-          <span>Exchange and permissioned trading secrets are encrypted. Wallet providers require public addresses and explicit delegation limits.</span>
+          <strong>Never enter seed phrases.</strong>
+          <span>Exchange API secrets are encrypted. For Hyperliquid, use an API wallet/agent secret only, not your recovery phrase or main wallet seed.</span>
         </div>
         <button type="submit" class="primary" data-loading-label="Saving...">
           {{ "Save Draft" if not selected_spec.tradable else "Save Connection" }}

@@ -92,7 +92,7 @@ def test_trading_connection_rejects_seed_phrases_and_cross_user_access(app) -> N
     service = app.extensions["services"]["trading_connections"]
     connection = _create_connection(app, owner)
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="Hyperliquid API wallet/agent secret"):
         service.create_or_update(
             user_id=owner.id,
             provider="hyperliquid",

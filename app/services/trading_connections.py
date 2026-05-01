@@ -39,14 +39,15 @@ PROVIDER_SPECS: dict[str, dict[str, Any]] = {
         "tradable": True,
         "verification_supported": True,
         "summary": "Live-ready perpetuals connection for balances, positions, orders, and vault execution.",
-        "setup_hint": "Create or use an API wallet with trading permissions, then enter the secret and account address.",
+        "setup_hint": "Create or use a Hyperliquid API wallet/agent with trading permissions, then enter the API wallet secret and account address. Never enter a recovery phrase.",
         "help_steps": [
-            "Create an API wallet with trading permission only.",
+            "Create an API wallet/agent with trading permission only.",
             "Do not enable withdrawal permission.",
-            "Enter the API secret and account address, then verify.",
+            "Enter the API wallet/agent private key or secret, plus the account address, then verify.",
+            "Do not paste a seed phrase or your main wallet recovery phrase.",
         ],
         "fields": [
-            {"name": "api_secret", "label": "API Secret", "type": "password", "required": True, "placeholder": "Encrypted at rest"},
+            {"name": "api_secret", "label": "API Wallet Secret", "type": "password", "required": True, "placeholder": "0x... API wallet/agent secret, encrypted at rest"},
             {"name": "wallet_address", "label": "Account Address", "type": "text", "required": True, "placeholder": "0x..."},
             {"name": "api_key", "label": "Account Label", "type": "text", "required": False, "placeholder": "Optional label or address"},
         ],
@@ -592,7 +593,10 @@ class TradingConnectionService:
     def _reject_seed_phrase(value: str, label: str) -> None:
         words = re.findall(r"[A-Za-z]+", str(value or ""))
         if len(words) >= 12:
-            raise ValueError(f"{label} looks like a seed phrase. Seed phrases are not accepted.")
+            raise ValueError(
+                f"{label} looks like a seed phrase. Seed phrases are not accepted. "
+                "Use an exchange API secret or a Hyperliquid API wallet/agent secret instead."
+            )
 
     @staticmethod
     def _fernet() -> Fernet:
