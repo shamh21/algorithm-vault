@@ -36,6 +36,19 @@ class _BuyHoldWithSignalStopStrategy:
         return Signal("buy", "open", timeframe, 99.5, 101.0, 0.2, {"signal_timestamp": candles[-1]["timestamp"]})
 
 
+class _BuyAndHoldStrategy:
+    parameters: dict[str, Any] = {}
+
+    def __init__(self) -> None:
+        self.opened = False
+
+    def generate_signal(self, *, symbol: str, timeframe: str, candles: list[dict[str, Any]], position: dict[str, Any]) -> Signal:
+        if position.get("quantity", 0.0) or self.opened:
+            return Signal("hold", "hold", timeframe, None, None, 0.0)
+        self.opened = True
+        return Signal("buy", "open", timeframe, None, None, 0.2)
+
+
 class _SellThenReduceStrategy:
     parameters: dict[str, Any] = {}
 
@@ -204,3 +217,17 @@ def test_backtest_handles_short_pnl_and_signal_reduce() -> None:
     assert result["trade_count"] > 0
     assert any(trade["direction"] == "short" for trade in result["trades"])
     assert result["realized_pnl"] > 0
+
+
+def test_backtest_liquidates_open_position_at_end_with_funding_cost() -> None:
+    engine = BacktestEngine({}, _CustomRegistry(_BuyAndHoldStrategy()), _MarketData())
+    result = engine.run(
+        _config(stop_loss_pct=0.5, take_profit_pct=0.5, slippage_bps=0.0, fee_bps=0.0, funding_cost_bps=8.0),
+        _candles(40),
+    )
+
+    assert result["trade_count"] == 1
+    assert result["trades"][0]["reason"] == "final_position_liquidation"
+    assert result["trades"][0]["funding_fee"] > 0
+    assert result["funding_cost_estimate"] == result["trades"][0]["funding_fee"]
+    assert result["unrealized_pnl"] == 0

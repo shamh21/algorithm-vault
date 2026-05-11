@@ -3,20 +3,34 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-    <meta name="theme-color" content="#0b0f14">
+    <meta name="theme-color" content="#06080d">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="Algorithm Vault">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    {% set asset_v = current_app.config.get('ASSET_VERSION', '1') %}
     <title>{% block title %}Algorithm Vault{% endblock %}</title>
-    <link rel="preload" as="style" href="{{ url_for('static', filename='css/app.css') }}">
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+    <link rel="manifest" href="{{ url_for('static', filename='manifest.webmanifest') }}">
+    <link rel="icon" type="image/png" sizes="192x192" href="{{ url_for('static', filename='icons/icon-192.png') }}">
+    <link rel="icon" type="image/png" sizes="512x512" href="{{ url_for('static', filename='icons/icon-512.png') }}">
+    <link rel="apple-touch-icon" sizes="180x180" href="{{ url_for('static', filename='icons/apple-touch-icon.png') }}">
+    <link rel="preload" as="style" href="{{ url_for('static', filename='css/app.css') }}?v={{ asset_v }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}?v={{ asset_v }}">
     {% block page_styles %}{% endblock %}
   </head>
   <body class="app-body mode-{{ nav_mode|default('live') }}" data-safe-area>
     <header class="site-header app-topbar" data-app-topbar>
-      <a class="brand-lockup" href="{{ url_for('consumer.home') }}" aria-label="Go to home">
+      <a class="brand-lockup" href="{% if admin_authenticated %}{{ url_for('dashboard.index') }}{% else %}{{ url_for('consumer.home') }}{% endif %}" aria-label="Go to home">
         <span class="brand-mark" aria-hidden="true">AV</span>
         <span class="brand-copy">
           <span class="eyebrow">Algorithm Vault</span>
-          <strong>Crypto Wallet</strong>
-          <small>Automated allocation cycles</small>
+          {% if admin_authenticated %}
+            <strong>Admin Console</strong>
+            <small>Operational controls</small>
+          {% else %}
+            <strong>Crypto Wallet</strong>
+            <small>Automated allocation cycles</small>
+          {% endif %}
         </span>
       </a>
 
@@ -33,13 +47,31 @@
 
       <nav class="nav app-nav" id="primary-navigation" data-primary-nav aria-label="Primary navigation">
         {% if current_user %}
-          <a href="{{ url_for('consumer.home') }}" class="{% if request.endpoint == 'consumer.home' %}active{% endif %}">Home</a>
-          <a href="{{ url_for('consumer.wallet') }}" class="{% if request.endpoint == 'consumer.wallet' %}active{% endif %}">Wallet</a>
-          <a href="{{ url_for('consumer.vault') }}" class="{% if request.endpoint in ['consumer.vault', 'consumer.start_cycle'] %}active{% endif %}">Vault</a>
-          <a href="{{ url_for('consumer.activity') }}" class="{% if request.endpoint == 'consumer.activity' %}active{% endif %}">Activity</a>
-          <a href="{{ url_for('settings.index') }}" class="{% if request.endpoint and request.endpoint.startswith('settings') %}active{% endif %}">Settings</a>
+          <a href="{{ url_for('consumer.home') }}" class="{% if request.endpoint == 'consumer.home' %}active{% endif %}">
+            <span class="topnav-icon" aria-hidden="true">⌂</span>
+            <span>Home</span>
+          </a>
+          <a href="{{ url_for('consumer.wallet') }}" class="{% if request.endpoint == 'consumer.wallet' %}active{% endif %}">
+            <span class="topnav-icon" aria-hidden="true">◈</span>
+            <span>Wallet</span>
+          </a>
+          <a href="{{ url_for('consumer.vault') }}" class="{% if request.endpoint in ['consumer.vault', 'consumer.start_cycle'] %}active{% endif %}">
+            <span class="topnav-icon" aria-hidden="true">⧉</span>
+            <span>Vault</span>
+          </a>
+          <a href="{{ url_for('consumer.activity') }}" class="{% if request.endpoint == 'consumer.activity' %}active{% endif %}">
+            <span class="topnav-icon" aria-hidden="true">⧉</span>
+            <span>Activity</span>
+          </a>
+          <a href="{{ url_for('settings.index') }}" class="{% if request.endpoint and request.endpoint.startswith('settings') %}active{% endif %}">
+            <span class="topnav-icon" aria-hidden="true">⚙</span>
+            <span>Settings</span>
+          </a>
           {% if admin_authenticated %}
-            <a href="{{ url_for('dashboard.index') }}" class="advanced-only {% if request.endpoint and (request.endpoint.startswith('dashboard') or request.endpoint.startswith('orders') or request.endpoint.startswith('backtests') or request.endpoint.startswith('panic') or request.endpoint.startswith('admin')) %}active{% endif %}">Admin</a>
+            <a href="{{ url_for('dashboard.index') }}" class="advanced-only {% if request.endpoint and (request.endpoint.startswith('dashboard') or request.endpoint.startswith('orders') or request.endpoint.startswith('backtests') or request.endpoint.startswith('panic') or request.endpoint.startswith('admin')) %}active{% endif %}">
+              <span class="topnav-icon" aria-hidden="true">◈</span>
+              <span>Admin</span>
+            </a>
           {% endif %}
           <form method="post" action="{{ url_for('auth.logout') }}" class="nav-form">
             {{ csrf_input()|safe }}
@@ -93,16 +125,24 @@
 
     {% if current_user %}
       <nav class="bottom-nav" aria-label="Mobile navigation">
-        <a href="{{ url_for('consumer.home') }}" class="{% if request.endpoint == 'consumer.home' %}active{% endif %}"><span>Home</span></a>
-        <a href="{{ url_for('consumer.wallet') }}" class="{% if request.endpoint == 'consumer.wallet' %}active{% endif %}"><span>Wallet</span></a>
-        <a href="{{ url_for('consumer.vault') }}" class="{% if request.endpoint in ['consumer.vault', 'consumer.start_cycle'] %}active{% endif %}"><span>Vault</span></a>
-        <a href="{{ url_for('consumer.activity') }}" class="{% if request.endpoint == 'consumer.activity' %}active{% endif %}"><span>Activity</span></a>
-        <a href="{{ url_for('settings.index') }}" class="{% if request.endpoint and request.endpoint.startswith('settings') %}active{% endif %}"><span>Settings</span></a>
+        {% if admin_authenticated %}
+          <a href="{{ url_for('dashboard.index') }}" class="{% if request.endpoint and request.endpoint.startswith('dashboard') %}active{% endif %}"><span class="nav-icon" aria-hidden="true">📈</span><span>Dashboard</span></a>
+          <a href="{{ url_for('orders.index') }}" class="{% if request.endpoint and request.endpoint.startswith('orders') %}active{% endif %}"><span class="nav-icon" aria-hidden="true">🧾</span><span>Orders</span></a>
+          <a href="{{ url_for('backtests.index') }}" class="{% if request.endpoint and request.endpoint.startswith('backtests') %}active{% endif %}"><span class="nav-icon" aria-hidden="true">📊</span><span>Backtests</span></a>
+          <a href="{{ url_for('panic.index') }}" class="{% if request.endpoint and request.endpoint.startswith('panic') %}active{% endif %}"><span class="nav-icon" aria-hidden="true">⚠</span><span>Panic</span></a>
+          <a href="{{ url_for('admin.risk') }}" class="{% if request.endpoint and request.endpoint.startswith('admin') %}active{% endif %}"><span class="nav-icon" aria-hidden="true">🛡</span><span>Risk</span></a>
+        {% else %}
+          <a href="{{ url_for('consumer.home') }}" class="{% if request.endpoint == 'consumer.home' %}active{% endif %}"><span class="nav-icon" aria-hidden="true">⌂</span><span>Home</span></a>
+          <a href="{{ url_for('consumer.wallet') }}" class="{% if request.endpoint == 'consumer.wallet' %}active{% endif %}"><span class="nav-icon" aria-hidden="true">◈</span><span>Wallet</span></a>
+          <a href="{{ url_for('consumer.vault') }}" class="{% if request.endpoint in ['consumer.vault', 'consumer.start_cycle'] %}active{% endif %}"><span class="nav-icon" aria-hidden="true">◈</span><span>Vault</span></a>
+          <a href="{{ url_for('consumer.activity') }}" class="{% if request.endpoint == 'consumer.activity' %}active{% endif %}"><span class="nav-icon" aria-hidden="true">🧾</span><span>Activity</span></a>
+          <a href="{{ url_for('settings.index') }}" class="{% if request.endpoint and request.endpoint.startswith('settings') %}active{% endif %}"><span class="nav-icon" aria-hidden="true">⚙</span><span>Settings</span></a>
+        {% endif %}
       </nav>
     {% endif %}
 
     <script>
-      (() => {
+      document.addEventListener("DOMContentLoaded", () => {
         const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
         document.body.classList.toggle("reduced-motion", prefersReducedMotion);
         const toggle = document.querySelector("[data-nav-toggle]");
@@ -152,13 +192,43 @@
         });
 
         if (!prefersReducedMotion) {
-          document.querySelectorAll(".card, .wallet-card, .vault-card, .banner, [data-flash-message]").forEach((element, index) => {
-            element.style.animationDelay = `${Math.min(index * 35, 180)}ms`;
-            element.classList.add("ui-rise-in");
-          });
+          const revealTargets = Array.from(document.querySelectorAll(".card, .wallet-card, .vault-card, .banner, [data-flash-message]")).slice(0, 18);
+          if (window.IntersectionObserver) {
+            const observer = new IntersectionObserver((entries) => {
+              entries.forEach((entry) => {
+                if (!entry.isIntersecting) return;
+                const element = entry.target;
+                const index = revealTargets.indexOf(element);
+                element.style.animationDelay = `${Math.min(Math.max(index, 0) * 35, 180)}ms`;
+                element.classList.add("ui-rise-in");
+                observer.unobserve(element);
+              });
+            }, { rootMargin: "24px 0px" });
+            revealTargets.forEach((element) => observer.observe(element));
+          } else {
+            revealTargets.forEach((element, index) => {
+              element.style.animationDelay = `${Math.min(index * 35, 180)}ms`;
+              element.classList.add("ui-rise-in");
+            });
+          }
         }
-      })();
+
+        const registerServiceWorker = () => {
+          const supportsServiceWorker = "serviceWorker" in navigator;
+          const localContext = ["localhost", "127.0.0.1", "::1"].includes(window.location.hostname);
+          if (!supportsServiceWorker || !(window.isSecureContext || localContext)) {
+            return;
+          }
+
+          window.addEventListener("load", () => {
+            navigator.serviceWorker.register("{{ url_for('static', filename='js/sw.js') }}?v={{ asset_v }}").catch(() => {});
+          }, { once: true });
+        };
+
+        registerServiceWorker();
+      });
     </script>
+    <script defer src="{{ url_for('static', filename='js/responsive-tables.js') }}?v={{ asset_v }}"></script>
     {% block page_scripts %}{% endblock %}
   </body>
 </html>

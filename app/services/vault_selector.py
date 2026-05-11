@@ -8,11 +8,12 @@ from typing import Any
 
 from ..features.fibonacci import FibonacciService
 from ..features.multi_timeframe import MultiTimeframeConfluenceService
-from ..ml.online_ranker import OnlineRanker, extract_features, horizon_from_duration
+from ..ml.online_ranker import ONE_H10_HORIZON, OnlineRanker, extract_features, horizon_from_duration
 from ..models import StrategyRanking
 from ..runtime import market_mode_for
 from .ensemble_allocator import DURATION_ENSEMBLE_VERSION, ENSEMBLE_VERSION, EnhancedEnsembleAllocator
 from .net_roi import net_roi_diagnostics, net_roi_v2_diagnostics, one_hour_edge_v2_diagnostics
+from .provider_assets import normalize_provider, provider_collateral_asset, provider_feature_context
 
 
 SUPPORTED_VAULT_TIMEFRAMES = {"1m", "5m", "15m", "1h"}
@@ -57,6 +58,7 @@ class VaultStrategySelector:
         self.market_scanner = market_scanner
         self.market_structure = market_structure
         self.pair_screening = pair_screening
+        self.ml_decision_engine = None
         self.fibonacci_service = FibonacciService()
         self.multi_timeframe_confluence = MultiTimeframeConfluenceService(market_data, config, self.fibonacci_service)
         self.enhanced_allocator = EnhancedEnsembleAllocator(config, self.online_ranker)
@@ -68,19 +70,24 @@ class VaultStrategySelector:
         current_mode: str,
         allocation_amount_usd: float = 0.0,
         allowed_symbols: list[str] | None = None,
+        provider: str | None = None,
     ) -> VaultSelection:
         asset = str(asset or "").upper()
         current_mode = str(current_mode or "live").lower()
+        provider_key = normalize_provider(provider)
+        collateral_asset = provider_collateral_asset(provider_key)
 
         symbol = self._resolve_symbol(asset, allowed_symbols)
         base = self._base_profile(duration_hours)
         base["allowed_symbols"] = self._normalize_symbols(allowed_symbols)
         base["duration_hours"] = duration_hours
+        base["provider"] = provider_key
+        base["collateral_asset"] = collateral_asset
         market_mode = market_mode_for(current_mode)
         timeframe = self._normalize_timeframe(str(base["timeframe"]))
         regime = self._market_regime(symbol, timeframe, market_mode)
 
-        ranking = self._best_ranking(symbol, base, regime.get("preferred_strategy"))
+        ranking = self._best_ranking(symbol, base, regime.get("preferred_strategy"), provider=provider_key)
         if ranking is not None:
             base["strategy_name"] = ranking.strategy_name
             base["timeframe"] = self._normalize_timeframe(ranking.timeframe)
@@ -117,7 +124,9 @@ class VaultStrategySelector:
         ranking_one_hour_edge_payload = self._ranking_one_hour_edge_payload(ranking)
 
         metadata: dict[str, Any] = {
+            **provider_feature_context(provider_key),
             "asset": asset,
+            "collateral_asset": collateral_asset,
             "symbol": symbol,
             "duration_hours": duration_hours,
             "duration_bucket": EnhancedEnsembleAllocator.duration_bucket(duration_hours),
@@ -138,6 +147,7 @@ class VaultStrategySelector:
             "is_realtime_market": bool(realtime.get("is_realtime", False)),
             "recent_trade_count": len(realtime.get("recent_trades") or []),
             "optimizer_ranking_id": ranking.id if ranking else None,
+            "optimizer_provider": normalize_provider(getattr(ranking, "provider", provider_key)) if ranking else None,
             "optimizer_score": float(ranking.score) if ranking else None,
             "optimizer_profile": ranking.profile if ranking else base.get("optimizer_profile"),
             "optimizer_recent_1h_return": float(ranking.recent_1h_return) if ranking else None,
@@ -167,6 +177,37 @@ class VaultStrategySelector:
             "preferred_strategy": regime.get("preferred_strategy"),
             "allowed_symbols": base["allowed_symbols"],
         }
+        if duration_hours <= 1:
+            target_roi_pct = self._safe_float(
+                parameters.get("target_roi_pct", self.config.get("ML_TARGET_ROI_1H10_PCT", self.config.get("ONE_H10_TARGET_ROI_PCT", 1000.0))),
+                1000.0,
+            )
+            target_multiplier = 10.0
+            metadata.update(
+                {
+                    "vault_cycle_name": "1H10",
+                    "algorithm_profile": "1H10",
+                    "ml_horizon": ONE_H10_HORIZON,
+                    "one_h10_vault": True,
+                    "target_roi_pct": target_roi_pct,
+                    "target_multiplier": target_multiplier,
+                    "target_return_objective": "one_h10",
+                    "target_amount_usd": float(allocation_amount_usd or 0.0) * target_multiplier,
+                    "target_copy": "1H10 aims to 10x the user's input amount in 1 hour.",
+                    "non_guarantee_notice": "The 10x figure is a strategy objective, not a guaranteed return.",
+                }
+            )
+            parameters.update(
+                {
+                    "vault_cycle_name": "1H10",
+                    "algorithm_profile": "1H10",
+                    "ml_horizon": ONE_H10_HORIZON,
+                    "one_h10_vault": True,
+                    "target_roi_pct": target_roi_pct,
+                    "target_multiplier": target_multiplier,
+                    "target_amount_usd": float(allocation_amount_usd or 0.0) * target_multiplier,
+                }
+            )
         if bool(parameters.get("high_upside_profile", False)):
             metadata["high_upside_profile"] = True
             metadata["selection_reasons"].append("high-upside profile tag requires explicit live caps and pre-live validation")
@@ -199,6 +240,26 @@ class VaultStrategySelector:
             volatility_pct,
             mode,
         )
+        allocation_decision = self._allocation_ml_decision(
+            ranking=ranking,
+            parameters=parameters,
+            metadata=metadata,
+            duration_hours=duration_hours,
+        )
+        if allocation_decision:
+            metadata["ml_decision"] = allocation_decision
+            metadata["ml_allocator_decision"] = allocation_decision
+            if (
+                bool(allocation_decision.get("ready", False))
+                and bool(self.config.get("ML_ALLOW_ALLOCATION_OVERRIDE", True))
+                and bool(self.config.get("ML_DETERMINISTIC_SAFETY_GATES_REQUIRED", True))
+            ):
+                sizing_score = self._safe_float((allocation_decision.get("raw") or {}).get("sizing_score"), 1.0)
+                if 0 < sizing_score < 1:
+                    parameters["risk_fraction"] = min(
+                        parameters["risk_fraction"],
+                        max(self._safe_float(self.config.get("VAULT_MIN_RISK_FRACTION"), 0.005), parameters["risk_fraction"] * sizing_score),
+                    )
         legs = self._allocation_legs(
             base=base,
             selected_ranking=ranking,
@@ -209,6 +270,7 @@ class VaultStrategySelector:
             mode=mode,
             market_mode=market_mode,
         )
+        legs = [self._provider_tagged_leg(leg, provider_key, collateral_asset) for leg in legs]
         metadata["vault_leg_count"] = len(legs)
 
         return VaultSelection(
@@ -233,12 +295,20 @@ class VaultStrategySelector:
             if bool(self.config.get("EXTREME_ROI_ENABLED", False)):
                 optimizer_profiles.insert(0, "extreme_roi_experimental")
             return {
-                "profile": "Aggressive",
+                "profile": "1H10",
                 "optimizer_profile": "aggressive_1h",
                 "optimizer_profiles": optimizer_profiles,
                 "strategy_name": "scalping",
                 "timeframe": "1m",
                 "parameters": {
+                    "one_h10_vault": True,
+                    "ml_horizon": ONE_H10_HORIZON,
+                    "objective": "one_h10",
+                    "high_upside_profile": True,
+                    "target_roi_pct": self._safe_float(
+                        self.config.get("ML_TARGET_ROI_1H10_PCT", self.config.get("ONE_H10_TARGET_ROI_PCT", 1000.0)),
+                        1000.0,
+                    ),
                     "momentum_lookback": 4,
                     "minimum_move_pct": 0.0015,
                     "risk_fraction": self._default_risk_fraction(),
@@ -246,7 +316,7 @@ class VaultStrategySelector:
                     "take_profit_pct": 0.0045,
                     "leverage": 1.0,
                 },
-                "reasons": ["one hour duration uses short-horizon allocation with tight risk controls"],
+                "reasons": ["1H10 aims to 10x the user's input amount in 1 hour while remaining risk-gated"],
             }
 
         if duration_hours <= 24:
@@ -305,13 +375,16 @@ class VaultStrategySelector:
         symbol: str,
         base: dict[str, Any],
         preferred_strategy: str | None = None,
+        provider: str | None = None,
     ) -> StrategyRanking | None:
         optimizer_profiles = list(base.get("optimizer_profiles") or [base.get("optimizer_profile")])
         profile = str(base.get("profile", ""))
         duration_hours = int(base.get("duration_hours", 0) or 0)
+        provider_key = normalize_provider(provider or base.get("provider"))
 
         for optimizer_profile in optimizer_profiles:
             query = StrategyRanking.query.filter_by(symbol=symbol, rejected=False)
+            query = self._provider_filtered_query(query, provider_key)
 
             if optimizer_profile:
                 query = query.filter_by(profile=str(optimizer_profile))
@@ -326,6 +399,7 @@ class VaultStrategySelector:
             ]
             accepted.sort(
                 key=lambda row: (
+                    self._provider_match_score(row, provider_key),
                     self._duration_match_score(row.lock_duration_hours, duration_hours),
                     self._one_hour_candidate_score(row, duration_hours)
                     if optimizer_profile in {"aggressive_1h", "extreme_roi_experimental"}
@@ -339,6 +413,25 @@ class VaultStrategySelector:
                 return accepted[0]
 
         return None
+
+    @staticmethod
+    def _provider_filtered_query(query: Any, provider: str | None) -> Any:
+        provider_key = normalize_provider(provider)
+        if provider_key and provider_key != "global":
+            return query.filter(StrategyRanking.provider.in_([provider_key, "global"]))
+        return query
+
+    @staticmethod
+    def _provider_match_score(ranking: StrategyRanking, provider: str | None) -> int:
+        provider_key = normalize_provider(provider)
+        if not provider_key or provider_key == "global":
+            return 1
+        ranking_provider = normalize_provider(getattr(ranking, "provider", "global"))
+        if ranking_provider == provider_key:
+            return 2
+        if ranking_provider == "global":
+            return 1
+        return 0
 
     def _ordered_rankings_query(self, query: Any, optimizer_profile: Any) -> Any:
         if str(optimizer_profile or "") == "aggressive_1h":
@@ -359,6 +452,11 @@ class VaultStrategySelector:
         if optimizer_profile in {"aggressive_1h", "extreme_roi_experimental"}:
             if str(ranking.rejection_reason or "").strip():
                 return False
+            if self._is_high_upside_ranking(ranking):
+                if not self._ranking_has_required_exits(ranking):
+                    return False
+                if bool(self.config.get("HIGH_UPSIDE_REQUIRE_PROMOTED_ML", True)) and not self._ranking_has_promoted_ml(ranking):
+                    return False
             if self._safe_float(ranking.net_return_after_costs) < 0:
                 return False
             if self._safe_float(ranking.recent_1h_return) <= 0:
@@ -453,6 +551,37 @@ class VaultStrategySelector:
             return False
 
         return True
+
+    @staticmethod
+    def _is_high_upside_ranking(ranking: StrategyRanking) -> bool:
+        params = ranking.parameters if isinstance(ranking.parameters, dict) else {}
+        value = params.get("high_upside_profile", False)
+        return value is True or str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+    def _ranking_has_required_exits(self, ranking: StrategyRanking) -> bool:
+        params = ranking.parameters if isinstance(ranking.parameters, dict) else {}
+        stop_loss = max(
+            self._safe_float(params.get("stop_loss_pct")),
+            self._safe_float(params.get("stop_loss")),
+            self._safe_float(params.get("stop_loss_price")),
+        )
+        take_profit = max(
+            self._safe_float(params.get("take_profit_pct")),
+            self._safe_float(params.get("take_profit")),
+            self._safe_float(params.get("take_profit_price")),
+        )
+        return stop_loss > 0 and take_profit > 0
+
+    def _ranking_has_promoted_ml(self, ranking: StrategyRanking) -> bool:
+        params = ranking.parameters if isinstance(ranking.parameters, dict) else {}
+        explanation = ranking.ml_explanation if isinstance(ranking.ml_explanation, dict) else {}
+        scanner = explanation.get("scanner") if isinstance(explanation.get("scanner"), dict) else {}
+        return str(
+            params.get("offline_ml_status")
+            or scanner.get("offline_ml_status")
+            or explanation.get("offline_ml_status")
+            or ""
+        ).lower() == "promoted"
 
     def _one_hour_candidate_score(self, ranking: StrategyRanking, duration_hours: int) -> float:
         one_hour_edge = self._ranking_one_hour_edge_payload(ranking)
@@ -673,6 +802,7 @@ class VaultStrategySelector:
         roi_v2_payload = self._ranking_net_roi_v2_payload(ranking)
         features = extract_features(
             {
+                **provider_feature_context(getattr(ranking, "provider", "global")),
                 "strategy_name": ranking.strategy_name,
                 "symbol": ranking.symbol,
                 "timeframe": ranking.timeframe,
@@ -714,6 +844,64 @@ class VaultStrategySelector:
             }
         )
         return base_score + self._safe_float(self.config.get("ML_SCORE_WEIGHT"), 0.15) * self.online_ranker.predict_score(features, horizon)
+
+    @staticmethod
+    def _provider_tagged_leg(leg: dict[str, Any], provider: str, collateral_asset: str) -> dict[str, Any]:
+        provider_key = normalize_provider(provider)
+        collateral = str(collateral_asset or provider_collateral_asset(provider_key)).upper()
+        tagged = dict(leg or {})
+        tagged["provider"] = provider_key
+        tagged["execution_venue"] = provider_key
+        tagged["collateral_asset"] = collateral
+        params = dict(tagged.get("parameters") or {})
+        params.update(provider_feature_context(provider_key))
+        params["collateral_asset"] = collateral
+        tagged["parameters"] = params
+        return tagged
+
+    def _allocation_ml_decision(
+        self,
+        *,
+        ranking: StrategyRanking | None,
+        parameters: dict[str, Any],
+        metadata: dict[str, Any],
+        duration_hours: int,
+    ) -> dict[str, Any]:
+        if self.ml_decision_engine is None:
+            return {}
+        if not bool(self.config.get("ML_ALL_AREAS_ENABLED", False)):
+            return {}
+        horizon = str(parameters.get("ml_horizon") or metadata.get("ml_horizon") or horizon_from_duration(duration_hours or 1)).lower()
+        ranking_payload = {
+            "ranking_id": ranking.id,
+            "score": ranking.score,
+            "net_return_after_costs": ranking.net_return_after_costs,
+            "profit_factor": ranking.profit_factor,
+            "trade_count": ranking.trade_count,
+            "max_drawdown": ranking.max_drawdown,
+        } if ranking is not None else {}
+        try:
+            return dict(
+                self.ml_decision_engine.decision(
+                    "pytorch_allocator",
+                    {
+                        **ranking_payload,
+                        **dict(parameters or {}),
+                        **dict(metadata or {}),
+                        "horizon": horizon,
+                        "duration_hours": duration_hours,
+                    },
+                    horizon=horizon,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "family": "pytorch_allocator",
+                "ready": False,
+                "action": "hold",
+                "blockers": [str(exc)],
+                "audit_metadata": {"status": "ml_allocator_decision_error"},
+            }
 
     def _allocation_legs(
         self,
@@ -1482,6 +1670,7 @@ class VaultStrategySelector:
         duration_hours = int(base.get("duration_hours", 0) or 0)
         for optimizer_profile in optimizer_profiles:
             query = StrategyRanking.query.filter(StrategyRanking.symbol.in_(symbols), StrategyRanking.rejected.is_(False))
+            query = self._provider_filtered_query(query, base.get("provider"))
             if optimizer_profile:
                 query = query.filter_by(profile=str(optimizer_profile))
             else:
@@ -1495,6 +1684,7 @@ class VaultStrategySelector:
             ]
             accepted.sort(
                 key=lambda row: (
+                    self._provider_match_score(row, base.get("provider")),
                     self._duration_match_score(row.lock_duration_hours, duration_hours),
                     self._one_hour_candidate_score(row, duration_hours) if optimizer_profile == "aggressive_1h" else 0.0,
                     self._ranking_net_roi_score(row),
@@ -1525,6 +1715,7 @@ class VaultStrategySelector:
         duration_hours = int(base.get("duration_hours", 0) or 0)
         for optimizer_profile in optimizer_profiles:
             query = StrategyRanking.query.filter(StrategyRanking.symbol.in_(symbols), StrategyRanking.rejected.is_(False))
+            query = self._provider_filtered_query(query, base.get("provider"))
             if optimizer_profile:
                 query = query.filter_by(profile=str(optimizer_profile))
             else:
@@ -1538,6 +1729,7 @@ class VaultStrategySelector:
             ]
             accepted.sort(
                 key=lambda row: (
+                    self._provider_match_score(row, base.get("provider")),
                     self._duration_match_score(row.lock_duration_hours, duration_hours),
                     self._one_hour_candidate_score(row, duration_hours) if optimizer_profile == "aggressive_1h" else 0.0,
                     self._ranking_net_roi_score(row),
@@ -1575,6 +1767,7 @@ class VaultStrategySelector:
                 StrategyRanking.strategy_name.in_(library),
                 StrategyRanking.rejected.is_(False),
             )
+            query = self._provider_filtered_query(query, base.get("provider"))
             if optimizer_profile:
                 query = query.filter_by(profile=str(optimizer_profile))
             else:
@@ -1591,9 +1784,13 @@ class VaultStrategySelector:
                 if self._ranking_acceptable(ranking, optimizer_profile, profile)
             ]
             accepted.sort(
-                key=lambda row: self._max_return_ranking_key(row, duration_hours)
+                key=lambda row: (
+                    self._provider_match_score(row, base.get("provider")),
+                    *self._max_return_ranking_key(row, duration_hours),
+                )
                 if bool(self.config.get("MAX_RETURN_OPTIMIZER_ENABLED", False))
                 else (
+                    self._provider_match_score(row, base.get("provider")),
                     self._duration_match_score(row.lock_duration_hours, duration_hours),
                     self._ranking_net_roi_score(row),
                     self._safe_float(row.net_return_after_costs),
@@ -1625,6 +1822,7 @@ class VaultStrategySelector:
 
         for optimizer_profile in optimizer_profiles:
             query = StrategyRanking.query.filter(StrategyRanking.symbol.in_(symbols), StrategyRanking.rejected.is_(False))
+            query = self._provider_filtered_query(query, base.get("provider"))
             if optimizer_profile:
                 query = query.filter_by(profile=str(optimizer_profile))
             else:
@@ -1639,6 +1837,7 @@ class VaultStrategySelector:
             ]
             accepted.sort(
                 key=lambda row: (
+                    self._provider_match_score(row, base.get("provider")),
                     self._duration_match_score(row.lock_duration_hours, duration_hours),
                     self._one_hour_candidate_score(row, duration_hours),
                     self._ranking_net_roi_score(row),
@@ -1674,6 +1873,7 @@ class VaultStrategySelector:
                 StrategyRanking.strategy_name.in_(library),
                 StrategyRanking.rejected.is_(False),
             )
+            query = self._provider_filtered_query(query, base.get("provider"))
             if optimizer_profile:
                 query = query.filter_by(profile=str(optimizer_profile))
             else:
@@ -1687,6 +1887,7 @@ class VaultStrategySelector:
             ]
             accepted.sort(
                 key=lambda row: (
+                    self._provider_match_score(row, base.get("provider")),
                     self._duration_match_score(row.lock_duration_hours, duration_hours),
                     self._ranking_net_roi_score(row),
                     self._safe_float(row.sharpe_like),
@@ -1799,7 +2000,7 @@ class VaultStrategySelector:
                 hard_cap,
                 self._safe_float(self.config.get("AGGRESSIVE_MAX_LIVE_LEVERAGE"), 3.0),
             )
-        if profile != "Aggressive":
+        if profile not in {"Aggressive", "1H10"}:
             cap = min(cap, 2.0)
         if volatility_pct >= self._safe_float(self.config.get("VAULT_HIGH_VOLATILITY_PCT"), 2.5):
             cap = min(cap, 1.5)
@@ -1970,10 +2171,10 @@ class VaultStrategySelector:
         metadata: dict[str, Any],
         volatility_pct: float,
     ) -> str:
-        if profile == "Aggressive":
+        if profile in {"Aggressive", "1H10"}:
             multiplier = self._safe_float(self.config.get("VAULT_AGGRESSIVE_SIZE_MULTIPLIER"), 1.35)
             self._scale_risk(parameters, multiplier, cap=0.09)
-            metadata["selection_reasons"].append("aggressive profile applied adaptive sizing under risk caps")
+            metadata["selection_reasons"].append(f"{profile} profile applied adaptive sizing under risk caps")
 
         if volatility_pct >= self._safe_float(self.config.get("VAULT_HIGH_VOLATILITY_PCT"), 2.5):
             self._scale_risk(parameters, 0.5, floor=0.01)

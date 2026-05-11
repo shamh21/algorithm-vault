@@ -1,18 +1,36 @@
 (() => {
+  const form = document.querySelector(".vault-form");
+  if (!form) return;
+
   const countdowns = Array.from(document.querySelectorAll("[data-countdown]"));
   const durationInputs = Array.from(document.querySelectorAll("input[name='lock_duration']"));
-  const submitButton = document.querySelector(".vault-form button[type='submit']");
-  const riskNotice = document.querySelector(".vault-form .risk-note span");
+  const submitButton = form.querySelector("button[type='submit']");
+  const riskNotice = form.querySelector(".risk-note span");
+  const idempotencyInput = form.querySelector("[data-vault-idempotency-key]");
+  const oneH10Ack = document.querySelector("[data-one-h10-live-ack]");
+  const oneH10AckInput = oneH10Ack?.querySelector("input[type='checkbox']");
+  const oneH10AckStatus = document.querySelector("[data-one-h10-ack-status]");
   const customDurationInput = document.querySelector("input[name='custom_duration_hours']");
   const customDurationUnit = document.querySelector("select[name='custom_duration_unit']");
   let timerId = null;
   const durationCopy = {
-    "1": "1h cycle uses short-horizon allocation with strict stops, smaller position caps, and liquidity checks. Estimated performance can change during the cycle.",
+    "1": "1H10 aims to 10x the user's input amount in 1 hour. This is a strategy objective, not a guaranteed return, and execution remains risk-gated.",
     "24": "24h cycle balances momentum and mean-reversion signals with moderate caps, spread controls, and backend risk checks.",
     "48": "48h cycle optimizes a balanced multi-factor scope with drawdown, volatility, liquidity, and turnover penalties.",
     "168": "7d cycle uses slower trend and volatility-breakout scopes with stronger drawdown controls and risk-gated execution.",
     custom: "Custom cycle uses the closest matching horizon model and remains subject to liquidity, spread, drawdown, and backend risk checks.",
   };
+
+  function randomKey() {
+    if (window.crypto && typeof window.crypto.randomUUID === "function") {
+      return window.crypto.randomUUID();
+    }
+    return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  }
+
+  if (idempotencyInput && !idempotencyInput.value) {
+    idempotencyInput.value = randomKey();
+  }
 
   function formatRemaining(ms) {
     if (ms <= 0) return "Ready for settlement";
@@ -65,7 +83,8 @@
   });
 
   function selectedDurationLabel(selected) {
-    if (!selected) return "1h";
+    if (!selected) return "1H10";
+    if (selected.value === "1") return "1H10";
     if (selected.value === "168") return "7d";
     if (selected.value === "custom") {
       const amount = Math.max(1, Number.parseInt(customDurationInput?.value || "24", 10) || 24);
@@ -83,9 +102,21 @@
     if (riskNotice) {
       riskNotice.textContent = durationCopy[selected.value] || durationCopy.custom;
     }
+    if (oneH10Ack) {
+      const isOneH10 = selected.value === "1";
+      oneH10Ack.hidden = !isOneH10;
+      if (!isOneH10 && oneH10AckInput) oneH10AckInput.checked = false;
+      updateOneH10AckStatus();
+    }
+  }
+
+  function updateOneH10AckStatus() {
+    if (!oneH10AckStatus || !oneH10AckInput) return;
+    oneH10AckStatus.textContent = oneH10AckInput.checked ? "Acknowledged" : "Not acknowledged";
   }
 
   durationInputs.forEach((input) => input.addEventListener("change", updateSubmitLabel));
+  if (oneH10AckInput) oneH10AckInput.addEventListener("change", updateOneH10AckStatus);
   if (customDurationInput) customDurationInput.addEventListener("input", updateSubmitLabel);
   if (customDurationUnit) customDurationUnit.addEventListener("change", updateSubmitLabel);
   updateSubmitLabel();

@@ -10,7 +10,7 @@ from flask import Blueprint, current_app, flash, jsonify, redirect, render_templ
 from ..auth import current_user
 from ..admin_auth import require_admin
 from ..extensions import db
-from ..models import AuditLog, Fill, Order, RiskEvent, ShadowLiveObservation, StrategyRanking, StrategyRun, StrategyValidation
+from ..models import StrategyRun
 from ..runtime import available_modes, get_current_mode, get_service, market_mode_for
 
 
@@ -44,16 +44,20 @@ def dashboard_data():
             "paper_equity_curve": payload["paper_equity_curve"],
             "latest_feature_snapshot": payload["latest_feature_snapshot"],
             "pnl": payload["pnl"],
-            "strategy_rankings": [
-                {
-                    "strategy_name": ranking.strategy_name,
-                    "symbol": ranking.symbol,
-                    "timeframe": ranking.timeframe,
-                    "score": float(ranking.score or 0.0),
-                    "rejected": bool(ranking.rejected),
-                }
-                for ranking in payload["strategy_rankings"]
-            ],
+            "strategy_rankings": payload["strategy_rankings"],
+        }
+    )
+
+
+@dashboard_bp.get("/api/performance")
+def dashboard_performance():
+    payload_service = get_service("dashboard_payload")
+    strategy_manager = get_service("strategy_manager")
+    return jsonify(
+        {
+            "dashboard_cache": payload_service.get_cache_stats(),
+            "market_cache": get_service("market_data").cache_stats(),
+            "strategy_loop": strategy_manager.get_loop_metrics(),
         }
     )
 
@@ -123,89 +127,21 @@ def stop_strategy(run_id: int):
 def _dashboard_payload() -> dict[str, Any]:
     mode = get_current_mode()
     market_mode = market_mode_for(mode)
-    user = current_user()
-
-    client = get_service("hyperliquid_client")
-    trading_connections = get_service("trading_connections")
-    risk_engine = get_service("risk_engine")
-    order_manager = get_service("order_manager")
-    registry = get_service("strategy_registry")
-    market_data = get_service("market_data")
-    feature_engine = get_service("feature_engine")
-
-    alerts: list[str] = []
-
-    snapshot = trading_connections.account_snapshot(user.id if user else None, "live")
-    balances = snapshot.balances
-    positions = snapshot.positions
-    recent_trades = snapshot.recent_fills
-    open_orders = snapshot.open_orders
-    alerts.extend(snapshot.alerts)
-    if user is not None and trading_connections.active_tradable_connection(user.id) is None:
-        alerts.append("Connect, verify, and activate a live-ready trading account before execution controls can run.")
-
-    pnl = _pnl(mode, order_manager, positions, recent_trades)
-
-    active_connection = trading_connections.active_tradable_connection(user.id) if user else None
-
-    return {
-        "mode": mode,
-        "modes": available_modes(),
-        "balances": balances,
-        "positions": positions,
-        "open_orders": open_orders,
-        "recent_trades": recent_trades,
-        "pnl": pnl,
-        "paper_equity_curve": [],
-        "risk_status": risk_engine.status(
-            mode,
-            user_id=user.id if user else None,
-            trading_connection_id=active_connection.id if active_connection else None,
-        ),
-        "strategy_runs": StrategyRun.query.order_by(StrategyRun.created_at.desc()).limit(10).all(),
-        "strategy_definitions": registry.definitions(),
-        "strategy_rankings": StrategyRanking.query.order_by(
-            StrategyRanking.score.desc(),
-            StrategyRanking.created_at.desc(),
-        ).limit(10).all(),
-        "latest_feature_snapshot": _latest_feature_snapshot(feature_engine, market_data, market_mode),
-        "external_adapter_status": feature_engine.external_status,
-        "pattern_model_status": feature_engine.pattern_status,
-        "shadow_observations": ShadowLiveObservation.query.order_by(ShadowLiveObservation.created_at.desc()).limit(10).all(),
-        "validations": StrategyValidation.query.order_by(StrategyValidation.started_at.desc()).limit(10).all(),
-        "local_orders": Order.query.order_by(Order.created_at.desc()).limit(10).all(),
-        "audits": AuditLog.query.order_by(AuditLog.created_at.desc()).limit(10).all(),
-        "alerts": alerts,
-        "recent_risk": RiskEvent.query.order_by(RiskEvent.created_at.desc()).limit(5).all(),
-        "market_summary": _safe_market_summary(market_data, market_mode),
-    }
+    dashboard_payload = get_service("dashboard_payload")
+    return dashboard_payload.get_payload(
+        user=current_user(),
+        mode=mode,
+        market_mode=market_mode,
+        market_data=get_service("market_data"),
+        risk_engine=get_service("risk_engine"),
+        order_manager=get_service("order_manager"),
+        trading_connections=get_service("trading_connections"),
+        wallet_summary=get_service("wallet_summary"),
+        feature_engine=get_service("feature_engine"),
+        registry=get_service("strategy_registry"),
+        refresh_exchange=_refresh_exchange_requested(),
+    )
 
 
-def _pnl(mode: str, order_manager: Any, positions: list[dict[str, Any]], recent_trades: list[dict[str, Any]]) -> dict[str, float]:
-    return {
-        "realized": sum(float(trade.get("closed_pnl", 0.0) or 0.0) for trade in recent_trades),
-        "unrealized": sum(float(position.get("unrealized_pnl", 0.0) or 0.0) for position in positions),
-    }
-
-
-def _safe_market_summary(market_data: Any, market_mode: str) -> list[dict[str, Any]]:
-    try:
-        return market_data.get_dashboard_market_summary(
-            current_app.config.get("ALLOWED_SYMBOLS", ["BTC"]),
-            current_app.config.get("DEFAULT_TIMEFRAME", "15m"),
-            market_mode,
-        )
-    except Exception as exc:  # noqa: BLE001
-        return [{"symbol": "N/A", "status": "error", "error": str(exc)}]
-
-
-def _latest_feature_snapshot(feature_engine: Any, market_data: Any, market_mode: str) -> dict[str, Any]:
-    symbols = current_app.config.get("ALLOWED_SYMBOLS", ["BTC"])
-    symbol = symbols[0] if symbols else "BTC"
-    timeframe = current_app.config.get("DEFAULT_TIMEFRAME", "15m")
-
-    try:
-        candles = market_data.get_candles(symbol, timeframe, mode=market_mode, limit=80)
-        return feature_engine.snapshot(symbol=symbol, timeframe=timeframe, candles=candles).as_dict()
-    except Exception as exc:  # noqa: BLE001
-        return {"symbol": symbol, "timeframe": timeframe, "error": str(exc)}
+def _refresh_exchange_requested() -> bool:
+    return str(request.args.get("refresh_exchange", "")).strip().lower() in {"1", "true", "yes", "on"}

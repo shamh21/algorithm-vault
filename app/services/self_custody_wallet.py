@@ -419,6 +419,11 @@ class SelfCustodyWalletService:
         details["provider_response"] = result.raw
         details["api_mode"] = "live"
         withdrawal.details = details
+        if withdrawal.status.startswith("failed"):
+            withdrawal.failure_reason = {
+                "failed_broadcast_not_found": "withdrawal broadcast returned a transaction hash, but the transaction was not found on-chain",
+            }.get(withdrawal.status, withdrawal.status.replace("_", " "))
+            withdrawal.completed_at = datetime.utcnow()
         self._audit(
             user_id=withdrawal.user_id,
             wallet_withdrawal_id=withdrawal.id,

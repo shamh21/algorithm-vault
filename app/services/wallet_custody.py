@@ -8,6 +8,7 @@ import json
 import math
 import re
 import secrets
+import time
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -869,11 +870,21 @@ class EvmWalletAdapter:
         asset = _asset_key(withdrawal.asset)
         source = current_app.extensions["services"]["wallet_custody"]._withdrawal_source(withdrawal) if has_app_context() else None
         from_address = source.address if source is not None else Account.from_key(private_key).address
+        rpc_url = self._rpc_url(network)
         nonce = int(str(self._rpc("eth_getTransactionCount", [from_address, "pending"], network=network) or "0x0"), 16)
-        gas_price = int(str(self._rpc("eth_gasPrice", [], network=network) or "0x0"), 16)
+        rpc_gas_price = int(str(self._rpc("eth_gasPrice", [], network=network) or "0x0"), 16)
+        gas_price = max(rpc_gas_price, self._minimum_gas_price_wei())
         chain_id = int(self._chain_config(network).get("chain_id", 1) or 1)
+        eth_balance_wei = int(str(self._rpc("eth_getBalance", [from_address, "pending"], network=network) or "0x0"), 16)
+        token_contract = ""
+        amount_units = 0
         if asset == "ETH":
             value = int(float(withdrawal.amount or 0.0) * 10**18)
+            required_wei = value + 21_000 * gas_price
+            if eth_balance_wei < required_wei:
+                raise RuntimeError(
+                    "source wallet has insufficient ETH for withdrawal amount plus gas"
+                )
             tx = {
                 "chainId": chain_id,
                 "nonce": nonce,
@@ -887,15 +898,22 @@ class EvmWalletAdapter:
             contract = self._token_contract(asset, network)
             if not contract:
                 raise RuntimeError(f"{asset} token contract is not configured")
+            token_contract = contract
             decimals = self._token_decimals(asset, network)
             amount_units = int(float(withdrawal.amount or 0.0) * 10**decimals)
+            gas_limit = 70_000
+            required_gas_wei = gas_limit * gas_price
+            if eth_balance_wei < required_gas_wei:
+                raise RuntimeError(
+                    f"source wallet has insufficient ETH for {asset} token transfer gas"
+                )
             data = "0xa9059cbb" + withdrawal.destination_address.lower().replace("0x", "").rjust(64, "0") + hex(amount_units)[2:].rjust(64, "0")
             tx = {
                 "chainId": chain_id,
                 "nonce": nonce,
                 "to": contract,
                 "value": 0,
-                "gas": 70_000,
+                "gas": gas_limit,
                 "gasPrice": gas_price,
                 "data": data,
             }
@@ -905,11 +923,49 @@ class EvmWalletAdapter:
         if not raw_hex.startswith("0x"):
             raw_hex = "0x" + raw_hex
         tx_hash = self._rpc("eth_sendRawTransaction", [raw_hex], network=network)
-        return BroadcastResult("submitted", str(tx_hash or ""), {"tx_hash": tx_hash})
+        tx_hash_value = str(tx_hash or "")
+        tx_found = self._transaction_visible(tx_hash_value, network)
+        raw = {
+            "tx_hash": tx_hash_value,
+            "rpc_url": rpc_url,
+            "nonce": nonce,
+            "rpc_gas_price_wei": rpc_gas_price,
+            "gas_price_wei": gas_price,
+            "gas_limit": int(tx.get("gas", 0) or 0),
+            "source": from_address,
+            "destination": withdrawal.destination_address,
+            "asset": asset,
+            "token_contract": token_contract,
+            "amount_units": amount_units if asset != "ETH" else value,
+            "raw_transaction": raw_hex,
+            "broadcast_visible": tx_found,
+        }
+        if tx_hash_value and not tx_found:
+            return BroadcastResult("failed_broadcast_not_found", tx_hash_value, raw)
+        return BroadcastResult("submitted", tx_hash_value, raw)
 
     def confirm_transaction(self, provider_reference: str, asset: str, network: str) -> dict[str, Any]:
         receipt = self._rpc("eth_getTransactionReceipt", [provider_reference], network=network)
         return {"confirmed": bool(receipt and receipt.get("status") == "0x1"), "raw": receipt}
+
+    def _transaction_visible(self, tx_hash: str, network: str) -> bool:
+        if not tx_hash:
+            return False
+        attempts = max(1, int(float(self.config.get("WALLET_BROADCAST_VERIFY_ATTEMPTS", 3) or 3)))
+        delay_seconds = max(0.0, float(self.config.get("WALLET_BROADCAST_VERIFY_DELAY_SECONDS", 0.5) or 0.5))
+        for attempt in range(attempts):
+            try:
+                if self._rpc("eth_getTransactionByHash", [tx_hash], network=network):
+                    return True
+            except Exception:
+                pass
+            if attempt < attempts - 1 and delay_seconds > 0:
+                time.sleep(delay_seconds)
+        return False
+
+    def _minimum_gas_price_wei(self) -> int:
+        gwei = max(0.0, float(self.config.get("WALLET_EVM_MIN_GAS_PRICE_GWEI", 2.0) or 0.0))
+        return int(gwei * 10**9)
 
     def _rpc_url(self, network: str) -> str:
         chain_config = self._chain_config(network)

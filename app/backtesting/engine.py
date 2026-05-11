@@ -28,7 +28,10 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..features.engine import FeatureEngine
+from ..ml.features import MLFeatureFactory, ML_FEATURE_SCHEMA_VERSION
+from ..ml.online_ranker import horizon_from_duration
 from ..services.market_data import MarketDataService
+from ..strategies.base import Signal
 from ..strategies.registry import StrategyRegistry
 
 
@@ -139,6 +142,7 @@ class BacktestConfig:
     leverage: float = 1.0
     min_liquidation_buffer_pct: float = 0.0
     funding_cost_bps: float = 0.0
+    funding_interval_hours: float = 8.0
 
 
 @dataclass(slots=True)
@@ -182,7 +186,15 @@ class BacktestEngine:
     #: Constant divisor used to convert basis points to decimal rates.
     BPS_DIVISOR: float = 10_000.0
 
-    def __init__(self, config: Dict[str, Any], registry: StrategyRegistry, market_data: MarketDataService) -> None:
+    def __init__(
+        self,
+        config: Dict[str, Any],
+        registry: StrategyRegistry,
+        market_data: MarketDataService,
+        *,
+        ml_decision_engine: Any | None = None,
+        ml_feature_factory: MLFeatureFactory | None = None,
+    ) -> None:
         """Create a new backtesting engine.
 
         Args:
@@ -196,6 +208,8 @@ class BacktestEngine:
         self.registry = registry
         self.market_data = market_data
         self.feature_engine = FeatureEngine()
+        self.ml_decision_engine = ml_decision_engine
+        self.ml_feature_factory = ml_feature_factory or MLFeatureFactory(config, self.feature_engine)
 
     # -------------------------------------------------------------------
     # Public API
@@ -256,6 +270,7 @@ class BacktestEngine:
         loss_streak: int = 0
         cooldown_until: Optional[datetime] = None
         total_fees: float = 0.0
+        total_funding_cost: float = 0.0
         total_traded_notional: float = 0.0
         peak_equity: float = float(backtest.initial_balance)
         evaluation_started: bool = backtest.evaluation_start_timestamp is None
@@ -329,22 +344,28 @@ class BacktestEngine:
                         fee_rate,
                         slippage_rate,
                     )
-                    cash += pnl - exit_fee
+                    funding_fee = self._funding_cost(position, timestamp, backtest)
+                    net_pnl = pnl - exit_fee - funding_fee
+                    cash += net_pnl
                     total_fees += exit_fee
+                    total_funding_cost += funding_fee
+                    total_traded_notional += abs(position.quantity * adjusted_exit)
                     if evaluation_started:
+                        duration_minutes = self._duration_minutes(position.entry_timestamp, timestamp)
                         trades.append(
                             {
                                 "direction": "long" if position.quantity > 0 else "short",
                                 "entry_price": position.entry_price,
                                 "exit_price": adjusted_exit,
-                                "pnl": pnl - exit_fee,
+                                "pnl": net_pnl,
                                 "gross_pnl": pnl,
                                 "fee": exit_fee,
-                                "return": (pnl - exit_fee) / max(position.entry_equity, 1e-9),
+                                "funding_fee": funding_fee,
+                                "return": net_pnl / max(position.entry_equity, 1e-9),
                                 "reason": "max_drawdown_kill_switch",
                                 "entry_timestamp": position.entry_timestamp,
                                 "timestamp": timestamp,
-                                "duration_minutes": self._duration_minutes(position.entry_timestamp, timestamp),
+                                "duration_minutes": duration_minutes,
                                 "notional": abs(position.quantity * position.entry_price),
                                 "entry_features": position.entry_features or {},
                                 "exit_features": {},
@@ -353,6 +374,8 @@ class BacktestEngine:
                                 "pattern_prediction": (position.entry_features or {}).get("pattern_prediction", {}),
                                 "rule_decision": (position.entry_signal_metadata or {}).get("rule_decision", {}),
                                 "rule_score": (position.entry_signal_metadata or {}).get("rule_decision", {}).get("score", 0.0),
+                                "ml_signal_decision": (position.entry_signal_metadata or {}).get("ml_signal_decision", {}),
+                                "ml_feature_schema_version": (position.entry_signal_metadata or {}).get("ml_feature_schema_version", ""),
                                 "leverage": (position.entry_signal_metadata or {}).get("leverage", 1.0),
                                 "liquidation_buffer_pct": (position.entry_signal_metadata or {}).get("liquidation_buffer_pct", 1.0),
                             }
@@ -371,6 +394,8 @@ class BacktestEngine:
                 candles=signal_history,
                 position={"quantity": position.quantity, "entry_price": position.entry_price},
             )
+            feature_payload = self._feature_payload(backtest.symbol, backtest.timeframe, signal_history, signal)
+            signal = self._ml_first_signal(backtest, signal, signal_history, feature_payload)
             feature_payload = self._feature_payload(backtest.symbol, backtest.timeframe, signal_history, signal)
             signal_metadata: Dict[str, Any] = getattr(signal, "metadata", {}) or {}
 
@@ -404,9 +429,11 @@ class BacktestEngine:
                         fee_rate,
                         slippage_rate,
                     )
-                    net_pnl = pnl - exit_fee
+                    funding_fee = self._funding_cost(position, timestamp, backtest)
+                    net_pnl = pnl - exit_fee - funding_fee
                     cash += net_pnl
                     total_fees += exit_fee
+                    total_funding_cost += funding_fee
                     total_traded_notional += abs(position.quantity * adjusted_exit)
                     day = candle_time.date().isoformat()
                     daily_realized[day] = daily_realized.get(day, 0.0) + net_pnl
@@ -421,6 +448,7 @@ class BacktestEngine:
                                 "pnl": net_pnl,
                                 "gross_pnl": pnl,
                                 "fee": exit_fee,
+                                "funding_fee": funding_fee,
                                 "return": trade_return,
                                 "reason": exit_reason,
                                 "entry_timestamp": position.entry_timestamp,
@@ -434,6 +462,8 @@ class BacktestEngine:
                                 "pattern_prediction": (position.entry_features or {}).get("pattern_prediction", {}),
                                 "rule_decision": (position.entry_signal_metadata or {}).get("rule_decision", {}),
                                 "rule_score": (position.entry_signal_metadata or {}).get("rule_decision", {}).get("score", 0.0),
+                                "ml_signal_decision": (position.entry_signal_metadata or {}).get("ml_signal_decision", {}),
+                                "ml_feature_schema_version": (position.entry_signal_metadata or {}).get("ml_feature_schema_version", ""),
                                 "leverage": (position.entry_signal_metadata or {}).get("leverage", 1.0),
                                 "liquidation_buffer_pct": (position.entry_signal_metadata or {}).get("liquidation_buffer_pct", 1.0),
                             }
@@ -557,19 +587,75 @@ class BacktestEngine:
         if not equity_curve:
             return self._empty_result()
 
-        # Compute final equity based on the last candle close.
+        # Liquidate any remaining position at the final candle so exits include
+        # realistic closing fees and held-position funding cost.
         final_price: float = float(candles[-1]["close"])
-        final_equity: float = self._equity(cash, position.quantity, position.entry_price, final_price)
-        # Update the last point in the equity curve if there is an open position.
         if position.quantity != 0 and equity_curve:
-            equity_curve[-1]["equity"] = round(final_equity, 6)
-            equity_curve[-1]["unrealized_pnl"] = round(final_equity - cash, 6)
+            final_timestamp = int(candles[-1].get("timestamp", 0))
+            pnl, exit_fee, adjusted_exit = self._close_position(
+                position.quantity,
+                position.entry_price,
+                final_price,
+                fee_rate,
+                slippage_rate,
+            )
+            funding_fee = self._funding_cost(position, final_timestamp, backtest)
+            net_pnl = pnl - exit_fee - funding_fee
+            cash += net_pnl
+            total_fees += exit_fee
+            total_funding_cost += funding_fee
+            total_traded_notional += abs(position.quantity * adjusted_exit)
+            if evaluation_started:
+                duration_minutes = self._duration_minutes(position.entry_timestamp, final_timestamp)
+                trades.append(
+                    {
+                        "direction": "long" if position.quantity > 0 else "short",
+                        "entry_price": position.entry_price,
+                        "exit_price": adjusted_exit,
+                        "pnl": net_pnl,
+                        "gross_pnl": pnl,
+                        "fee": exit_fee,
+                        "funding_fee": funding_fee,
+                        "return": net_pnl / max(position.entry_equity, 1e-9),
+                        "reason": "final_position_liquidation",
+                        "entry_timestamp": position.entry_timestamp,
+                        "timestamp": final_timestamp,
+                        "duration_minutes": duration_minutes,
+                        "notional": abs(position.quantity * position.entry_price),
+                        "entry_features": position.entry_features or {},
+                        "exit_features": {},
+                        "fibonacci_levels": (position.entry_features or {}).get("fibonacci_levels", {}),
+                        "external_scores": (position.entry_features or {}).get("external_scores", {}),
+                        "pattern_prediction": (position.entry_features or {}).get("pattern_prediction", {}),
+                        "rule_decision": (position.entry_signal_metadata or {}).get("rule_decision", {}),
+                        "rule_score": (position.entry_signal_metadata or {}).get("rule_decision", {}).get("score", 0.0),
+                        "ml_signal_decision": (position.entry_signal_metadata or {}).get("ml_signal_decision", {}),
+                        "ml_feature_schema_version": (position.entry_signal_metadata or {}).get("ml_feature_schema_version", ""),
+                        "leverage": (position.entry_signal_metadata or {}).get("leverage", 1.0),
+                        "liquidation_buffer_pct": (position.entry_signal_metadata or {}).get("liquidation_buffer_pct", 1.0),
+                    }
+                )
+            risk_events.append(
+                {
+                    "timestamp": final_timestamp,
+                    "rule": "final_position_liquidation",
+                    "message": "Open position was liquidated at the final candle for after-cost accounting.",
+                }
+            )
+            position = _Position()
+            equity_curve[-1]["cash"] = round(cash, 6)
+            equity_curve[-1]["equity"] = round(cash, 6)
+            equity_curve[-1]["realized_pnl"] = round(cash - backtest.initial_balance, 6)
+            equity_curve[-1]["unrealized_pnl"] = 0.0
+            equity_curve[-1]["position_value"] = 0.0
+        final_equity: float = self._equity(cash, position.quantity, position.entry_price, final_price)
 
         return self._result(
             backtest=backtest,
             cash=cash,
             final_equity=final_equity,
             total_fees=total_fees,
+            total_funding_cost=total_funding_cost,
             total_traded_notional=total_traded_notional,
             trades=trades,
             equity_curve=equity_curve,
@@ -588,6 +674,7 @@ class BacktestEngine:
         cash: float,
         final_equity: float,
         total_fees: float,
+        total_funding_cost: float,
         total_traded_notional: float,
         trades: List[Dict[str, Any]],
         equity_curve: List[Dict[str, Any]],
@@ -596,8 +683,8 @@ class BacktestEngine:
         risk_events: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         """Assemble the final result dictionary from backtest components."""
-        funding_cost_estimate = total_traded_notional * max(float(backtest.funding_cost_bps or 0.0), 0.0) / self.BPS_DIVISOR
-        adjusted_final_equity = final_equity - funding_cost_estimate
+        funding_cost_estimate = max(float(total_funding_cost or 0.0), 0.0)
+        adjusted_final_equity = final_equity
         total_return = ((adjusted_final_equity - backtest.initial_balance) / backtest.initial_balance) if backtest.initial_balance else 0.0
         wins = [trade for trade in trades if trade["pnl"] > 0]
         losses = [trade for trade in trades if trade["pnl"] < 0]
@@ -656,7 +743,123 @@ class BacktestEngine:
             "risk_events": risk_events,
             "risk_event_count": len(risk_events),
             "feature_audit_summary": self._feature_audit_summary(trades),
+            "ml_feature_schema_version": ML_FEATURE_SCHEMA_VERSION,
+            "ml_first_enabled": bool(self.config.get("ML_FIRST_STRATEGIES_ENABLED", False)),
+            "ml_decision_trade_count": len([trade for trade in trades if trade.get("ml_signal_decision")]),
         }
+
+    def _ml_first_signal(
+        self,
+        backtest: BacktestConfig,
+        signal: Signal,
+        candles: List[Dict[str, Any]],
+        feature_payload: Dict[str, Any],
+    ) -> Signal:
+        """Use promoted ML as the final signal source when ML-first mode is enabled.
+
+        The deterministic strategy still provides baseline features. If ML is
+        unavailable, stale, low confidence, or missing exits, the backtest emits
+        ``hold`` instead of falling back into an automatic trade.
+        """
+
+        if not bool(self.config.get("ML_FIRST_STRATEGIES_ENABLED", False)):
+            return signal
+        metadata = dict(getattr(signal, "metadata", {}) or {})
+        horizon = horizon_from_duration((backtest.parameters or {}).get("lock_duration_hours") or 1)
+        if self.ml_decision_engine is None:
+            metadata.update(
+                {
+                    "ml_feature_schema_version": ML_FEATURE_SCHEMA_VERSION,
+                    "ml_safety_blockers": ["ml_decision_engine_unavailable"],
+                    "no_trade_reason": "ml_first_signal_blocked:ml_decision_engine_unavailable",
+                }
+            )
+            return Signal("hold", metadata["no_trade_reason"], backtest.timeframe, None, None, 0.0, metadata)
+
+        context = self.ml_feature_factory.build(
+            symbol=backtest.symbol,
+            timeframe=backtest.timeframe,
+            candles=candles,
+            deterministic_signal=signal,
+            optimizer_context={
+                **dict(backtest.parameters or {}),
+                **dict(feature_payload or {}),
+                "strategy_name": backtest.strategy_name,
+                "mode": backtest.mode,
+                "horizon": horizon,
+            },
+            cutoff_timestamp=(candles[-1] if candles else {}).get("timestamp"),
+        )
+        try:
+            decision = dict(
+                self.ml_decision_engine.decision(
+                    "pytorch_gru_signal",
+                    context,
+                    horizon=horizon,
+                    candles=candles,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            decision = {
+                "ready": False,
+                "action": "hold",
+                "blockers": [f"ml_signal_error:{exc}"],
+                "raw": {"ready_for_live": False, "blockers": [str(exc)]},
+            }
+        raw = dict(decision.get("raw") or {}) if isinstance(decision.get("raw"), dict) else {}
+        blockers = list(decision.get("blockers", []) or []) + list(raw.get("blockers", []) or [])
+        metadata.update(
+            {
+                "feature_snapshot": feature_payload,
+                "ml_feature_schema_version": ML_FEATURE_SCHEMA_VERSION,
+                "ml_signal_decision": decision,
+                "ml_signal_model": raw,
+                "ml_signal_quality": raw,
+                "ml_safety_blockers": list(dict.fromkeys(blockers)),
+                "ml_first_strategy_enabled": True,
+            }
+        )
+        min_confidence = float(self.config.get("ML_MIN_SIGNAL_CONFIDENCE", self.config.get("ML_SIGNAL_MIN_CONFIDENCE", 0.60)) or 0.60)
+        confidence = self._safe_float(raw.get("confidence", decision.get("confidence", 0.0)))
+        action = str(raw.get("action") or decision.get("action") or "hold").lower()
+        if not bool(raw.get("ready_for_live", False)) or not bool(decision.get("ready", False)):
+            reason = "ml_first_signal_blocked:" + ",".join(list(dict.fromkeys(blockers)) or ["not_ready"])
+            metadata["no_trade_reason"] = reason
+            return Signal("hold", reason, backtest.timeframe, None, None, 0.0, metadata)
+        if confidence < min_confidence:
+            reason = "ml_first_signal_blocked:low_confidence"
+            metadata["no_trade_reason"] = reason
+            metadata["ml_safety_blockers"] = list(dict.fromkeys([*metadata["ml_safety_blockers"], "low_confidence"]))
+            return Signal("hold", reason, backtest.timeframe, None, None, 0.0, metadata)
+        if action not in {"buy", "sell"}:
+            metadata["no_trade_reason"] = "ml_signal_hold"
+            return Signal("hold", "ML signal selected hold.", backtest.timeframe, None, None, 0.0, metadata)
+        mid = self._safe_float((candles[-1] if candles else {}).get("close"), 0.0)
+        stop_pct = max(self._safe_float(raw.get("suggested_stop_loss_pct")), 0.0)
+        take_pct = max(self._safe_float(raw.get("suggested_take_profit_pct")), 0.0)
+        if mid <= 0 or stop_pct <= 0 or take_pct <= 0:
+            reason = "ml_first_signal_blocked:missing_price_or_exits"
+            metadata["no_trade_reason"] = reason
+            metadata["ml_safety_blockers"] = list(dict.fromkeys([*metadata["ml_safety_blockers"], "missing_price_or_exits"]))
+            return Signal("hold", reason, backtest.timeframe, None, None, 0.0, metadata)
+        stop_loss = mid * (1 - stop_pct) if action == "buy" else mid * (1 + stop_pct)
+        take_profit = mid * (1 + take_pct) if action == "buy" else mid * (1 - take_pct)
+        base_fraction = self._safe_float(getattr(signal, "position_fraction", 0.0), 0.0)
+        ml_fraction = self._safe_float(raw.get("position_fraction", raw.get("sizing_score")), 0.0)
+        position_fraction = max(0.0, min(base_fraction if base_fraction > 0 else 1.0, ml_fraction, 1.0))
+        if position_fraction <= 0:
+            reason = "ml_first_signal_blocked:zero_sizing"
+            metadata["no_trade_reason"] = reason
+            return Signal("hold", reason, backtest.timeframe, None, None, 0.0, metadata)
+        return Signal(
+            action,
+            f"ML-first signal selected {action}.",
+            backtest.timeframe,
+            stop_loss,
+            take_profit,
+            position_fraction,
+            metadata,
+        )
 
     def _position_quantity(self, sizing_mode: SizingMode | BacktestConfig, *args: Any, **kwargs: Any) -> float:
         """Calculate the quantity to trade given the sizing mode and risk parameters."""
@@ -802,6 +1005,16 @@ class BacktestEngine:
         gross = quantity * (adjusted_exit - entry_price) if quantity > 0 else abs(quantity) * (entry_price - adjusted_exit)
         fee = abs(quantity * adjusted_exit) * fee_rate
         return gross, fee, adjusted_exit
+
+    def _funding_cost(self, position: _Position, exit_timestamp: int, backtest: BacktestConfig) -> float:
+        funding_bps = max(float(backtest.funding_cost_bps or 0.0), 0.0)
+        if funding_bps <= 0 or position.quantity == 0:
+            return 0.0
+        interval_hours = max(float(backtest.funding_interval_hours or 8.0), 1.0)
+        held_hours = max(self._duration_minutes(position.entry_timestamp, exit_timestamp), 0.0) / 60.0
+        intervals = held_hours / interval_hours
+        notional = abs(position.quantity * position.entry_price)
+        return notional * funding_bps / self.BPS_DIVISOR * intervals
 
     @staticmethod
     def _equity(cash: float, quantity: float, entry_price: float, price: float) -> float:
@@ -990,6 +1203,14 @@ class BacktestEngine:
         }
 
     @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        try:
+            candidate = float(value)
+        except (TypeError, ValueError):
+            return default
+        return candidate if candidate == candidate and abs(candidate) != float("inf") else default
+
+    @staticmethod
     def _empty_result() -> Dict[str, Any]:
         """Return an empty result structure used when no backtest can be run."""
         return {
@@ -1031,4 +1252,7 @@ class BacktestEngine:
             "risk_events": [],
             "risk_event_count": 0,
             "feature_audit_summary": {},
+            "ml_feature_schema_version": ML_FEATURE_SCHEMA_VERSION,
+            "ml_first_enabled": False,
+            "ml_decision_trade_count": 0,
         }

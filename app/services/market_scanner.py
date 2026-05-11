@@ -11,7 +11,7 @@ from flask import has_app_context
 from ..extensions import db
 from ..features.engine import FeatureEngine
 from ..ml.online_ranker import extract_features, horizon_from_duration
-from ..models import AuditLog, Setting
+from ..models import AuditLog, LeveragedMarket, LeveragedMarketFeature, Setting
 from .market_data import MarketDataService
 from .net_roi import net_roi_diagnostics, net_roi_v2_diagnostics, one_hour_edge_v2_diagnostics
 from .tradability import (
@@ -67,6 +67,7 @@ class MarketScannerService:
         online_ranker: Any | None = None,
         offline_ranker: Any | None = None,
         pair_screening: Any | None = None,
+        ml_decision_engine: Any | None = None,
     ) -> None:
         self.config = config
         self.market_data = market_data
@@ -75,6 +76,7 @@ class MarketScannerService:
         self.online_ranker = online_ranker
         self.offline_ranker = offline_ranker
         self.pair_screening = pair_screening
+        self.ml_decision_engine = ml_decision_engine
         self._hot_cache: dict[tuple[str, str], tuple[float, list[dict[str, Any]]]] = {}
         self._score_cache: dict[tuple[str, str, str, int, str, str], tuple[float, list[ScoredCandidate]]] = {}
         self._diagnostic_cache: dict[tuple[str, str, str, int, str, str], dict[str, Any]] = {}
@@ -171,12 +173,17 @@ class MarketScannerService:
             }
             return list(cached)
 
-        hot_lookup = {item["symbol"]: item for item in self.hot_tokens(mode=mode, timeframe=timeframe)}
-        universe_lookup = {
-            item.symbol: item.as_dict()
-            for item in self.universe_service.liquid_universe(mode, timeframe)
-            if hasattr(item, "as_dict")
-        }
+        bounded_universe = self._bounded_high_upside_universe(mode=mode, optimizer_profile=optimizer_profile)
+        if bounded_universe:
+            hot_lookup: dict[str, dict[str, Any]] = {}
+            universe_lookup: dict[str, dict[str, Any]] = {}
+        else:
+            hot_lookup = {item["symbol"]: item for item in self.hot_tokens(mode=mode, timeframe=timeframe)}
+            universe_lookup = {
+                item.symbol: item.as_dict()
+                for item in self.universe_service.liquid_universe(mode, timeframe)
+                if hasattr(item, "as_dict")
+            }
         pair_lookup = self._pair_lookup(
             list(normalized),
             mode=mode,
@@ -194,8 +201,10 @@ class MarketScannerService:
                     book = self.market_data.get_order_book(symbol, mode)
                 except Exception:  # noqa: BLE001
                     book = {}
-            except Exception:  # noqa: BLE001
-                rejected.append(self._diagnostic_row(symbol, "market_data_unavailable", source="market_data"))
+            except Exception as exc:  # noqa: BLE001
+                error = self._sanitize_error(exc)
+                reason = "provider_rate_limited" if self._is_rate_limit_error(error) else "market_data_unavailable"
+                rejected.append(self._diagnostic_row(symbol, reason, source="market_data", error=error))
                 continue
             features = snapshot.as_dict()
             tradability = self._tradability_payload(symbol, candles, book, universe_lookup.get(symbol, {}))
@@ -383,6 +392,32 @@ class MarketScannerService:
                 score += float(roi_v2_payload["net_roi_v2_score"]) * 0.25
             if bool(self.config.get("ONE_HOUR_EDGE_V2_ENABLED", True)):
                 score += float(one_hour_edge_payload["one_hour_edge_v2"]) * 0.20
+            ml_decision = self._ml_universe_decision(
+                {
+                    **features,
+                    **roi_context,
+                    **roi_payload,
+                    **roi_v2_payload,
+                    **one_hour_edge_payload,
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "strategy_name": strategy_name,
+                    "optimizer_profile": optimizer_profile,
+                    "horizon": horizon,
+                    "score": score,
+                },
+                horizon,
+            )
+            if ml_decision:
+                features["ml_decision"] = ml_decision
+                features["ml_universe_decision"] = ml_decision
+                score_breakdown["ml_universe"] = (
+                    float(ml_decision.get("confidence", 0.0) or 0.0) * float(self.config.get("ML_SCORE_WEIGHT", 0.15) or 0.15)
+                    if bool(ml_decision.get("ready", False))
+                    else 0.0
+                )
+                score += score_breakdown["ml_universe"]
+            features["scanner_score_breakdown"] = dict(score_breakdown)
             source = "pair_screening" if pair_bonus > hot_score and pair_bonus > 0 else "hot_token" if hot_score > 0 else "configured"
             rejection_reason = self._scanner_rejection_reason(tradability, {**high_upside_metrics, **roi_payload, **roi_v2_payload}, score)
             candidate = ScoredCandidate(
@@ -404,10 +439,255 @@ class MarketScannerService:
 
         scored.sort(key=lambda item: item.score, reverse=True)
         self._score_cache[cache_key] = (time.time(), scored)
-        diagnostics = self._scan_diagnostics(cache_key, scored, rejected, runtime_seconds=max(time.perf_counter() - started_at, 0.0))
+        diagnostics = self._scan_diagnostics(
+            cache_key,
+            scored,
+            rejected,
+            runtime_seconds=max(time.perf_counter() - started_at, 0.0),
+            bounded_universe=bounded_universe,
+        )
         self._diagnostic_cache[cache_key] = diagnostics
         self.last_scan_diagnostics = dict(diagnostics)
         return list(scored)
+
+    def score_one_h10_markets(
+        self,
+        markets: list[LeveragedMarket] | tuple[LeveragedMarket, ...],
+        *,
+        provider: str = "",
+        limit: int | None = None,
+    ) -> list[ScoredCandidate]:
+        """Rank persisted leveraged markets for 1H10 provider legs."""
+
+        started_at = time.perf_counter()
+        active_markets = [market for market in markets if str(getattr(market, "status", "")).lower() == "active"]
+        if not active_markets:
+            self.last_scan_diagnostics = {
+                "accepted": [],
+                "rejected": [],
+                "rejection_breakdown": {"no_active_markets": 1},
+                "cache_hit": False,
+                "scan_runtime_seconds": max(time.perf_counter() - started_at, 0.0),
+                "one_h10_scanner": True,
+            }
+            return []
+
+        market_ids = [int(market.id) for market in active_markets if getattr(market, "id", None)]
+        feature_rows = (
+            LeveragedMarketFeature.query.filter(LeveragedMarketFeature.leveraged_market_id.in_(market_ids)).all()
+            if market_ids
+            else []
+        )
+        features_by_market: dict[int, list[LeveragedMarketFeature]] = {}
+        for row in feature_rows:
+            features_by_market.setdefault(int(row.leveraged_market_id), []).append(row)
+
+        scored: list[ScoredCandidate] = []
+        rejected: list[dict[str, Any]] = []
+        min_liquidity = self._float(self.config.get("ONE_H10_MIN_LIQUIDITY_USD"), self._float(self.config.get("VAULT_MIN_LIQUIDITY_USD"), 1_000.0))
+        max_spread = self._float(self.config.get("ONE_H10_MAX_SLIPPAGE_BPS"), self._float(self.config.get("VAULT_MAX_SLIPPAGE_BPS"), 20.0))
+        for market in active_markets:
+            rows = features_by_market.get(int(market.id or 0), [])
+            feature_payload = self._one_h10_feature_payload(rows)
+            symbol = str(market.symbol or "").upper()
+            provider_key = str(provider or market.provider or "").lower()
+            if not feature_payload:
+                rejected.append(self._diagnostic_row(symbol, "one_h10_feature_missing", source=provider_key))
+                continue
+            liquidity = max(self._float(feature_payload.get("liquidity_usd")), self._float(market.liquidity_usd))
+            spread = self._float(feature_payload.get("spread_bps"), self._float(market.spread_bps))
+            if bool(self.config.get("ONE_H10_REJECT_ZERO_SPREAD", True)) and spread <= 0:
+                rejected.append(self._diagnostic_row(symbol, "spread_missing", source=provider_key))
+                continue
+            if liquidity < min_liquidity:
+                rejected.append(self._diagnostic_row(symbol, "liquidity_below_threshold", source=provider_key))
+                continue
+            if max_spread >= 0 and spread > max_spread:
+                rejected.append(self._diagnostic_row(symbol, "spread_above_threshold", source=provider_key))
+                continue
+            edge_payload = self._one_h10_market_edge_payload(feature_payload, liquidity=liquidity, spread_bps=spread)
+            feature_payload = {**feature_payload, **edge_payload}
+            score, score_breakdown = self._one_h10_market_score(feature_payload, liquidity=liquidity, spread_bps=spread)
+            features = {
+                **feature_payload,
+                "provider": provider_key,
+                "execution_venue": provider_key,
+                "market_id": market.id,
+                "venue_symbol": market.venue_symbol,
+                "settlement_asset": market.settlement_asset,
+                "max_leverage": market.max_leverage,
+                "liquidity_usd": liquidity,
+                "spread_bps": spread,
+                "cost_drag_bps": edge_payload["cost_drag_bps"],
+                "expected_move_bps": edge_payload["expected_move_bps"],
+                "gross_expected_return_bps": edge_payload["gross_expected_return_bps"],
+                "net_expected_return_bps": edge_payload["net_expected_return_bps"],
+                "edge_after_cost_bps": edge_payload["edge_after_cost_bps"],
+                "expected_execution_quality": edge_payload["expected_execution_quality"],
+                "capital_efficiency_score": edge_payload["capital_efficiency_score"],
+                "capacity_multiple": edge_payload["capacity_multiple"],
+                "scanner_source": "one_h10_leveraged_market_features",
+                "ml_horizon": "1h10",
+                "objective": "one_h10",
+            }
+            scored.append(
+                ScoredCandidate(
+                    symbol=symbol,
+                    score=score,
+                    technical_score=score,
+                    ml_score=0.0,
+                    hot_score=0.0,
+                    source="one_h10_feature_backfill",
+                    features=features,
+                    score_breakdown=score_breakdown,
+                )
+            )
+
+        scored.sort(key=lambda item: item.score, reverse=True)
+        resolved_limit = limit if limit is not None else int(self.config.get("ONE_H10_MAX_PROVIDER_LEGS", 3) or 3)
+        result = scored[: max(1, int(resolved_limit or 1))]
+        diagnostics = self._scan_diagnostics(
+            ("one_h10", str(provider or "all"), "features", 3600, "scalping", "one_h10"),
+            result,
+            rejected,
+            runtime_seconds=max(time.perf_counter() - started_at, 0.0),
+            bounded_universe=False,
+        )
+        diagnostics["one_h10_scanner"] = True
+        diagnostics["candidate_count"] = len(scored)
+        self.last_scan_diagnostics = diagnostics
+        return list(result)
+
+    def _bounded_high_upside_universe(self, *, mode: str, optimizer_profile: str) -> bool:
+        if not bool(self.config.get("HIGH_UPSIDE_BOUNDED_SCANNER_UNIVERSE", True)):
+            return False
+        if str(mode or "").lower() != "live":
+            return False
+        if str(optimizer_profile or "") != "aggressive_1h":
+            return False
+        return bool(self.config.get("HIGH_UPSIDE_PROFILE_ENABLED", False))
+
+    def _one_h10_feature_payload(self, rows: list[LeveragedMarketFeature]) -> dict[str, Any]:
+        if not rows:
+            return {}
+        rows_by_timeframe = {str(row.timeframe): row for row in rows}
+        preferred = rows_by_timeframe.get("15m") or rows_by_timeframe.get("1h") or rows_by_timeframe.get("4h") or rows[0]
+        payload = dict(preferred.features or {})
+        payload["one_h10_feature_timeframes"] = sorted(rows_by_timeframe)
+        payload["one_h10_feature_updated_at"] = str(getattr(preferred, "updated_at", "") or "")
+        for timeframe, row in rows_by_timeframe.items():
+            features = dict(row.features or {})
+            prefix = f"tf_{timeframe.replace(' ', '_')}_"
+            for key in (
+                "rsi",
+                "ema_fast",
+                "ema_slow",
+                "sma_fast",
+                "sma_slow",
+                "ema_trend",
+                "trend_strength",
+                "macd_histogram",
+                "atr_pct",
+                "volatility",
+                "spread_bps",
+                "liquidity_usd",
+            ):
+                if key in features:
+                    payload[prefix + key] = features.get(key)
+        return payload
+
+    def _one_h10_market_edge_payload(self, features: dict[str, Any], *, liquidity: float, spread_bps: float) -> dict[str, float]:
+        close = max(self._float(features.get("close")), 1.0)
+        trend_bps = abs(self._float(features.get("trend_strength"))) * 10_000.0
+        ema_bps = abs(self._float(features.get("ema_trend"))) / close * 10_000.0
+        macd_bps = abs(self._float(features.get("macd_histogram"))) / close * 10_000.0
+        fib = features.get("fibonacci_confluence") if isinstance(features.get("fibonacci_confluence"), dict) else {}
+        fib_bps = max(self._float(fib.get("score")), 0.0) * 12.0
+        volume = features.get("volume_spike") if isinstance(features.get("volume_spike"), dict) else {}
+        volume_bps = min(max(self._float(volume.get("ratio")) - 1.0, 0.0), 4.0) * 6.0
+        imbalance_bps = min(abs(self._float(features.get("order_book_imbalance"))) * 18.0, 18.0)
+        volatility_bps = min(max(self._float(features.get("volatility")), self._float(features.get("atr_pct"))) * 10_000.0, 150.0)
+        gross_expected = max(
+            trend_bps * 0.35
+            + ema_bps * 0.20
+            + macd_bps * 0.18
+            + fib_bps
+            + volume_bps
+            + imbalance_bps
+            + volatility_bps * 0.12,
+            0.0,
+        )
+        implied_cost = cost_drag_bps(
+            spread=max(spread_bps, 0.0),
+            fee_bps=self._float(self.config.get("FEE_BPS"), 5.0),
+            slippage_bps=self._float(self.config.get("SIM_SLIPPAGE_BPS"), 8.0),
+        )
+        configured_cost = self._float(features.get("cost_drag_bps"), -1.0)
+        drag = max(configured_cost, implied_cost) if configured_cost >= 0 else implied_cost
+        net_expected = gross_expected - drag
+        min_edge = max(0.0, self._float(self.config.get("NET_ROI_MIN_EDGE_BPS"), 4.0))
+        max_cost = max(1.0, self._float(self.config.get("AGGRESSIVE_1H_MAX_COST_DRAG_BPS"), 18.0))
+        min_liquidity = max(1.0, self._float(self.config.get("ONE_H10_MIN_LIQUIDITY_USD"), self._float(self.config.get("VAULT_MIN_LIQUIDITY_USD"), 1_000.0)))
+        max_spread = max(1.0, self._float(self.config.get("ONE_H10_MAX_SLIPPAGE_BPS"), self._float(self.config.get("VAULT_MAX_SLIPPAGE_BPS"), 20.0)))
+        capacity_multiple = max(liquidity, 0.0) / min_liquidity
+        capital_efficiency = max(0.0, min(capacity_multiple / 12.0, 1.0))
+        cost_quality = max(0.0, min(1.0 - max(drag - min_edge, 0.0) / max(max_cost * 2.0, 1.0), 1.0))
+        spread_quality = max(0.0, min(1.0 - max(spread_bps, 0.0) / max_spread, 1.0))
+        edge_quality = max(0.0, min(net_expected / max(min_edge * 8.0, 1.0), 1.0))
+        execution_quality = max(0.0, min(cost_quality * 0.35 + spread_quality * 0.20 + capital_efficiency * 0.25 + edge_quality * 0.20, 1.0))
+        return {
+            "expected_move_bps": gross_expected,
+            "gross_expected_return_bps": gross_expected,
+            "net_expected_return_bps": net_expected,
+            "edge_after_cost_bps": net_expected,
+            "cost_drag_bps": drag,
+            "expected_execution_quality": execution_quality,
+            "capital_efficiency_score": capital_efficiency,
+            "capacity_multiple": capacity_multiple,
+            "cost_efficiency_score": cost_quality,
+            "net_edge_quality": edge_quality,
+        }
+
+    def _one_h10_market_score(self, features: dict[str, Any], *, liquidity: float, spread_bps: float) -> tuple[float, dict[str, float]]:
+        rsi = self._float(features.get("rsi"), 50.0)
+        rsi_score = 1.2 if 35 <= rsi <= 70 else 0.4 if 25 <= rsi <= 78 else -0.6
+        trend_score = abs(self._float(features.get("trend_strength"))) * 120.0
+        ema_alignment = self._float(features.get("ema_trend"))
+        ema_score = min(abs(ema_alignment) / max(self._float(features.get("close")), 1.0) * 10_000, 4.0)
+        macd_score = min(abs(self._float(features.get("macd_histogram"))) / max(self._float(features.get("close")), 1.0) * 10_000, 4.0)
+        fib = features.get("fibonacci_confluence") if isinstance(features.get("fibonacci_confluence"), dict) else {}
+        fib_score = self._float(fib.get("score")) * 2.0 + min(self._float(fib.get("cluster_count")), 20.0) / 10.0
+        volume = features.get("volume_spike") if isinstance(features.get("volume_spike"), dict) else {}
+        volume_score = min(max(self._float(volume.get("ratio")) - 1.0, 0.0), 4.0)
+        volatility_score = min(max(self._float(features.get("volatility")) * 1000.0, 0.0), 4.0)
+        liquidity_score = min(liquidity / 100_000.0, 8.0)
+        spread_penalty = max(spread_bps, 0.0) / 8.0
+        funding_penalty = abs(self._float(features.get("funding_rate"))) * 10_000.0
+        imbalance_score = min(abs(self._float(features.get("order_book_imbalance"))) * 2.0, 2.0)
+        net_edge = self._float(features.get("net_expected_return_bps"))
+        execution_quality = self._float(features.get("expected_execution_quality"))
+        cost_drag = self._float(features.get("cost_drag_bps"))
+        max_cost = max(1.0, self._float(self.config.get("AGGRESSIVE_1H_MAX_COST_DRAG_BPS"), 18.0))
+        net_edge_score = max(min(net_edge / 35.0, 6.0), -6.0)
+        execution_score = execution_quality * 4.0
+        cost_drag_penalty = max(cost_drag - max_cost, 0.0) / 4.0 + max(-net_edge, 0.0) / 18.0
+        breakdown = {
+            "rsi": rsi_score,
+            "trend": trend_score,
+            "ema": ema_score,
+            "macd": macd_score,
+            "fibonacci": fib_score,
+            "volume": volume_score,
+            "volatility": volatility_score,
+            "liquidity": liquidity_score,
+            "order_book_imbalance": imbalance_score,
+            "net_expected_edge": net_edge_score,
+            "execution_quality": execution_score,
+            "spread_penalty": -spread_penalty,
+            "funding_penalty": -funding_penalty,
+            "cost_drag_penalty": -cost_drag_penalty,
+        }
+        return sum(breakdown.values()), breakdown
 
     def _hot_score(self, symbol: str, candles: list[dict[str, Any]]) -> tuple[float, dict[str, Any]]:
         closes = [self._float(row.get("close")) for row in candles if isinstance(row, dict)]
@@ -461,12 +741,27 @@ class MarketScannerService:
         universe_payload: dict[str, Any],
     ) -> dict[str, Any]:
         if universe_payload:
+            spread = self._float(universe_payload.get("spread_bps"))
+            liquidity_usd = self._float(universe_payload.get("liquidity_usd"))
+            if spread <= 0 and book:
+                spread = spread_bps(book)
+            if liquidity_usd <= 0 and book:
+                liquidity_usd = book_liquidity_usd(book, depth=max(1, int(self.config.get("VAULT_BOOK_DEPTH_LEVELS", 5))))
+            if spread <= 0:
+                spread = max(0.0, self._float(self.config.get("UNKNOWN_SPREAD_BPS_FLOOR"), 2.0))
             return {
                 "symbol": symbol,
-                "spread_bps": self._float(universe_payload.get("spread_bps")),
-                "liquidity_usd": self._float(universe_payload.get("liquidity_usd")),
+                "spread_bps": spread,
+                "liquidity_usd": liquidity_usd,
                 "volatility_pct": self._float(universe_payload.get("volatility_pct")),
-                "cost_drag_bps": self._float(universe_payload.get("cost_drag_bps")),
+                "cost_drag_bps": max(
+                    self._float(universe_payload.get("cost_drag_bps")),
+                    cost_drag_bps(
+                        spread=spread,
+                        fee_bps=float(self.config.get("FEE_BPS", 5.0) or 5.0),
+                        slippage_bps=float(self.config.get("SIM_SLIPPAGE_BPS", 8.0) or 8.0),
+                    ),
+                ),
                 "market_structure_score": self._float(universe_payload.get("market_structure_score")),
                 "volatility_regime": str(universe_payload.get("volatility_regime", "unknown")),
                 "source": universe_payload.get("source", "dynamic_liquid"),
@@ -596,6 +891,20 @@ class MarketScannerService:
                 "blockers": [str(exc)],
             }
 
+    def _ml_universe_decision(self, context: dict[str, Any], horizon: str) -> dict[str, Any]:
+        if self.ml_decision_engine is None or not bool(self.config.get("ML_ALL_AREAS_ENABLED", False)):
+            return {}
+        try:
+            return dict(self.ml_decision_engine.decision("pytorch_universe", context, horizon=horizon))
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "family": "pytorch_universe",
+                "ready": False,
+                "action": "rank",
+                "blockers": [self._sanitize_error(exc)],
+                "audit_metadata": {"status": "ml_universe_decision_error"},
+            }
+
     def _scanner_rejection_reason(
         self,
         tradability: dict[str, Any],
@@ -637,6 +946,7 @@ class MarketScannerService:
         rejected: list[dict[str, Any]],
         *,
         runtime_seconds: float = 0.0,
+        bounded_universe: bool = False,
     ) -> dict[str, Any]:
         rejected_breakdown: dict[str, int] = {}
         for row in rejected:
@@ -660,6 +970,8 @@ class MarketScannerService:
             "cache_hit": False,
             "scan_runtime_seconds": runtime_seconds,
             "market_data_cache": self._market_data_cache_stats(),
+            "bounded_universe": bounded_universe,
+            "broad_universe_refresh_skipped": bounded_universe,
         }
         if (
             bool(self.config.get("HIGH_UPSIDE_PROFILE_ENABLED", False))
@@ -687,6 +999,7 @@ class MarketScannerService:
         *,
         source: str = "",
         candidate: ScoredCandidate | None = None,
+        error: str = "",
     ) -> dict[str, Any]:
         if candidate is None:
             return {
@@ -738,6 +1051,8 @@ class MarketScannerService:
                 "offline_ml_status": "no_promoted_model",
                 "offline_ml_blend_enabled": False,
                 "rejection_reason": rejection_reason,
+                "error": error,
+                "rate_limited": self._is_rate_limit_error(error),
             }
         features = candidate.features or {}
         return {
@@ -788,8 +1103,20 @@ class MarketScannerService:
             "offline_ml_prediction": self._float(features.get("offline_ml_prediction")),
             "offline_ml_status": str(features.get("offline_ml_status", "no_promoted_model")),
             "offline_ml_blend_enabled": bool(features.get("offline_ml_blend_enabled", False)),
+            "ml_decision": dict(features.get("ml_decision") or {}),
+            "ml_universe_decision": dict(features.get("ml_universe_decision") or {}),
             "rejection_reason": rejection_reason or candidate.rejection_reason,
         }
+
+    @staticmethod
+    def _sanitize_error(exc: object) -> str:
+        text = str(exc or "")
+        return text.replace("\n", " ")[:500] if text else "unknown_error"
+
+    @staticmethod
+    def _is_rate_limit_error(error: object) -> bool:
+        text = str(error or "").lower()
+        return "429" in text or "rate limit" in text or "too many requests" in text
 
     def _disable_high_upside(self, reason: str, details: dict[str, Any]) -> None:
         if not has_app_context():

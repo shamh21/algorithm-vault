@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import time
 
 from app.extensions import db
 from app.models import AuditLog, OptimizerRun, Order, StrategyRanking, StrategyRun
@@ -17,6 +18,114 @@ def test_strategy_runner_limited_helper_and_error_message_are_not_duplicated() -
 
     assert source.count("def _mark_vault_limited") == 1
     assert source.count("Strategy run {run_id} failed") == 1
+
+
+def test_strategy_market_fingerprint_changes_when_latest_candle_changes(app) -> None:
+    manager = app.extensions["services"]["strategy_manager"]
+    candles_a = [
+        {"t": 1, "c": 100.0},
+        {"t": 2, "c": 101.0},
+    ]
+    candles_b = [
+        {"t": 1, "c": 100.0},
+        {"t": 2, "c": 102.0},
+    ]
+
+    fingerprint_a = manager._market_fingerprint("BTC", "1m", candles_a)
+    fingerprint_a_repeat = manager._market_fingerprint("BTC", "1m", candles_a)
+    fingerprint_b = manager._market_fingerprint("BTC", "1m", candles_b)
+
+    assert fingerprint_a == fingerprint_a_repeat
+    assert fingerprint_a != fingerprint_b
+
+
+def test_strategy_change_driven_skip_gate_respects_flag_and_idle_window(app) -> None:
+    manager = app.extensions["services"]["strategy_manager"]
+    app.config["STRATEGY_CHANGE_DRIVEN_LOOP_ENABLED"] = True
+    app.config["STRATEGY_IDLE_REEVAL_SECONDS"] = 15
+
+    run_id = 987654
+    loop_state = manager._loop_state(run_id)
+    now = time.time()
+    fingerprint = manager._market_fingerprint("BTC", "1m", [{"t": 10, "c": 100.0}])
+    loop_state.last_market_fingerprint = fingerprint
+    loop_state.last_eval_at = now
+
+    assert manager._should_skip_full_eval(loop_state, fingerprint, now + 1.0) is True
+    assert manager._should_skip_full_eval(loop_state, fingerprint, now + 20.0) is False
+    assert manager._should_skip_full_eval(loop_state, f"{fingerprint}-changed", now + 1.0) is False
+
+    app.config["STRATEGY_CHANGE_DRIVEN_LOOP_ENABLED"] = False
+    assert manager._should_skip_full_eval(loop_state, fingerprint, now + 1.0) is False
+    manager._clear_loop_state(run_id)
+
+
+def test_strategy_heartbeat_persistence_is_throttled(app) -> None:
+    manager = app.extensions["services"]["strategy_manager"]
+    app.config["STRATEGY_HEARTBEAT_PERSIST_SECONDS"] = 30
+    run = StrategyRun(
+        strategy_name="scalping",
+        symbol="BTC",
+        timeframe="1m",
+        mode="paper",
+        status="running",
+    )
+    run.parameters = {}
+    db.session.add(run)
+    db.session.commit()
+
+    loop_state = manager._loop_state(run.id)
+    now = time.time()
+    loop_state.last_persisted_heartbeat_at = now
+
+    unchanged = manager._persist_run_runtime_state(
+        run,
+        loop_state,
+        status="running",
+        last_error=None,
+        heartbeat_now=now + 5.0,
+    )
+    changed = manager._persist_run_runtime_state(
+        run,
+        loop_state,
+        status="running",
+        last_error=None,
+        heartbeat_now=now + 31.0,
+    )
+
+    assert unchanged is False
+    assert changed is True
+    assert run.last_heartbeat_at is not None
+    manager._clear_loop_state(run.id)
+
+
+def test_strategy_loop_metrics_payload_includes_expected_fields(app) -> None:
+    manager = app.extensions["services"]["strategy_manager"]
+    manager._loop_metrics["ticks_total"] = 10
+    manager._loop_metrics["ticks_skipped_unchanged"] = 4
+    manager._loop_metrics["ticks_full_eval"] = 6
+    manager._loop_metrics["full_eval_ms_sum"] = 120.0
+    manager._loop_metrics["db_writes_total"] = 7
+
+    payload = manager.get_loop_metrics()
+
+    assert payload["ticks_total"] == 10
+    assert payload["ticks_skipped_unchanged"] == 4
+    assert payload["ticks_full_eval"] == 6
+    assert payload["avg_full_eval_ms"] == 20.0
+    assert payload["db_writes_total"] == 7
+
+
+def test_dashboard_performance_payload_includes_strategy_loop_metrics(app, monkeypatch) -> None:
+    from app.routes import dashboard as dashboard_routes
+
+    monkeypatch.setattr(dashboard_routes, "require_admin", lambda: None)
+    response = app.test_client().get("/admin/api/performance")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert isinstance(payload, dict)
+    assert "strategy_loop" in payload
 
 
 def test_aggressive_signal_edge_below_cost_threshold_records_no_trade(app) -> None:
@@ -69,6 +178,130 @@ def test_strategy_and_vault_fallbacks_are_live_only(app) -> None:
     assert manager._market_mode("live") == "live"
     assert selector._fallback_mode() == "live"
     assert selector._execution_state("paper", [], metadata) == ("live", "live", "failed", "limited")
+
+
+def test_high_upside_runner_holds_when_required_ml_signal_is_unavailable(app) -> None:
+    app.config["HIGH_UPSIDE_REQUIRE_ML_SIGNAL"] = True
+    app.config["ML_SIGNAL_MODEL_ENABLED"] = False
+    manager = app.extensions["services"]["strategy_manager"]
+    run = StrategyRun(strategy_name="scalping", symbol="BTC", timeframe="1m", mode="live")
+    run.parameters = {"high_upside_profile": True, "duration_hours": 1}
+    signal = Signal("buy", "base signal", "1m", 99.0, 102.0, 0.5, {"confidence": 0.8})
+
+    gated = manager._high_upside_ml_signal(
+        run,
+        signal,
+        [{"close": 100.0, "volume": 1000}, {"close": 101.0, "volume": 1100}],
+        {"trend_strength": 1.0},
+        "live",
+    )
+
+    assert gated.action == "hold"
+    assert gated.position_fraction == 0.0
+    assert gated.metadata["ml_signal_model"]["status"] == "disabled"
+    assert gated.metadata["no_trade_reason"].startswith("ml_signal_blocked")
+
+
+def test_high_upside_runner_uses_promoted_ml_signal_for_live_entry(app, monkeypatch) -> None:
+    app.config["HIGH_UPSIDE_REQUIRE_ML_SIGNAL"] = True
+    app.config["ML_SIGNAL_MODEL_ENABLED"] = True
+    manager = app.extensions["services"]["strategy_manager"]
+    run = StrategyRun(strategy_name="scalping", symbol="BTC", timeframe="1m", mode="live")
+    run.parameters = {"high_upside_profile": True, "duration_hours": 1}
+    signal = Signal("hold", "base hold", "1m", None, None, 0.0, {"confidence": 0.2})
+
+    monkeypatch.setattr(
+        manager.ml_signal_model,
+        "score_payload",
+        lambda context, horizon, **kwargs: {
+            "enabled": True,
+            "status": "promoted",
+            "ready_for_live": True,
+            "action": "sell",
+            "confidence": 0.88,
+            "expected_return": -0.02,
+            "suggested_stop_loss_pct": 0.005,
+            "suggested_take_profit_pct": 0.012,
+            "sizing_score": 0.4,
+            "position_fraction": 0.4,
+            "blockers": [],
+        },
+    )
+
+    selected = manager._high_upside_ml_signal(
+        run,
+        signal,
+        [{"close": 100.0, "volume": 1000}, {"close": 101.0, "volume": 1100}],
+        {"trend_strength": 1.0},
+        "live",
+    )
+
+    assert selected.action == "sell"
+    assert selected.stop_loss > 101.0
+    assert selected.take_profit < 101.0
+    assert selected.position_fraction == 0.4
+    assert selected.metadata["ml_signal_model"]["status"] == "promoted"
+
+
+def test_ml_first_strategy_wrapper_blocks_non_high_upside_without_model(app) -> None:
+    app.config["ML_FIRST_STRATEGIES_ENABLED"] = True
+    app.config["ML_SIGNAL_MODEL_ENABLED"] = False
+    manager = app.extensions["services"]["strategy_manager"]
+    run = StrategyRun(strategy_name="scalping", symbol="BTC", timeframe="1m", mode="paper")
+    run.parameters = {}
+    signal = Signal("buy", "base signal", "1m", 99.0, 102.0, 0.5, {"confidence": 0.8})
+
+    gated = manager._high_upside_ml_signal(
+        run,
+        signal,
+        [{"close": 100.0, "volume": 1000}, {"close": 101.0, "volume": 1100}],
+        {"trend_strength": 1.0},
+        "live",
+    )
+
+    assert gated.action == "hold"
+    assert gated.metadata["no_trade_reason"].startswith("ml_signal_blocked")
+    assert "ml_signal_decision" in gated.metadata
+
+
+def test_ml_first_strategy_wrapper_uses_promoted_signal_for_non_high_upside(app, monkeypatch) -> None:
+    app.config["ML_FIRST_STRATEGIES_ENABLED"] = True
+    app.config["ML_SIGNAL_MODEL_ENABLED"] = True
+    manager = app.extensions["services"]["strategy_manager"]
+    run = StrategyRun(strategy_name="scalping", symbol="BTC", timeframe="1m", mode="paper")
+    run.parameters = {}
+    signal = Signal("buy", "base signal", "1m", 99.0, 102.0, 0.8, {"confidence": 0.8})
+
+    monkeypatch.setattr(
+        manager.ml_signal_model,
+        "score_payload",
+        lambda context, horizon, **kwargs: {
+            "enabled": True,
+            "status": "promoted",
+            "ready_for_live": True,
+            "action": "buy",
+            "confidence": 0.9,
+            "expected_return": 0.02,
+            "suggested_stop_loss_pct": 0.005,
+            "suggested_take_profit_pct": 0.012,
+            "sizing_score": 0.3,
+            "position_fraction": 0.3,
+            "blockers": [],
+        },
+    )
+
+    selected = manager._high_upside_ml_signal(
+        run,
+        signal,
+        [{"close": 100.0, "volume": 1000}, {"close": 101.0, "volume": 1100}],
+        {"trend_strength": 1.0},
+        "live",
+    )
+
+    assert selected.action == "buy"
+    assert selected.position_fraction == 0.3
+    assert selected.metadata["ml_signal_decision"]["family"] == "pytorch_gru_signal"
+    assert selected.metadata["ml_feature_schema_version"] == "ml_feature_v1"
 
 
 def test_signal_quality_combines_features_fibonacci_market_and_ml(app) -> None:

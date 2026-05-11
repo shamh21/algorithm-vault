@@ -7,7 +7,7 @@
   <article class="vault-card wallet-flow-card">
     <span class="card-kicker">Deposit</span>
     <h1>{{ balance.asset }} Deposit Address</h1>
-    <p class="muted">Use only generated real custody addresses or configured exchange/custody addresses. No address is shown unless the wallet service can create or verify one.</p>
+    <p class="muted">Use a generated custody or configured exchange address. We only show verified addresses.</p>
 
     <form method="get" action="{{ url_for('consumer.deposit', asset=balance.asset) }}" class="inline-form">
       <label>Network
@@ -40,7 +40,7 @@
 
     <div class="risk-note">
       <strong>Send only {{ balance.asset }} on {{ selected_network }}{% if address %} to this address{% endif %}.</strong>
-      <span>Sending any other asset or using a different network may result in loss. Network fees may apply.</span>
+      <span>Wrong assets or networks can result in loss. Fees may also apply.</span>
     </div>
 
     {% if address %}

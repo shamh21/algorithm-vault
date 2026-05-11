@@ -7,7 +7,7 @@
   <article class="vault-card wallet-flow-card">
     <span class="card-kicker">Withdraw</span>
     <h1>Withdraw {{ balance.asset }}</h1>
-    <p class="muted">Withdrawals validate the destination address and either simulate in test mode or submit to the configured provider in real-address mode.</p>
+    <p class="muted">Destination addresses are validated. Test mode simulates; live mode submits to your configured provider.</p>
 
     <div class="balance-pill-row">
       <span class="balance-pill positive">Available {{ "%.6f"|format(balance.available_balance) }} {{ balance.asset }}</span>
@@ -19,14 +19,20 @@
       {% if errors and errors.get("form") %}
         <div class="flash danger">{{ errors.get("form") }}</div>
       {% endif %}
-      <label>Withdraw Address
+        <label>Destination Address
         <input type="text" name="withdraw_address" placeholder="Paste destination address" value="{{ form_values.withdraw_address if form_values else '' }}" required>
         {% if errors and errors.get("withdraw_address") %}<span class="field-error">{{ errors.get("withdraw_address") }}</span>{% endif %}
       </label>
       <label>Amount
-        <input type="number" name="amount" min="0" max="{{ balance.available_balance }}" step="0.000001" inputmode="decimal" value="{{ form_values.amount if form_values else '' }}" required>
+        <input type="number" name="amount" min="0" max="{{ [balance.available_balance, max_withdrawal_amount or 0]|max }}" step="0.000001" inputmode="decimal" value="{{ form_values.amount if form_values else '' }}" required>
         {% if errors and errors.get("amount") %}<span class="field-error">{{ errors.get("amount") }}</span>{% endif %}
       </label>
+      {% if max_withdrawal_amount and max_withdrawal_amount > 0 %}
+        <label class="checkbox-row">
+          <input type="checkbox" name="withdraw_max" value="1">
+          <span>Withdraw max {{ "%.6f"|format(max_withdrawal_amount) }} {{ balance.asset }}</span>
+        </label>
+      {% endif %}
       <label>Network
         <select name="network">
           {% for network in networks %}
@@ -41,8 +47,8 @@
       </label>
 
       <div class="risk-note">
-        <strong>Check the asset and network before submitting.</strong>
-        <span>Withdrawals may incur network fees and remain pending until backend processing completes.</span>
+        <strong>Check asset and network before submitting.</strong>
+        <span>Withdrawals may incur fees and may remain pending during backend processing.</span>
       </div>
 
       <button type="submit" class="primary" data-loading-label="Submitting...">Submit Withdrawal</button>

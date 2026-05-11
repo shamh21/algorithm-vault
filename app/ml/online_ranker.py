@@ -10,6 +10,7 @@ from flask import has_app_context
 
 from ..extensions import db
 from ..models import MLModelState, MLTrainingEvent
+from ..services.provider_assets import normalize_provider
 
 
 NUMERIC_FEATURE_SCALES: dict[str, float] = {
@@ -101,6 +102,10 @@ NUMERIC_FEATURE_SCALES: dict[str, float] = {
     "scanner_rejection_rate": 1.0,
     "offline_ml_prediction": 1.0,
     "duration_hours": 168.0,
+    "order_book_depth_usd": 250_000.0,
+    "fee_bps": 100.0,
+    "maker_fee_bps": 100.0,
+    "taker_fee_bps": 100.0,
 }
 
 CATEGORICAL_KEYS = (
@@ -125,6 +130,9 @@ CATEGORICAL_KEYS = (
     "spread_cost_regime",
     "liquidity_regime",
     "trend_breakout_regime",
+    "provider",
+    "execution_venue",
+    "collateral_asset",
 )
 BOOLEAN_FEATURES = {
     "aggressive_profile",
@@ -135,7 +143,13 @@ BOOLEAN_FEATURES = {
     "mtf_momentum_exhaustion",
     "market_structure_enabled",
     "offline_ml_blend_enabled",
+    "provider_is_hyperliquid",
+    "provider_is_kucoin",
+    "collateral_is_usdc",
+    "collateral_is_usdt",
 }
+
+ONE_H10_HORIZON = "1h10"
 
 
 def horizon_from_duration(duration_hours: int | float | str | None) -> str:
@@ -151,6 +165,31 @@ def horizon_from_duration(duration_hours: int | float | str | None) -> str:
     if duration <= 168:
         return "7d"
     return "custom"
+
+
+def is_one_h10_context(context: dict[str, Any] | Any) -> bool:
+    payload = _as_dict(context)
+    markers = {
+        str(payload.get("algorithm_profile") or "").strip().lower(),
+        str(payload.get("vault_cycle_name") or "").strip().lower(),
+        str(payload.get("objective") or "").strip().lower(),
+        str(payload.get("target_return_objective") or "").strip().lower(),
+        str(payload.get("ml_horizon") or "").strip().lower(),
+        str(payload.get("horizon") or "").strip().lower(),
+    }
+    return bool(payload.get("one_h10_vault")) or bool(payload.get("is_one_h10")) or bool(
+        markers & {ONE_H10_HORIZON, "1h10", "one_h10", "one_hour_10x"}
+    )
+
+
+def horizon_from_context(context: dict[str, Any] | Any, duration_hours: int | float | str | None = None) -> str:
+    payload = _as_dict(context)
+    if is_one_h10_context(payload):
+        return ONE_H10_HORIZON
+    explicit = str(payload.get("ml_horizon") or "").strip().lower()
+    if explicit:
+        return explicit
+    return horizon_from_duration(duration_hours if duration_hours is not None else _first_float(payload, "lock_duration_hours", "duration_hours") or 1)
 
 
 def extract_features(context: dict[str, Any] | Any) -> dict[str, Any]:
@@ -181,7 +220,8 @@ def extract_features(context: dict[str, Any] | Any) -> dict[str, Any]:
         payload.setdefault("liquidity_regime", regime_bucket.get("liquidity"))
         payload.setdefault("trend_breakout_regime", regime_bucket.get("trend_breakout"))
     duration = _first_float(payload, "lock_duration_hours", "duration_hours")
-    horizon = str(payload.get("horizon") or horizon_from_duration(duration or 1)).lower()
+    horizon = ONE_H10_HORIZON if is_one_h10_context(payload) else str(payload.get("horizon") or horizon_from_context(payload, duration or 1)).lower()
+    payload["horizon"] = horizon
     features: dict[str, Any] = {
         "horizon": horizon,
         "duration_hours": duration or _duration_for_horizon(horizon),
@@ -237,7 +277,11 @@ def extract_features(context: dict[str, Any] | Any) -> dict[str, Any]:
         "fees_to_equity": fees / equity if equity > 0 else 0.0,
         "capacity_ratio": capacity / allocation if allocation > 0 and capacity > 0 else 1.0,
         "liquidity_usd": _first_float(payload, "liquidity_usd", "realtime_liquidity_usd", "capacity_usd"),
+        "order_book_depth_usd": _first_float(payload, "order_book_depth_usd"),
         "signal_stability": _first_float(payload, "signal_stability", default=1.0),
+        "fee_bps": _first_float(payload, "fee_bps", "estimated_fee_bps"),
+        "maker_fee_bps": _first_float(payload, "maker_fee_bps"),
+        "taker_fee_bps": _first_float(payload, "taker_fee_bps"),
         "leverage": _first_float(payload, "leverage", default=1.0),
         "liquidation_buffer_pct": _first_float(payload, "liquidation_buffer_pct", default=1.0),
         "atr_pct": _first_float(payload, "atr_pct"),
@@ -316,6 +360,10 @@ def extract_features(context: dict[str, Any] | Any) -> dict[str, Any]:
     features["mtf_momentum_exhaustion"] = bool(multi_timeframe_confluence.get("momentum_exhaustion", False))
     features["market_structure_enabled"] = bool(market_structure.get("enabled", payload.get("market_structure_enabled", False)))
     features["offline_ml_blend_enabled"] = bool(payload.get("offline_ml_blend_enabled", False))
+    features["provider_is_hyperliquid"] = str(payload.get("provider") or payload.get("execution_venue") or "").lower() == "hyperliquid"
+    features["provider_is_kucoin"] = str(payload.get("provider") or payload.get("execution_venue") or "").lower() == "kucoin"
+    features["collateral_is_usdc"] = str(payload.get("collateral_asset") or "").upper() == "USDC"
+    features["collateral_is_usdt"] = str(payload.get("collateral_asset") or "").upper() == "USDT"
     return features
 
 
@@ -502,8 +550,10 @@ class OnlineRanker:
             record.update_count = update_count + 1
             record.total_loss = float(record.total_loss or 0.0) + loss
             record.last_loss = loss
+            provider_key = normalize_provider((metadata or {}).get("provider") or (metadata or {}).get("execution_venue"))
             event = MLTrainingEvent(
                 model_state_id=record.id,
+                provider=provider_key,
                 source=str(source or "unknown"),
                 source_id=str(source_id) if source_id is not None else None,
                 mode=mode,
@@ -549,8 +599,10 @@ class OnlineRanker:
         error = target - prediction_before
         if has_app_context():
             record = self._model_state(horizon, create=True)
+            provider_key = normalize_provider((metadata or {}).get("provider") or (metadata or {}).get("execution_venue"))
             event = MLTrainingEvent(
                 model_state_id=record.id,
+                provider=provider_key,
                 source=str(source or "unknown"),
                 source_id=str(source_id) if source_id is not None else None,
                 mode="live",

@@ -21,6 +21,7 @@ def app():
             "MAX_DAILY_LOSS_USDC": 100.0,
             "EXPLICIT_LIVE_CONFIRMED": False,
             "SECONDARY_CONFIRMATION": False,
+            "ONE_H10_LIVE_ENABLED": True,
             "SHADOW_LIVE_MIN_TRADES": 1,
             "SHADOW_LIVE_MIN_HOURS": 0.0,
         }

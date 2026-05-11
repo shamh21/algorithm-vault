@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from typing import Any
 
 import pyotp
 
@@ -10,6 +11,7 @@ from app.models import (
     DepositAddress,
     Fill,
     Order,
+    Setting,
     VaultCycle,
     WalletAddress,
     WalletAuditLog,
@@ -84,15 +86,78 @@ def _create_live_connection(app, user):
     return connection
 
 
+def _confirm_one_h10_live(app) -> None:
+    app.config["EXPLICIT_LIVE_CONFIRMED"] = True
+    app.config["SECONDARY_CONFIRMATION"] = True
+    Setting.set_json("explicit_live_confirmed", True)
+    Setting.set_json("secondary_confirmation", True)
+    db.session.commit()
+
+
+class _PassingOneH10Forecast:
+    def forecast(
+        self,
+        features: dict[str, Any],
+        *,
+        provider: str,
+        symbol: str,
+        allocation_cap_usd: float = 0.0,
+        available_margin_usd: float = 0.0,
+        market: Any = None,
+    ) -> dict[str, Any]:
+        suggested_notional = min(
+            value
+            for value in [
+                float(allocation_cap_usd or 5.0),
+                float(available_margin_usd or allocation_cap_usd or 5.0),
+                5.0,
+            ]
+            if value > 0
+        )
+        return {
+            "predicted_side": "buy",
+            "action": "buy",
+            "confidence": 0.82,
+            "expected_return_bps": 42.0,
+            "gross_expected_return_bps": 54.0,
+            "net_expected_return_bps": 28.0,
+            "cost_drag_bps": 8.0,
+            "spread_bps": 1.0,
+            "execution_quality": 0.9,
+            "capital_efficiency_score": 1.0,
+            "expected_net_edge_passed": True,
+            "suggested_notional_usd": suggested_notional,
+            "suggested_leverage": 1.0,
+            "suggested_order_type": "limit",
+            "suggested_stop_loss_pct": 0.01,
+            "suggested_take_profit_pct": 0.03,
+            "directional_score": 0.6,
+            "blockers": [],
+            "advisory_blockers": [],
+            "ml_namespace": "1h10",
+            "ml_horizon": "1h10",
+            "source": "one_h10_ml_profit_suite",
+            "ml_ready": True,
+            "ml_decision": {},
+            "ml_policy_decisions": {},
+            "provider": provider,
+            "symbol": symbol,
+        }
+
+
 def _start_cycle(client, amount: str, duration: str = "24"):
+    data = {
+        "deposit_amount": amount,
+        "deposit_asset": "USDC",
+        "lock_duration": duration,
+        "settlement_asset": "USDC",
+    }
+    if str(duration) == "1":
+        _confirm_one_h10_live(client.application)
+        data["one_h10_live_ack"] = "on"
     return client.post(
         "/vault/start",
-        data={
-            "deposit_amount": amount,
-            "deposit_asset": "USDC",
-            "lock_duration": duration,
-            "settlement_asset": "USDC",
-        },
+        data=data,
         follow_redirects=True,
     )
 
@@ -102,8 +167,10 @@ def _seed_custody_usdc(user: User, amount: float = 1000.0) -> None:
     db.session.commit()
 
 
-def test_multiple_vault_cycles_can_run_at_once(app) -> None:
+def test_multiple_vault_cycles_can_run_at_once(app, monkeypatch) -> None:
     _patch_market_data(app)
+    _confirm_one_h10_live(app)
+    monkeypatch.setitem(app.extensions["services"], "one_h10_forecast", _PassingOneH10Forecast())
     app.extensions["services"]["strategy_manager"].start = lambda run_id: None
     user, secret = _create_user()
     _seed_custody_usdc(user)
@@ -141,8 +208,9 @@ def test_vault_concentration_rejects_excess_asset_exposure(app) -> None:
     assert b"asset exposure would exceed" in blocked.data
 
 
-def test_cycle_settlement_persists_trade_risk_leverage_reward_summary(app) -> None:
+def test_cycle_settlement_persists_trade_risk_leverage_reward_summary(app, monkeypatch) -> None:
     _patch_market_data(app)
+    monkeypatch.setitem(app.extensions["services"], "one_h10_forecast", _PassingOneH10Forecast())
     app.extensions["services"]["strategy_manager"].start = lambda run_id: None
     app.extensions["services"]["strategy_manager"].stop = lambda run_id: None
     app.extensions["services"]["order_manager"].current_position = lambda *args, **kwargs: {"unrealized_pnl": 2.0}
@@ -154,6 +222,9 @@ def test_cycle_settlement_persists_trade_risk_leverage_reward_summary(app) -> No
     _start_cycle(client, "100", "1")
     cycle = VaultCycle.query.filter_by(user_id=user.id).one()
     leg = cycle.allocation_legs[0]
+    app.extensions["services"]["order_manager"].current_position = (
+        lambda symbol, *args, **kwargs: {"unrealized_pnl": 2.0 if symbol == leg.symbol else 0.0}
+    )
     order = Order(
         user_id=user.id,
         trading_connection_id=cycle.trading_connection_id,
@@ -211,8 +282,9 @@ def test_all_wallet_assets_render_in_allocation_and_settlement_selectors(app) ->
     assert b'<option value="XRP"' in vault.data
 
 
-def test_standard_duration_cycles_start_and_settle(app) -> None:
+def test_standard_duration_cycles_start_and_settle(app, monkeypatch) -> None:
     _patch_market_data(app)
+    monkeypatch.setitem(app.extensions["services"], "one_h10_forecast", _PassingOneH10Forecast())
     app.extensions["services"]["strategy_manager"].start = lambda run_id: None
     app.extensions["services"]["strategy_manager"].stop = lambda run_id: None
     app.extensions["services"]["order_manager"].current_position = lambda *args, **kwargs: {"unrealized_pnl": 0.0}

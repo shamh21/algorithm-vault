@@ -65,6 +65,33 @@ def test_vault_selector_prefers_duration_matched_aggressive_risk_adjusted_rankin
     assert day.metadata["optimizer_profile"] == "aggressive_risk_adjusted"
 
 
+def test_vault_selector_filters_rankings_by_execution_provider(app) -> None:
+    _patch_market(app)
+    optimizer_run = OptimizerRun(profile="aggressive_risk_adjusted", status="completed")
+    db.session.add(optimizer_run)
+    db.session.flush()
+    hyperliquid = _ranking(optimizer_run.id, strategy="breakout", timeframe="15m", duration=24, score=100.0)
+    hyperliquid.provider = "hyperliquid"
+    kucoin = _ranking(optimizer_run.id, strategy="mean_reversion", timeframe="15m", duration=24, score=5.0)
+    kucoin.provider = "kucoin"
+    db.session.add_all([hyperliquid, kucoin])
+    db.session.commit()
+
+    selection = app.extensions["services"]["vault_strategy_selector"].select(
+        "USDT",
+        24,
+        "paper",
+        100.0,
+        provider="kucoin",
+    )
+
+    assert selection.strategy_name == "mean_reversion"
+    assert selection.metadata["provider"] == "kucoin"
+    assert selection.metadata["collateral_asset"] == "USDT"
+    assert selection.metadata["optimizer_provider"] == "kucoin"
+    assert selection.legs[0]["provider"] == "kucoin"
+
+
 def test_vault_selector_uses_warmed_ml_score_to_nudge_ranking(app) -> None:
     app.config["ML_RANKER_ENABLED"] = True
     app.config["ML_MIN_TRAINING_EVENTS"] = 1

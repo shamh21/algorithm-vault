@@ -61,6 +61,8 @@ def build_connection_health(
         "provider_code": parsed.get("provider_code"),
         "client_ip": parsed.get("client_ip"),
         "ip_whitelist_blocked": bool(parsed.get("ip_whitelist_blocked", False)),
+        "transient_failure": bool(parsed.get("transient_failure", False)),
+        "failure_category": parsed.get("failure_category", ""),
     }
 
 
@@ -70,6 +72,8 @@ def parse_exchange_failure(message: object) -> dict[str, Any]:
         "provider_code": None,
         "client_ip": None,
         "ip_whitelist_blocked": False,
+        "transient_failure": False,
+        "failure_category": "",
     }
     if not text:
         return parsed
@@ -87,6 +91,54 @@ def parse_exchange_failure(message: object) -> dict[str, Any]:
     if ip_match:
         parsed["client_ip"] = ip_match.group(1)
     parsed["ip_whitelist_blocked"] = "invalid request ip" in text.lower() or bool(parsed["client_ip"])
+    lowered = text.lower()
+    if parsed["ip_whitelist_blocked"]:
+        parsed["failure_category"] = "ip_whitelist"
+    credential_markers = (
+        "invalid kc-api-key",
+        "invalid api key",
+        "api-key format invalid",
+        "signature not valid",
+        "invalid signature",
+        "invalid passphrase",
+        "api key not exists",
+        "unauthorized",
+        "cannot be decrypted",
+    )
+    permission_markers = (
+        "permission",
+        "forbidden",
+        "futures permission",
+        "api-permission",
+        "not allowed",
+    )
+    symbol_markers = (
+        "not mapped",
+        "invalid symbol",
+        "symbol not exists",
+        "contract not exist",
+        "contract_size",
+        "sizing metadata",
+    )
+    if any(marker in lowered for marker in credential_markers):
+        parsed["failure_category"] = "invalid_credentials"
+    elif any(marker in lowered for marker in permission_markers):
+        parsed["failure_category"] = "missing_permission"
+    elif any(marker in lowered for marker in symbol_markers):
+        parsed["failure_category"] = "bad_symbol_mapping"
+    timeout_markers = (
+        "timed out",
+        "timeout",
+        "max retries exceeded",
+        "connectionerror",
+        "failed to resolve",
+        "nameresolutionerror",
+        "nodename nor servname",
+        "temporary failure",
+    )
+    if any(marker in lowered for marker in timeout_markers):
+        parsed["transient_failure"] = True
+        parsed["failure_category"] = "network_timeout" if "timed out" in lowered or "timeout" in lowered else "network_unavailable"
     return parsed
 
 
@@ -96,6 +148,8 @@ def operator_connection_message(health: dict[str, Any]) -> str:
     client_ip = health.get("client_ip")
     if client_ip:
         return f"{provider} blocked live trading: {reason}. Whitelist current client IP {client_ip} before starting a vault cycle."
+    if health.get("transient_failure"):
+        return f"{provider} live access is temporarily unavailable: {reason}. Wait for a fresh readiness check before starting a vault cycle."
     return f"{provider} blocked live trading: {reason}"
 
 

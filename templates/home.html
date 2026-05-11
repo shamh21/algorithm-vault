@@ -7,7 +7,7 @@
   <div class="hero-copy">
     <span class="eyebrow">Wallet + Automated Vault</span>
     <h1>Allocate crypto into risk-gated algorithm cycles.</h1>
-    <p>Choose a wallet balance, lock an amount, select a duration, and settle back into your preferred asset when the cycle completes.</p>
+    <p>Choose an allocation, set a lock duration, and settle back into your preferred asset at unlock.</p>
     <div class="hero-actions">
       <a href="{{ url_for('consumer.vault') }}" class="button-link primary">Start a Cycle</a>
       <a href="{{ url_for('consumer.wallet') }}" class="button-link secondary">View Wallet</a>
@@ -16,6 +16,18 @@
   <aside class="vault-card hero-status">
     <span class="muted">Portfolio Value</span>
     <strong class="hero-value">${{ "%.2f"|format(portfolio_total) }}</strong>
+    <div class="status-row">
+      <span>Locked Funds</span>
+      <strong>{{ "%.6f"|format(wallet_summary.locked_total) }}</strong>
+    </div>
+    <div class="status-row">
+      <span>Active Provider</span>
+      {% for connection in wallet_summary.trading_connections if connection.is_active %}
+        <strong>{{ connection.provider|title }} #{{ connection.connection_id }}</strong>
+      {% else %}
+        <strong>None</strong>
+      {% endfor %}
+    </div>
     {% if active_cycle %}
       <div class="status-row">
         <span>Active Cycle</span>
@@ -57,7 +69,7 @@
     </div>
     <a href="{{ url_for('consumer.activity') }}" class="text-link">All activity</a>
   </div>
-  <table>
+  <table class="responsive-table">
     <thead><tr><th>Type</th><th>Asset</th><th>Amount</th><th>Status</th><th>Time</th></tr></thead>
     <tbody>
       {% for item in recent_transactions %}

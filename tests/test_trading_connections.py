@@ -9,9 +9,10 @@ from cryptography.fernet import Fernet
 from app.auth import decrypt_totp_secret, encrypt_totp_secret, password_hash
 from app.extensions import db
 from app.models import Order, Setting, TradingConnection, User
-from app.services.hyperliquid_client import ClientSnapshot
-from app.services.live_provider_adapters import BinanceFuturesConnector, UniswapDelegatedConnector
-from app.services.order_manager import OrderIntent
+from app.services.connection_health import parse_exchange_failure
+from app.services.hyperliquid_client import ClientSnapshot, HyperliquidClient
+from app.services.live_provider_adapters import BinanceFuturesConnector, KucoinFuturesConnector, ProviderRequestError, UniswapDelegatedConnector
+from app.services.order_manager import OrderIntent, OrderManager
 
 
 def _create_user(username: str) -> User:
@@ -450,6 +451,304 @@ def test_binance_connector_signs_usdm_order(monkeypatch) -> None:
     assert calls[-1][2]["headers"]["X-MBX-APIKEY"] == "key"
     assert calls[-1][2]["params"]["symbol"] == "BTCUSDT"
     assert "signature" in calls[-1][2]["params"]
+
+
+def test_kucoin_connector_signs_futures_order_with_contract_sizing(monkeypatch) -> None:
+    class Creds:
+        api_key = "key"
+        api_secret = "secret"
+        passphrase = "passphrase"
+        wallet_address = ""
+
+    class Response:
+        status_code = 200
+        text = "{}"
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def json(self):
+            return self.payload
+
+    calls = []
+
+    class Session:
+        def request(self, method, url, **kwargs):
+            calls.append((method, url, kwargs))
+            return Response({"code": "200000", "data": {"orderId": "ku-123", "clientOid": "client-1"}})
+
+    connector = KucoinFuturesConnector(
+        {
+            "ENABLE_LIVE_TRADING": True,
+            "KUCOIN_FUTURES_BASE_URL": "https://example.test",
+            "KUCOIN_CONTRACT_SPECS_JSON": '{"XBTUSDTM":{"contract_size":0.001,"size_step":1,"min_size":1}}',
+        },
+        Creds(),
+    )
+    connector.session = Session()
+    monkeypatch.setattr("app.services.live_provider_adapters.time.time", lambda: 1_700_000_000)
+
+    result = connector.place_order("live", "BTC", "buy", 0.1, "limit", 100.0, False, 2.0, 0.0)
+
+    body = calls[-1][2]["data"]
+    headers = calls[-1][2]["headers"]
+    assert result["status"] == "submitted"
+    assert result["exchange_order_id"] == "ku-123"
+    assert headers["KC-API-KEY"] == "key"
+    assert headers["KC-API-KEY-VERSION"] == "2"
+    assert '"symbol":"XBTUSDTM"' in body
+    assert '"marginMode":"ISOLATED"' in body
+    assert '"positionSide":"BOTH"' in body
+    assert '"size":100' in body
+
+
+def test_kucoin_connector_fails_closed_on_unaligned_contract_quantity() -> None:
+    class Creds:
+        api_key = "key"
+        api_secret = "secret"
+        passphrase = "passphrase"
+        wallet_address = ""
+
+    connector = KucoinFuturesConnector(
+        {
+            "ENABLE_LIVE_TRADING": True,
+            "KUCOIN_CONTRACT_SPECS_JSON": '{"XBTUSDTM":{"contract_size":0.001,"size_step":1,"min_size":1}}',
+        },
+        Creds(),
+    )
+
+    with pytest.raises(ValueError, match="does not align"):
+        connector.place_order("live", "BTC", "buy", 0.1005, "market", None, False, 1.0, 0.0)
+
+
+def test_kucoin_connector_reads_futures_candles_and_mid_price() -> None:
+    class Creds:
+        api_key = "key"
+        api_secret = "secret"
+        passphrase = "passphrase"
+        wallet_address = ""
+
+    class Response:
+        status_code = 200
+        text = "{}"
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def json(self):
+            return self.payload
+
+    calls = []
+
+    class Session:
+        def request(self, method, url, **kwargs):
+            calls.append((method, url, kwargs))
+            if "/kline/query" in url:
+                return Response(
+                    {
+                        "code": "200000",
+                        "data": [
+                            [1_766_000_000, "100", "105", "99", "104", "1000"],
+                            [1_766_000_060, "104", "106", "103", "105", "900"],
+                        ],
+                    }
+                )
+            return Response({"code": "200000", "data": {"bestBidPrice": "104.9", "bestAskPrice": "105.1"}})
+
+    connector = KucoinFuturesConnector(
+        {
+            "ENABLE_LIVE_TRADING": True,
+            "KUCOIN_FUTURES_BASE_URL": "https://example.test",
+            "KUCOIN_SYMBOL_MAP_JSON": '{"BTC":"XBTUSDTM"}',
+        },
+        Creds(),
+    )
+    connector.session = Session()
+
+    candles = connector.get_candles("XBTUSDTM", "1m", "live", 2)
+    mid = connector.get_mid_price("XBTUSDTM", "live")
+
+    assert [row["close"] for row in candles] == [104.0, 105.0]
+    assert mid == pytest.approx(105.0)
+    kline_call = calls[0]
+    assert kline_call[2]["params"]["symbol"] == "XBTUSDTM"
+    assert kline_call[2]["params"]["granularity"] == 1
+    assert kline_call[2]["params"]["from"] > 1_000_000_000_000
+    assert kline_call[2]["params"]["to"] > 1_000_000_000_000
+
+
+def test_kucoin_connector_normalizes_positions_orders_and_fills() -> None:
+    class Creds:
+        api_key = "key"
+        api_secret = "secret"
+        passphrase = "passphrase"
+        wallet_address = ""
+
+    class Response:
+        status_code = 200
+        text = "{}"
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def json(self):
+            return self.payload
+
+    class Session:
+        def request(self, method, url, **kwargs):
+            if url.endswith("/api/v1/positions"):
+                return Response({"code": "200000", "data": [{"symbol": "XBTUSDTM", "currentQty": 2, "avgEntryPrice": "100", "markPrice": "110", "unrealisedPnl": "1.5"}]})
+            params = kwargs.get("params") or {}
+            if params.get("status") == "active":
+                return Response({"code": "200000", "data": {"items": [{"symbol": "XBTUSDTM", "id": "order-1", "side": "buy", "price": "100", "size": "2"}]}})
+            if url.endswith("/api/v1/recentDoneOrders"):
+                return Response({"code": "200000", "data": {"items": [{"symbol": "XBTUSDTM", "side": "sell", "price": "111", "size": "1", "realisedPnl": "2"}]}})
+            return Response({"code": "200000", "data": {}})
+
+    connector = KucoinFuturesConnector({"ENABLE_LIVE_TRADING": True}, Creds())
+    connector.session = Session()
+
+    positions = connector.get_positions("live")
+    orders = connector.get_open_orders("live")
+    fills = connector.get_recent_fills("live")
+
+    assert positions[0]["symbol"] == "BTC"
+    assert positions[0]["quantity"] == 2.0
+    assert orders[0]["order_id"] == "order-1"
+    assert fills[0]["closed_pnl"] == 2.0
+
+
+def test_kucoin_provider_error_redacts_and_categorizes_failures() -> None:
+    error = ProviderRequestError('{"code":"400006","msg":"Invalid request ip, the current clientIp is:209.52.132.232","KC-API-KEY":"secret-key"}')
+    parsed = parse_exchange_failure(str(error))
+
+    assert "secret-key" not in str(error)
+    assert parsed["provider_code"] == "400006"
+    assert parsed["client_ip"] == "209.52.132.232"
+    assert parsed["failure_category"] == "ip_whitelist"
+
+
+def test_hyperliquid_rejected_order_sets_local_rejection_reason(app, monkeypatch) -> None:
+    user = _create_user("hl-rejected")
+    connection = _create_connection(app, user)
+    manager = app.extensions["services"]["order_manager"]
+
+    class FakeConnector:
+        def can_trade(self, mode: str) -> bool:
+            return True
+
+        def place_order(self, *args):
+            return {"status": "rejected", "exchange_order_id": None, "error": "insufficient margin", "raw": {"response": "rejected"}}
+
+        def get_positions(self, mode: str):
+            return []
+
+    monkeypatch.setattr(app.extensions["services"]["market_data"], "get_mid_price", lambda symbol, mode: 100.0)
+    monkeypatch.setattr(app.extensions["services"]["trading_connections"], "connector_for_user", lambda user_id, connection_id=None: FakeConnector())
+
+    order = manager.place_order(
+        OrderIntent(
+            symbol="BTC",
+            side="buy",
+            quantity=0.1,
+            mode="live",
+            stop_loss=95.0,
+            user_id=user.id,
+            trading_connection_id=connection.id,
+        )
+    )
+
+    assert order.status == "rejected"
+    assert order.rejection_reason == "insufficient margin"
+    assert order.details["exchange_error"] == "insufficient margin"
+
+
+def test_hyperliquid_normalizes_top_level_sdk_rejection() -> None:
+    result = HyperliquidClient._normalize_order_response({"status": "err", "response": "insufficient margin"}, submitted_price=100.0)
+
+    assert result["status"] == "rejected"
+    assert result["error"] == "insufficient margin"
+
+
+def test_hyperliquid_market_order_uses_sdk_price_normalizer(monkeypatch) -> None:
+    captured: dict[str, float] = {}
+
+    class FakeExchange:
+        def _slippage_price(self, symbol: str, is_buy: bool, slippage_pct: float) -> float:
+            assert symbol == "BTC"
+            assert is_buy is False
+            assert slippage_pct == pytest.approx(0.0001)
+            return 79971.0
+
+        def update_leverage(self, leverage: int, symbol: str):
+            return {"status": "ok"}
+
+        def order(self, symbol, is_buy, quantity, price, order_type, reduce_only=False):
+            captured.update({"quantity": quantity, "price": price})
+            return {"status": "ok", "response": {"type": "order", "data": {"statuses": [{"resting": {"oid": 123}}]}}}
+
+    client = HyperliquidClient(
+        {
+            "ENABLE_LIVE_TRADING": True,
+            "HL_ACCOUNT_ADDRESS": "0x" + ("1" * 40),
+            "HL_SECRET_KEY": "0x" + ("2" * 64),
+            "HL_MAINNET_BASE_URL": "https://api.hyperliquid.xyz",
+            "HL_TESTNET_BASE_URL": "https://api.hyperliquid-testnet.xyz",
+        }
+    )
+    monkeypatch.setattr(client, "_get_exchange", lambda mode: FakeExchange())
+
+    result = client.place_order("live", "BTC", "sell", 0.00001, "market", None, False, 1.0, 0.0001)
+
+    assert result["status"] == "open"
+    assert result["submitted_price"] == 79971.0
+    assert captured == {"quantity": 0.00001, "price": 79971.0}
+
+
+def test_hyperliquid_order_size_uses_asset_size_decimals(monkeypatch) -> None:
+    captured: dict[str, float] = {}
+
+    class FakeInfo:
+        name_to_coin = {"TRX": "TRX"}
+        coin_to_asset = {"TRX": 7}
+        asset_to_sz_decimals = {7: 0}
+
+    class FakeExchange:
+        info = FakeInfo()
+
+        def _slippage_price(self, symbol: str, is_buy: bool, slippage_pct: float) -> float:
+            return 0.34905
+
+        def update_leverage(self, leverage: int, symbol: str):
+            return {"status": "ok"}
+
+        def order(self, symbol, is_buy, quantity, price, order_type, reduce_only=False):
+            captured.update({"quantity": quantity, "price": price})
+            return {"status": "ok", "response": {"type": "order", "data": {"statuses": [{"filled": {"oid": 456, "avgPx": "0.34905", "totalSz": "2"}}]}}}
+
+    client = HyperliquidClient(
+        {
+            "ENABLE_LIVE_TRADING": True,
+            "HL_ACCOUNT_ADDRESS": "0x" + ("1" * 40),
+            "HL_SECRET_KEY": "0x" + ("2" * 64),
+            "HL_MAINNET_BASE_URL": "https://api.hyperliquid.xyz",
+            "HL_TESTNET_BASE_URL": "https://api.hyperliquid-testnet.xyz",
+        }
+    )
+    monkeypatch.setattr(client, "_get_exchange", lambda mode: FakeExchange())
+
+    result = client.place_order("live", "TRX", "sell", 2.864631, "market", None, False, 1.0, 0.0001)
+
+    assert result["status"] == "filled"
+    assert result["submitted_quantity"] == 2.0
+    assert result["filled_quantity"] == 2.0
+    assert captured == {"quantity": 2.0, "price": 0.34905}
+
+
+def test_order_submit_slippage_caps_requested_value() -> None:
+    assert OrderManager._submission_slippage_pct(0.0001, 0.015) == pytest.approx(0.0001)
+    assert OrderManager._submission_slippage_pct(0.02, 0.015) == pytest.approx(0.015)
+    assert OrderManager._submission_slippage_pct(0.0, 0.015) == pytest.approx(0.0075)
 
 
 def test_uniswap_delegated_connector_fails_closed_without_delegation(app) -> None:

@@ -20,8 +20,8 @@ def is_database_locked(exc: BaseException) -> bool:
 
 def commit_with_retry(
     *,
-    attempts: int = 4,
-    sleep_seconds: float = 0.08,
+    attempts: int = 8,
+    sleep_seconds: float = 0.12,
 ) -> None:
     """Commit the current session, retrying transient SQLite lock failures."""
 
@@ -43,8 +43,8 @@ def commit_with_retry(
 def write_with_retry(
     operation: Callable[[], T],
     *,
-    attempts: int = 4,
-    sleep_seconds: float = 0.08,
+    attempts: int = 8,
+    sleep_seconds: float = 0.12,
 ) -> T:
     """Run a DB mutation function and commit it, reapplying on lock retry."""
 

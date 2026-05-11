@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta
+from typing import Any
 
+import pytest
 import pyotp
 from cryptography.fernet import Fernet
 from werkzeug.security import check_password_hash
@@ -96,6 +98,65 @@ def _create_live_connection(app, user):
     return connection
 
 
+def _confirm_one_h10_live(app) -> None:
+    app.config["EXPLICIT_LIVE_CONFIRMED"] = True
+    app.config["SECONDARY_CONFIRMATION"] = True
+    Setting.set_json("explicit_live_confirmed", True)
+    Setting.set_json("secondary_confirmation", True)
+    db.session.commit()
+
+
+class _PassingOneH10Forecast:
+    def forecast(
+        self,
+        features: dict[str, Any],
+        *,
+        provider: str,
+        symbol: str,
+        allocation_cap_usd: float = 0.0,
+        available_margin_usd: float = 0.0,
+        market: Any = None,
+    ) -> dict[str, Any]:
+        suggested_notional = min(
+            value
+            for value in [
+                float(allocation_cap_usd or 5.0),
+                float(available_margin_usd or allocation_cap_usd or 5.0),
+                5.0,
+            ]
+            if value > 0
+        )
+        return {
+            "predicted_side": "buy",
+            "action": "buy",
+            "confidence": 0.82,
+            "expected_return_bps": 42.0,
+            "gross_expected_return_bps": 54.0,
+            "net_expected_return_bps": 28.0,
+            "cost_drag_bps": 8.0,
+            "spread_bps": 1.0,
+            "execution_quality": 0.9,
+            "capital_efficiency_score": 1.0,
+            "expected_net_edge_passed": True,
+            "suggested_notional_usd": suggested_notional,
+            "suggested_leverage": 1.0,
+            "suggested_order_type": "limit",
+            "suggested_stop_loss_pct": 0.01,
+            "suggested_take_profit_pct": 0.03,
+            "directional_score": 0.6,
+            "blockers": [],
+            "advisory_blockers": [],
+            "ml_namespace": "1h10",
+            "ml_horizon": "1h10",
+            "source": "one_h10_ml_profit_suite",
+            "ml_ready": True,
+            "ml_decision": {},
+            "ml_policy_decisions": {},
+            "provider": provider,
+            "symbol": symbol,
+        }
+
+
 class _LiveWalletAdapter:
     def __init__(self) -> None:
         self.broadcasts = 0
@@ -127,6 +188,15 @@ class _LiveWalletAdapter:
         return {"confirmed": True}
 
 
+class _LiveUsdtWalletAdapter(_LiveWalletAdapter):
+    def supports(self, asset: str, network: str) -> bool:
+        return asset.upper() in {"ETH", "USDT"} and network == "Ethereum"
+
+    def get_balance(self, address: str, asset: str, network: str) -> WalletBalanceSnapshot:
+        amount = 10.0 if asset.upper() == "USDT" else 0.01
+        return WalletBalanceSnapshot(amount=amount, asset=asset, checked=True, confirmations=12)
+
+
 def _enable_live_wallets(app) -> tuple[_LiveWalletAdapter, RealWalletCustodyService]:
     app.config["USE_REAL_ADDRESSES"] = True
     app.config["WALLET_REAL_CUSTODY_ENABLED"] = True
@@ -139,6 +209,28 @@ def _enable_live_wallets(app) -> tuple[_LiveWalletAdapter, RealWalletCustodyServ
     fake = _LiveWalletAdapter()
     custody = RealWalletCustodyService(app.config, adapters=[fake])
     app.extensions["services"]["wallet_custody"] = custody
+    return fake, custody
+
+
+def _enable_live_usdt_wallets(app) -> tuple[_LiveUsdtWalletAdapter, RealWalletCustodyService]:
+    app.config["USE_REAL_ADDRESSES"] = True
+    app.config["WALLET_REAL_CUSTODY_ENABLED"] = True
+    app.config["WALLET_ALLOW_IN_APP_KEYGEN"] = True
+    app.config["WALLET_WITHDRAWALS_ENABLED"] = True
+    app.config["WALLET_REQUIRE_WITHDRAWAL_APPROVAL"] = False
+    app.config["TOTP_ENCRYPTION_KEY"] = Fernet.generate_key().decode("utf-8")
+    app.config["WALLET_EVM_RPC_URL"] = "https://evm.example.invalid"
+    app.config["WALLET_EVM_TOKEN_CONTRACTS"] = {
+        "ETHEREUM": {
+            "USDT": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+            "USDT_DECIMALS": 6,
+        }
+    }
+    Setting.set_json("use_real_addresses", True)
+    fake = _LiveUsdtWalletAdapter()
+    custody = RealWalletCustodyService(app.config, adapters=[fake])
+    app.extensions["services"]["wallet_custody"] = custody
+    app.extensions["services"]["self_custody_wallet"].custody = custody
     return fake, custody
 
 
@@ -701,7 +793,7 @@ def test_exchange_snapshot_does_not_overwrite_custody_usdt_balance(app) -> None:
         [],
     )
 
-    response = client.get("/wallet")
+    response = client.get("/wallet?refresh_exchange=1")
 
     assert response.status_code == 200
     assert b"Exchange Margin" in response.data
@@ -805,6 +897,43 @@ def test_live_wallet_withdrawal_requires_admin_approval_and_releases_on_reject(a
     assert balance.locked_balance == 1.0
 
 
+def test_usdt_withdraw_max_uses_on_chain_token_balance(app) -> None:
+    _patch_market_data(app)
+    fake, custody = _enable_live_usdt_wallets(app)
+    user, secret = _create_user(username="usdtmax")
+    custody.get_or_create_address(user_id=user.id, asset="USDT", network="Ethereum")
+    db.session.add(WalletBalance(user_id=user.id, asset="USDT", available_balance=7.0, locked_balance=0.0))
+    db.session.commit()
+
+    client = app.test_client()
+    _login(client, user.username, secret)
+    form = client.get("/wallet/withdraw/USDT?network=Ethereum&max=1")
+    assert form.status_code == 200
+    assert b"Withdraw USDT" in form.data
+    assert b"Withdraw max 10.000000 USDT" in form.data
+
+    response = client.post(
+        "/wallet/withdraw/USDT",
+        data={
+            "withdraw_address": "0x0eA336f8CFD67Ee22EeaF8198BB287A953c04761",
+            "amount": "0",
+            "withdraw_max": "1",
+            "network": "Ethereum",
+            "totp_code": pyotp.TOTP(secret).now(),
+        },
+    )
+
+    assert response.status_code == 302
+    withdrawal = WalletWithdrawal.query.filter_by(user_id=user.id).one()
+    assert withdrawal.amount == 10.0
+    assert withdrawal.destination_address == "0x0eA336f8CFD67Ee22EeaF8198BB287A953c04761"
+    assert withdrawal.status == "submitted"
+    assert fake.broadcasts == 1
+    tx = WalletTransaction.query.filter_by(user_id=user.id, transaction_type="withdrawal").one()
+    assert tx.amount == 10.0
+    assert tx.status == "pending_withdrawal"
+
+
 def test_vault_cycle_start_locks_wallet_and_links_strategy(app) -> None:
     _patch_market_data(app)
     app.extensions["services"]["strategy_manager"].start = lambda run_id: None
@@ -845,9 +974,11 @@ def test_vault_cycle_start_locks_wallet_and_links_strategy(app) -> None:
     assert run.parameters["vault_cycle_id"] == cycle.id
 
 
-def test_one_hour_vault_cycle_uses_short_horizon_strategy(app) -> None:
+def test_one_hour_vault_cycle_uses_short_horizon_strategy(app, monkeypatch) -> None:
     _patch_market_data(app)
     _patch_deep_book(app)
+    _confirm_one_h10_live(app)
+    monkeypatch.setitem(app.extensions["services"], "one_h10_forecast", _PassingOneH10Forecast())
     app.extensions["services"]["strategy_manager"].start = lambda run_id: None
     user, secret = _create_user(username="onehour")
     db.session.add(WalletBalance(user_id=user.id, asset="USDC", available_balance=1000.0, estimated_usd_value=1000.0))
@@ -863,6 +994,7 @@ def test_one_hour_vault_cycle_uses_short_horizon_strategy(app) -> None:
             "deposit_asset": "USDC",
             "lock_duration": "1",
             "settlement_asset": "USDC",
+            "one_h10_live_ack": "on",
         },
     )
 
@@ -870,10 +1002,15 @@ def test_one_hour_vault_cycle_uses_short_horizon_strategy(app) -> None:
     cycle = VaultCycle.query.filter_by(user_id=user.id).one()
     run = db.session.get(StrategyRun, cycle.strategy_run_id)
     assert cycle.lock_duration_hours == 1
-    assert cycle.algorithm_profile == "Aggressive"
+    assert cycle.algorithm_profile == "1H10"
     assert cycle.selected_strategy_name == "scalping"
     assert cycle.selected_timeframe == "1m"
-    assert run.parameters["allocation_cap_usd"] == 50
+    legs = VaultAllocationLeg.query.filter_by(vault_cycle_id=cycle.id).all()
+    assert legs
+    assert sum(float(leg.allocation_cap_usd or 0.0) for leg in legs) == pytest.approx(50.0)
+    assert run.parameters["allocation_cap_usd"] <= 50
+    assert run.parameters["one_h10_all_pairs"] is True
+    assert run.parameters["ml_horizon"] == "1h10"
 
 
 def test_vault_estimated_value_reflects_linked_strategy_pnl(app) -> None:
@@ -1056,6 +1193,7 @@ def test_live_vault_cycle_starts_with_active_connection(app) -> None:
 def test_live_vault_cycle_blocks_when_exchange_ip_check_fails(app) -> None:
     _patch_market_data(app)
     _patch_deep_book(app)
+    _confirm_one_h10_live(app)
     app.extensions["services"]["strategy_manager"].start = lambda run_id: (_ for _ in ()).throw(AssertionError("strategy must not start"))
     user, secret = _create_user(username="ipblocked")
     db.session.add(WalletBalance(user_id=user.id, asset="USDC", available_balance=1000.0, estimated_usd_value=1000.0))
@@ -1080,6 +1218,7 @@ def test_live_vault_cycle_blocks_when_exchange_ip_check_fails(app) -> None:
             "deposit_asset": "USDC",
             "lock_duration": "1",
             "settlement_asset": "USDC",
+            "one_h10_live_ack": "on",
         },
         follow_redirects=True,
     )
@@ -1094,6 +1233,86 @@ def test_live_vault_cycle_blocks_when_exchange_ip_check_fails(app) -> None:
     assert health["provider_code"] == "400006"
     assert health["client_ip"] == "209.52.132.232"
     assert b"Whitelist current client IP 209.52.132.232" in response.data
+
+
+def test_live_vault_cycle_uses_recent_timeout_backoff_before_snapshot(app) -> None:
+    _patch_market_data(app)
+    _patch_deep_book(app)
+    _confirm_one_h10_live(app)
+    app.extensions["services"]["strategy_manager"].start = lambda run_id: (_ for _ in ()).throw(AssertionError("strategy must not start"))
+    user, secret = _create_user(username="timeoutbackoff")
+    db.session.add(WalletBalance(user_id=user.id, asset="USDC", available_balance=1000.0, estimated_usd_value=1000.0))
+    db.session.commit()
+    client = app.test_client()
+    _login(client, user.username, secret)
+    connection = app.extensions["services"]["trading_connections"].active_tradable_connection(user.id)
+    Setting.set_json(
+        f"connection_health:{connection.id}",
+        {
+            "connection_id": connection.id,
+            "provider": connection.provider,
+            "mode": "live",
+            "last_checked_at": datetime.utcnow().isoformat() + "Z",
+            "can_trade": False,
+            "alerts": ["Read timed out."],
+            "failure_reason": "HTTPSConnectionPool(host='api.hyperliquid.xyz', port=443): Read timed out. (read timeout=10.0)",
+            "transient_failure": True,
+            "failure_category": "network_timeout",
+        },
+    )
+    db.session.commit()
+    app.extensions["services"]["trading_connections"].account_snapshot = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("fresh snapshot must wait for backoff")
+    )
+
+    response = client.post(
+        "/vault/start",
+        data={
+            "deposit_amount": "100",
+            "deposit_asset": "USDC",
+            "lock_duration": "1",
+            "settlement_asset": "USDC",
+            "one_h10_live_ack": "on",
+        },
+        follow_redirects=True,
+    )
+
+    balance = WalletBalance.query.filter_by(user_id=user.id, asset="USDC").one()
+    assert response.status_code == 200
+    assert VaultCycle.query.filter_by(user_id=user.id).count() == 0
+    assert balance.available_balance == 1000.0
+    assert balance.locked_balance == 0.0
+    assert b"temporarily unavailable" in response.data
+
+
+def test_vault_cycle_keeps_small_available_reserve_when_asset_locked(app) -> None:
+    _patch_market_data(app)
+    _confirm_one_h10_live(app)
+    app.extensions["services"]["strategy_manager"].start = lambda run_id: (_ for _ in ()).throw(AssertionError("strategy must not start"))
+    user, secret = _create_user(username="smallreserve")
+    db.session.add(WalletBalance(user_id=user.id, asset="USDT", available_balance=5.0, locked_balance=5.0, estimated_usd_value=10.0))
+    db.session.commit()
+    client = app.test_client()
+    _login(client, user.username, secret)
+
+    response = client.post(
+        "/vault/start",
+        data={
+            "deposit_amount": "5",
+            "deposit_asset": "USDT",
+            "lock_duration": "1",
+            "settlement_asset": "USDT",
+            "one_h10_live_ack": "on",
+        },
+        follow_redirects=True,
+    )
+
+    balance = WalletBalance.query.filter_by(user_id=user.id, asset="USDT").one()
+    assert response.status_code == 200
+    assert VaultCycle.query.filter_by(user_id=user.id).count() == 0
+    assert balance.available_balance == 5.0
+    assert balance.locked_balance == 5.0
+    assert b"Keep at least $5.00 available" in response.data
 
 
 def test_no_order_cycle_failure_is_visible_in_vault_and_detail(app) -> None:
@@ -1143,6 +1362,8 @@ def test_no_order_cycle_failure_is_visible_in_vault_and_detail(app) -> None:
     assert b"No live order submitted" in vault.data
     assert b"No live order submitted" in detail.data
     assert b"Invalid request ip" in detail.data
+    assert b"flask repair-limited-cycle --cycle-id" in vault.data
+    assert b"flask repair-limited-cycle --cycle-id" in detail.data
 
 
 def test_repair_limited_cycle_releases_no_order_failed_cycle(app) -> None:

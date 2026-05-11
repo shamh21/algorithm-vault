@@ -5,6 +5,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import re
+import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Protocol
@@ -190,6 +192,9 @@ class TradingConnector(Protocol):
     def get_positions(self, mode: str) -> list[dict[str, Any]]:
         ...
 
+    def discover_leveraged_markets(self, mode: str) -> list[dict[str, Any]]:
+        ...
+
     def withdraw_from_bridge(self, mode: str, amount: float, destination: str) -> dict[str, Any]:
         ...
 
@@ -250,6 +255,21 @@ class HyperliquidTradingConnector:
     def get_positions(self, mode: str) -> list[dict[str, Any]]:
         return self.client.get_positions(mode)
 
+    def discover_leveraged_markets(self, mode: str) -> list[dict[str, Any]]:
+        if mode != "live":
+            return []
+        meta, contexts = self.client.get_perp_meta_and_asset_contexts(mode)
+        universe = meta.get("universe", []) if isinstance(meta, dict) else []
+        rows: list[dict[str, Any]] = []
+        for index, asset in enumerate(universe):
+            if not isinstance(asset, dict):
+                continue
+            row = dict(asset)
+            if index < len(contexts) and isinstance(contexts[index], dict):
+                row["_asset_context"] = dict(contexts[index])
+            rows.append(row)
+        return rows
+
     def withdraw_from_bridge(self, mode: str, amount: float, destination: str) -> dict[str, Any]:
         return self.client.withdraw_from_bridge(mode, amount, destination)
 
@@ -281,6 +301,9 @@ class UnsupportedTradingConnector:
     def get_positions(self, mode: str) -> list[dict[str, Any]]:
         return []
 
+    def discover_leveraged_markets(self, mode: str) -> list[dict[str, Any]]:
+        return []
+
     def withdraw_from_bridge(self, mode: str, amount: float, destination: str) -> dict[str, Any]:
         raise RuntimeError(f"{self.provider} connector does not support withdrawals.")
 
@@ -290,6 +313,10 @@ class TradingConnectionService:
 
     def __init__(self, config: dict[str, Any]) -> None:
         self.config = config
+        self._snapshot_cache: dict[tuple[int, int, str], tuple[float, ClientSnapshot]] = {}
+        self._snapshot_backoff: dict[tuple[int, int, str], tuple[float, str]] = {}
+        self._snapshot_inflight: dict[tuple[int, int, str], threading.Event] = {}
+        self._snapshot_guard = threading.Lock()
 
     def create_or_update(
         self,
@@ -384,6 +411,17 @@ class TradingConnectionService:
                 return connection
         return None
 
+    def verified_tradable_connections(self, user_id: int, providers: list[str] | None = None) -> list[TradingConnection]:
+        provider_filter = {self._normalize_provider(provider) for provider in (providers or []) if str(provider or "").strip()}
+        query = TradingConnection.query.filter_by(user_id=int(user_id), verification_status=VERIFIED_STATUS)
+        connections: list[TradingConnection] = []
+        for connection in query.order_by(TradingConnection.updated_at.desc(), TradingConnection.id.desc()).all():
+            if provider_filter and connection.provider not in provider_filter:
+                continue
+            if self.provider_spec(connection.provider)["tradable"]:
+                connections.append(connection)
+        return connections
+
     def has_active_connection(self, user_id: int) -> bool:
         return self.active_tradable_connection(user_id) is not None
 
@@ -396,7 +434,8 @@ class TradingConnectionService:
             return False
         try:
             connection = self.get_for_user(user_id, connection_id) if connection_id else self.active_tradable_connection(user_id)
-            if connection is None or not connection.is_active or not self._is_verified_tradable(connection):
+            requires_active = connection_id is None
+            if connection is None or (requires_active and not connection.is_active) or not self._is_verified_tradable(connection):
                 return False
             return self._connector_for_connection(connection).can_trade(mode)
         except Exception:
@@ -405,10 +444,83 @@ class TradingConnectionService:
     def account_snapshot(self, user_id: int | None, mode: str, connection_id: int | None = None) -> ClientSnapshot:
         if user_id is None:
             return ClientSnapshot(mode, [], [], [], [], ["No authenticated user is available for live account data."])
+        connection = self.get_for_user(user_id, connection_id) if connection_id else self.active_tradable_connection(user_id)
+        if connection is None:
+            return ClientSnapshot(mode, [], [], [], [], ["Connect and verify a trading account before live trading."])
+        cache_key = (int(user_id), int(connection.id or 0), str(mode))
+
+        while True:
+            with self._snapshot_guard:
+                cached = self._cached_snapshot_nolock(cache_key, mode)
+                if cached is not None:
+                    return cached
+
+                backoff_alert = self._snapshot_backoff_alert_nolock(cache_key)
+                if backoff_alert:
+                    stale = self._cached_snapshot_nolock(cache_key, mode, allow_stale=True)
+                    if stale is not None:
+                        return stale
+                    return ClientSnapshot(mode, [], [], [], [], [backoff_alert])
+
+                inflight = self._snapshot_inflight.get(cache_key)
+                if inflight is not None:
+                    event = inflight
+                else:
+                    event = threading.Event()
+                    self._snapshot_inflight[cache_key] = event
+                    break
+
+            event.wait(max(0.1, float(self._snapshot_cache_seconds(mode) or 0.0)))
+            with self._snapshot_guard:
+                # If another caller completed work, serve what they stored.
+                cached = self._cached_snapshot_nolock(cache_key, mode)
+                if cached is not None:
+                    return cached
+
         try:
-            return self.connector_for_user(user_id, connection_id).account_snapshot(mode)
+            snapshot = self._connector_for_connection(connection).account_snapshot(mode)
+            clone = self._clone_snapshot(snapshot)
         except Exception as exc:  # noqa: BLE001
+            self._record_snapshot_backoff(cache_key, exc)
+            stale = self._cached_snapshot_nolock(cache_key, mode, allow_stale=True)
+            if stale is not None:
+                return stale
             return ClientSnapshot(mode, [], [], [], [], [str(exc)])
+        finally:
+            with self._snapshot_guard:
+                inflight = self._snapshot_inflight.pop(cache_key, None)
+                if inflight is not None:
+                    inflight.set()
+
+        if self._snapshot_has_transient_alert(clone):
+            self._record_snapshot_backoff(cache_key, "; ".join(str(alert) for alert in clone.alerts))
+        elif not clone.alerts:
+            self._snapshot_backoff.pop(cache_key, None)
+
+        with self._snapshot_guard:
+            self._snapshot_cache[cache_key] = (time.time(), self._clone_snapshot(clone))
+
+        return self._clone_snapshot(clone)
+
+    def invalidate_account_snapshot(
+        self,
+        user_id: int,
+        mode: str | None = None,
+        connection_id: int | None = None,
+    ) -> None:
+        connection_filter = int(connection_id) if connection_id is not None else None
+        mode_filter = str(mode).lower() if mode else None
+        with self._snapshot_guard:
+            for key in list(self._snapshot_cache.keys()):
+                cache_user_id, cache_connection_id, cache_mode = key
+                if int(cache_user_id) != int(user_id):
+                    continue
+                if connection_filter is not None and cache_connection_id != connection_filter:
+                    continue
+                if mode_filter is not None and cache_mode != mode_filter:
+                    continue
+                self._snapshot_cache.pop(key, None)
+                self._snapshot_backoff.pop(key, None)
 
     def connector_for_user(self, user_id: int, connection_id: int | None = None) -> TradingConnector:
         connection = self.get_for_user(user_id, connection_id) if connection_id else self.active_tradable_connection(user_id)
@@ -583,6 +695,100 @@ class TradingConnectionService:
         if value not in SUPPORTED_PROVIDERS:
             raise ValueError("Unsupported trading provider.")
         return value
+
+    def _cached_snapshot(self, key: tuple[int, int, str], mode: str, *, allow_stale: bool = False) -> ClientSnapshot | None:
+        with self._snapshot_guard:
+            return self._cached_snapshot_nolock(key, mode, allow_stale=allow_stale)
+
+    def _cached_snapshot_nolock(self, key: tuple[int, int, str], mode: str, *, allow_stale: bool = False) -> ClientSnapshot | None:
+        cached_at, snapshot = self._snapshot_cache.get(key, (0.0, None))
+        if snapshot is None:
+            return None
+        ttl = self._snapshot_cache_seconds(mode)
+        if allow_stale:
+            ttl = max(ttl, self._snapshot_stale_seconds(mode))
+        if ttl <= 0 or time.time() - cached_at > ttl:
+            return None
+        return self._clone_snapshot(snapshot)
+
+    def _snapshot_cache_seconds(self, mode: str) -> float:
+        if str(mode or "").lower() != "live":
+            return 0.0
+        try:
+            return max(0.0, float(self.config.get("TRADING_CONNECTION_LIVE_SNAPSHOT_CACHE_SECONDS", self.config.get("ONE_H10_ACCOUNT_REFRESH_SECONDS", 20.0)) or 0.0))
+        except (TypeError, ValueError):
+            return 20.0
+
+    def _snapshot_stale_seconds(self, mode: str) -> float:
+        if str(mode or "").lower() != "live":
+            return 0.0
+        try:
+            return max(self._snapshot_cache_seconds(mode), float(self.config.get("TRADING_CONNECTION_LIVE_SNAPSHOT_STALE_SECONDS", 120.0) or 0.0))
+        except (TypeError, ValueError):
+            return 120.0
+
+    def _snapshot_backoff_seconds(self) -> float:
+        try:
+            return max(1.0, float(self.config.get("TRADING_CONNECTION_LIVE_SNAPSHOT_BACKOFF_SECONDS", self.config.get("ONE_H10_MARKET_DATA_BACKOFF_SECONDS", 30.0)) or 0.0))
+        except (TypeError, ValueError):
+            return 30.0
+
+    def _snapshot_backoff_alert(self, key: tuple[int, int, str]) -> str | None:
+        with self._snapshot_guard:
+            return self._snapshot_backoff_alert_nolock(key)
+
+    def _snapshot_backoff_alert_nolock(self, key: tuple[int, int, str]) -> str | None:
+        until, reason = self._snapshot_backoff.get(key, (0.0, ""))
+        if until <= time.time():
+            self._snapshot_backoff.pop(key, None)
+            return None
+        return reason or "Live account snapshot is temporarily unavailable; retrying after provider backoff."
+
+    def _record_snapshot_backoff(self, key: tuple[int, int, str], exc: object) -> None:
+        with self._snapshot_guard:
+            self._snapshot_backoff[key] = (
+                time.time() + self._snapshot_backoff_seconds(),
+                "Live account snapshot is temporarily unavailable; retrying after provider backoff.",
+            )
+
+    def _record_snapshot_backoff_nolock(self, key: tuple[int, int, str], exc: object) -> None:
+        if not self._is_transient_provider_error(exc):
+            return
+        self._record_snapshot_backoff(key, exc)
+
+    @classmethod
+    def _snapshot_has_transient_alert(cls, snapshot: ClientSnapshot) -> bool:
+        return any(cls._is_transient_provider_error(alert) for alert in (snapshot.alerts or []))
+
+    @staticmethod
+    def _is_transient_provider_error(value: object) -> bool:
+        text = repr(value).lower()
+        return any(
+            marker in text
+            for marker in (
+                "429",
+                "rate limit",
+                "too many requests",
+                "timed out",
+                "timeout",
+                "temporarily unavailable",
+                "hyperliquid call failed",
+                "cloudfront",
+                "connection reset",
+                "dns",
+            )
+        )
+
+    @staticmethod
+    def _clone_snapshot(snapshot: ClientSnapshot) -> ClientSnapshot:
+        return ClientSnapshot(
+            snapshot.mode,
+            [dict(item) for item in snapshot.balances],
+            [dict(item) for item in snapshot.positions],
+            [dict(item) for item in snapshot.open_orders],
+            [dict(item) for item in snapshot.recent_fills],
+            [str(item) for item in snapshot.alerts],
+        )
 
     @staticmethod
     def _normalize_connection_type(connection_type: str) -> str:

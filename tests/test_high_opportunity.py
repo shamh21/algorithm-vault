@@ -115,6 +115,14 @@ def _create_live_connection(app, user):
     return connection
 
 
+def _confirm_one_h10_live(app) -> None:
+    app.config["EXPLICIT_LIVE_CONFIRMED"] = True
+    app.config["SECONDARY_CONFIRMATION"] = True
+    Setting.set_json("explicit_live_confirmed", True)
+    Setting.set_json("secondary_confirmation", True)
+    db.session.commit()
+
+
 class _BuyThenReduceStrategy:
     parameters: dict[str, Any] = {}
 
@@ -132,6 +140,57 @@ class _Registry:
 class _MarketData:
     def get_candles(self, *args, **kwargs):
         return []
+
+
+class _PassingOneH10Forecast:
+    def forecast(
+        self,
+        features: dict[str, Any],
+        *,
+        provider: str,
+        symbol: str,
+        allocation_cap_usd: float = 0.0,
+        available_margin_usd: float = 0.0,
+        market: Any = None,
+    ) -> dict[str, Any]:
+        suggested_notional = min(
+            value
+            for value in [
+                float(allocation_cap_usd or 5.0),
+                float(available_margin_usd or allocation_cap_usd or 5.0),
+                5.0,
+            ]
+            if value > 0
+        )
+        return {
+            "predicted_side": "buy",
+            "action": "buy",
+            "confidence": 0.82,
+            "expected_return_bps": 42.0,
+            "gross_expected_return_bps": 54.0,
+            "net_expected_return_bps": 28.0,
+            "cost_drag_bps": 8.0,
+            "spread_bps": 1.0,
+            "execution_quality": 0.9,
+            "capital_efficiency_score": 1.0,
+            "expected_net_edge_passed": True,
+            "suggested_notional_usd": suggested_notional,
+            "suggested_leverage": 1.0,
+            "suggested_order_type": "limit",
+            "suggested_stop_loss_pct": 0.01,
+            "suggested_take_profit_pct": 0.03,
+            "directional_score": 0.6,
+            "blockers": [],
+            "advisory_blockers": [],
+            "ml_namespace": "1h10",
+            "ml_horizon": "1h10",
+            "source": "one_h10_ml_profit_suite",
+            "ml_ready": True,
+            "ml_decision": {},
+            "ml_policy_decisions": {},
+            "provider": provider,
+            "symbol": symbol,
+        }
 
 
 def test_dynamic_universe_filters_liquid_pairs_and_falls_back(app) -> None:
@@ -464,15 +523,17 @@ def test_backtest_models_leverage_funding_and_liquidation_buffer() -> None:
     assert any(event["rule"] == "liquidation_buffer_too_tight" for event in blocked["risk_events"])
 
 
-def test_vault_cycle_creates_multi_leg_strategy_runs(app) -> None:
+def test_vault_cycle_creates_multi_leg_strategy_runs(app, monkeypatch) -> None:
     app.config["DYNAMIC_UNIVERSE_ENABLED"] = True
     app.config["LEVERAGE_OPTIMIZER_ENABLED"] = True
     app.config["VAULT_MAX_PARALLEL_LEGS"] = 3
+    _confirm_one_h10_live(app)
     market_data = app.extensions["services"]["market_data"]
     market_data.get_mid_price = lambda symbol, mode: 100.0
     market_data.get_order_book = lambda symbol, mode: _book(spread=0.1, size="1000")
     market_data.get_candles = lambda symbol, timeframe, mode, limit: _candles()
     app.extensions["services"]["market_universe"].symbols = lambda mode, timeframe: ["BTC", "ETH", "SOL"]
+    monkeypatch.setitem(app.extensions["services"], "one_h10_forecast", _PassingOneH10Forecast())
     started: list[int] = []
     app.extensions["services"]["strategy_manager"].start = lambda run_id: started.append(run_id)
 
@@ -513,6 +574,7 @@ def test_vault_cycle_creates_multi_leg_strategy_runs(app) -> None:
             "deposit_asset": "USDC",
             "lock_duration": "1",
             "settlement_asset": "USDC",
+            "one_h10_live_ack": "on",
         },
     )
 
@@ -526,17 +588,19 @@ def test_vault_cycle_creates_multi_leg_strategy_runs(app) -> None:
     assert all(db.session.get(StrategyRun, leg.strategy_run_id).parameters["vault_leg_id"] == leg.id for leg in legs)
 
 
-def test_vault_cycle_creates_linked_pair_stat_arb_legs(app) -> None:
+def test_one_h10_all_market_scanner_ignores_legacy_pair_stat_arb_legs(app, monkeypatch) -> None:
     app.config["PAIR_SCREENING_ENABLED"] = True
     app.config["PAIR_TRADING_ENABLED"] = True
     app.config["PAIR_MIN_CORRELATION"] = 0.75
     app.config["PAIR_MAX_SPREAD_ZSCORE"] = 2.5
     app.config["PAIR_MIN_LIQUIDITY_USD"] = 25_000.0
     app.config["PAIR_MAX_SPREAD_BPS"] = 20.0
+    _confirm_one_h10_live(app)
     market_data = app.extensions["services"]["market_data"]
     market_data.get_mid_price = lambda symbol, mode: 100.0
     market_data.get_order_book = lambda symbol, mode: _book(spread=0.02, size="1000")
     market_data.get_candles = lambda symbol, timeframe, mode, limit: _correlated_pair_candles(symbol, limit)
+    monkeypatch.setitem(app.extensions["services"], "one_h10_forecast", _PassingOneH10Forecast())
     started: list[int] = []
     app.extensions["services"]["strategy_manager"].start = lambda run_id: started.append(run_id)
     user, secret = _create_user("pairuser")
@@ -552,21 +616,19 @@ def test_vault_cycle_creates_linked_pair_stat_arb_legs(app) -> None:
             "deposit_asset": "USDC",
             "lock_duration": "1",
             "settlement_asset": "USDC",
+            "one_h10_live_ack": "on",
         },
     )
 
     assert response.status_code == 302
     cycle = VaultCycle.query.filter_by(user_id=user.id).one()
     legs = VaultAllocationLeg.query.filter_by(vault_cycle_id=cycle.id).order_by(VaultAllocationLeg.id).all()
-    assert len(legs) == 2
-    assert len(started) == 2
-    assert {leg.details["pair_mode"] for leg in legs} == {"stat_arb"}
-    assert len({leg.details["pair_group_id"] for leg in legs}) == 1
-    assert {leg.details["pair_role"] for leg in legs} == {"long", "short"}
+    assert len(legs) == 3
+    assert len(started) == 3
+    assert all(leg.details["one_h10_vault"] is True for leg in legs)
+    assert all(leg.details.get("pair_mode") is None for leg in legs)
+    assert all(db.session.get(StrategyRun, leg.strategy_run_id).parameters["one_h10_all_pairs"] is True for leg in legs)
     assert sum(float(leg.allocation_cap_usd or 0.0) for leg in legs) <= 120.0 + 1e-9
-    run_params = [db.session.get(StrategyRun, leg.strategy_run_id).parameters for leg in legs]
-    assert {params["pair_forced_side"] for params in run_params} == {"buy", "sell"}
-    assert all(params["pair_group_id"] == legs[0].details["pair_group_id"] for params in run_params)
 
 
 def test_vault_cycle_creates_strategy_basket_without_dynamic_universe(app) -> None:

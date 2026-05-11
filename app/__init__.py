@@ -2,10 +2,19 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+import sys
+
 from dotenv import load_dotenv
 from flask import Flask
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
+
+_DOTENV_PATH = Path(__file__).resolve().parent.parent / ".env"
+_FLASK_CLI_WILL_LOAD_DOTENV = os.getenv("FLASK_RUN_FROM_CLI", "").strip().lower() == "true" and not os.getenv("FLASK_SKIP_DOTENV")
+if "pytest" not in sys.modules and not _FLASK_CLI_WILL_LOAD_DOTENV:
+    load_dotenv(_DOTENV_PATH)
 
 from .backtesting.engine import BacktestEngine
 from .backtesting.optimizer import StrategyOptimizer
@@ -17,6 +26,9 @@ from .extensions import db
 from .features.engine import FeatureEngine
 from .ml.offline_ranker import OfflineRanker
 from .ml.online_ranker import OnlineRanker
+from .ml.decision_engine import MLDecisionEngine
+from .ml.features import MLFeatureFactory
+from .ml.signal_model import MLSignalModel
 from .models import Setting, StrategyRun, User, VaultCycle, WalletBalance, WalletTransaction
 from .admin_auth import admin_authenticated, admin_configured
 from .routes.admin import admin_bp
@@ -29,12 +41,16 @@ from .routes.orders import orders_bp
 from .routes.panic import panic_bp
 from .routes.settings import settings_bp
 from .services.hyperliquid_client import HyperliquidClient
+from .services.leveraged_markets import LeveragedMarketDiscoveryService
 from .services.market_scanner import MarketScannerService
 from .services.market_structure import MarketStructureService
 from .services.market_universe import MarketUniverseService
 from .services.market_data import MarketDataService
+from .services.dashboard_service import DashboardPayloadService
 from .services.order_manager import OrderManager
+from .services.one_h10_forecast import OneH10ForecastService
 from .services.pair_screening import PairScreeningService
+from .services.rapid_ml_trader import RapidMLTraderService
 from .services.risk_engine import RiskEngine
 from .services.realtime_market import RealtimeMarketService
 from .services.self_custody_wallet import SelfCustodyWalletService
@@ -43,6 +59,7 @@ from .services.trading_connections import TradingConnectionService
 from .services.vault_selector import VaultStrategySelector
 from .services.wallet_addresses import WalletAddressService
 from .services.wallet_custody import RealWalletCustodyService
+from .services.wallet_summary import WalletSummaryService
 from .strategies.registry import StrategyRegistry
 from .utils import format_duration_seconds
 
@@ -50,7 +67,6 @@ from .utils import format_duration_seconds
 def create_app(test_config: dict | None = None) -> Flask:
     """Create and configure the Flask application."""
 
-    load_dotenv()
     app = Flask(__name__, template_folder="../templates", static_folder="../static")
     app.config.from_object(BaseConfig)
     if test_config:
@@ -74,12 +90,29 @@ def create_app(test_config: dict | None = None) -> Flask:
     trading_connections = TradingConnectionService(app.config)
     online_ranker = OnlineRanker(app.config)
     offline_ranker = OfflineRanker(app.config)
+    ml_signal_model = MLSignalModel(app.config)
+    ml_feature_factory = MLFeatureFactory(app.config, feature_engine)
+    ml_decision_engine = MLDecisionEngine(app.config, signal_model=ml_signal_model)
+    ml_decision_engine.feature_factory = ml_feature_factory
+    one_h10_forecast = OneH10ForecastService(app.config, ml_decision_engine)
     market_scanner.online_ranker = online_ranker
     market_scanner.offline_ranker = offline_ranker
+    market_scanner.ml_decision_engine = ml_decision_engine
     pair_screening = PairScreeningService(app.config, market_data, market_universe, market_structure, online_ranker)
     market_scanner.pair_screening = pair_screening
+    leveraged_markets = LeveragedMarketDiscoveryService(app.config, market_data, trading_connections, ml_feature_factory)
     order_manager = OrderManager(app.config, hyperliquid_client, market_data, risk_engine, trading_connections)
-    backtest_engine = BacktestEngine(app.config, strategy_registry, market_data)
+    dashboard_payload = DashboardPayloadService(app, app.config)
+    rapid_ml_trader = RapidMLTraderService(
+        app.config,
+        trading_connections,
+        market_data,
+        ml_decision_engine,
+        offline_ranker,
+        order_manager,
+        leveraged_markets,
+    )
+    backtest_engine = BacktestEngine(app.config, strategy_registry, market_data, ml_decision_engine=ml_decision_engine, ml_feature_factory=ml_feature_factory)
     strategy_optimizer = StrategyOptimizer(
         app.config,
         strategy_registry,
@@ -90,6 +123,8 @@ def create_app(test_config: dict | None = None) -> Flask:
         market_structure,
         pair_screening,
         offline_ranker,
+        ml_decision_engine,
+        ml_feature_factory,
     )
     vault_strategy_selector = VaultStrategySelector(
         app.config,
@@ -102,8 +137,10 @@ def create_app(test_config: dict | None = None) -> Flask:
         market_structure,
         pair_screening,
     )
+    vault_strategy_selector.ml_decision_engine = ml_decision_engine
     wallet_address_service = WalletAddressService(app.config)
     wallet_custody = RealWalletCustodyService(app.config)
+    wallet_summary = WalletSummaryService()
     self_custody_wallet = SelfCustodyWalletService(app.config)
     strategy_manager = StrategyManager(
         app,
@@ -114,6 +151,8 @@ def create_app(test_config: dict | None = None) -> Flask:
         feature_engine,
         online_ranker,
         realtime_market,
+        ml_signal_model,
+        ml_decision_engine,
     )
 
     app.extensions["services"] = {
@@ -122,21 +161,29 @@ def create_app(test_config: dict | None = None) -> Flask:
         "execution_venue": execution_venue,
         "market_data": market_data,
         "realtime_market": realtime_market,
+        "dashboard_payload": dashboard_payload,
         "market_structure": market_structure,
         "market_universe": market_universe,
         "market_scanner": market_scanner,
         "pair_screening": pair_screening,
+        "leveraged_markets": leveraged_markets,
         "feature_engine": feature_engine,
         "risk_engine": risk_engine,
         "trading_connections": trading_connections,
         "online_ranker": online_ranker,
         "offline_ranker": offline_ranker,
+        "ml_signal_model": ml_signal_model,
+        "ml_feature_factory": ml_feature_factory,
+        "ml_decision_engine": ml_decision_engine,
+        "one_h10_forecast": one_h10_forecast,
         "order_manager": order_manager,
+        "rapid_ml_trader": rapid_ml_trader,
         "backtest_engine": backtest_engine,
         "strategy_optimizer": strategy_optimizer,
         "vault_strategy_selector": vault_strategy_selector,
         "wallet_address_service": wallet_address_service,
         "wallet_custody": wallet_custody,
+        "wallet_summary": wallet_summary,
         "self_custody_wallet": self_custody_wallet,
         "strategy_manager": strategy_manager,
     }
@@ -325,6 +372,7 @@ def _ensure_schema() -> None:
             "provider_metadata_json": "provider_metadata_json TEXT NOT NULL DEFAULT '{}'",
         },
         "strategy_ranking": {
+            "provider": "provider VARCHAR(64) NOT NULL DEFAULT 'global'",
             "profile": "profile VARCHAR(64) NOT NULL DEFAULT 'short_term'",
             "experimental": "experimental BOOLEAN NOT NULL DEFAULT 0",
             "risk_label": "risk_label VARCHAR(80) NOT NULL DEFAULT ''",
@@ -373,6 +421,15 @@ def _ensure_schema() -> None:
             "user_id": "user_id INTEGER",
             "trading_connection_id": "trading_connection_id INTEGER",
         },
+        "fill": {
+            "source_order_id": "source_order_id INTEGER",
+            "exchange_order_id": "exchange_order_id VARCHAR(120)",
+            "exchange_fill_id": "exchange_fill_id VARCHAR(180)",
+            "funding_fee": "funding_fee FLOAT NOT NULL DEFAULT 0",
+            "fee_known": "fee_known BOOLEAN NOT NULL DEFAULT 1",
+            "realized_pnl_known": "realized_pnl_known BOOLEAN NOT NULL DEFAULT 1",
+            "metadata_json": "metadata_json TEXT NOT NULL DEFAULT '{}'",
+        },
         "position_snapshot": {
             "user_id": "user_id INTEGER",
             "trading_connection_id": "trading_connection_id INTEGER",
@@ -391,9 +448,23 @@ def _ensure_schema() -> None:
         "vault_allocation_leg": {
             "strategy_run_id": "strategy_run_id INTEGER",
             "optimizer_ranking_id": "optimizer_ranking_id INTEGER",
+            "provider": "provider VARCHAR(64) NOT NULL DEFAULT 'global'",
+            "trading_connection_id": "trading_connection_id INTEGER",
             "realized_pnl_usd": "realized_pnl_usd FLOAT NOT NULL DEFAULT 0",
             "unrealized_pnl_usd": "unrealized_pnl_usd FLOAT NOT NULL DEFAULT 0",
             "metadata_json": "metadata_json TEXT NOT NULL DEFAULT '{}'",
+        },
+        "ml_model_state": {
+            "provider": "provider VARCHAR(64) NOT NULL DEFAULT 'global'",
+        },
+        "ml_offline_model": {
+            "provider": "provider VARCHAR(64) NOT NULL DEFAULT 'global'",
+        },
+        "ml_training_event": {
+            "provider": "provider VARCHAR(64) NOT NULL DEFAULT 'global'",
+        },
+        "leveraged_market": {
+            "trading_connection_id": "trading_connection_id INTEGER",
         },
     }
     for table, columns in additions.items():
@@ -403,6 +474,9 @@ def _ensure_schema() -> None:
         for name, ddl in columns.items():
             if name not in existing:
                 db.session.execute(text(f"ALTER TABLE {table} ADD COLUMN {ddl}"))
+    _mark_legacy_zero_live_fills_unknown()
+    db.session.commit()
+    _ensure_indexes()
     db.session.commit()
 
 
@@ -412,6 +486,54 @@ def _table_columns(table: str) -> set[str]:
     except Exception:  # noqa: BLE001
         return set()
     return {row["name"] for row in rows}
+
+
+def _ensure_indexes() -> None:
+    statements = (
+        "CREATE INDEX IF NOT EXISTS ix_strategy_run_user_status_created ON strategy_run (user_id, status, created_at)",
+        "CREATE INDEX IF NOT EXISTS ix_strategy_run_status_updated ON strategy_run (status, updated_at)",
+        "CREATE INDEX IF NOT EXISTS ix_strategy_run_connection_status_created ON strategy_run (trading_connection_id, status, created_at)",
+        "CREATE INDEX IF NOT EXISTS ix_vault_cycle_user_status_started ON vault_cycle (user_id, status, started_at)",
+        "CREATE INDEX IF NOT EXISTS ix_vault_cycle_user_unlocks ON vault_cycle (user_id, unlocks_at)",
+        "CREATE INDEX IF NOT EXISTS ix_vault_cycle_connection_status_started ON vault_cycle (trading_connection_id, status, started_at)",
+        "CREATE INDEX IF NOT EXISTS ix_vault_leg_cycle_status ON vault_allocation_leg (vault_cycle_id, status)",
+        "CREATE INDEX IF NOT EXISTS ix_vault_leg_run_status ON vault_allocation_leg (strategy_run_id, status)",
+        "CREATE INDEX IF NOT EXISTS ix_vault_leg_connection_symbol_status ON vault_allocation_leg (trading_connection_id, symbol, status)",
+    )
+    for statement in statements:
+        try:
+            db.session.execute(text(statement))
+        except Exception:  # noqa: BLE001
+            db.session.rollback()
+
+
+def _mark_legacy_zero_live_fills_unknown() -> None:
+    fill_columns = _table_columns("fill")
+    if not {"metadata_json", "fee_known", "realized_pnl_known"}.issubset(fill_columns):
+        return
+    try:
+        db.session.execute(
+            text(
+                """
+                UPDATE fill
+                SET
+                    fee_known = 0,
+                    realized_pnl_known = 0,
+                    metadata_json = '{"reconciliation_status":"legacy_unknown_zero_live_fill"}'
+                WHERE id IN (
+                    SELECT fill.id
+                    FROM fill
+                    JOIN "order" ON fill.order_id = "order".id
+                    WHERE "order".mode = 'live'
+                      AND ABS(COALESCE(fill.fee, 0)) < 0.000000000001
+                      AND ABS(COALESCE(fill.pnl, 0)) < 0.000000000001
+                      AND COALESCE(fill.metadata_json, '{}') = '{}'
+                )
+                """
+            )
+        )
+    except Exception:  # noqa: BLE001
+        db.session.rollback()
 
 
 def _crypto_rail_assets() -> list[dict]:

@@ -6,7 +6,7 @@
 <section class="page-heading">
   <span class="card-kicker">Settings</span>
   <h1>Wallet Preferences</h1>
-  <p class="muted">Keep the consumer experience focused on wallet balances, vault cycles, and settlement preferences.</p>
+  <p class="muted">Wallet, vault cycles, and settlement preferences in one clean view.</p>
 </section>
 
 <section class="grid two-up">
@@ -17,7 +17,7 @@
       <span class="mode-dot" aria-hidden="true"></span>
       <span>{{ current_mode|replace('_', ' ')|upper }}</span>
     </div>
-    <p class="muted">This deployment is live-only. Execution remains blocked until a verified trading connection is active.</p>
+    <p class="muted">Live is disabled until a verified trading connection is active.</p>
   </article>
 
   <article class="wallet-card">
@@ -27,9 +27,9 @@
         <span class="mode-dot" aria-hidden="true"></span>
         <span>{{ active_trading_connection.provider|upper }}</span>
       </div>
-      <p class="muted">Live wallet and vault execution use your active connection only.</p>
+        <p class="muted">Live wallet and vault execution use only your active connection.</p>
     {% else %}
-      <p class="muted">Connect your own exchange or wallet account before live trading.</p>
+        <p class="muted">Connect an exchange or wallet account before live trading.</p>
     {% endif %}
     <a href="{{ url_for('settings.connections') }}" class="button-link primary">Manage Connections</a>
   </article>
@@ -41,7 +41,7 @@
     <ul class="compact-list">
       <li>Live execution requires an active verified trading connection.</li>
       <li>Risk checks enforce stop loss, notional, slippage, leverage, daily loss, cooldown, and panic-lock gates.</li>
-      <li>Optimizer output is diagnostic and does not bypass live eligibility controls.</li>
+      <li>Optimizer output is advisory and does not bypass live eligibility controls.</li>
     </ul>
   </article>
 </section>

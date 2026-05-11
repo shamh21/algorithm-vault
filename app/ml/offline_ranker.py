@@ -12,7 +12,9 @@ from typing import Any
 from flask import current_app, has_app_context
 
 from ..extensions import db
-from ..models import MLOfflineModel, MLTrainingEvent, StrategyRanking
+from ..models import MLMarketHistory, MLOfflineModel, MLTrainingEvent, StrategyRanking
+from ..services.provider_assets import normalize_provider, provider_feature_context
+from .features import MLFeatureFactory
 from .online_ranker import OnlineRanker, extract_features, horizon_from_duration, outcome_from_result
 
 
@@ -25,6 +27,7 @@ class OfflineTrainingRow:
     target: float
     created_at: datetime
     source: str
+    provider: str = "global"
 
 
 class OfflineRanker:
@@ -35,15 +38,23 @@ class OfflineRanker:
         self.online_ranker = OnlineRanker(config)
         self.artifact_root = Path(artifact_root) if artifact_root else None
 
-    def train(self, horizon: str, *, model_types: str | list[str] = "both") -> dict[str, Any]:
+    def train(
+        self,
+        horizon: str,
+        *,
+        model_types: str | list[str] = "both",
+        provider: str = "global",
+        use_market_history: bool = False,
+    ) -> dict[str, Any]:
         horizon_key = str(horizon or "global").lower()
+        provider_key = normalize_provider(provider)
         requested = self._model_types(model_types)
         blockers: list[str] = []
         if not bool(self.config.get("ML_OFFLINE_MODELS_ENABLED", False)):
             blockers.append("ML_OFFLINE_MODELS_ENABLED=false")
         if not self._module_available("joblib"):
             blockers.append("joblib_missing")
-        rows = self.training_rows(horizon_key)
+        rows = self.training_rows(horizon_key, provider=provider_key, use_market_history=use_market_history)
         min_rows = int(self.config.get("ML_OFFLINE_MIN_TRAINING_ROWS", 250) or 250)
         if len(rows) < min_rows:
             blockers.append("insufficient_training_rows")
@@ -51,9 +62,12 @@ class OfflineRanker:
             return {
                 "trained": False,
                 "horizon": horizon_key,
+                "provider": provider_key,
                 "requested_model_types": requested,
                 "training_rows": len(rows),
                 "min_training_rows": min_rows,
+                "use_market_history": bool(use_market_history),
+                "training_dataset": self._training_dataset_payload(rows),
                 "blockers": blockers,
             }
 
@@ -62,9 +76,12 @@ class OfflineRanker:
             return {
                 "trained": False,
                 "horizon": horizon_key,
+                "provider": provider_key,
                 "requested_model_types": requested,
                 "training_rows": len(rows),
                 "min_training_rows": min_rows,
+                "use_market_history": bool(use_market_history),
+                "training_dataset": self._training_dataset_payload(rows),
                 "blockers": ["empty_feature_schema"],
             }
 
@@ -86,11 +103,12 @@ class OfflineRanker:
             predictions = [float(value) for value in model.predict(valid_x)] if valid_x else []
             metrics = self._metrics(valid_y, predictions)
             metrics["feature_importance"] = self._feature_importance(model, feature_names)
-            artifact_path = self._artifact_path(horizon_key, model_type)
+            artifact_path = self._artifact_path(provider_key, horizon_key, model_type)
             payload = {
                 "model": model,
                 "model_type": model_type,
                 "horizon": horizon_key,
+                "provider": provider_key,
                 "feature_schema_version": FEATURE_SCHEMA_VERSION,
                 "feature_names": feature_names,
                 "created_at": datetime.utcnow().isoformat(),
@@ -99,7 +117,8 @@ class OfflineRanker:
             }
             self._dump_artifact(payload, artifact_path)
             record = MLOfflineModel(
-                model_key=f"offline_ranker:{horizon_key}:{model_type}:{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}",
+                model_key=f"offline_ranker:{provider_key}:{horizon_key}:{model_type}:{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}",
+                provider=provider_key,
                 horizon=horizon_key,
                 model_type=model_type,
                 status="candidate",
@@ -121,24 +140,32 @@ class OfflineRanker:
         return {
             "trained": bool(trained),
             "horizon": horizon_key,
+            "provider": provider_key,
             "requested_model_types": requested,
             "trained_models": trained,
             "skipped_models": skipped,
             "training_rows": len(rows),
             "feature_count": len(feature_names),
+            "use_market_history": bool(use_market_history),
+            "training_dataset": self._training_dataset_payload(rows),
             "blockers": [] if trained else ["no_model_trained"],
         }
 
-    def promote(self, horizon: str, *, model_id: int) -> dict[str, Any]:
+    def promote(self, horizon: str, *, model_id: int, provider: str = "global") -> dict[str, Any]:
         horizon_key = str(horizon or "global").lower()
-        record = MLOfflineModel.query.filter_by(id=int(model_id), horizon=horizon_key).one_or_none()
+        provider_key = normalize_provider(provider)
+        record = MLOfflineModel.query.filter_by(id=int(model_id), horizon=horizon_key, provider=provider_key).one_or_none()
         if record is None:
-            return {"promoted": False, "horizon": horizon_key, "model_id": model_id, "blockers": ["model_not_found"]}
+            return {"promoted": False, "horizon": horizon_key, "provider": provider_key, "model_id": model_id, "blockers": ["model_not_found"]}
         diagnostics = self.promotion_diagnostics(record)
         if not diagnostics["ready"]:
             return {"promoted": False, **diagnostics}
 
-        for promoted in MLOfflineModel.query.filter_by(horizon=horizon_key, status="promoted").all():
+        for promoted in (
+            MLOfflineModel.query.filter_by(horizon=horizon_key, provider=provider_key, status="promoted")
+            .filter(MLOfflineModel.model_type.in_(self._model_types("both")))
+            .all()
+        ):
             if promoted.id != record.id:
                 promoted.status = "archived"
         record.status = "promoted"
@@ -155,13 +182,18 @@ class OfflineRanker:
         rejected: bool = False,
     ) -> dict[str, Any]:
         horizon_key = str(horizon or "global").lower()
-        record = self.promoted_model(horizon_key)
+        provider_key = normalize_provider(context.get("provider") or context.get("execution_venue"))
+        record = self.promoted_model(horizon_key, provider=provider_key, safe_scoring=True)
+        unsafe_record = None
+        if record is None:
+            unsafe_record = self.promoted_model(horizon_key, provider=provider_key, safe_scoring=False)
         payload: dict[str, Any] = {
             "enabled": bool(self.config.get("ML_OFFLINE_MODELS_ENABLED", False)),
             "blend_enabled": bool(self.config.get("ML_OFFLINE_BLEND_ENABLED", False)),
             "blend_applied": False,
             "status": "no_promoted_model",
             "horizon": horizon_key,
+            "provider": provider_key,
             "prediction": 0.0,
             "model_id": None,
             "model_type": None,
@@ -170,6 +202,17 @@ class OfflineRanker:
             "blockers": [],
         }
         if record is None:
+            if unsafe_record is not None:
+                model_type = str(getattr(unsafe_record, "model_type", "") or "").lower()
+                payload.update(
+                    {
+                        "status": "promoted_model_type_not_safe_for_scoring",
+                        "model_id": getattr(unsafe_record, "id", None),
+                        "model_type": model_type,
+                        "blockers": [f"offline_model_type_not_safe_for_scoring:{model_type}"],
+                    }
+                )
+                return payload
             payload["blockers"] = ["promoted_model_missing"]
             return payload
         diagnostics = self.promotion_diagnostics(record)
@@ -190,7 +233,7 @@ class OfflineRanker:
             payload["status"] = "artifact_unavailable"
             payload["blockers"] = [artifact]
             return payload
-        normalized = self.online_ranker.normalized_features(extract_features(context))
+        normalized = self.online_ranker.normalized_features(extract_features({**provider_feature_context(provider_key), **context}))
         feature_names = list(artifact.get("feature_names") or record.feature_names)
         vector = self._vector(normalized, feature_names)
         prediction = float(artifact["model"].predict([vector])[0])
@@ -204,24 +247,34 @@ class OfflineRanker:
             payload["blend_applied"] = True
         return payload
 
-    def readiness(self, horizon: str = "1h", *, require_blend: bool = True) -> dict[str, Any]:
+    def readiness(self, horizon: str = "1h", *, require_blend: bool = True, provider: str = "global") -> dict[str, Any]:
         horizon_key = str(horizon or "global").lower()
-        record = self.promoted_model(horizon_key)
+        provider_key = normalize_provider(provider)
+        record = self.promoted_model(horizon_key, provider=provider_key, safe_scoring=True)
+        unsafe_record = None
+        if record is None:
+            unsafe_record = self.promoted_model(horizon_key, provider=provider_key, safe_scoring=False)
         blockers: list[str] = []
         if not bool(self.config.get("ML_OFFLINE_MODELS_ENABLED", False)):
             blockers.append("ML_OFFLINE_MODELS_ENABLED=false")
         if require_blend and not bool(self.config.get("ML_OFFLINE_BLEND_ENABLED", False)):
             blockers.append("ML_OFFLINE_BLEND_ENABLED=false")
         if record is None:
-            blockers.append("promoted_model_missing")
+            if unsafe_record is not None:
+                blockers.append(f"offline_model_type_not_safe_for_scoring:{str(unsafe_record.model_type or '').lower()}")
+            else:
+                blockers.append("promoted_model_missing")
         diagnostics = self.promotion_diagnostics(record) if record else {"blockers": []}
         blockers.extend(diagnostics.get("blockers", []))
         return {
             "ready": not blockers,
             "horizon": horizon_key,
+            "provider": provider_key,
             "blockers": list(dict.fromkeys(blockers)),
             "promoted_model": self._model_payload(record) if record else None,
+            "unsafe_promoted_model": self._model_payload(unsafe_record) if unsafe_record else None,
             "model_types": self._model_types("both"),
+            "safe_scoring_model_types": self._safe_scoring_model_types(),
             "blend_enabled": bool(self.config.get("ML_OFFLINE_BLEND_ENABLED", False)),
             "require_blend": bool(require_blend),
         }
@@ -266,23 +319,32 @@ class OfflineRanker:
             **self._model_payload(record),
         }
 
-    def promoted_model(self, horizon: str) -> MLOfflineModel | None:
+    def promoted_model(self, horizon: str, *, provider: str = "global", safe_scoring: bool = False) -> MLOfflineModel | None:
         if not has_app_context():
             return None
-        return (
-            MLOfflineModel.query.filter_by(horizon=str(horizon or "global").lower(), status="promoted")
-            .order_by(MLOfflineModel.promoted_at.desc(), MLOfflineModel.created_at.desc())
-            .first()
+        provider_key = normalize_provider(provider)
+        query = (
+            MLOfflineModel.query.filter_by(horizon=str(horizon or "global").lower(), provider=provider_key, status="promoted")
+            .filter(MLOfflineModel.model_type.in_(self._model_types("both")))
         )
+        if safe_scoring:
+            safe_types = self._safe_scoring_model_types()
+            if safe_types:
+                query = query.filter(MLOfflineModel.model_type.in_(safe_types))
+        return query.order_by(MLOfflineModel.promoted_at.desc(), MLOfflineModel.created_at.desc()).first()
 
-    def training_rows(self, horizon: str) -> list[OfflineTrainingRow]:
+    def training_rows(self, horizon: str, *, provider: str = "global", use_market_history: bool = False) -> list[OfflineTrainingRow]:
         if not has_app_context():
             return []
         horizon_key = str(horizon or "global").lower()
+        provider_key = normalize_provider(provider)
         rows: list[OfflineTrainingRow] = []
         rankings = StrategyRanking.query.order_by(StrategyRanking.created_at.asc(), StrategyRanking.id.asc()).all()
         for ranking in rankings:
             if horizon_from_duration(ranking.lock_duration_hours or 1) != horizon_key:
+                continue
+            ranking_provider = normalize_provider(getattr(ranking, "provider", "global"))
+            if provider_key != "global" and ranking_provider != provider_key:
                 continue
             payload = self._ranking_payload(ranking)
             features = self.online_ranker.normalized_features(extract_features(payload))
@@ -292,6 +354,7 @@ class OfflineRanker:
                     target=self._target_from_payload(payload),
                     created_at=ranking.created_at or datetime.utcnow(),
                     source="strategy_ranking",
+                    provider=ranking_provider,
                 )
             )
         events = (
@@ -301,19 +364,151 @@ class OfflineRanker:
         )
         for event in events:
             details = event.details or {}
+            event_provider = normalize_provider(getattr(event, "provider", None) or details.get("provider") or (event.features or {}).get("provider"))
+            if provider_key != "global" and event_provider != provider_key:
+                continue
             if event.mode == "live" and details.get("status") not in {"quarantined", "promoted"}:
                 continue
-            target_payload = {**dict(details or {}), **dict(event.features or {})}
+            target_payload = {**provider_feature_context(event_provider), **dict(details or {}), **dict(event.features or {})}
             rows.append(
                 OfflineTrainingRow(
-                    features={str(key): float(value) for key, value in (event.features or {}).items() if self._is_number(value)},
+                    features=self.online_ranker.normalized_features(extract_features(target_payload)),
                     target=self._target_from_payload(target_payload, fallback=float(event.outcome or 0.0)),
                     created_at=event.created_at or datetime.utcnow(),
                     source=f"training_event:{event.source}",
+                    provider=event_provider,
                 )
             )
+        if use_market_history:
+            rows.extend(self._market_history_training_rows(horizon_key, provider=provider_key))
         rows.sort(key=lambda row: row.created_at)
         return rows
+
+    def _market_history_training_rows(self, horizon: str, *, provider: str = "global") -> list[OfflineTrainingRow]:
+        provider_key = normalize_provider(provider)
+        query = MLMarketHistory.query.filter_by(status="ok")
+        if provider_key != "global":
+            query = query.filter(MLMarketHistory.provider == provider_key)
+        histories = (
+            query.order_by(MLMarketHistory.window_end.asc(), MLMarketHistory.fetched_at.asc(), MLMarketHistory.id.asc())
+            .limit(5_000)
+            .all()
+        )
+        rows: list[OfflineTrainingRow] = []
+        factory = MLFeatureFactory(self.config)
+        max_rows = max(1, int(self.config.get("ML_OFFLINE_MARKET_HISTORY_MAX_ROWS", 50_000) or 50_000))
+        samples_per_window = max(1, int(self.config.get("ML_OFFLINE_MARKET_HISTORY_SAMPLES_PER_WINDOW", 250) or 250))
+        horizon_minutes = self._horizon_minutes(horizon)
+        for history in histories:
+            if len(rows) >= max_rows:
+                break
+            candles = [row for row in history.candles if isinstance(row, dict)]
+            if len(candles) < 40:
+                continue
+            timeframe_minutes = self._timeframe_minutes(history.timeframe)
+            forward_steps = max(1, int(round(horizon_minutes / max(timeframe_minutes, 1))))
+            min_window = max(30, forward_steps + 5)
+            last_cutoff = len(candles) - forward_steps - 1
+            if last_cutoff <= min_window:
+                continue
+            span = max(1, last_cutoff - min_window)
+            stride = max(1, span // samples_per_window)
+            for cutoff_index in range(min_window, last_cutoff + 1, stride):
+                if len(rows) >= max_rows:
+                    break
+                feature_start = max(0, cutoff_index - 240)
+                feature_window = candles[feature_start : cutoff_index + 1]
+                current_close = self._first_float(feature_window[-1], "close")
+                future_close = self._first_float(candles[cutoff_index + forward_steps], "close")
+                if current_close <= 0 or future_close <= 0:
+                    continue
+                forward_return = (future_close - current_close) / current_close
+                venue_symbol = ""
+                diagnostics = history.diagnostics if isinstance(history.diagnostics, dict) else {}
+                if isinstance(diagnostics, dict):
+                    venue_symbol = str(diagnostics.get("venue_symbol") or "")
+                provider_row = normalize_provider(history.provider)
+                payload = factory.build(
+                    symbol=history.symbol,
+                    timeframe=history.timeframe,
+                    candles=feature_window,
+                    optimizer_context={
+                        **provider_feature_context(provider_row),
+                        "strategy_name": "ml_market_history_offline",
+                        "provider": provider_row,
+                        "execution_venue": provider_row,
+                        "venue_symbol": venue_symbol or history.symbol,
+                        "horizon": horizon,
+                        "lock_duration_hours": max(1.0, horizon_minutes / 60.0),
+                        "trade_count": 1,
+                        "profit_factor": 1.0,
+                        "consistency": 0.5,
+                        "window_stability": 1.0,
+                    },
+                    cutoff_timestamp=feature_window[-1].get("timestamp"),
+                )
+                target_payload = {
+                    **payload,
+                    "net_return_after_costs": forward_return,
+                    "total_return": forward_return,
+                    "recent_performance_score": forward_return,
+                    "profit_factor": 1.2 if forward_return > 0 else 0.8,
+                    "consistency": 1.0 if forward_return > 0 else 0.0,
+                    "window_stability": 1.0,
+                    "trade_count": 1,
+                }
+                rows.append(
+                    OfflineTrainingRow(
+                        features=self.online_ranker.normalized_features(extract_features(payload)),
+                        target=self._target_from_payload(target_payload, fallback=forward_return),
+                        created_at=self._history_sample_time(feature_window[-1], history),
+                        source="ml_market_history:offline_ranker",
+                        provider=provider_row,
+                    )
+                )
+        return rows
+
+    @staticmethod
+    def _training_dataset_payload(rows: list[OfflineTrainingRow]) -> dict[str, Any]:
+        sources: dict[str, int] = {}
+        providers: dict[str, int] = {}
+        for row in rows:
+            sources[row.source] = sources.get(row.source, 0) + 1
+            providers[row.provider] = providers.get(row.provider, 0) + 1
+        return {
+            "row_count": len(rows),
+            "sources": dict(sorted(sources.items())),
+            "providers": dict(sorted(providers.items())),
+            "market_history_rows": sum(count for source, count in sources.items() if source.startswith("ml_market_history:")),
+            "leakage_policy": "features are built only from each row's pre-cutoff candle window; forward return is target-only",
+        }
+
+    @staticmethod
+    def _timeframe_minutes(timeframe: str | None) -> int:
+        value = str(timeframe or "1h").lower()
+        return {"1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240}.get(value, 60)
+
+    @staticmethod
+    def _horizon_minutes(horizon: str | None) -> int:
+        value = str(horizon or "1h").lower()
+        if value.endswith("m"):
+            return max(1, int(OfflineRanker._safe_float(value[:-1], 1.0)))
+        if value.endswith("h"):
+            return max(1, int(OfflineRanker._safe_float(value[:-1], 1.0) * 60))
+        if value.endswith("d"):
+            return max(1, int(OfflineRanker._safe_float(value[:-1], 1.0) * 24 * 60))
+        return max(1, int(OfflineRanker._safe_float(value, 1.0) * 60))
+
+    @staticmethod
+    def _history_sample_time(candle: dict[str, Any], history: MLMarketHistory) -> datetime:
+        raw = OfflineRanker._safe_float(candle.get("timestamp"), 0.0)
+        seconds = raw / 1000.0 if raw > 10_000_000_000 else raw
+        if seconds > 0:
+            try:
+                return datetime.utcfromtimestamp(seconds)
+            except (OverflowError, OSError, ValueError):
+                pass
+        return history.window_end or history.fetched_at or history.created_at or datetime.utcnow()
 
     def _fit_model(self, model_type: str, train_x: list[list[float]], train_y: list[float]) -> Any | str:
         model_type = str(model_type or "").lower()
@@ -343,10 +538,11 @@ class OfflineRanker:
             return model
         return "unsupported_model_type"
 
-    def _artifact_path(self, horizon: str, model_type: str) -> Path:
+    def _artifact_path(self, provider: str, horizon: str, model_type: str) -> Path:
         root = self.artifact_root or Path(current_app.instance_path) / "ml_models"
         root.mkdir(parents=True, exist_ok=True)
-        return root / f"offline-ranker-{horizon}-{model_type}-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}.joblib"
+        provider_key = normalize_provider(provider)
+        return root / f"offline-ranker-{provider_key}-{horizon}-{model_type}-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}.joblib"
 
     def _dump_artifact(self, payload: dict[str, Any], path: Path) -> None:
         import joblib
@@ -519,6 +715,14 @@ class OfflineRanker:
             requested = [str(item).strip().lower() for item in value]
         return [item for item in dict.fromkeys(requested) if item in {"sklearn", "xgboost"}]
 
+    def _safe_scoring_model_types(self) -> list[str]:
+        configured = self.config.get("ML_OFFLINE_SAFE_SCORING_MODEL_TYPES", ["sklearn"])
+        if isinstance(configured, str):
+            requested = [item.strip().lower() for item in configured.split(",") if item.strip()]
+        else:
+            requested = [str(item).strip().lower() for item in configured or [] if str(item).strip()]
+        return [item for item in dict.fromkeys(requested) if item in {"sklearn", "xgboost"}]
+
     @staticmethod
     def _module_available(name: str) -> bool:
         try:
@@ -549,6 +753,7 @@ class OfflineRanker:
         return {
             "model_id": record.id,
             "model_key": record.model_key,
+            "provider": getattr(record, "provider", "global"),
             "horizon": record.horizon,
             "model_type": record.model_type,
             "status": record.status,
@@ -572,6 +777,7 @@ class OfflineRanker:
         net_roi = explanation.get("net_roi") if isinstance(explanation.get("net_roi"), dict) else {}
         net_roi_v2 = explanation.get("net_roi_v2") if isinstance(explanation.get("net_roi_v2"), dict) else {}
         payload = {
+            **provider_feature_context(getattr(ranking, "provider", "global")),
             "strategy_name": ranking.strategy_name,
             "symbol": ranking.symbol,
             "timeframe": ranking.timeframe,
@@ -658,6 +864,16 @@ class OfflineRanker:
             if math.isfinite(candidate):
                 return candidate
         return default
+
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        if value in (None, ""):
+            return default
+        try:
+            candidate = float(value)
+        except (TypeError, ValueError):
+            return default
+        return candidate if math.isfinite(candidate) else default
 
     def _config_float(self, key: str, default: float) -> float:
         value = self.config.get(key, default)

@@ -463,6 +463,130 @@ def test_real_withdrawal_requires_live_mode_and_broadcasts_when_live(app) -> Non
     assert fake.broadcasts == 1
 
 
+def test_evm_token_withdrawal_fails_before_broadcast_without_eth_for_gas(app, monkeypatch) -> None:
+    _enable_generated_wallets(app)
+    adapter = EvmWalletAdapter(app.config)
+    calls: list[tuple[str, list[Any]]] = []
+
+    def fake_rpc(method: str, params: list[Any], *, network: str) -> Any:
+        calls.append((method, params))
+        if method == "eth_getTransactionCount":
+            return "0x0"
+        if method == "eth_gasPrice":
+            return hex(20_000_000_000)
+        if method == "eth_getBalance":
+            return "0x0"
+        if method == "eth_sendRawTransaction":
+            raise AssertionError("broadcast should not be attempted without gas")
+        return "0x0"
+
+    monkeypatch.setattr(adapter, "_rpc", fake_rpc)
+    user, _ = _create_user("nogas")
+    wallet_address = app.extensions["services"]["wallet_custody"].get_or_create_address(
+        user_id=user.id,
+        asset="USDT",
+        network="Ethereum",
+    )
+    withdrawal = WalletWithdrawal(
+        user_id=user.id,
+        source_wallet_address_id=wallet_address.id,
+        asset="USDT",
+        network="Ethereum",
+        destination_address="0x1111111111111111111111111111111111111111",
+        amount=1.0,
+    )
+
+    with pytest.raises(RuntimeError, match="insufficient ETH"):
+        adapter.sign_and_broadcast(withdrawal, "11" * 32)
+
+    assert [call[0] for call in calls] == ["eth_getTransactionCount", "eth_gasPrice", "eth_getBalance"]
+
+
+def test_evm_broadcast_hash_missing_on_chain_returns_failed_status(app, monkeypatch) -> None:
+    _enable_generated_wallets(app)
+    adapter = EvmWalletAdapter(app.config)
+
+    def fake_rpc(method: str, params: list[Any], *, network: str) -> Any:
+        if method == "eth_getTransactionCount":
+            return "0x0"
+        if method == "eth_gasPrice":
+            return hex(1_000_000_000)
+        if method == "eth_getBalance":
+            return hex(10**18)
+        if method == "eth_sendRawTransaction":
+            return "0xmissing"
+        if method == "eth_getTransactionByHash":
+            return None
+        return "0x0"
+
+    monkeypatch.setattr(adapter, "_rpc", fake_rpc)
+    app.config["WALLET_BROADCAST_VERIFY_ATTEMPTS"] = 1
+    user, _ = _create_user("missingtx")
+    wallet_address = app.extensions["services"]["wallet_custody"].get_or_create_address(
+        user_id=user.id,
+        asset="USDT",
+        network="Ethereum",
+    )
+    withdrawal = WalletWithdrawal(
+        user_id=user.id,
+        source_wallet_address_id=wallet_address.id,
+        asset="USDT",
+        network="Ethereum",
+        destination_address="0x1111111111111111111111111111111111111111",
+        amount=1.0,
+    )
+
+    result = adapter.sign_and_broadcast(withdrawal, "11" * 32)
+
+    assert result.status == "failed_broadcast_not_found"
+    assert result.provider_reference == "0xmissing"
+    assert result.raw["broadcast_visible"] is False
+    assert result.raw["token_contract"] == "0xdAC17F958D2ee523a2206206994597C13D831ec7"
+    assert result.raw["amount_units"] == 1_000_000
+
+
+def test_evm_token_withdrawal_applies_minimum_gas_price_floor(app, monkeypatch) -> None:
+    _enable_generated_wallets(app)
+    app.config["WALLET_EVM_MIN_GAS_PRICE_GWEI"] = 2.0
+    app.config["WALLET_BROADCAST_VERIFY_ATTEMPTS"] = 1
+    adapter = EvmWalletAdapter(app.config)
+
+    def fake_rpc(method: str, params: list[Any], *, network: str) -> Any:
+        if method == "eth_getTransactionCount":
+            return "0x0"
+        if method == "eth_gasPrice":
+            return hex(136_742_204)
+        if method == "eth_getBalance":
+            return hex(10**18)
+        if method == "eth_sendRawTransaction":
+            return "0xsent"
+        if method == "eth_getTransactionByHash":
+            return {"hash": params[0]}
+        return "0x0"
+
+    monkeypatch.setattr(adapter, "_rpc", fake_rpc)
+    user, _ = _create_user("gasfloor")
+    wallet_address = app.extensions["services"]["wallet_custody"].get_or_create_address(
+        user_id=user.id,
+        asset="USDT",
+        network="Ethereum",
+    )
+    withdrawal = WalletWithdrawal(
+        user_id=user.id,
+        source_wallet_address_id=wallet_address.id,
+        asset="USDT",
+        network="Ethereum",
+        destination_address="0x1111111111111111111111111111111111111111",
+        amount=1.0,
+    )
+
+    result = adapter.sign_and_broadcast(withdrawal, "11" * 32)
+
+    assert result.status == "submitted"
+    assert result.raw["rpc_gas_price_wei"] == 136_742_204
+    assert result.raw["gas_price_wei"] == 2_000_000_000
+
+
 def test_generation_fails_closed_without_valid_encryption_key(app) -> None:
     _enable_generated_wallets(app)
     app.config["TOTP_ENCRYPTION_KEY"] = ""

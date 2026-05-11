@@ -6,9 +6,11 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
+import re
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlencode
 
@@ -17,8 +19,14 @@ import requests
 from .hyperliquid_client import ClientSnapshot
 
 
+logger = logging.getLogger(__name__)
+
 BINANCE_SYMBOLS = {"BTC": "BTCUSDT", "ETH": "ETHUSDT", "SOL": "SOLUSDT", "XRP": "XRPUSDT"}
 KUCOIN_SYMBOLS = {"BTC": "XBTUSDTM", "ETH": "ETHUSDTM", "SOL": "SOLUSDTM", "XRP": "XRPUSDTM"}
+KUCOIN_CONTRACT_SPECS = {
+    "XBTUSDTM": {"contract_size": 0.001, "size_step": 1, "min_size": 1},
+    "ETHUSDTM": {"contract_size": 0.01, "size_step": 1, "min_size": 1},
+}
 DYDX_SYMBOLS = {"BTC": "BTC-USD", "ETH": "ETH-USD", "SOL": "SOL-USD", "XRP": "XRP-USD"}
 UNISWAP_TOKENS = {
     "ETH": {
@@ -40,6 +48,21 @@ UNISWAP_TOKENS = {
 
 class ProviderRequestError(RuntimeError):
     """Raised when a provider API returns an unusable response."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider: str = "provider",
+        status_code: int | None = None,
+        provider_code: str | None = None,
+        transient: bool = False,
+    ) -> None:
+        self.provider = provider
+        self.status_code = status_code
+        self.provider_code = provider_code
+        self.transient = transient
+        super().__init__(_redact_provider_error(message))
 
 
 class BinanceFuturesConnector:
@@ -170,7 +193,11 @@ class BinanceFuturesConnector:
                             "side": "buy" if bool(fill.get("buyer")) else "sell",
                             "price": _safe_float(fill.get("price")),
                             "size": _safe_float(fill.get("qty")),
-                            "closed_pnl": _safe_float(fill.get("realizedPnl")),
+                            "fee": _safe_float(fill.get("commission")) if fill.get("commission") is not None else None,
+                            "fee_token": fill.get("commissionAsset"),
+                            "closed_pnl": _safe_float(fill.get("realizedPnl")) if fill.get("realizedPnl") is not None else None,
+                            "exchange_order_id": str(fill.get("orderId") or ""),
+                            "exchange_fill_id": str(fill.get("id") or fill.get("tradeId") or ""),
                             "timestamp": fill.get("time"),
                             "raw": fill,
                         }
@@ -272,6 +299,7 @@ class BinanceFuturesConnector:
             "status": normalized_status,
             "exchange_order_id": str(response.get("orderId") or response.get("clientOrderId") or ""),
             "fill_price": _safe_float(response.get("avgPrice")) or None,
+            "filled_quantity": _safe_float(response.get("executedQty", response.get("origQty"))) or None,
             "submitted_price": _safe_float(response.get("price")) or None,
             "raw": response,
         }
@@ -291,11 +319,14 @@ class KucoinFuturesConnector:
         self.credentials = credentials
         self.metadata = metadata or {}
         self.session = requests.Session()
+        self._time_offset_ms = 0
+        self._last_time_sync_monotonic = 0.0
 
     def can_trade(self, mode: str) -> bool:
         if mode != "live" or not bool(self.config.get("ENABLE_LIVE_TRADING", False)):
             return False
         self._account_overview()
+        self._position_mode()
         return True
 
     def account_snapshot(self, mode: str) -> ClientSnapshot:
@@ -321,13 +352,17 @@ class KucoinFuturesConnector:
     ) -> dict[str, Any]:
         if mode != "live":
             raise RuntimeError("KuCoin connector supports live futures only.")
+        venue_symbol = self._symbol(symbol)
+        contracts = self._contract_size(venue_symbol, quantity)
         body: dict[str, Any] = {
             "clientOid": f"av-{uuid.uuid4().hex}",
-            "symbol": self._symbol(symbol),
+            "symbol": venue_symbol,
+            "marginMode": self._margin_mode(),
+            "positionSide": self._position_side(),
             "side": side.lower(),
             "type": order_type.lower(),
-            "size": self._decimal(quantity),
-            "leverage": str(int(max(1, round(leverage)))),
+            "size": contracts,
+            "leverage": int(max(1, round(leverage))),
             "reduceOnly": bool(reduce_only),
         }
         if order_type.lower() == "limit":
@@ -339,12 +374,7 @@ class KucoinFuturesConnector:
         data = _response_data(response)
         if not isinstance(data, dict):
             data = {}
-        return {
-            "status": "submitted",
-            "exchange_order_id": str(data.get("orderId") or data.get("id") or body["clientOid"]),
-            "submitted_price": limit_price,
-            "raw": response,
-        }
+        return self._normalize_order_response(data, fallback_client_oid=str(body["clientOid"]), submitted_price=limit_price, raw=response)
 
     def cancel_order(self, mode: str, symbol: str, exchange_order_id: str) -> dict[str, Any]:
         response = self._signed("DELETE", f"{self._path('KUCOIN_ORDERS_PATH', '/api/v1/orders')}/{exchange_order_id}")
@@ -419,14 +449,21 @@ class KucoinFuturesConnector:
             response = self._signed("GET", self._path("KUCOIN_FILLS_PATH", "/api/v1/recentDoneOrders"))
         except Exception:
             return []
-        rows = _as_list(_response_data(response))
+        data = _response_data(response)
+        rows = _as_list(data.get("items") if isinstance(data, dict) else data)
         return [
             {
                 "symbol": self._internal_symbol(str(fill.get("symbol", ""))),
                 "side": str(fill.get("side", "")).lower(),
                 "price": _safe_float(fill.get("price")),
                 "size": _safe_float(fill.get("size", fill.get("dealSize"))),
-                "closed_pnl": _safe_float(fill.get("realisedPnl", fill.get("pnl"))),
+                "fee": _safe_float(fill.get("fee")) if fill.get("fee") is not None else None,
+                "fee_token": fill.get("feeCurrency"),
+                "closed_pnl": _safe_float(fill.get("realisedPnl", fill.get("pnl")))
+                if fill.get("realisedPnl", fill.get("pnl")) is not None
+                else None,
+                "exchange_order_id": str(fill.get("orderId") or fill.get("order_id") or ""),
+                "exchange_fill_id": str(fill.get("tradeId") or fill.get("id") or ""),
                 "timestamp": fill.get("createdAt"),
                 "raw": fill,
             }
@@ -436,9 +473,86 @@ class KucoinFuturesConnector:
     def withdraw_from_bridge(self, mode: str, amount: float, destination: str) -> dict[str, Any]:
         raise RuntimeError("KuCoin withdrawals are intentionally disabled in this app.")
 
+    def discover_leveraged_markets(self, mode: str) -> list[dict[str, Any]]:
+        if mode != "live":
+            return []
+        payload = _request_with_retries(
+            self.session,
+            "GET",
+            self._base_url() + self._path("KUCOIN_ACTIVE_CONTRACTS_PATH", "/api/v1/contracts/active"),
+            provider="KuCoin",
+            attempts=self._retry_attempts(),
+            sleep_seconds=self._retry_sleep_seconds(),
+            timeout=self._timeout(),
+        )
+        rows = _response_data(payload)
+        return [dict(item) for item in _as_list(rows) if isinstance(item, dict)]
+
+    def get_candles(self, symbol: str, timeframe: str, mode: str, limit: int = 200) -> list[dict[str, Any]]:
+        if mode != "live":
+            raise RuntimeError("KuCoin connector supports live futures market data only.")
+        venue_symbol = self._symbol(symbol)
+        granularity = self._kline_granularity(timeframe)
+        candle_limit = max(1, min(int(_safe_float(limit, 200)), 500))
+        now = datetime.now(timezone.utc)
+        start = now - (timedelta(minutes=granularity) * (candle_limit + 5))
+        payload = _request_with_retries(
+            self.session,
+            "GET",
+            self._base_url() + self._path("KUCOIN_KLINE_PATH", "/api/v1/kline/query"),
+            provider="KuCoin",
+            attempts=max(1, min(self._retry_attempts(), 2)),
+            sleep_seconds=self._retry_sleep_seconds(),
+            timeout=self._timeout(),
+            params={
+                "symbol": venue_symbol,
+                "granularity": granularity,
+                "from": int(start.timestamp() * 1000),
+                "to": int(now.timestamp() * 1000),
+            },
+        )
+        rows = _response_data(payload)
+        candles = [self._normalize_kline(row, timeframe) for row in (rows if isinstance(rows, list) else [])]
+        result = [row for row in candles if row is not None]
+        if not result:
+            raise RuntimeError(f"provider_market_data_unavailable: kucoin candles {venue_symbol} {timeframe}")
+        return sorted(result, key=lambda item: item["timestamp"])[-candle_limit:]
+
+    def get_mid_price(self, symbol: str, mode: str) -> float:
+        if mode != "live":
+            raise RuntimeError("KuCoin connector supports live futures market data only.")
+        venue_symbol = self._symbol(symbol)
+        payload = _request_with_retries(
+            self.session,
+            "GET",
+            self._base_url() + self._path("KUCOIN_TICKER_PATH", "/api/v1/ticker"),
+            provider="KuCoin",
+            attempts=max(1, min(self._retry_attempts(), 2)),
+            sleep_seconds=self._retry_sleep_seconds(),
+            timeout=self._timeout(),
+            params={"symbol": venue_symbol},
+        )
+        data = _response_data(payload)
+        if not isinstance(data, dict):
+            raise RuntimeError(f"provider_market_data_unavailable: kucoin mid_price {venue_symbol}")
+        best_bid = _safe_float(data.get("bestBidPrice", data.get("bidPrice")))
+        best_ask = _safe_float(data.get("bestAskPrice", data.get("askPrice")))
+        if best_bid > 0 and best_ask > 0:
+            return (best_bid + best_ask) / 2.0
+        price = _safe_float(data.get("price", data.get("markPrice", data.get("indexPrice"))))
+        if price <= 0:
+            raise RuntimeError(f"provider_market_data_unavailable: kucoin mid_price {venue_symbol}")
+        return price
+
     def _account_overview(self) -> dict[str, Any]:
         path = self._path("KUCOIN_ACCOUNT_OVERVIEW_PATH", "/api/v1/account-overview")
         response = self._signed("GET", path, params={"currency": "USDT"})
+        data = _response_data(response)
+        return data if isinstance(data, dict) else {}
+
+    def _position_mode(self) -> dict[str, Any]:
+        path = self._path("KUCOIN_POSITION_MODE_PATH", "/api/v2/position/getPositionMode")
+        response = self._signed("GET", path)
         data = _response_data(response)
         return data if isinstance(data, dict) else {}
 
@@ -452,34 +566,81 @@ class KucoinFuturesConnector:
         params = dict(params or {})
         body_text = json.dumps(body or {}, separators=(",", ":")) if body else ""
         endpoint = path + (f"?{urlencode(params, doseq=True)}" if params else "")
-        timestamp = str(int(time.time() * 1000))
-        payload = f"{timestamp}{method.upper()}{endpoint}{body_text}"
-        signature = base64.b64encode(hmac.new(self.credentials.api_secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).digest()).decode("utf-8")
-        passphrase = base64.b64encode(
-            hmac.new(self.credentials.api_secret.encode("utf-8"), self.credentials.passphrase.encode("utf-8"), hashlib.sha256).digest()
-        ).decode("utf-8")
-        headers = {
-            "KC-API-KEY": self.credentials.api_key,
-            "KC-API-SIGN": signature,
-            "KC-API-TIMESTAMP": timestamp,
-            "KC-API-PASSPHRASE": passphrase,
-            "KC-API-KEY-VERSION": "2",
-            "Content-Type": "application/json",
-        }
-        response = self.session.request(
-            method,
-            self._base_url() + path,
-            params=params or None,
-            data=body_text if body else None,
-            headers=headers,
+        payload: Any = None
+        for attempt in range(2):
+            timestamp = str(self._timestamp_ms(force_sync=attempt > 0))
+            pre_sign = f"{timestamp}{method.upper()}{endpoint}{body_text}"
+            signature = base64.b64encode(hmac.new(self.credentials.api_secret.encode("utf-8"), pre_sign.encode("utf-8"), hashlib.sha256).digest()).decode("utf-8")
+            passphrase = base64.b64encode(
+                hmac.new(self.credentials.api_secret.encode("utf-8"), self.credentials.passphrase.encode("utf-8"), hashlib.sha256).digest()
+            ).decode("utf-8")
+            headers = {
+                "KC-API-KEY": self.credentials.api_key,
+                "KC-API-SIGN": signature,
+                "KC-API-TIMESTAMP": timestamp,
+                "KC-API-PASSPHRASE": passphrase,
+                "KC-API-KEY-VERSION": "2",
+                "Content-Type": "application/json",
+            }
+            payload = _request_with_retries(
+                self.session,
+                method,
+                self._base_url() + path,
+                provider="KuCoin",
+                attempts=self._retry_attempts(),
+                sleep_seconds=self._retry_sleep_seconds(),
+                timeout=self._timeout(),
+                params=params or None,
+                data=body_text if body else None,
+                headers=headers,
+            )
+            if not self._is_invalid_timestamp_payload(payload) or attempt > 0:
+                break
+        if isinstance(payload, dict) and str(payload.get("code", "200000")) not in {"200000", "200", "0"}:
+            provider_code = str(payload.get("code") or "")
+            message = str(payload.get("msg") or payload.get("message") or payload)
+            raise ProviderRequestError(
+                json.dumps({"code": provider_code, "msg": message}),
+                provider="KuCoin",
+                provider_code=provider_code,
+            )
+        return payload
+
+    def _timestamp_ms(self, *, force_sync: bool = False) -> int:
+        if bool(self.config.get("KUCOIN_TIME_SYNC_ENABLED", True)):
+            self._sync_server_time(force=force_sync)
+        return int(time.time() * 1000) + int(self._time_offset_ms)
+
+    def _sync_server_time(self, *, force: bool = False) -> None:
+        if not bool(self.config.get("KUCOIN_TIME_SYNC_ENABLED", True)):
+            return
+        ttl = max(1.0, _safe_float(self.config.get("KUCOIN_TIME_SYNC_TTL_SECONDS"), 300.0))
+        now_monotonic = time.monotonic()
+        if not force and self._last_time_sync_monotonic and now_monotonic - self._last_time_sync_monotonic < ttl:
+            return
+        payload = _request_with_retries(
+            self.session,
+            "GET",
+            self._base_url() + self._path("KUCOIN_SERVER_TIME_PATH", "/api/v1/timestamp"),
+            provider="KuCoin",
+            attempts=max(1, min(self._retry_attempts(), 2)),
+            sleep_seconds=self._retry_sleep_seconds(),
             timeout=self._timeout(),
         )
-        if response.status_code >= 400:
-            raise ProviderRequestError(response.text[:500])
-        payload = response.json()
-        if isinstance(payload, dict) and str(payload.get("code", "200000")) not in {"200000", "200", "0"}:
-            raise ProviderRequestError(str(payload.get("msg") or payload.get("message") or payload))
-        return payload
+        server_ms = _safe_float(_response_data(payload))
+        if server_ms <= 0:
+            return
+        local_ms = int(time.time() * 1000)
+        self._time_offset_ms = int(server_ms) - local_ms
+        self._last_time_sync_monotonic = now_monotonic
+
+    @staticmethod
+    def _is_invalid_timestamp_payload(payload: Any) -> bool:
+        if not isinstance(payload, dict):
+            return False
+        code = str(payload.get("code") or "")
+        message = str(payload.get("msg") or payload.get("message") or "").lower()
+        return code == "400002" or "kc-api-timestamp" in message
 
     def _base_url(self) -> str:
         return str(self.config.get("KUCOIN_FUTURES_BASE_URL", "https://api-futures.kucoin.com")).rstrip("/")
@@ -487,14 +648,31 @@ class KucoinFuturesConnector:
     def _timeout(self) -> float:
         return max(1.0, _safe_float(self.config.get("PROVIDER_TIMEOUT_SECONDS"), 10.0))
 
+    def _retry_attempts(self) -> int:
+        return max(1, int(_safe_float(self.config.get("PROVIDER_RETRY_ATTEMPTS", self.config.get("EXCHANGE_RETRY_ATTEMPTS", 3)), 3)))
+
+    def _retry_sleep_seconds(self) -> float:
+        return max(0.0, _safe_float(self.config.get("PROVIDER_RETRY_SLEEP_SECONDS", self.config.get("EXCHANGE_RETRY_SLEEP_SECONDS", 0.5)), 0.5))
+
     def _path(self, key: str, default: str) -> str:
         return str(self.config.get(key, default)).strip() or default
 
+    def _margin_mode(self) -> str:
+        value = str(self.metadata.get("margin_mode") or self.config.get("KUCOIN_MARGIN_MODE", "ISOLATED")).strip().upper()
+        return value if value in {"ISOLATED", "CROSS"} else "ISOLATED"
+
+    def _position_side(self) -> str:
+        value = str(self.metadata.get("position_side") or self.config.get("KUCOIN_POSITION_SIDE", "BOTH")).strip().upper()
+        return value if value in {"BOTH", "LONG", "SHORT"} else "BOTH"
+
     def _symbol(self, symbol: str) -> str:
+        raw_symbol = str(symbol or "").upper()
+        if raw_symbol.endswith(("USDTM", "USDM")) or raw_symbol.startswith("."):
+            return raw_symbol
         mapping = _json_config(self.config, "KUCOIN_SYMBOL_MAP_JSON", KUCOIN_SYMBOLS)
-        value = mapping.get(str(symbol).upper())
+        value = mapping.get(raw_symbol)
         if not value:
-            raise ValueError(f"{symbol.upper()} is not mapped for KuCoin futures.")
+            raise ValueError(f"{raw_symbol} is not mapped for KuCoin futures.")
         return str(value).upper()
 
     def _internal_symbol(self, venue_symbol: str) -> str:
@@ -502,12 +680,118 @@ class KucoinFuturesConnector:
         reverse = {str(value).upper(): key for key, value in mapping.items()}
         return reverse.get(venue_symbol.upper(), venue_symbol.upper())
 
+    def _contract_size(self, venue_symbol: str, quantity: float) -> int:
+        spec = _json_config(self.config, "KUCOIN_CONTRACT_SPECS_JSON", KUCOIN_CONTRACT_SPECS).get(venue_symbol.upper())
+        if not isinstance(spec, dict):
+            raise ValueError(f"{venue_symbol.upper()} is missing KUCOIN_CONTRACT_SPECS_JSON sizing metadata.")
+        multiplier = _safe_float(spec.get("contract_size"))
+        step = max(1, int(_safe_float(spec.get("size_step"), 1.0)))
+        min_size = max(step, int(_safe_float(spec.get("min_size"), step)))
+        if multiplier <= 0:
+            raise ValueError(f"{venue_symbol.upper()} has invalid KuCoin contract_size metadata.")
+        raw_contracts = float(quantity) / multiplier
+        rounded = int(round(raw_contracts / step) * step)
+        if rounded < min_size:
+            raise ValueError(f"{venue_symbol.upper()} KuCoin contract size {rounded} is below minimum {min_size}.")
+        if abs(rounded - raw_contracts) > 1e-9:
+            raise ValueError(
+                f"{venue_symbol.upper()} quantity {quantity} does not align to KuCoin contract_size={multiplier} and size_step={step}."
+            )
+        return rounded
+
     def _balances(self, account: dict[str, Any]) -> list[dict[str, Any]]:
         value = _safe_float(account.get("accountEquity", account.get("marginBalance", account.get("balance"))))
         available = _safe_float(account.get("availableBalance", account.get("available", value)))
         if not value and not available:
             return []
         return [{"asset": account.get("currency", "USDT"), "type": "futures", "value": value, "withdrawable": available}]
+
+    @staticmethod
+    def _kline_granularity(timeframe: str) -> int:
+        mapping = {
+            "1m": 1,
+            "5m": 5,
+            "15m": 15,
+            "30m": 30,
+            "1h": 60,
+            "2h": 120,
+            "4h": 240,
+            "8h": 480,
+            "1d": 1440,
+        }
+        key = str(timeframe or "").strip().lower()
+        if key not in mapping:
+            raise ValueError(f"Unsupported KuCoin futures timeframe '{timeframe}'.")
+        return mapping[key]
+
+    @staticmethod
+    def _normalize_kline(row: Any, timeframe: str) -> dict[str, Any] | None:
+        if isinstance(row, dict):
+            timestamp = _safe_float(row.get("time", row.get("timestamp", row.get("startAt", row.get("start")))))
+            open_price = _safe_float(row.get("open"))
+            high = _safe_float(row.get("high"))
+            low = _safe_float(row.get("low"))
+            close = _safe_float(row.get("close"))
+            volume = _safe_float(row.get("volume", row.get("vol")))
+        elif isinstance(row, (list, tuple)) and len(row) >= 6:
+            values = list(row)
+            timestamp = _safe_float(values[0])
+            open_price = _safe_float(values[1])
+            high = _safe_float(values[2])
+            low = _safe_float(values[3])
+            close = _safe_float(values[4])
+            volume = _safe_float(values[5])
+        else:
+            return None
+        if timestamp <= 0 or close <= 0:
+            return None
+        if timestamp > 10_000_000_000:
+            timestamp = timestamp / 1000.0
+        return {
+            "timestamp": datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat(),
+            "timeframe": timeframe,
+            "open": open_price,
+            "high": high,
+            "low": low,
+            "close": close,
+            "volume": volume,
+        }
+
+    @staticmethod
+    def _normalize_order_response(
+        payload: dict[str, Any],
+        *,
+        fallback_client_oid: str,
+        submitted_price: float | None,
+        raw: Any,
+    ) -> dict[str, Any]:
+        raw_status = str(payload.get("status") or payload.get("state") or "").lower()
+        done = bool(payload.get("isActive") is False or payload.get("doneAt") or payload.get("endAt"))
+        cancelled = bool(payload.get("cancelExist") or payload.get("cancelled"))
+        deal_size = _safe_float(payload.get("dealSize", payload.get("filledSize")))
+        size = _safe_float(payload.get("size", payload.get("quantity")))
+        if raw_status in {"done", "filled"} or (done and deal_size > 0 and (size <= 0 or deal_size >= size)):
+            status = "filled"
+        elif raw_status in {"cancelled", "canceled"} or cancelled:
+            status = "cancelled"
+        elif raw_status in {"rejected", "failed"} or payload.get("rejectReason"):
+            status = "rejected"
+        elif raw_status in {"active", "open"} or payload.get("isActive") is True:
+            status = "open"
+        else:
+            status = "submitted"
+        result = {
+            "status": status,
+            "exchange_order_id": str(payload.get("orderId") or payload.get("id") or fallback_client_oid),
+            "client_order_id": str(payload.get("clientOid") or fallback_client_oid),
+            "fill_price": _safe_float(payload.get("avgDealPrice", payload.get("avgPrice"))) or None,
+            "filled_quantity": deal_size or None,
+            "submitted_price": submitted_price if submitted_price is not None else (_safe_float(payload.get("price")) or None),
+            "raw": raw,
+        }
+        if payload.get("rejectReason"):
+            result["error"] = str(payload["rejectReason"])
+        return result
 
     @staticmethod
     def _decimal(value: float | int | str) -> str:
@@ -829,6 +1113,84 @@ def _response_data(payload: Any) -> Any:
     if isinstance(payload, dict) and "data" in payload:
         return payload["data"]
     return payload
+
+
+def _request_with_retries(
+    session: requests.Session,
+    method: str,
+    url: str,
+    *,
+    provider: str,
+    attempts: int,
+    sleep_seconds: float,
+    timeout: float,
+    **kwargs: Any,
+) -> Any:
+    last_error: Exception | None = None
+    attempts = max(1, int(attempts))
+    for attempt in range(1, attempts + 1):
+        try:
+            response = session.request(method, url, timeout=timeout, **kwargs)
+            if response.status_code >= 400:
+                raise ProviderRequestError(
+                    response.text[:500],
+                    provider=provider,
+                    status_code=response.status_code,
+                    transient=_is_transient_status(response.status_code),
+                )
+            try:
+                return response.json()
+            except ValueError as exc:
+                raise ProviderRequestError(
+                    f"{provider} returned non-JSON response.",
+                    provider=provider,
+                    status_code=response.status_code,
+                    transient=False,
+                ) from exc
+        except ProviderRequestError as exc:
+            last_error = exc
+            should_retry = bool(exc.transient)
+        except (requests.Timeout, requests.ConnectionError) as exc:
+            last_error = exc
+            should_retry = True
+        except requests.RequestException as exc:
+            last_error = exc
+            should_retry = False
+
+        if attempt >= attempts or not should_retry:
+            break
+        logger.warning("%s request failed attempt=%s/%s error=%s", provider, attempt, attempts, _redact_provider_error(str(last_error)))
+        time.sleep(max(0.0, sleep_seconds) * attempt)
+
+    if isinstance(last_error, ProviderRequestError):
+        raise last_error
+    transient = isinstance(last_error, (requests.Timeout, requests.ConnectionError))
+    raise ProviderRequestError(
+        f"{provider} request failed after {attempts} attempt(s): {last_error}",
+        provider=provider,
+        transient=transient,
+    ) from last_error
+
+
+def _is_transient_status(status_code: int | None) -> bool:
+    return int(status_code or 0) in {408, 425, 429, 500, 502, 503, 504}
+
+
+def _redact_provider_error(message: object) -> str:
+    text = str(message or "").strip()
+    if not text:
+        return ""
+    replacements = [
+        (r'("KC-API-KEY"\s*:\s*")[^"]+', r"\1[redacted]"),
+        (r'("KC-API-SIGN"\s*:\s*")[^"]+', r"\1[redacted]"),
+        (r'("KC-API-PASSPHRASE"\s*:\s*")[^"]+', r"\1[redacted]"),
+        (r'("apiKey"\s*:\s*")[^"]+', r"\1[redacted]"),
+        (r'("apiSecret"\s*:\s*")[^"]+', r"\1[redacted]"),
+        (r"(0x)[0-9a-fA-F]{64}", r"\1[redacted]"),
+    ]
+    for pattern, replacement in replacements:
+        text = re.sub(pattern, replacement, text)
+    return text[:500]
 
 
 def _as_list(value: Any) -> list[dict[str, Any]]:

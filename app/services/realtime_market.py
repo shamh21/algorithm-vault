@@ -18,6 +18,7 @@ class RealtimeMarketService:
         self._books: dict[str, dict[str, Any]] = {}
         self._trades: dict[str, list[dict[str, Any]]] = {}
         self._updated_at: dict[str, float] = {}
+        self._derived_snapshot_cache: dict[tuple[str, str, float, float, float], dict[str, Any]] = {}
 
     def snapshot(self, symbol: str, mode: str, timeframe: str = "1m", user: str | None = None) -> dict[str, Any]:
         symbol = str(symbol or "").upper()
@@ -117,17 +118,24 @@ class RealtimeMarketService:
         now = time.time()
         book = self._books.get(symbol)
         mid = self._mids.get(symbol)
+        book_updated_at = self._updated_at.get(f"book:{symbol}", 0.0)
+        mid_updated_at = self._updated_at.get(f"mid:{symbol}", 0.0)
+        trades_updated_at = self._updated_at.get(f"trades:{symbol}", 0.0)
         if book is None or mid is None:
             return None
-        if now - self._updated_at.get(f"book:{symbol}", 0.0) > max_stale:
+        if now - book_updated_at > max_stale:
             return None
-        if now - self._updated_at.get(f"mid:{symbol}", 0.0) > max_stale:
+        if now - mid_updated_at > max_stale:
             return None
+        cache_key = (symbol, timeframe, book_updated_at, mid_updated_at, trades_updated_at)
+        cached = self._derived_snapshot_cache.get(cache_key)
+        if cached is not None:
+            return dict(cached)
 
         metrics = self._book_metrics(book)
         trades = list(self._trades.get(symbol, []))[-25:]
         volatility = self._trade_volatility_pct(trades)
-        return {
+        snapshot = {
             "source": "websocket",
             "symbol": symbol,
             "timeframe": timeframe,
@@ -141,6 +149,8 @@ class RealtimeMarketService:
             "signal_stability": self._signal_stability(volatility, metrics["spread_bps"]),
             "is_realtime": True,
         }
+        self._derived_snapshot_cache = {cache_key: dict(snapshot)}
+        return snapshot
 
     def _http_snapshot(self, symbol: str, mode: str, timeframe: str, user: str | None = None) -> dict[str, Any]:
         try:

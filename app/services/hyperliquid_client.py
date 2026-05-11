@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import asdict, dataclass
+from decimal import Decimal, InvalidOperation, ROUND_FLOOR
 from typing import Any, Callable
 
 
@@ -78,12 +79,13 @@ class HyperliquidClient:
             return ClientSnapshot(mode, [], [], [], [], alerts)
 
         try:
-            balances = self.get_balances(mode)
-            positions = self.get_positions(mode)
-            open_orders = self.get_open_orders(mode)
-            recent_fills = self.get_recent_fills(mode)
+            retry = mode != "live"
+            balances = self.get_balances(mode, retry=retry)
+            positions = self.get_positions(mode, retry=retry)
+            open_orders = self.get_open_orders(mode, retry=retry)
+            recent_fills = self.get_recent_fills(mode, retry=retry)
         except Exception as exc:  # noqa: BLE001
-            logger.exception("Failed to build Hyperliquid account snapshot for %s", mode)
+            logger.warning("Failed to build Hyperliquid account snapshot for %s: %s", mode, exc)
             alerts.append(f"Exchange data unavailable: {exc}")
             balances, positions, open_orders, recent_fills = [], [], [], []
 
@@ -95,12 +97,12 @@ class HyperliquidClient:
 
         return ClientSnapshot(mode, balances, positions, open_orders, recent_fills, alerts)
 
-    def get_balances(self, mode: str) -> list[dict[str, Any]]:
+    def get_balances(self, mode: str, *, retry: bool = True) -> list[dict[str, Any]]:
         info = self._get_public_info(mode)
         address = self._account_address()
 
-        user_state = self._retry(lambda: info.user_state(address), f"{mode} user_state")
-        spot_state = self._retry(lambda: info.spot_user_state(address), f"{mode} spot_user_state")
+        user_state = self._retry(lambda: info.user_state(address), f"{mode} user_state", attempts=self.retry_attempts if retry else 1, log_warnings=retry, wrap_error=retry)
+        spot_state = self._retry(lambda: info.spot_user_state(address), f"{mode} spot_user_state", attempts=self.retry_attempts if retry else 1, log_warnings=retry, wrap_error=retry)
 
         margin_summary = user_state.get("marginSummary", {})
 
@@ -125,11 +127,11 @@ class HyperliquidClient:
 
         return balances
 
-    def get_positions(self, mode: str) -> list[dict[str, Any]]:
+    def get_positions(self, mode: str, *, retry: bool = True) -> list[dict[str, Any]]:
         info = self._get_public_info(mode)
         address = self._account_address()
 
-        user_state = self._retry(lambda: info.user_state(address), f"{mode} positions")
+        user_state = self._retry(lambda: info.user_state(address), f"{mode} positions", attempts=self.retry_attempts if retry else 1, log_warnings=retry, wrap_error=retry)
         positions: list[dict[str, Any]] = []
 
         for item in user_state.get("assetPositions", []):
@@ -151,11 +153,11 @@ class HyperliquidClient:
 
         return positions
 
-    def get_open_orders(self, mode: str) -> list[dict[str, Any]]:
+    def get_open_orders(self, mode: str, *, retry: bool = True) -> list[dict[str, Any]]:
         info = self._get_public_info(mode)
         address = self._account_address()
 
-        orders = self._retry(lambda: info.open_orders(address), f"{mode} open_orders")
+        orders = self._retry(lambda: info.open_orders(address), f"{mode} open_orders", attempts=self.retry_attempts if retry else 1, log_warnings=retry, wrap_error=retry)
 
         return [
             {
@@ -171,11 +173,11 @@ class HyperliquidClient:
             for order in orders
         ]
 
-    def get_recent_fills(self, mode: str) -> list[dict[str, Any]]:
+    def get_recent_fills(self, mode: str, *, retry: bool = True) -> list[dict[str, Any]]:
         info = self._get_public_info(mode)
         address = self._account_address()
 
-        fills = self._retry(lambda: info.user_fills(address), f"{mode} user_fills")
+        fills = self._retry(lambda: info.user_fills(address), f"{mode} user_fills", attempts=self.retry_attempts if retry else 1, log_warnings=retry, wrap_error=retry)
 
         return [
             {
@@ -183,7 +185,11 @@ class HyperliquidClient:
                 "side": self._normalize_side(fill.get("side")),
                 "price": self._safe_float(fill.get("px")),
                 "size": self._safe_float(fill.get("sz")),
-                "closed_pnl": self._safe_float(fill.get("closedPnl")),
+                "fee": self._safe_float(fill.get("fee")) if fill.get("fee") is not None else None,
+                "fee_token": fill.get("feeToken"),
+                "closed_pnl": self._safe_float(fill.get("closedPnl")) if fill.get("closedPnl") is not None else None,
+                "exchange_order_id": str(fill.get("oid") or ""),
+                "exchange_fill_id": str(fill.get("tid") or fill.get("hash") or ""),
                 "timestamp": fill.get("time"),
                 "direction": fill.get("dir"),
                 "raw": fill,
@@ -191,9 +197,15 @@ class HyperliquidClient:
             for fill in fills[:25]
         ]
 
-    def get_all_mids(self, mode: str) -> dict[str, float]:
+    def get_all_mids(self, mode: str, *, retry: bool = True) -> dict[str, float]:
         info = self._get_public_info(mode)
-        mids = self._retry(lambda: info.all_mids(), f"{mode} all_mids")
+        mids = self._retry(
+            lambda: info.all_mids(),
+            f"{mode} all_mids",
+            attempts=self.retry_attempts if retry else 1,
+            log_warnings=retry,
+            wrap_error=retry,
+        )
 
         return {
             str(symbol): price
@@ -201,11 +213,40 @@ class HyperliquidClient:
             if (price := self._safe_float(raw_price)) > 0
         }
 
-    def get_order_book(self, mode: str, symbol: str) -> dict[str, Any]:
+    def get_perp_meta(self, mode: str) -> dict[str, Any]:
+        """Return Hyperliquid perpetual metadata from the official info endpoint."""
+
+        info = self._get_public_info(mode)
+        if not hasattr(info, "meta"):
+            return {}
+        payload = self._retry(lambda: info.meta(), f"{mode} meta")
+        return payload if isinstance(payload, dict) else {}
+
+    def get_perp_meta_and_asset_contexts(self, mode: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Return perpetual metadata and asset contexts when supported by the SDK."""
+
+        info = self._get_public_info(mode)
+        if not hasattr(info, "meta_and_asset_ctxs"):
+            meta = self.get_perp_meta(mode)
+            return meta, []
+        payload = self._retry(lambda: info.meta_and_asset_ctxs(), f"{mode} meta_and_asset_ctxs")
+        if isinstance(payload, (list, tuple)) and len(payload) >= 2:
+            meta = payload[0] if isinstance(payload[0], dict) else {}
+            contexts = payload[1] if isinstance(payload[1], list) else []
+            return meta, [dict(item) for item in contexts if isinstance(item, dict)]
+        return {}, []
+
+    def get_order_book(self, mode: str, symbol: str, *, retry: bool = True) -> dict[str, Any]:
         self._validate_symbol(symbol)
 
         info = self._get_public_info(mode)
-        return self._retry(lambda: info.l2_snapshot(symbol), f"{mode} l2_snapshot {symbol}")
+        return self._retry(
+            lambda: info.l2_snapshot(symbol),
+            f"{mode} l2_snapshot {symbol}",
+            attempts=self.retry_attempts if retry else 1,
+            log_warnings=retry,
+            wrap_error=retry,
+        )
 
     def get_candles(
         self,
@@ -214,6 +255,8 @@ class HyperliquidClient:
         timeframe: str,
         start_ms: int,
         end_ms: int,
+        *,
+        retry: bool = True,
     ) -> list[dict[str, Any]]:
         self._validate_symbol(symbol)
 
@@ -225,6 +268,9 @@ class HyperliquidClient:
         candles = self._retry(
             lambda: info.candles_snapshot(symbol, timeframe, start_ms, end_ms),
             f"{mode} candles_snapshot {symbol} {timeframe}",
+            attempts=self.retry_attempts if retry else 1,
+            log_warnings=retry,
+            wrap_error=retry,
         )
 
         return candles if isinstance(candles, list) else []
@@ -259,10 +305,15 @@ class HyperliquidClient:
         if quantity <= 0:
             raise ValueError("quantity must be positive")
 
+        exchange = self._get_exchange(mode)
+        quantity = self._normalize_order_size(exchange, symbol, quantity)
+
+        if quantity <= 0:
+            raise ValueError(f"quantity is below Hyperliquid size precision for {symbol}")
+
         if order_type == "limit" and (limit_price is None or limit_price <= 0):
             raise ValueError("limit_price must be positive for limit orders")
 
-        exchange = self._get_exchange(mode)
         is_buy = side == "buy"
 
         if leverage > 0:
@@ -275,13 +326,7 @@ class HyperliquidClient:
         tif = "Gtc"
 
         if order_type == "market" or price is None:
-            mid = self.get_all_mids(mode).get(symbol, 0.0)
-
-            if mid <= 0:
-                raise RuntimeError(f"Mid price unavailable for {symbol}")
-
-            direction = 1 + slippage_pct if is_buy else 1 - slippage_pct
-            price = round(mid * direction, 6)
+            price = self._market_ioc_price(exchange, mode, symbol, is_buy, slippage_pct)
             tif = "Ioc"
 
         response = self._retry(
@@ -296,7 +341,59 @@ class HyperliquidClient:
             f"{mode} order {symbol}",
         )
 
-        return self._normalize_order_response(response, submitted_price=price)
+        return self._normalize_order_response(response, submitted_price=price, submitted_quantity=quantity)
+
+    def _market_ioc_price(self, exchange: Any, mode: str, symbol: str, is_buy: bool, slippage_pct: float) -> float:
+        if hasattr(exchange, "_slippage_price"):
+            price = self._retry(
+                lambda: exchange._slippage_price(symbol, is_buy, slippage_pct),  # noqa: SLF001
+                f"{mode} slippage_price {symbol}",
+            )
+            return self._require_positive_price(price, symbol)
+
+        mid = self.get_all_mids(mode).get(symbol, 0.0)
+
+        if mid <= 0:
+            raise RuntimeError(f"Mid price unavailable for {symbol}")
+
+        direction = 1 + slippage_pct if is_buy else 1 - slippage_pct
+        price = float(f"{mid * direction:.5g}")
+        return self._require_positive_price(price, symbol)
+
+    def _require_positive_price(self, price: Any, symbol: str) -> float:
+        normalized = self._safe_float(price)
+        if normalized <= 0:
+            raise RuntimeError(f"Marketable price unavailable for {symbol}")
+        return normalized
+
+    def _normalize_order_size(self, exchange: Any, symbol: str, quantity: float) -> float:
+        decimals = self._size_decimals(exchange, symbol)
+        if decimals is None:
+            return quantity
+        decimals = max(0, int(decimals))
+        try:
+            normalized = Decimal(str(quantity)).quantize(Decimal("1").scaleb(-decimals), rounding=ROUND_FLOOR)
+        except (InvalidOperation, ValueError):
+            return 0.0
+        return self._safe_float(normalized)
+
+    @staticmethod
+    def _size_decimals(exchange: Any, symbol: str) -> int | None:
+        info = getattr(exchange, "info", None)
+        if info is None:
+            return None
+        name_to_coin = getattr(info, "name_to_coin", {}) or {}
+        coin = name_to_coin.get(symbol, symbol) if isinstance(name_to_coin, dict) else symbol
+        coin_to_asset = getattr(info, "coin_to_asset", {}) or {}
+        asset = coin_to_asset.get(coin) if isinstance(coin_to_asset, dict) else None
+        if asset is None:
+            return None
+        asset_to_sz_decimals = getattr(info, "asset_to_sz_decimals", {}) or {}
+        decimals = asset_to_sz_decimals.get(asset) if isinstance(asset_to_sz_decimals, dict) else None
+        try:
+            return int(decimals)
+        except (TypeError, ValueError):
+            return None
 
     def cancel_order(self, mode: str, symbol: str, exchange_order_id: str) -> dict[str, Any]:
         self._validate_mode(mode)
@@ -388,25 +485,37 @@ class HyperliquidClient:
 
         return results
 
-    def _retry(self, fn: Callable[[], Any], context: str) -> Any:
+    def _retry(
+        self,
+        fn: Callable[[], Any],
+        context: str,
+        *,
+        attempts: int | None = None,
+        log_warnings: bool = True,
+        wrap_error: bool = True,
+    ) -> Any:
         last_error: Exception | None = None
+        retry_attempts = max(1, int(attempts or self.retry_attempts))
 
-        for attempt in range(1, self.retry_attempts + 1):
+        for attempt in range(1, retry_attempts + 1):
             try:
                 return fn()
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
-                logger.warning(
-                    "Hyperliquid call failed: %s attempt=%s/%s error=%s",
-                    context,
-                    attempt,
-                    self.retry_attempts,
-                    exc,
-                )
+                if log_warnings:
+                    logger.warning(
+                        "Hyperliquid call failed: %s attempt=%s/%s error=%s",
+                        context,
+                        attempt,
+                        retry_attempts,
+                        exc,
+                    )
 
-                if attempt < self.retry_attempts:
+                if attempt < retry_attempts:
                     time.sleep(self.retry_sleep_seconds * attempt)
 
+        if last_error is not None and not wrap_error:
+            raise last_error
         raise RuntimeError(f"Hyperliquid call failed after retries: {context}") from last_error
 
     def _get_public_info(self, mode: str) -> Any:
@@ -455,13 +564,27 @@ class HyperliquidClient:
         return str(address)
 
     @staticmethod
-    def _normalize_order_response(response: dict[str, Any], *, submitted_price: float) -> dict[str, Any]:
-        statuses = response.get("response", {}).get("data", {}).get("statuses", [])
+    def _normalize_order_response(
+        response: dict[str, Any],
+        *,
+        submitted_price: float,
+        submitted_quantity: float | None = None,
+    ) -> dict[str, Any]:
+        response_payload = response.get("response", {})
+        if not isinstance(response_payload, dict):
+            response_payload = {}
+        data_payload = response_payload.get("data", {})
+        if not isinstance(data_payload, dict):
+            data_payload = {}
+        statuses = data_payload.get("statuses", [])
+        if not isinstance(statuses, list):
+            statuses = []
         status = statuses[0] if statuses else {}
 
         exchange_order_id = None
         state = "submitted"
         fill_price = None
+        filled_quantity = None
         error = None
 
         if "resting" in status:
@@ -470,10 +593,17 @@ class HyperliquidClient:
         elif "filled" in status:
             exchange_order_id = str(status["filled"].get("oid", ""))
             fill_price = HyperliquidClient._safe_float(status["filled"].get("avgPx"), submitted_price)
+            filled_quantity = HyperliquidClient._safe_float(status["filled"].get("totalSz"), submitted_quantity or 0.0)
             state = "filled"
         elif "error" in status:
             state = "rejected"
             error = str(status["error"])
+        elif response.get("error"):
+            state = "rejected"
+            error = str(response.get("error"))
+        elif str(response.get("status", "")).lower() in {"err", "error", "rejected"}:
+            state = "rejected"
+            error = str(response.get("response") or response.get("message") or response.get("status"))
 
         result = {
             "raw": response,
@@ -482,6 +612,11 @@ class HyperliquidClient:
             "fill_price": fill_price,
             "submitted_price": submitted_price,
         }
+
+        if submitted_quantity is not None:
+            result["submitted_quantity"] = submitted_quantity
+        if filled_quantity is not None:
+            result["filled_quantity"] = filled_quantity
 
         if error:
             result["error"] = error
@@ -498,6 +633,8 @@ class HyperliquidClient:
     def _validate_symbol(symbol: str) -> None:
         if not symbol or not isinstance(symbol, str):
             raise ValueError("symbol must be a non-empty string")
+        if symbol.strip().startswith(("#", "@")):
+            raise ValueError(f"Unsupported Hyperliquid indexed market symbol: {symbol}")
 
     @staticmethod
     def _normalize_side(value: Any) -> str:

@@ -30,12 +30,15 @@ from types import SimpleNamespace
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from ..extensions import db
+from ..features.engine import FeatureEngine
+from ..ml.features import MLFeatureFactory, ML_FEATURE_SCHEMA_VERSION
 from ..ml.offline_ranker import OfflineRanker
 from ..ml.online_ranker import OnlineRanker, extract_features, horizon_from_duration, outcome_from_result
 from ..models import OptimizerRun, Setting, StrategyRanking, StrategyValidation
 from ..services.ensemble_allocator import EnhancedEnsembleAllocator
 from ..services.market_data import MarketDataService
 from ..services.net_roi import net_roi_diagnostics, net_roi_v2_diagnostics, one_hour_edge_v2_diagnostics
+from ..services.provider_assets import normalize_provider, provider_collateral_asset, provider_feature_context
 from ..strategies.registry import StrategyRegistry
 from .engine import BacktestConfig, BacktestEngine
 
@@ -173,7 +176,9 @@ class OptimizerConfig:
     pair_max_spread_zscore: float = 2.5
     dynamic_intraday_live_eligible: bool = False
     high_upside_profile: bool = False
+    live_canary_research_overlay: str = ""
     runtime_deadline_monotonic: float = 0.0
+    provider: str = "global"
 
 
 @dataclass(frozen=True, slots=True)
@@ -290,6 +295,8 @@ class StrategyOptimizer:
         market_structure: Any | None = None,
         pair_screening: Any | None = None,
         offline_ranker: OfflineRanker | None = None,
+        ml_decision_engine: Any | None = None,
+        ml_feature_factory: MLFeatureFactory | None = None,
     ) -> None:
         self.config = config
         self.registry = registry
@@ -299,6 +306,8 @@ class StrategyOptimizer:
         self.market_structure = market_structure
         self.pair_screening = pair_screening
         self.offline_ranker = offline_ranker or OfflineRanker(config)
+        self.ml_decision_engine = ml_decision_engine
+        self.ml_feature_factory = ml_feature_factory or MLFeatureFactory(config, FeatureEngine())
         self.runner = BacktestRunner(backtest_engine)
 
     # ------------------------------------------------------------------
@@ -315,6 +324,7 @@ class StrategyOptimizer:
         universe_mode: str = "configured",
         max_parallel_legs: int = 1,
         allow_leverage_experiment: bool = False,
+        mode: str = "testnet",
     ) -> OptimizerConfig:
         """Produce a default ``OptimizerConfig`` based on stored settings.
 
@@ -333,6 +343,7 @@ class StrategyOptimizer:
             A fully populated ``OptimizerConfig`` instance.
         """
         profile_enum = Profile.from_str(profile)
+        market_data_mode = str(mode or "testnet").lower()
         train_days, test_days, step_days = profile_enum.windows
         if profile_enum in {Profile.AGGRESSIVE_1H, Profile.EXTREME_ROI_EXPERIMENTAL}:
             train_hours, test_hours, step_hours = self._horizon_hours(lock_duration_hours)
@@ -363,7 +374,7 @@ class StrategyOptimizer:
                 timeframes=timeframes,
                 strategy_names=strategy_names or default_aggressive_names or self.registry.names(),
                 profile=profile_enum.value,
-                mode="testnet",
+                mode=market_data_mode,
                 initial_balance=float(self.config.get("DEFAULT_PAPER_BALANCE", 1_000.0)),
                 fee_bps=float(self.config.get("FEE_BPS", 5.0)),
                 slippage_bps=float(self.config.get("SIM_SLIPPAGE_BPS", 8.0)),
@@ -419,7 +430,7 @@ class StrategyOptimizer:
                 timeframes=timeframes or list(self.config.get("DYNAMIC_INTRADAY_TIMEFRAMES", ["1m", "5m", "15m"])),
                 strategy_names=strategy_names or default_names or self.registry.names(),
                 profile=profile_enum.value,
-                mode="testnet",
+                mode=market_data_mode,
                 initial_balance=float(self.config.get("DEFAULT_PAPER_BALANCE", 1_000.0)),
                 fee_bps=float(self.config.get("FEE_BPS", 5.0)),
                 slippage_bps=float(self.config.get("SIM_SLIPPAGE_BPS", 8.0)),
@@ -495,7 +506,7 @@ class StrategyOptimizer:
                 timeframes=timeframes or default_timeframes,
                 strategy_names=strategy_names or default_names or self.registry.names(),
                 profile=profile_enum.value,
-                mode="testnet",
+                mode=market_data_mode,
                 initial_balance=float(self.config.get("DEFAULT_PAPER_BALANCE", 1_000.0)),
                 fee_bps=float(self.config.get("FEE_BPS", 5.0)),
                 slippage_bps=float(self.config.get("SIM_SLIPPAGE_BPS", 8.0)),
@@ -535,7 +546,7 @@ class StrategyOptimizer:
             timeframes=timeframes or [self.config.get("DEFAULT_TIMEFRAME", "15m")],
             strategy_names=strategy_names or self.registry.names(),
             profile=profile_enum.value,
-            mode="testnet",
+            mode=market_data_mode,
             initial_balance=float(self.config.get("DEFAULT_PAPER_BALANCE", 1_000.0)),
             fee_bps=float(self.config.get("FEE_BPS", 5.0)),
             slippage_bps=float(self.config.get("SIM_SLIPPAGE_BPS", 8.0)),
@@ -581,6 +592,88 @@ class StrategyOptimizer:
             "pair_min_correlation": float(self.config.get("PAIR_MIN_CORRELATION", 0.75) or 0.75),
             "pair_max_spread_zscore": float(self.config.get("PAIR_MAX_SPREAD_ZSCORE", 2.5) or 2.5),
         }
+
+    def _ordered_parameter_sets(
+        self,
+        symbol: str,
+        timeframe: str,
+        strategy_name: str,
+        parameter_sets: List[Dict[str, Any]],
+        optimizer_config: OptimizerConfig,
+    ) -> list[tuple[Dict[str, Any], dict[str, Any]]]:
+        """Order optimizer work with promoted ML policy without accepting candidates."""
+
+        if not parameter_sets:
+            return []
+        decisions: list[tuple[Dict[str, Any], dict[str, Any]]] = []
+        for index, parameters in enumerate(parameter_sets):
+            decision = self._optimizer_policy_decision(
+                symbol=symbol,
+                timeframe=timeframe,
+                strategy_name=strategy_name,
+                parameters=parameters,
+                optimizer_config=optimizer_config,
+            )
+            decision.setdefault("original_index", index)
+            decisions.append((parameters, decision))
+        if not bool(self.config.get("ML_OPTIMIZER_POLICY_ENABLED", False)):
+            return decisions
+        if not any(bool(decision.get("ready", False)) for _, decision in decisions):
+            return decisions
+        return sorted(
+            decisions,
+            key=lambda item: (
+                0 if bool(item[1].get("ready", False)) else 1,
+                -float(((item[1].get("raw") or {}).get("optimizer_policy_score", 0.0)) or 0.0),
+                int(item[1].get("original_index", 0)),
+            ),
+        )
+
+    def _optimizer_policy_decision(
+        self,
+        *,
+        symbol: str,
+        timeframe: str,
+        strategy_name: str,
+        parameters: Dict[str, Any],
+        optimizer_config: OptimizerConfig,
+    ) -> dict[str, Any]:
+        if self.ml_decision_engine is None:
+            return {
+                "family": "pytorch_optimizer_policy",
+                "ready": False,
+                "action": "prioritize",
+                "blockers": ["ml_decision_engine_unavailable"],
+            }
+        context = self.ml_feature_factory.build(
+            symbol=symbol,
+            timeframe=timeframe,
+            optimizer_context={
+                **dict(parameters or {}),
+                **provider_feature_context(optimizer_config.provider),
+                "strategy_name": strategy_name,
+                "profile": optimizer_config.profile,
+                "optimizer_profile": optimizer_config.profile,
+                "mode": optimizer_config.mode,
+                "lock_duration_hours": int(optimizer_config.lock_duration_hours or 0),
+                "allocation_amount_usd": float(optimizer_config.allocation_amount_usd or 0.0),
+            },
+        )
+        try:
+            return dict(
+                self.ml_decision_engine.decision(
+                    "pytorch_optimizer_policy",
+                    context,
+                    horizon=horizon_from_duration(optimizer_config.lock_duration_hours or 1),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "family": "pytorch_optimizer_policy",
+                "ready": False,
+                "action": "prioritize",
+                "blockers": [f"ml_optimizer_policy_error:{exc}"],
+            }
 
     # ------------------------------------------------------------------
     # Entry point
@@ -659,11 +752,19 @@ class StrategyOptimizer:
                         if stop_requested:
                             break
                         # Determine parameter sets to evaluate, capped by max_parameter_sets.
-                        for parameters in self._parameter_sets(
+                        parameter_sets = self._parameter_sets(
                             strategy_name,
                             optimizer_config.max_parameter_sets,
                             optimizer_config,
-                        ):
+                        )
+                        ordered_parameter_sets = self._ordered_parameter_sets(
+                            symbol,
+                            timeframe,
+                            strategy_name,
+                            parameter_sets,
+                            optimizer_config,
+                        )
+                        for parameters, policy_decision in ordered_parameter_sets:
                             if self._deadline_reached(optimizer_config) and rankings:
                                 partial_result = True
                                 partial_reason = "optimizer_deadline_reached"
@@ -675,6 +776,28 @@ class StrategyOptimizer:
                                     "high_upside_profile": True,
                                     "duration_hours": int(optimizer_config.lock_duration_hours or 0),
                                 }
+                            policy_raw = (
+                                policy_decision.get("raw")
+                                if isinstance(policy_decision.get("raw"), dict)
+                                else {}
+                            )
+                            if bool(policy_decision.get("ready", False)) and policy_decision.get("action") == "skip":
+                                result = self._rejected_candidate(
+                                    symbol,
+                                    timeframe,
+                                    strategy_name,
+                                    parameters,
+                                    policy_raw.get("skip_reason") or "ml_optimizer_policy_low_edge",
+                                    optimizer_config,
+                                )
+                                result["ml_optimizer_policy"] = policy_decision
+                                result["ml_feature_schema_version"] = ML_FEATURE_SCHEMA_VERSION
+                                stats.record_skip(result["rejection_reason"])
+                                rankings.append(result)
+                                persist_started = time.perf_counter()
+                                self._persist_ranking(run, result)
+                                stats.persistence_seconds += time.perf_counter() - persist_started
+                                continue
                             skip_reason = self._prefilter_rejection_reason(parameters, window_slices, optimizer_config)
                             if skip_reason:
                                 result = self._rejected_candidate(
@@ -698,6 +821,8 @@ class StrategyOptimizer:
                                     optimizer_config=optimizer_config,
                                     runtime_stats=stats,
                                 )
+                            result["ml_optimizer_policy"] = policy_decision
+                            result["ml_feature_schema_version"] = ML_FEATURE_SCHEMA_VERSION
                             rankings.append(result)
                             # Persist each ranking incrementally to avoid large transactions.
                             persist_started = time.perf_counter()
@@ -788,7 +913,10 @@ class StrategyOptimizer:
             "live_eligibility_summary": self._live_eligibility_summary(optimizer_config),
             "dynamic_intraday_diagnostics": self._dynamic_intraday_diagnostics(rankings, optimizer_config),
             "high_upside_readiness": self._high_upside_readiness(optimizer_config),
-            "offline_ml_readiness": self.offline_ranker.readiness(horizon_from_duration(optimizer_config.lock_duration_hours or 1)),
+            "offline_ml_readiness": self.offline_ranker.readiness(
+                horizon_from_duration(optimizer_config.lock_duration_hours or 1),
+                provider=optimizer_config.provider,
+            ),
             "pair_screening_summary": pair_screening_summary,
             "pair_candidates": pair_screening_summary.get("pair_candidates", []),
             "pair_rejection_breakdown": pair_screening_summary.get("pair_rejection_breakdown", {}),
@@ -1062,6 +1190,27 @@ class StrategyOptimizer:
             rejected = True
             rejection_reason = rejection_reason or "insufficient_liquidity_capacity"
             warnings.append("Liquidity capacity was too low for the requested allocation.")
+        if bool(self.config.get("OPTIMIZER_PROFIT_GUARDRAILS_ENABLED", True)):
+            min_net_return = float(self.config.get("OPTIMIZER_MIN_NET_RETURN_AFTER_COSTS", 0.0) or 0.0)
+            min_edge_after_cost = float(self.config.get("OPTIMIZER_MIN_EDGE_AFTER_COST_BPS", 0.0) or 0.0)
+            min_window_ratio = float(self.config.get("OPTIMIZER_MIN_ACCEPTED_WINDOW_RATIO", 0.40) or 0.40)
+            max_cost_drag = float(self.config.get("OPTIMIZER_MAX_COST_DRAG_BPS", 30.0) or 30.0)
+            if net_return_after_costs <= min_net_return:
+                rejected = True
+                rejection_reason = rejection_reason or "negative_net_return_after_costs"
+                warnings.append("Net return after fees, slippage, and estimated funding was not positive.")
+            if edge_score <= min_edge_after_cost:
+                rejected = True
+                rejection_reason = rejection_reason or "low_edge_after_costs"
+                warnings.append("Expected edge after costs was not positive enough for live selection.")
+            if accepted_window_ratio < min_window_ratio:
+                rejected = True
+                rejection_reason = rejection_reason or "unstable_consistency"
+                warnings.append("Too few walk-forward windows were profitable after costs.")
+            if cost_drag_bps > max_cost_drag:
+                rejected = True
+                rejection_reason = rejection_reason or "cost_drag_above_threshold"
+                warnings.append("Estimated trading costs were too high for the measured edge.")
         if optimizer_config.profile == Profile.AGGRESSIVE_1H.value:
             score, rejected, rejection_reason, warnings = self._aggressive_score_and_rejections(
                 score=score,
@@ -1319,6 +1468,7 @@ class StrategyOptimizer:
             rejected=rejected,
             optimizer_config=optimizer_config,
             result_context={
+                **provider_feature_context(optimizer_config.provider),
                 "strategy_name": strategy_name,
                 "symbol": symbol,
                 "timeframe": timeframe,
@@ -1371,26 +1521,62 @@ class StrategyOptimizer:
                 "profit_objective_version": "max_return_v3" if optimizer_config.max_return_optimizer_enabled else "",
             },
         )
+        ml_decision_context = {
+            **provider_feature_context(optimizer_config.provider),
+            "strategy_name": strategy_name,
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "profile": optimizer_config.profile,
+            "optimizer_profile": optimizer_config.profile,
+            "net_return_after_costs": net_return_after_costs,
+            "total_return": weighted_return,
+            "recent_performance_score": recent_performance_score,
+            "recent_1h_return": recent_1h_return,
+            "max_drawdown": weighted_drawdown,
+            "profit_factor": weighted_profit_factor,
+            "trade_count": trades,
+            "edge_score": edge_score,
+            "cost_drag_bps": cost_drag_bps,
+            "turnover_after_fees": turnover_after_fees,
+            "window_stability": window_stability,
+            "market_structure": market_structure,
+            "market_structure_score": market_structure_score,
+            "spread_bps": spread_bps,
+            "liquidity_capacity_usd": liquidity_capacity_usd,
+            "rejected": rejected,
+            "rejection_reason": rejection_reason,
+        }
+        ml_backtest_score = self._ml_decision_payload("pytorch_backtest_scorer", ml_decision_context, optimizer_config)
+        ml_fibonacci_decision = self._ml_decision_payload("pytorch_fibonacci", ml_decision_context, optimizer_config)
         if not rejected:
             score = ml_payload["ml_adjusted_score"]
             score += float(roi_payload["net_roi_score"]) * 0.05
             if bool(self.config.get("NET_ROI_V2_ENABLED", True)):
                 score += float(roi_v2_payload["net_roi_v2_score"]) * 0.03
+            if bool(ml_backtest_score.get("ready", False)):
+                prediction = self._safe_float((ml_backtest_score.get("raw") or {}).get("backtest_edge_prediction"), 0.0)
+                score += prediction * self._safe_float(self.config.get("ML_BACKTEST_SCORER_WEIGHT"), 0.10)
         return {
+            "provider": normalize_provider(optimizer_config.provider),
+            "collateral_asset": provider_collateral_asset(optimizer_config.provider),
             "strategy_name": strategy_name,
             "symbol": symbol,
+            "venue_symbol": symbol,
             "timeframe": timeframe,
             "profile": optimizer_config.profile,
             "experimental": self._is_experimental_profile(optimizer_config.profile),
             "risk_label": self._risk_label(optimizer_config.profile),
             "warning": self._profile_warning(optimizer_config.profile),
-            "parameters": parameters,
+            "parameters": {**parameters, "venue_symbol": symbol, "app_symbol": str(symbol).upper()},
             "score": score,
             "base_score": ml_payload["base_score"],
             "ml_score": ml_payload["ml_score"],
             "ml_adjusted_score": ml_payload["ml_adjusted_score"],
             "ml_warmup": ml_payload["ml_warmup"],
             "ml_explanation": ml_payload["ml_explanation"],
+            "ml_feature_schema_version": ML_FEATURE_SCHEMA_VERSION,
+            "ml_backtest_score": ml_backtest_score,
+            "ml_fibonacci_decision": ml_fibonacci_decision,
             "offline_ml_prediction": ml_payload["offline_ml_prediction"],
             "offline_ml_status": ml_payload["offline_ml_status"],
             "offline_ml_blend_applied": ml_payload["offline_ml_blend_applied"],
@@ -1774,14 +1960,15 @@ class StrategyOptimizer:
             rejected = True
             rejection_reason = rejection_reason or "low_edge_after_costs"
             warnings.append("Dynamic intraday edge after execution costs was below threshold.")
+        if spread_bps > max_spread:
+            rejected = True
+            if not rejection_reason or rejection_reason in {"insufficient_liquidity_capacity", "cost_drag_above_threshold"}:
+                rejection_reason = "spread_above_threshold"
+            warnings.append("Dynamic intraday spread exceeded the configured production cap.")
         if liquidity_usd > 0 and liquidity_usd < min_liquidity:
             rejected = True
             rejection_reason = rejection_reason or "insufficient_liquidity_capacity"
             warnings.append("Dynamic intraday liquidity was below the configured production floor.")
-        if spread_bps > max_spread:
-            rejected = True
-            rejection_reason = rejection_reason or "spread_above_threshold"
-            warnings.append("Dynamic intraday spread exceeded the configured production cap.")
         if volatility_regime == "dislocated":
             rejected = True
             rejection_reason = rejection_reason or "dislocated_volatility_regime"
@@ -1924,6 +2111,41 @@ class StrategyOptimizer:
             "offline_ml_blend_applied": bool(offline_payload.get("blend_applied", False)),
             "offline_ml_model_id": offline_payload.get("model_id"),
         }
+
+    def _ml_decision_payload(
+        self,
+        family: str,
+        result_context: dict[str, Any],
+        optimizer_config: OptimizerConfig,
+    ) -> dict[str, Any]:
+        if self.ml_decision_engine is None:
+            return {
+                "family": family,
+                "ready": False,
+                "action": "hold",
+                "blockers": ["ml_decision_engine_unavailable"],
+            }
+        context = self.ml_feature_factory.build(
+            symbol=str(result_context.get("symbol") or ""),
+            timeframe=str(result_context.get("timeframe") or ""),
+            optimizer_context=result_context,
+            market_structure=result_context.get("market_structure") if isinstance(result_context.get("market_structure"), dict) else {},
+        )
+        try:
+            return dict(
+                self.ml_decision_engine.decision(
+                    family,
+                    context,
+                    horizon=horizon_from_duration(optimizer_config.lock_duration_hours or 1),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "family": family,
+                "ready": False,
+                "action": "hold",
+                "blockers": [f"{family}_error:{exc}"],
+            }
 
     def _offline_ml_payload(
         self,
@@ -2385,6 +2607,13 @@ class StrategyOptimizer:
                 break
         if optimizer_config is not None and optimizer_config.max_return_optimizer_enabled:
             candidates = self._max_return_parameter_sets(strategy_name, candidates, max_parameter_sets, optimizer_config)
+        if optimizer_config is not None and optimizer_config.live_canary_research_overlay:
+            candidates = self._live_canary_research_parameter_sets(
+                strategy_name,
+                candidates,
+                max_parameter_sets,
+                optimizer_config.live_canary_research_overlay,
+            )
         if optimizer_config is not None and (
             optimizer_config.profile == Profile.AGGRESSIVE_1H.value
             or (
@@ -2445,6 +2674,75 @@ class StrategyOptimizer:
                         expanded.append(item)
                     if len(expanded) >= max_parameter_sets:
                         return expanded
+        return expanded[:max_parameter_sets]
+
+    def _live_canary_research_parameter_sets(
+        self,
+        strategy_name: str,
+        candidates: list[dict[str, Any]],
+        max_parameter_sets: int,
+        overlay: str,
+    ) -> list[dict[str, Any]]:
+        """Add research-only overlays that seek cleaner accepted rankings without changing gates."""
+        overlays_by_reason: dict[str, dict[str, list[dict[str, Any]]]] = {
+            "profit_factor_below_one": {
+                "scalping": [
+                    {"minimum_move_pct": 0.0022, "stop_loss_pct": 0.0035, "take_profit_pct": 0.0105, "trailing_stop_pct": 0.0012, "fast_fade_exit_pct": 0.0006},
+                    {"minimum_move_pct": 0.0030, "stop_loss_pct": 0.0045, "take_profit_pct": 0.0140, "breakeven_trigger_pct": 0.0025},
+                ],
+                "volatility_breakout": [
+                    {"lookback": 16, "range_multiplier": 1.45, "stop_loss_pct": 0.005, "take_profit_pct": 0.018, "fade_exit_ratio": 0.18},
+                    {"lookback": 24, "range_multiplier": 1.70, "stop_loss_pct": 0.006, "take_profit_pct": 0.024, "fade_exit_ratio": 0.15},
+                ],
+                "breakout": [
+                    {"lookback": 18, "confirmation_buffer_pct": 0.0018, "stop_loss_pct": 0.005, "take_profit_pct": 0.020, "exit_buffer_pct": 0.0008},
+                    {"lookback": 30, "confirmation_buffer_pct": 0.0025, "stop_loss_pct": 0.007, "take_profit_pct": 0.028, "exit_buffer_pct": 0.0010},
+                ],
+                "ema_crossover": [
+                    {"fast_period": 8, "slow_period": 21, "stop_loss_pct": 0.005, "take_profit_pct": 0.018, "compression_exit_pct": 0.00008},
+                    {"fast_period": 13, "slow_period": 34, "stop_loss_pct": 0.006, "take_profit_pct": 0.024, "compression_exit_pct": 0.00010},
+                ],
+                "rsi_mean_reversion": [
+                    {"period": 7, "oversold": 24, "overbought": 76, "exit_rsi": 50, "stop_loss_pct": 0.005, "take_profit_pct": 0.014, "reentry_buffer": 4},
+                    {"period": 9, "oversold": 22, "overbought": 78, "exit_rsi": 50, "stop_loss_pct": 0.006, "take_profit_pct": 0.018, "reentry_buffer": 5},
+                ],
+            },
+            "negative_recent_1h_return": {
+                "scalping": [
+                    {"momentum_lookback": 3, "minimum_move_pct": 0.0025, "stop_loss_pct": 0.003, "take_profit_pct": 0.009, "trailing_stop_pct": 0.0012},
+                    {"momentum_lookback": 6, "minimum_move_pct": 0.0035, "stop_loss_pct": 0.004, "take_profit_pct": 0.012, "fast_fade_exit_pct": 0.0005},
+                ],
+                "volatility_breakout": [
+                    {"lookback": 10, "range_multiplier": 1.55, "stop_loss_pct": 0.0045, "take_profit_pct": 0.015, "fade_exit_ratio": 0.12},
+                    {"lookback": 20, "range_multiplier": 1.80, "stop_loss_pct": 0.006, "take_profit_pct": 0.022, "fade_exit_ratio": 0.12},
+                ],
+                "breakout": [
+                    {"lookback": 12, "confirmation_buffer_pct": 0.0020, "stop_loss_pct": 0.0045, "take_profit_pct": 0.016, "exit_buffer_pct": 0.0007},
+                    {"lookback": 24, "confirmation_buffer_pct": 0.0030, "stop_loss_pct": 0.0065, "take_profit_pct": 0.024, "exit_buffer_pct": 0.0010},
+                ],
+            },
+            "low_trade_count": {
+                "scalping": [
+                    {"momentum_lookback": 2, "minimum_move_pct": 0.0010, "stop_loss_pct": 0.003, "take_profit_pct": 0.0075, "trailing_stop_pct": 0.0015},
+                    {"momentum_lookback": 4, "minimum_move_pct": 0.0014, "stop_loss_pct": 0.0035, "take_profit_pct": 0.0090},
+                ],
+                "rsi_mean_reversion": [
+                    {"period": 5, "oversold": 30, "overbought": 70, "exit_rsi": 50, "stop_loss_pct": 0.0045, "take_profit_pct": 0.010, "reentry_buffer": 2},
+                    {"period": 6, "oversold": 32, "overbought": 68, "exit_rsi": 50, "stop_loss_pct": 0.0055, "take_profit_pct": 0.012, "reentry_buffer": 2},
+                ],
+            },
+        }
+        overlays = overlays_by_reason.get(str(overlay or ""), {}).get(strategy_name, [])
+        expanded = list(candidates)
+        for base in candidates:
+            for item_overlay in overlays:
+                item = dict(base)
+                item.update(item_overlay)
+                item["live_canary_research_overlay"] = overlay
+                if item not in expanded:
+                    expanded.append(item)
+                if len(expanded) >= max_parameter_sets:
+                    return expanded
         return expanded[:max_parameter_sets]
 
     def _horizon_hours(self, lock_duration_hours: int) -> tuple[int, int, int]:
@@ -2613,6 +2911,7 @@ class StrategyOptimizer:
         """Persist a single ranking result to the database."""
         ranking = StrategyRanking(
             optimizer_run_id=run.id,
+            provider=normalize_provider(result.get("provider") or (run.config_payload or {}).get("provider")),
             strategy_name=result["strategy_name"],
             symbol=result["symbol"],
             timeframe=result["timeframe"],
@@ -2671,6 +2970,12 @@ class StrategyOptimizer:
         ranking.warnings = result["warnings"]
         ranking.ml_explanation = {
             **dict(result.get("ml_explanation", {}) or {}),
+            "venue_symbol": result.get("venue_symbol") or result.get("symbol"),
+            "app_symbol": str(result.get("symbol") or "").upper(),
+            "ml_feature_schema_version": result.get("ml_feature_schema_version", ML_FEATURE_SCHEMA_VERSION),
+            "ml_optimizer_policy": result.get("ml_optimizer_policy", {}),
+            "ml_backtest_score": result.get("ml_backtest_score", {}),
+            "ml_fibonacci_decision": result.get("ml_fibonacci_decision", {}),
             "net_roi": {
                 "net_roi_score": result.get("net_roi_score", 0.0),
                 "expected_fill_quality": result.get("expected_fill_quality", 0.0),
@@ -3205,7 +3510,11 @@ class StrategyOptimizer:
             blockers.append("HIGH_UPSIDE_LIVE_CAP_USDC_BY_DURATION_JSON_missing")
         if cap_pct <= 0:
             blockers.append("HIGH_UPSIDE_LIVE_CAP_PCT_BY_DURATION_JSON_missing")
-        ml_readiness = self.offline_ranker.readiness(duration_bucket, require_blend=False)
+        ml_readiness = self.offline_ranker.readiness(
+            duration_bucket,
+            require_blend=False,
+            provider=optimizer_config.provider,
+        )
         if bool(self.config.get("HIGH_UPSIDE_REQUIRE_PROMOTED_ML", True)) and not bool(ml_readiness.get("ready", False)):
             blockers.append("promoted_offline_ml_required")
 
@@ -3218,6 +3527,8 @@ class StrategyOptimizer:
             "ready": not blockers,
             "blockers": blockers,
             "duration_bucket": duration_bucket,
+            "provider": normalize_provider(optimizer_config.provider),
+            "collateral_asset": provider_collateral_asset(optimizer_config.provider),
             "caps": {
                 "max_position_notional_usd": max_notional,
                 "max_daily_loss_usdc": max_daily_loss,
@@ -3801,6 +4112,10 @@ class StrategyOptimizer:
             "ml_adjusted_score": -999.0,
             "ml_warmup": True,
             "ml_explanation": {},
+            "ml_feature_schema_version": ML_FEATURE_SCHEMA_VERSION,
+            "ml_optimizer_policy": {},
+            "ml_backtest_score": {},
+            "ml_fibonacci_decision": {},
             "total_return": 0.0,
             "net_return_after_costs": 0.0,
             "raw_upside_score": 0.0,
@@ -4047,4 +4362,7 @@ class StrategyOptimizer:
             "pair_max_spread_zscore": optimizer_config.pair_max_spread_zscore,
             "dynamic_intraday_live_eligible": optimizer_config.dynamic_intraday_live_eligible,
             "high_upside_profile": optimizer_config.high_upside_profile,
+            "live_canary_research_overlay": optimizer_config.live_canary_research_overlay,
+            "provider": normalize_provider(optimizer_config.provider),
+            "collateral_asset": provider_collateral_asset(optimizer_config.provider),
         }

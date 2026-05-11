@@ -7,8 +7,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from ..extensions import db
+from ..ml.decision_engine import MLDecisionEngine
 from ..ml.offline_ranker import OfflineRanker
-from ..models import AuditLog, Fill, Order, PositionSnapshot, RiskEvent, Setting, StrategyValidation
+from ..ml.signal_model import MLSignalModel
+from ..models import AuditLog, Fill, LeveragedMarket, Order, PositionSnapshot, RiskEvent, Setting, StrategyValidation
+from .provider_assets import normalize_provider
 
 
 VALID_MODES = {"live"}
@@ -32,6 +35,22 @@ class RiskDecision:
         }
 
 
+@dataclass(slots=True)
+class SafetyEnvelope:
+    """Non-bypassable live checks that stay outside ML authority."""
+
+    ready: bool
+    blockers: list[str] = field(default_factory=list)
+    details: dict[str, Any] = field(default_factory=dict)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "ready": self.ready,
+            "blockers": list(self.blockers),
+            "details": dict(self.details),
+        }
+
+
 class RiskEngine:
     """Evaluates hard risk rules before order submission."""
 
@@ -46,6 +65,7 @@ class RiskEngine:
         limit_price = self._optional_positive_float(getattr(intent, "limit_price", None))
         reduce_only = bool(getattr(intent, "reduce_only", False))
         metadata = dict(getattr(intent, "metadata", {}) or {})
+        is_one_h10 = self._is_one_h10(metadata)
         user_id = getattr(intent, "user_id", None)
         trading_connection_id = getattr(intent, "trading_connection_id", None)
         shadow_validation_id: int | None = None
@@ -61,6 +81,27 @@ class RiskEngine:
 
         if mode == "live" and not self._config_bool("ENABLE_LIVE_TRADING"):
             return self._reject("live_disabled", "Live trading is disabled by configuration.")
+
+        if mode == "live" and is_one_h10 and not reduce_only:
+            metadata.update(
+                {
+                    "one_h10_vault": True,
+                    "ml_horizon": "1h10",
+                    "objective": metadata.get("objective") or "one_h10",
+                    "ml_objective": metadata.get("ml_objective") or "one_h10",
+                    "ml_policy_required": True,
+                    "ml_governed_risk": True,
+                }
+            )
+            try:
+                intent.metadata = metadata
+            except Exception:  # noqa: BLE001
+                pass
+
+        if mode == "live" and is_one_h10:
+            one_h10_decision = self._evaluate_one_h10_gate(metadata)
+            if not one_h10_decision.approved:
+                return one_h10_decision
 
         if mode == "live" and self._is_max_return_objective(metadata) and not bool(self.config.get("MAX_RETURN_LIVE_ELIGIBLE", False)):
             return self._reject(
@@ -103,8 +144,31 @@ class RiskEngine:
                 "Exchange trading credentials are missing or disabled for this mode.",
             )
 
+        ml_policy_active = mode == "live" and self._ml_policy_active(metadata)
+        if mode == "live" and reduce_only:
+            ml_policy_active = False
+        elif mode == "live" and is_one_h10 and not reduce_only:
+            ml_policy_active = True
+        safety_envelope_payload: dict[str, Any] = {}
+        ml_policy_payload: dict[str, Any] = {}
+
         allowed_symbols = {str(item).upper() for item in self.config.get("ALLOWED_SYMBOLS", [])}
-        if allowed_symbols and symbol not in allowed_symbols:
+        one_h10_all_pairs = is_one_h10 and bool(self.config.get("ONE_H10_ALL_PAIRS_ENABLED", True))
+        high_upside_all_pairs = (
+            self._is_high_upside_profile(metadata)
+            and normalize_provider(metadata.get("provider") or metadata.get("execution_venue")) == "hyperliquid"
+            and bool(self.config.get("HIGH_UPSIDE_ALL_PAIRS_ENABLED", True))
+            and bool(metadata.get("venue_symbol") or metadata.get("provider_symbol") or symbol)
+        )
+        rapid_ml_all_futures = self._is_rapid_ml_active_futures_market(metadata, symbol)
+        if (
+            not reduce_only
+            and allowed_symbols
+            and symbol not in allowed_symbols
+            and not one_h10_all_pairs
+            and not high_upside_all_pairs
+            and not rapid_ml_all_futures
+        ):
             return self._reject("symbol_not_allowed", f"{symbol} is not in the approved symbol list.")
 
         if quantity <= 0:
@@ -117,6 +181,14 @@ class RiskEngine:
                 f"Requested leverage exceeds configured cap of {max_leverage}.",
                 {"requested_leverage": leverage, "max_leverage": max_leverage},
             )
+        if mode == "live" and is_one_h10:
+            one_h10_leverage_cap = min(max_leverage, self._config_float("ONE_H10_MAX_LEVERAGE", max_leverage))
+            if leverage > one_h10_leverage_cap:
+                return self._reject(
+                    "one_h10_leverage_cap",
+                    f"1H10 leverage exceeds configured cap of {one_h10_leverage_cap}.",
+                    {"requested_leverage": leverage, "max_leverage": one_h10_leverage_cap},
+                )
 
         if mode == "live" and self._uses_experimental_live_caps(metadata):
             aggressive_live_cap = min(
@@ -135,13 +207,45 @@ class RiskEngine:
             return self._reject("price_unavailable", "A reference price is required to perform risk checks.")
 
         notional = reference_price * quantity
+        provider_key = normalize_provider(metadata.get("provider") or metadata.get("execution_venue"))
+        min_notional = self._config_float("HYPERLIQUID_MIN_ORDER_VALUE_USD", 10.0)
+        if mode == "live" and not reduce_only and provider_key == "hyperliquid" and min_notional > 0 and notional + 1e-9 < min_notional:
+            return self._reject(
+                "hyperliquid_min_order_value",
+                f"Hyperliquid requires minimum order value of ${min_notional:g}.",
+                {"notional": notional, "min_notional": min_notional, "provider": provider_key},
+            )
+        if ml_policy_active:
+            safety_envelope = self._safety_envelope(
+                intent,
+                reference_price=reference_price,
+                notional=notional,
+                has_trading_access=has_trading_access,
+            )
+            safety_envelope_payload = safety_envelope.as_dict()
+            if not safety_envelope.ready:
+                return self._reject(
+                    "safety_envelope_blocked",
+                    "Non-bypassable live safety envelope blocked the ML-governed order.",
+                    safety_envelope_payload,
+                )
+            ml_policy_decision = self._evaluate_ml_policy_bundle(
+                intent,
+                reference_price=reference_price,
+                notional=notional,
+                safety_envelope=safety_envelope,
+            )
+            ml_policy_payload = dict(ml_policy_decision.details or {})
+            if not ml_policy_decision.approved:
+                return ml_policy_decision
+
         max_notional = (
             self._config_float("HIGH_UPSIDE_MAX_POSITION_NOTIONAL_USD", 0.0)
             if mode == "live" and self._is_high_upside_profile(metadata)
             else self._config_float("MAX_POSITION_NOTIONAL", 0.0)
         )
 
-        if max_notional > 0 and notional > max_notional:
+        if not reduce_only and max_notional > 0 and notional > max_notional:
             return self._reject(
                 "high_upside_max_notional" if self._is_high_upside_profile(metadata) else "max_notional",
                 f"Order notional {notional:.2f} exceeds cap {max_notional:.2f}.",
@@ -159,6 +263,12 @@ class RiskEngine:
         if not reduce_only:
             if stop_loss is None:
                 return self._reject("stop_loss_required", "Opening trades must include a stop loss.")
+            if ml_policy_active and take_profit is None:
+                return self._reject(
+                    "take_profit_required",
+                    "ML-governed opening trades must include take profit.",
+                    {"ml_policy_authority": self.config.get("ML_POLICY_LIVE_AUTHORITY", "guarded")},
+                )
 
             stop_decision = self._validate_stop_loss(intent, reference_price, stop_loss)
             if not stop_decision.approved:
@@ -253,12 +363,347 @@ class RiskEngine:
                 "reward_risk": metadata.get("risk_reward"),
                 "shadow_validation_id": shadow_validation_id,
                 "pair_shadow_validation_id": metadata.get("pair_shadow_validation_id"),
+                "safety_envelope": safety_envelope_payload,
+                "ml_policy_decisions": ml_policy_payload,
+                "ml_policy_authority": ml_policy_payload.get(
+                    "ml_policy_authority",
+                    self.config.get("ML_POLICY_LIVE_AUTHORITY", "guarded") if ml_policy_active else "disabled",
+                ),
             },
         )
+
+    def _ml_policy_active(self, metadata: dict[str, Any]) -> bool:
+        payload = metadata or {}
+        if bool(payload.get("ml_policy_required", False)) or bool(payload.get("ml_governed_risk", False)):
+            return True
+        return any(
+            bool(self.config.get(key, False))
+            for key in (
+                "ML_RISK_POLICY_ENABLED",
+                "ML_EXIT_POLICY_ENABLED",
+                "ML_CAP_POLICY_ENABLED",
+                "ML_ORDER_POLICY_ENABLED",
+                "ML_ROI_TARGET_POLICY_ENABLED",
+            )
+        )
+
+    def _safety_envelope(
+        self,
+        intent: Any,
+        *,
+        reference_price: float,
+        notional: float,
+        has_trading_access: bool,
+    ) -> SafetyEnvelope:
+        blockers: list[str] = []
+        mode = str(getattr(intent, "mode", "")).lower()
+        metadata = dict(getattr(intent, "metadata", {}) or {})
+        is_one_h10 = self._is_one_h10(metadata)
+        hard_cap = self._ml_live_hard_cap(metadata)
+        hard_daily_loss = self._config_float("ML_LIVE_HARD_DAILY_LOSS_USDC", 0.50)
+        user_id = getattr(intent, "user_id", None)
+        trading_connection_id = getattr(intent, "trading_connection_id", None)
+        dynamic_cap, dynamic_cap_details = self._one_h10_dynamic_notional_cap(
+            metadata,
+            leverage=self._safe_float(getattr(intent, "leverage", 1.0), 1.0),
+        )
+
+        if mode != "live":
+            blockers.append("safety_mode_not_live")
+        if not self._config_bool("ENABLE_LIVE_TRADING"):
+            blockers.append("safety_live_trading_disabled")
+        if Setting.get_json("panic_lock", False):
+            blockers.append("safety_panic_lock")
+        if not has_trading_access:
+            blockers.append("safety_verified_connection_missing")
+        if not bool(self.config.get("EXPLICIT_LIVE_CONFIRMED", False)) or not bool(Setting.get_json("explicit_live_confirmed", False)):
+            blockers.append("safety_explicit_live_confirmation_missing")
+        if not bool(self.config.get("SECONDARY_CONFIRMATION", False)) or not bool(Setting.get_json("secondary_confirmation", False)):
+            blockers.append("safety_secondary_confirmation_missing")
+        if reference_price <= 0:
+            blockers.append("safety_reference_price_missing")
+        if is_one_h10:
+            if dynamic_cap <= 0:
+                blockers.append("safety_one_h10_dynamic_cap_missing")
+            elif notional > dynamic_cap + 1e-9:
+                blockers.append("safety_one_h10_dynamic_cap_breached")
+        elif hard_cap <= 0:
+            if not bool(metadata.get("rapid_ml")):
+                blockers.append("safety_ml_live_hard_cap_missing")
+        elif notional > hard_cap + 1e-9:
+            blockers.append("safety_ml_live_hard_cap_breached")
+        loss_used = abs(min(0.0, self.daily_realized_pnl(mode, user_id=user_id, trading_connection_id=trading_connection_id)))
+        if hard_daily_loss <= 0:
+            blockers.append("safety_ml_live_hard_daily_loss_missing")
+        elif loss_used >= hard_daily_loss:
+            blockers.append("safety_ml_live_hard_daily_loss_reached")
+        if str(self.config.get("ML_POLICY_LIVE_AUTHORITY", "guarded") or "guarded").lower() != "guarded":
+            blockers.append("safety_ml_live_authority_not_guarded")
+
+        return SafetyEnvelope(
+            ready=not blockers,
+            blockers=list(dict.fromkeys(blockers)),
+            details={
+                "mode": mode,
+                "symbol": str(getattr(intent, "symbol", "")).upper(),
+                "reference_price": reference_price,
+                "notional": notional,
+                "hard_cap_usdc": hard_cap,
+                "one_h10_dynamic_cap_usd": dynamic_cap if is_one_h10 else None,
+                "one_h10_dynamic_cap": dynamic_cap_details if is_one_h10 else {},
+                "hard_daily_loss_usdc": hard_daily_loss,
+                "loss_used_usdc": loss_used,
+                "policy_live_authority": self.config.get("ML_POLICY_LIVE_AUTHORITY", "guarded"),
+                "ml_policy_required": bool(metadata.get("ml_policy_required", False)),
+                "has_trading_access": bool(has_trading_access),
+                "explicit_live_confirmed": bool(self.config.get("EXPLICIT_LIVE_CONFIRMED", False))
+                and bool(Setting.get_json("explicit_live_confirmed", False)),
+                "secondary_confirmation": bool(self.config.get("SECONDARY_CONFIRMATION", False))
+                and bool(Setting.get_json("secondary_confirmation", False)),
+            },
+        )
+
+    def _evaluate_ml_policy_bundle(
+        self,
+        intent: Any,
+        *,
+        reference_price: float,
+        notional: float,
+        safety_envelope: SafetyEnvelope,
+    ) -> RiskDecision:
+        metadata = dict(getattr(intent, "metadata", {}) or {})
+        is_one_h10 = self._is_one_h10(metadata)
+        leverage = self._safe_float(getattr(intent, "leverage", 1.0), 1.0)
+        dynamic_cap, dynamic_cap_details = self._one_h10_dynamic_notional_cap(metadata, leverage=leverage)
+        ml_live_cap = dynamic_cap if is_one_h10 and dynamic_cap > 0 else self._ml_live_hard_cap(metadata)
+        horizon = self._ml_policy_horizon(metadata)
+        provider_key = normalize_provider(metadata.get("provider") or metadata.get("execution_venue"))
+        context = {
+            **metadata,
+            "provider": provider_key,
+            "execution_venue": provider_key,
+            "symbol": str(getattr(intent, "symbol", "")).upper(),
+            "side": str(getattr(intent, "side", "")).lower(),
+            "horizon": horizon,
+            "objective": metadata.get("objective") or metadata.get("ml_objective") or "risk_adjusted",
+            "notional": notional,
+            "reference_price": reference_price,
+            "leverage": leverage,
+            "stop_loss": self._safe_float(getattr(intent, "stop_loss", 0.0)),
+            "take_profit": self._safe_float(getattr(intent, "take_profit", 0.0)),
+            "stop_loss_pct": self._stop_loss_pct(intent, reference_price),
+            "take_profit_pct": self._take_profit_pct(intent, reference_price),
+            "ml_live_hard_cap_usdc": ml_live_cap,
+            "one_h10_dynamic_cap_usd": dynamic_cap,
+            "one_h10_dynamic_cap": dynamic_cap_details,
+            "ml_live_hard_daily_loss_usdc": self._config_float("ML_LIVE_HARD_DAILY_LOSS_USDC", 0.50),
+            "hard_max_leverage": self._config_float("MAX_LEVERAGE", 1.0),
+            "safety_envelope_ready": safety_envelope.ready,
+        }
+        engine = MLDecisionEngine(self.config, signal_model=MLSignalModel(self.config))
+        if is_one_h10 and bool(self.config.get("ONE_H10_REQUIRE_PROMOTED_ML", True)):
+            forecast = metadata.get("one_h10_forecast") if isinstance(metadata.get("one_h10_forecast"), dict) else {}
+            forecast_blockers = [str(item) for item in (forecast.get("blockers", []) or []) if str(item)]
+            if not bool(forecast.get("ml_ready", False)) or str(forecast.get("ml_horizon") or "").lower() != "1h10":
+                return self._reject(
+                    "one_h10_promoted_ml_required",
+                    "1H10 opening live orders require a promoted 1h10 ML forecast.",
+                    {"horizon": horizon, "forecast": forecast, "blockers": list(dict.fromkeys([*forecast_blockers, "ml_not_ready"]))},
+                )
+            required_feature_blockers = {"features_stale", "missing_fibonacci_features"}
+            if required_feature_blockers.intersection(forecast_blockers):
+                return self._reject(
+                    "one_h10_required_features_missing",
+                    "1H10 opening live orders require fresh higher-timeframe Fibonacci and indicator features.",
+                    {"horizon": horizon, "forecast": forecast, "blockers": list(dict.fromkeys(forecast_blockers))},
+                )
+            fib_readiness = self._ml_family_readiness(engine, "pytorch_fibonacci", horizon, provider_key)
+            if not bool(fib_readiness.get("ready", False)):
+                return self._reject(
+                    "one_h10_fibonacci_ml_not_ready",
+                    "1H10 opening live orders require promoted pytorch_fibonacci readiness for horizon 1h10.",
+                    {"horizon": horizon, "readiness": fib_readiness, "blockers": list(fib_readiness.get("blockers", []) or [])},
+                )
+        required_families = {
+            **({"pytorch_fibonacci": "ML_FIBONACCI_MODEL_ENABLED"} if is_one_h10 and bool(self.config.get("ONE_H10_REQUIRE_PROMOTED_ML", True)) else {}),
+            "pytorch_risk_policy": "ML_RISK_POLICY_ENABLED",
+            "pytorch_exit_policy": "ML_EXIT_POLICY_ENABLED",
+            "pytorch_cap_policy": "ML_CAP_POLICY_ENABLED",
+            "pytorch_execution_policy": "ML_ORDER_POLICY_ENABLED",
+            "pytorch_roi_target": "ML_ROI_TARGET_POLICY_ENABLED",
+        }
+        enabled_families = [
+            family for family, flag in required_families.items() if bool(self.config.get(flag, False))
+        ]
+        if is_one_h10 and bool(self.config.get("ONE_H10_BOOTSTRAP_LIVE_ENABLED", True)) and not enabled_families:
+            return RiskDecision(
+                approved=True,
+                details={
+                    "ml_policy_decisions": {
+                        "one_h10_bootstrap_policy": {
+                            "ready": True,
+                            "action": "approve",
+                            "horizon": horizon,
+                            "reason": "one_h10_bootstrap_live_enabled",
+                            "blockers": [],
+                        }
+                    },
+                    "safety_envelope": safety_envelope.as_dict(),
+                    "ml_policy_authority": "one_h10_bootstrap",
+                    "enabled_families": enabled_families,
+                    "notional": notional,
+                    "horizon": horizon,
+                    "one_h10_dynamic_cap_usd": dynamic_cap,
+                    "bootstrap_live": True,
+                },
+            )
+        if is_one_h10 and "pytorch_risk_policy" not in enabled_families:
+            return self._reject(
+                "one_h10_ml_policy_not_enabled",
+                "1H10 opening live orders require the custom 1h10 ML risk policy to be enabled.",
+                {"horizon": horizon, "safety_envelope": safety_envelope.as_dict()},
+            )
+        if bool(metadata.get("ml_policy_required", False)) and not enabled_families:
+            return self._reject(
+                "ml_policy_not_enabled",
+                "ML-governed risk was required by metadata, but no ML policy families are enabled.",
+                {"safety_envelope": safety_envelope.as_dict()},
+            )
+        decisions: dict[str, Any] = {}
+        blockers: list[str] = []
+        for family in enabled_families:
+            readiness = self._ml_family_readiness(engine, family, horizon, provider_key)
+            if not bool(readiness.get("ready", False)):
+                blockers.append(f"{family}_not_ready")
+                decisions[family] = {"ready": False, "blockers": readiness.get("blockers", [])}
+                continue
+            decision = dict(engine.decision(family, context, horizon=horizon))
+            decisions[family] = decision
+            raw = decision.get("raw") if isinstance(decision.get("raw"), dict) else {}
+            if family == "pytorch_risk_policy" and str(decision.get("action") or "").lower() != "approve":
+                blockers.append("ml_risk_policy_rejected")
+            if family == "pytorch_fibonacci":
+                raw_blockers = raw.get("blockers") if isinstance(raw.get("blockers"), list) else []
+                blockers.extend(str(item) for item in raw_blockers if str(item))
+                if str(decision.get("action") or "").lower() not in {"suggest", "approve"}:
+                    blockers.append("ml_fibonacci_policy_rejected")
+            if family == "pytorch_exit_policy" and raw.get("blockers"):
+                blockers.extend(str(item) for item in list(raw.get("blockers") or []))
+            if family == "pytorch_cap_policy":
+                suggested = self._safe_float(raw.get("suggested_notional_usdc"), 0.0)
+                suggested_leverage = self._safe_float(raw.get("suggested_leverage"), 0.0)
+                leverage_cap = self._config_float("MAX_LEVERAGE", 1.0)
+                if is_one_h10:
+                    leverage_cap = min(leverage_cap, self._config_float("ONE_H10_MAX_LEVERAGE", leverage_cap))
+                if suggested_leverage > leverage_cap + 1e-9:
+                    blockers.append("ml_cap_policy_leverage_cap_breach")
+                if is_one_h10:
+                    if dynamic_cap > 0 and suggested > dynamic_cap + 1e-9:
+                        blockers.append("ml_cap_policy_dynamic_cap_breach")
+                else:
+                    hard_cap = self._ml_live_hard_cap(metadata)
+                    if hard_cap > 0 and suggested > hard_cap + 1e-9:
+                        blockers.append("ml_cap_policy_hard_cap_breach")
+
+        details = {
+            "ml_policy_decisions": decisions,
+            "safety_envelope": safety_envelope.as_dict(),
+            "ml_policy_authority": self.config.get("ML_POLICY_LIVE_AUTHORITY", "guarded"),
+            "enabled_families": enabled_families,
+            "notional": notional,
+            "horizon": horizon,
+            "one_h10_dynamic_cap_usd": dynamic_cap if is_one_h10 else None,
+        }
+        if blockers:
+            return self._reject(
+                "ml_policy_rejected",
+                "Promoted ML policy did not approve the live risk intent.",
+                {**details, "blockers": list(dict.fromkeys(blockers))},
+            )
+        return RiskDecision(approved=True, details=details)
+
+    @staticmethod
+    def _ml_family_readiness(engine: Any, family: str, horizon: str, provider: str) -> dict[str, Any]:
+        try:
+            return dict(engine.family_readiness(family, horizon, provider=provider))
+        except TypeError as exc:
+            if "provider" not in str(exc):
+                raise
+            return dict(engine.family_readiness(family, horizon))
+
+    def _ml_policy_horizon(self, metadata: dict[str, Any]) -> str:
+        payload = metadata or {}
+        if self._is_one_h10(payload):
+            return "1h10"
+        explicit = str(payload.get("ml_horizon") or payload.get("horizon") or "").strip().lower()
+        if explicit:
+            return explicit
+        return self._duration_bucket(payload.get("duration_hours") or payload.get("lock_duration_hours") or "1h")
+
+    def _one_h10_dynamic_notional_cap(self, metadata: dict[str, Any], *, leverage: float) -> tuple[float, dict[str, Any]]:
+        payload = metadata or {}
+        if not self._is_one_h10(payload):
+            return 0.0, {}
+        margin_sources: dict[str, float] = {}
+        for key in (
+            "allocation_cap_usd",
+            "available_margin_usd",
+            "provider_free_margin_usd",
+            "free_margin_usd",
+            "account_equity_usd",
+            "user_input_amount_usd",
+            "starting_value_usd",
+        ):
+            value = self._safe_float(payload.get(key), 0.0)
+            if value > 0:
+                margin_sources[key] = value
+        effective_leverage = max(1.0, self._safe_float(leverage, 1.0))
+        margin_cap = min(margin_sources.values()) if margin_sources else 0.0
+        margin_notional_cap = margin_cap * effective_leverage if margin_cap > 0 else 0.0
+
+        notional_sources: dict[str, float] = {}
+        for key in (
+            "liquidity_capacity",
+            "liquidity_capacity_usd",
+            "orderbook_capacity_usd",
+            "exchange_max_notional_usd",
+            "max_order_notional_usd",
+        ):
+            value = self._safe_float(payload.get(key), 0.0)
+            if value > 0:
+                notional_sources[key] = value
+
+        candidates = []
+        if margin_notional_cap > 0:
+            candidates.append(margin_notional_cap)
+        candidates.extend(notional_sources.values())
+        cap = min(candidates) if candidates else 0.0
+        return cap, {
+            "cap_usd": cap,
+            "margin_cap_usd": margin_cap,
+            "margin_notional_cap_usd": margin_notional_cap,
+            "leverage": effective_leverage,
+            "margin_sources": margin_sources,
+            "notional_sources": notional_sources,
+        }
 
     def _evaluate_live_gate(self, intent: Any) -> RiskDecision:
         if Setting.get_json("live_trading_blocked", False):
             return self._reject("live_blocked", "Live trading is blocked after a prior failure; review and reset first.")
+        if (
+            bool(self.config.get("LIVE_BLOCK_ON_UNRECONCILED_FILLS", True))
+            and not bool(getattr(intent, "reduce_only", False))
+        ):
+            unreconciled_count = self.unreconciled_live_fill_count(
+                user_id=getattr(intent, "user_id", None),
+                trading_connection_id=getattr(intent, "trading_connection_id", None),
+            )
+            if unreconciled_count > 0:
+                return self._reject(
+                    "unreconciled_live_fills",
+                    "New live entries are blocked until recent closing fills have reconciled realized PnL.",
+                    {"unreconciled_fill_count": unreconciled_count},
+                )
 
         return RiskDecision(approved=True)
 
@@ -376,9 +821,53 @@ class RiskEngine:
         return bool(self.config.get("DYNAMIC_INTRADAY_LIVE_ELIGIBLE", False)) and self._is_dynamic_intraday(metadata)
 
     @staticmethod
+    def _is_one_h10(metadata: dict[str, Any]) -> bool:
+        payload = metadata or {}
+        markers = {
+            str(payload.get("algorithm_profile") or "").strip().lower(),
+            str(payload.get("vault_cycle_name") or "").strip().lower(),
+            str(payload.get("ml_horizon") or "").strip().lower(),
+            str(payload.get("objective") or "").strip().lower(),
+        }
+        return bool(payload.get("one_h10_vault")) or bool(markers & {"1h10", "one_h10", "one_hour_10x"})
+
+    @staticmethod
     def _is_high_upside_profile(metadata: dict[str, Any]) -> bool:
+        if RiskEngine._is_one_h10(metadata):
+            return False
         value = (metadata or {}).get("high_upside_profile", False)
         return value is True or str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+    def _is_rapid_ml_active_futures_market(self, metadata: dict[str, Any], symbol: str) -> bool:
+        payload = metadata or {}
+        if not bool(payload.get("rapid_ml")) or not bool(payload.get("rapid_ml_all_futures_universe")):
+            return False
+        provider = normalize_provider(payload.get("provider") or payload.get("execution_venue"))
+        if provider not in {"hyperliquid", "kucoin"}:
+            return False
+        symbol_key = str(symbol or "").upper()
+        venue_symbol = str(payload.get("venue_symbol") or payload.get("provider_symbol") or symbol_key).upper()
+        market_id = self._safe_float(payload.get("futures_market_id"), 0.0)
+        query = LeveragedMarket.query.filter_by(provider=provider, status="active")
+        if market_id > 0:
+            if query.filter_by(id=int(market_id)).first() is not None:
+                return True
+        return (
+            query.filter((LeveragedMarket.symbol == symbol_key) | (LeveragedMarket.venue_symbol == venue_symbol)).first()
+            is not None
+        )
+
+    def _ml_live_hard_cap(self, metadata: dict[str, Any]) -> float:
+        payload = metadata or {}
+        if bool(payload.get("rapid_ml")):
+            metadata_cap = self._safe_float(payload.get("ml_live_hard_cap_usdc"), 0.0)
+            if metadata_cap > 0:
+                return metadata_cap
+            rapid_cap = self._config_float("RAPID_ML_HARD_CAP_USDC", 0.0)
+            if rapid_cap > 0:
+                return rapid_cap
+            return 0.0
+        return self._config_float("ML_LIVE_HARD_CAP_USDC", 10.0)
 
     def _uses_experimental_live_caps(self, metadata: dict[str, Any]) -> bool:
         return (
@@ -389,6 +878,16 @@ class RiskEngine:
             or self._is_dynamic_intraday_live_eligible(metadata)
             or self._is_high_upside_profile(metadata)
         )
+
+    def _evaluate_one_h10_gate(self, metadata: dict[str, Any]) -> RiskDecision:
+        if not bool(self.config.get("ONE_H10_LIVE_ENABLED", False)):
+            return self._reject("one_h10_live_disabled", "1H10 live orders require ONE_H10_LIVE_ENABLED=true.")
+        if not bool(self.config.get("ML_DETERMINISTIC_SAFETY_GATES_REQUIRED", True)):
+            return self._reject(
+                "one_h10_safety_gates_disabled",
+                "1H10 ML-driven live orders require deterministic safety gates to remain enabled.",
+            )
+        return RiskDecision(approved=True, details={"ml_horizon": metadata.get("ml_horizon"), "vault_cycle_name": "1H10"})
 
     def _requires_aggressive_shadow_validation(self, metadata: dict[str, Any]) -> bool:
         return (
@@ -472,7 +971,7 @@ class RiskEngine:
             query = query.filter(Order.trading_connection_id == int(trading_connection_id))
         fills = query.all()
 
-        return sum(self._safe_float(fill.pnl) - self._safe_float(fill.fee) for fill in fills)
+        return sum(self._fill_net_pnl(fill) for fill in fills)
 
     def cooldown_remaining(
         self,
@@ -491,7 +990,6 @@ class RiskEngine:
         query = (
             Fill.query.join(Fill.order)
             .filter(Fill.fill_time >= window)
-            .filter(Fill.pnl < 0)
             .filter(Order.mode == mode)
             .filter(Fill.simulated == (mode == "paper"))
         )
@@ -499,7 +997,7 @@ class RiskEngine:
             query = query.filter(Order.user_id == int(user_id))
         if trading_connection_id is not None:
             query = query.filter(Order.trading_connection_id == int(trading_connection_id))
-        fill = query.order_by(Fill.fill_time.desc()).first()
+        fill = next((row for row in query.order_by(Fill.fill_time.desc()).all() if self._fill_net_pnl(row) < 0), None)
 
         if fill is None:
             return 0
@@ -508,6 +1006,30 @@ class RiskEngine:
         remaining = timedelta(minutes=cooldown_minutes) - (now - fill_time)
 
         return max(0, int(remaining.total_seconds() // 60))
+
+    def unreconciled_live_fill_count(
+        self,
+        *,
+        user_id: int | None = None,
+        trading_connection_id: int | None = None,
+    ) -> int:
+        lookback_hours = max(0.0, self._config_float("LIVE_UNRECONCILED_FILL_LOOKBACK_HOURS", 24.0))
+        since = datetime.now(timezone.utc) - timedelta(hours=lookback_hours or 24.0)
+        query = (
+            Fill.query.join(Fill.order)
+            .filter(Order.mode == "live")
+            .filter(Fill.simulated.is_(False))
+            .filter(Fill.fill_time >= since)
+            .filter(Fill.realized_pnl_known.is_(False))
+        )
+        if user_id is not None:
+            query = query.filter(Order.user_id == int(user_id))
+        if trading_connection_id is not None:
+            query = query.filter(Order.trading_connection_id == int(trading_connection_id))
+        return int(query.count())
+
+    def _fill_net_pnl(self, fill: Fill) -> float:
+        return self._safe_float(fill.pnl) - self._safe_float(fill.fee) - self._safe_float(getattr(fill, "funding_fee", 0.0))
 
     def status(
         self,
@@ -530,16 +1052,64 @@ class RiskEngine:
             "high_upside": {
                 "profile_enabled": bool(self.config.get("HIGH_UPSIDE_PROFILE_ENABLED", False)),
                 "live_eligible": bool(self.config.get("HIGH_UPSIDE_LIVE_ELIGIBLE", False)),
+                "auto_live_enabled": bool(self.config.get("HIGH_UPSIDE_AUTO_LIVE_ENABLED", False)),
                 "auto_disabled": bool(Setting.get_json("high_upside_live_disabled", False)),
                 "disabled_reason": Setting.get_json("high_upside_live_disabled_reason", {}),
                 "max_position_notional": self._config_float("HIGH_UPSIDE_MAX_POSITION_NOTIONAL_USD", 0.0),
                 "max_daily_loss": self._config_float("HIGH_UPSIDE_MAX_DAILY_LOSS_USDC", 0.0),
                 "requires_promoted_offline_ml": bool(self.config.get("HIGH_UPSIDE_REQUIRE_PROMOTED_ML", True)),
                 "offline_ml_readiness": OfflineRanker(self.config).readiness(self._duration_bucket("1h"), require_blend=False),
+                "requires_ml_signal": bool(self.config.get("HIGH_UPSIDE_REQUIRE_ML_SIGNAL", True)),
+                "ml_signal_readiness": MLSignalModel(self.config).readiness(
+                    self._duration_bucket("1h"),
+                    require_promoted=bool(self.config.get("ML_SIGNAL_REQUIRE_PROMOTED", True)),
+                ),
+                "ml_suite_readiness": MLDecisionEngine(
+                    self.config,
+                    signal_model=MLSignalModel(self.config),
+                ).readiness(self._duration_bucket("1h")),
+                "deterministic_safety_gates_required": bool(
+                    self.config.get("ML_DETERMINISTIC_SAFETY_GATES_REQUIRED", True)
+                ),
+                "ml_policy_controls": {
+                    "risk_policy_enabled": bool(self.config.get("ML_RISK_POLICY_ENABLED", False)),
+                    "exit_policy_enabled": bool(self.config.get("ML_EXIT_POLICY_ENABLED", False)),
+                    "cap_policy_enabled": bool(self.config.get("ML_CAP_POLICY_ENABLED", False)),
+                    "order_policy_enabled": bool(self.config.get("ML_ORDER_POLICY_ENABLED", False)),
+                    "roi_target_policy_enabled": bool(self.config.get("ML_ROI_TARGET_POLICY_ENABLED", False)),
+                    "live_authority": self.config.get("ML_POLICY_LIVE_AUTHORITY", "guarded"),
+                    "sandbox_bypass_enabled": bool(self.config.get("ML_POLICY_SANDBOX_BYPASS_ENABLED", True)),
+                    "live_hard_cap_usdc": self._config_float("ML_LIVE_HARD_CAP_USDC", 10.0),
+                    "live_hard_daily_loss_usdc": self._config_float("ML_LIVE_HARD_DAILY_LOSS_USDC", 0.50),
+                    "target_roi_1h_pct": self._config_float("ML_TARGET_ROI_1H_PCT", 1000.0),
+                    "target_roi_1w_pct": self._config_float("ML_TARGET_ROI_1W_PCT", 100.0),
+                },
+                "continuous_controls": {
+                    "adaptive_cadence_enabled": bool(self.config.get("HIGH_UPSIDE_ADAPTIVE_CADENCE_ENABLED", False)),
+                    "ml_continuous_vault_enabled": bool(self.config.get("ML_CONTINUOUS_VAULT_ENABLED", False)),
+                    "ml_vault_tick_enabled": bool(self.config.get("ML_VAULT_TICK_ENABLED", False)),
+                    "ml_vault_provider_scope": self.config.get("ML_VAULT_PROVIDER_SCOPE", "all"),
+                    "ml_vault_max_cap_usdc": self._config_float("ML_VAULT_MAX_CAP_USDC", 10.0),
+                    "ml_vault_max_daily_loss_usdc": self._config_float("ML_VAULT_MAX_DAILY_LOSS_USDC", 0.50),
+                    "ml_vault_leverage_policy": self.config.get("ML_VAULT_LEVERAGE_POLICY", "exchange_max_gated"),
+                    "ml_vault_min_liquidation_buffer_pct": self._config_float("ML_VAULT_MIN_LIQUIDATION_BUFFER_PCT", 0.20),
+                    "max_live_cycles_per_day": self._config_int("HIGH_UPSIDE_MAX_LIVE_CYCLES_PER_DAY", 1),
+                    "daily_live_order_count": self._high_upside_daily_live_order_count(),
+                    "max_active_cycles": self._config_int("HIGH_UPSIDE_MAX_ACTIVE_CYCLES", 1),
+                    "active_live_order_count": self._high_upside_active_live_order_count(),
+                    "loss_cooldown_seconds": self._config_float("HIGH_UPSIDE_LOSS_COOLDOWN_SECONDS", 3600.0),
+                    "rejection_cooldown_seconds": self._config_float("HIGH_UPSIDE_REJECTION_COOLDOWN_SECONDS", 900.0),
+                    "rate_limit_backoff_seconds": self._config_float("HIGH_UPSIDE_RATE_LIMIT_BACKOFF_SECONDS", 300.0),
+                },
             },
         }
 
     def _evaluate_high_upside_gate(self, metadata: dict[str, Any]) -> RiskDecision:
+        if not bool(self.config.get("ML_DETERMINISTIC_SAFETY_GATES_REQUIRED", True)):
+            return self._reject(
+                "deterministic_safety_gates_disabled",
+                "ML-driven live orders require deterministic safety gates to remain enabled.",
+            )
         if Setting.get_json("high_upside_live_disabled", False):
             return self._reject(
                 "high_upside_auto_disabled",
@@ -550,6 +1120,23 @@ class RiskEngine:
             return self._reject("high_upside_profile_disabled", "High-upside profile requires HIGH_UPSIDE_PROFILE_ENABLED=true.")
         if not bool(self.config.get("HIGH_UPSIDE_LIVE_ELIGIBLE", False)):
             return self._reject("high_upside_live_disabled", "High-upside live orders require HIGH_UPSIDE_LIVE_ELIGIBLE=true.")
+        if not bool(self.config.get("HIGH_UPSIDE_AUTO_LIVE_ENABLED", False)):
+            return self._reject(
+                "high_upside_auto_live_disabled",
+                "High-upside live orders require HIGH_UPSIDE_AUTO_LIVE_ENABLED=true.",
+            )
+        if str(self.config.get("APP_MODE", "paper") or "paper").lower() != "live":
+            return self._reject("high_upside_app_mode_not_live", "High-upside live orders require APP_MODE=live.")
+        if not bool(self.config.get("EXPLICIT_LIVE_CONFIRMED", False)) or not bool(Setting.get_json("explicit_live_confirmed", False)):
+            return self._reject(
+                "high_upside_explicit_live_confirmation_missing",
+                "High-upside live orders require config and DB explicit live confirmation.",
+            )
+        if not bool(self.config.get("SECONDARY_CONFIRMATION", False)) or not bool(Setting.get_json("secondary_confirmation", False)):
+            return self._reject(
+                "high_upside_secondary_confirmation_missing",
+                "High-upside live orders require config and DB secondary confirmation.",
+            )
         missing: list[str] = []
         if self._config_float("HIGH_UPSIDE_MAX_POSITION_NOTIONAL_USD", 0.0) <= 0:
             missing.append("HIGH_UPSIDE_MAX_POSITION_NOTIONAL_USD")
@@ -566,9 +1153,18 @@ class RiskEngine:
                 "High-upside profile is missing required live cap configuration.",
                 {"missing": missing, "duration_bucket": duration_bucket},
             )
-        ml_decision = self._evaluate_high_upside_ml_gate(duration_bucket)
+        ml_decision = self._evaluate_high_upside_ml_gate(
+            duration_bucket,
+            provider=metadata.get("provider") or metadata.get("execution_venue"),
+        )
         if not ml_decision.approved:
             return ml_decision
+        signal_decision = self._evaluate_high_upside_signal_gate(metadata, duration_bucket)
+        if not signal_decision.approved:
+            return signal_decision
+        continuous_decision = self._evaluate_high_upside_continuous_limits(metadata)
+        if not continuous_decision.approved:
+            return continuous_decision
         drawdown = self._safe_float(metadata.get("max_drawdown"))
         drawdown_cap = abs(self._config_float("AGGRESSIVE_1H_MAX_DRAWDOWN_PCT", 0.35))
         if drawdown < 0 and drawdown <= -drawdown_cap:
@@ -580,10 +1176,56 @@ class RiskEngine:
             )
         return RiskDecision(approved=True)
 
-    def _evaluate_high_upside_ml_gate(self, duration_bucket: str) -> RiskDecision:
+    def _evaluate_high_upside_continuous_limits(self, metadata: dict[str, Any]) -> RiskDecision:
+        max_daily = self._config_int("HIGH_UPSIDE_MAX_LIVE_CYCLES_PER_DAY", 1)
+        daily_count = self._high_upside_daily_live_order_count()
+        if max_daily >= 0 and daily_count >= max_daily:
+            return self._reject(
+                "high_upside_daily_live_cycle_limit",
+                "High-upside daily live cycle limit has been reached.",
+                {"daily_count": daily_count, "max_daily_live_cycles": max_daily},
+            )
+
+        max_active = self._config_int("HIGH_UPSIDE_MAX_ACTIVE_CYCLES", 1)
+        active_count = self._high_upside_active_live_order_count()
+        if max_active >= 0 and active_count >= max_active:
+            return self._reject(
+                "high_upside_active_cycle_limit",
+                "High-upside active live cycle limit has been reached.",
+                {"active_count": active_count, "max_active_cycles": max_active},
+            )
+
+        rejection_cooldown = self._high_upside_recent_rejection_cooldown_seconds()
+        if rejection_cooldown > 0:
+            return self._reject(
+                "high_upside_rejection_cooldown",
+                "Recent high-upside rejection triggered a cooldown.",
+                {"cooldown_remaining_seconds": rejection_cooldown},
+            )
+
+        loss_cooldown = self._high_upside_loss_cooldown_seconds()
+        if loss_cooldown > 0:
+            return self._reject(
+                "high_upside_loss_cooldown",
+                "Recent high-upside loss triggered a cooldown.",
+                {"cooldown_remaining_seconds": loss_cooldown},
+            )
+
+        backoff_seconds = self._high_upside_rate_limit_backoff_remaining_seconds()
+        if backoff_seconds > 0:
+            return self._reject(
+                "high_upside_provider_rate_limit_backoff",
+                "High-upside provider rate-limit backoff is active.",
+                {"backoff_remaining_seconds": backoff_seconds},
+            )
+
+        return RiskDecision(approved=True, details={"high_upside_continuous_limits": dict(metadata or {})})
+
+    def _evaluate_high_upside_ml_gate(self, duration_bucket: str, *, provider: Any = "global") -> RiskDecision:
         if not bool(self.config.get("HIGH_UPSIDE_REQUIRE_PROMOTED_ML", True)):
             return RiskDecision(approved=True)
-        readiness = OfflineRanker(self.config).readiness(duration_bucket, require_blend=False)
+        provider_key = normalize_provider(provider)
+        readiness = OfflineRanker(self.config).readiness(duration_bucket, require_blend=False, provider=provider_key)
         if bool(readiness.get("ready", False)):
             return RiskDecision(approved=True)
         blockers = list(readiness.get("blockers", []))
@@ -603,13 +1245,133 @@ class RiskEngine:
         if diagnostic_breach:
             self._disable_high_upside(
                 "offline_model_diagnostic_breach",
-                {"duration_bucket": duration_bucket, "blockers": blockers},
+                {"duration_bucket": duration_bucket, "provider": provider_key, "blockers": blockers},
             )
         return self._reject(
             "high_upside_promoted_ml_required",
             "High-upside live orders require a promoted offline ML model that passes readiness checks.",
-            {"duration_bucket": duration_bucket, "offline_ml_readiness": readiness},
+            {"duration_bucket": duration_bucket, "provider": provider_key, "offline_ml_readiness": readiness},
         )
+
+    def _evaluate_high_upside_signal_gate(self, metadata: dict[str, Any], duration_bucket: str) -> RiskDecision:
+        if not bool(self.config.get("HIGH_UPSIDE_REQUIRE_ML_SIGNAL", True)):
+            return RiskDecision(approved=True)
+        if not bool(self.config.get("ML_SIGNAL_MODEL_ENABLED", False)):
+            return self._reject(
+                "high_upside_ml_signal_disabled",
+                "High-upside live orders require ML_SIGNAL_MODEL_ENABLED=true.",
+            )
+        readiness = MLSignalModel(self.config).readiness(
+            duration_bucket,
+            require_promoted=bool(self.config.get("ML_SIGNAL_REQUIRE_PROMOTED", True)),
+        )
+        if not bool(readiness.get("ready", False)):
+            return self._reject(
+                "high_upside_promoted_ml_signal_required",
+                "High-upside live orders require a promoted ML signal model that passes readiness checks.",
+                {"duration_bucket": duration_bucket, "ml_signal_readiness": readiness},
+            )
+        signal_payload = metadata.get("ml_signal_model") if isinstance(metadata.get("ml_signal_model"), dict) else {}
+        if not signal_payload:
+            return self._reject(
+                "high_upside_ml_signal_missing",
+                "High-upside live order metadata is missing the promoted ML signal decision.",
+            )
+        confidence = self._safe_float(signal_payload.get("confidence"))
+        min_confidence = self._config_float("ML_SIGNAL_MIN_CONFIDENCE", 0.60)
+        if confidence < min_confidence:
+            return self._reject(
+                "high_upside_ml_signal_low_confidence",
+                "High-upside ML signal confidence is below the configured threshold.",
+                {"confidence": confidence, "min_confidence": min_confidence},
+            )
+        if not bool(signal_payload.get("ready_for_live", False)):
+            return self._reject(
+                "high_upside_ml_signal_not_ready",
+                "High-upside ML signal was not marked live-ready.",
+                {"ml_signal_model": signal_payload},
+            )
+        if str(signal_payload.get("status") or "") != "promoted":
+            return self._reject(
+                "high_upside_ml_signal_not_promoted",
+                "High-upside ML signal must come from a promoted model.",
+                {"ml_signal_model": signal_payload},
+            )
+        if str(signal_payload.get("action") or "").lower() not in {"buy", "sell"}:
+            return self._reject(
+                "high_upside_ml_signal_hold",
+                "High-upside ML signal did not select an actionable side.",
+                {"ml_signal_model": signal_payload},
+            )
+        return RiskDecision(approved=True)
+
+    def _high_upside_daily_live_order_count(self) -> int:
+        since = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        count = 0
+        for order in Order.query.filter(Order.mode == "live", Order.created_at >= since).order_by(Order.created_at.desc()).limit(500).all():
+            if self._high_upside_order(order) and str(order.status or "").lower() not in {"rejected", "failed", "cancelled"}:
+                count += 1
+        return count
+
+    def _high_upside_active_live_order_count(self) -> int:
+        active_statuses = {"open", "submitted", "pending", "partially_filled"}
+        count = 0
+        for order in Order.query.filter_by(mode="live").order_by(Order.created_at.desc()).limit(500).all():
+            if self._high_upside_order(order) and str(order.status or "").lower() in active_statuses:
+                count += 1
+        return count
+
+    def _high_upside_order(self, order: Order) -> bool:
+        details = dict(order.details or {})
+        return self._is_high_upside_profile(details) or str(details.get("optimizer_profile", "")).lower() == "aggressive_1h"
+
+    def _high_upside_recent_rejection_cooldown_seconds(self) -> float:
+        cooldown = self._config_float("HIGH_UPSIDE_REJECTION_COOLDOWN_SECONDS", 900.0)
+        if cooldown <= 0:
+            return 0.0
+        since = datetime.now(timezone.utc) - timedelta(seconds=cooldown)
+        for order in (
+            Order.query.filter(Order.mode == "live", Order.created_at >= since, Order.status.in_(["rejected", "failed"]))
+            .order_by(Order.created_at.desc())
+            .limit(100)
+            .all()
+        ):
+            if self._high_upside_order(order):
+                elapsed = (datetime.now(timezone.utc) - self._as_aware_utc(order.created_at)).total_seconds()
+                return max(0.0, cooldown - elapsed)
+        return 0.0
+
+    def _high_upside_loss_cooldown_seconds(self) -> float:
+        cooldown = self._config_float("HIGH_UPSIDE_LOSS_COOLDOWN_SECONDS", 3600.0)
+        if cooldown <= 0:
+            return 0.0
+        since = datetime.now(timezone.utc) - timedelta(seconds=cooldown)
+        rows = (
+            db.session.query(Order, Fill)
+            .join(Fill, Fill.order_id == Order.id)
+            .filter(Order.mode == "live", Fill.fill_time >= since)
+            .order_by(Fill.fill_time.desc())
+            .limit(100)
+            .all()
+        )
+        for order, fill in rows:
+            if self._high_upside_order(order) and self._fill_net_pnl(fill) < 0:
+                elapsed = (datetime.now(timezone.utc) - self._as_aware_utc(fill.fill_time)).total_seconds()
+                return max(0.0, cooldown - elapsed)
+        return 0.0
+
+    def _high_upside_rate_limit_backoff_remaining_seconds(self) -> float:
+        until = Setting.get_json("high_upside_rate_limited_until", None)
+        if not until:
+            return 0.0
+        try:
+            until_dt = datetime.fromisoformat(str(until).replace("Z", "+00:00"))
+        except ValueError:
+            return 0.0
+        now = datetime.now(until_dt.tzinfo or timezone.utc)
+        if until_dt.tzinfo is None:
+            until_dt = until_dt.replace(tzinfo=timezone.utc)
+        return max(0.0, (until_dt - now).total_seconds())
 
     def _disable_high_upside(self, reason: str, details: dict[str, Any]) -> None:
         Setting.set_json("high_upside_live_disabled", True)
@@ -692,6 +1454,18 @@ class RiskEngine:
             return abs(limit_price - reference_price) / reference_price
 
         return max(0.0, self._safe_float(getattr(intent, "slippage_pct", 0.0)))
+
+    def _stop_loss_pct(self, intent: Any, reference_price: float) -> float:
+        stop_loss = self._optional_positive_float(getattr(intent, "stop_loss", None))
+        if stop_loss is None or reference_price <= 0:
+            return 0.0
+        return abs(reference_price - stop_loss) / reference_price
+
+    def _take_profit_pct(self, intent: Any, reference_price: float) -> float:
+        take_profit = self._optional_positive_float(getattr(intent, "take_profit", None))
+        if take_profit is None or reference_price <= 0:
+            return 0.0
+        return abs(take_profit - reference_price) / reference_price
 
     def _duration_cap(self, key: str, bucket: str, default: float) -> float:
         mapping = self.config.get(key) or {}

@@ -31,11 +31,23 @@
       <div><dt>Max Leverage</dt><dd>{{ "%.2f"|format(summary.get("max_leverage", 1)) }}x</dd></div>
       <div><dt>Reward/Risk</dt><dd>{{ "%.2f"|format(summary.get("risk_reward", 0)) }}</dd></div>
       <div><dt>Slippage</dt><dd>{{ "%.2f"|format(summary.get("slippage_bps", 0)) }} bps</dd></div>
+      <div><dt>ROI</dt><dd>{{ "%.2f"|format(summary.get("roi_pct", 0)) }}%</dd></div>
+      <div><dt>Target</dt><dd>${{ "%.2f"|format(summary.get("target_amount_usd", 0)) }}</dd></div>
     </dl>
-    {% if summary.get("no_order_failure_reason") %}
+    {% if summary.get("runtime_notice") %}
+      <div class="risk-note warning-note">
+        <strong>Market data backoff active</strong>
+        <span>{{ summary.get("runtime_notice", {}).get("message") }}</span>
+        {% if summary.get("runtime_notice", {}).get("retry_after") %}
+          <span class="muted">Retry after {{ summary.get("runtime_notice", {}).get("retry_after") }}</span>
+        {% endif %}
+      </div>
+    {% endif %}
+    {% if summary.get("repairable_no_order") and summary.get("no_order_failure_reason") %}
       <div class="risk-note danger-note">
         <strong>No live order submitted</strong>
         <span>{{ summary.get("no_order_failure_reason") }}</span>
+        <span class="muted">Repair check: flask repair-limited-cycle --cycle-id {{ cycle.id }}</span>
       </div>
     {% endif %}
   </article>
@@ -51,6 +63,64 @@
   </article>
 </section>
 
+{% if cycle.algorithm_profile == "1H10" %}
+<section class="card">
+  <div class="section-heading">
+    <div>
+      <span class="card-kicker">1H10 Diagnostics</span>
+      <h2>Scanner, ML, And Blockers</h2>
+    </div>
+  </div>
+  <dl class="cycle-details compact-details">
+    <div><dt>Submitted Orders</dt><dd>{{ summary.get("submitted_order_count", 0) }}</dd></div>
+    <div><dt>Rejected Orders</dt><dd>{{ summary.get("rejected_order_count", 0) }}</dd></div>
+    <div><dt>Failed Orders</dt><dd>{{ summary.get("failed_order_count", 0) }}</dd></div>
+    {% set one_h10_ml = summary.get("ml_readiness", {}) %}
+    <div><dt>ML Readiness</dt><dd>{{ one_h10_ml.get("display_status") or ("Ready" if one_h10_ml.get("ready") else "Bootstrap / Not Ready") }}</dd></div>
+    <div><dt>Active Markets</dt><dd>{{ summary.get("feature_diagnostics", {}).get("active_markets", 0) }}</dd></div>
+    <div><dt>Feature Rows</dt><dd>{{ summary.get("feature_diagnostics", {}).get("features_attempted", 0) }} attempted</dd></div>
+  </dl>
+  {% if summary.get("forecast_blockers") %}
+    <div class="risk-note warning-note">
+      <strong>Forecast blockers</strong>
+      <span>{{ summary.get("forecast_blockers")|join(", ") }}</span>
+    </div>
+  {% endif %}
+  {% if summary.get("forecast_advisory_blockers") %}
+    <div class="risk-note">
+      <strong>1H10 ML advisory signals</strong>
+      <span>{{ summary.get("forecast_advisory_blockers")|join(", ") }}</span>
+    </div>
+  {% endif %}
+  {% if summary.get("blocker_categories") %}
+    <div class="risk-note warning-note">
+      <strong>Blocker categories</strong>
+      <span>{{ summary.get("blocker_categories")|join(", ") }}</span>
+    </div>
+  {% endif %}
+  {% if summary.get("ranked_candidates") %}
+    <table class="responsive-table">
+      <thead><tr><th>Provider</th><th>Symbol</th><th>Allocation</th><th>Scanner Score</th><th>Forecast</th><th>Source</th></tr></thead>
+      <tbody>
+        {% for candidate in summary.get("ranked_candidates", []) %}
+          <tr>
+            <td>{{ candidate.get("provider") }}</td>
+            <td>{{ candidate.get("symbol") }}</td>
+            <td>${{ "%.2f"|format(candidate.get("allocation_cap_usd", 0)) }}</td>
+            <td>{{ "%.4f"|format(candidate.get("scanner_score", 0)) }}</td>
+            <td>
+              {{ candidate.get("forecast", {}).get("predicted_side", "hold")|title }}
+              {{ "%.0f"|format(candidate.get("forecast", {}).get("confidence", 0) * 100) }}%
+            </td>
+            <td>{{ candidate.get("scanner_source") }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+</section>
+{% endif %}
+
 <section class="card">
   <div class="section-heading">
     <div>
@@ -58,7 +128,7 @@
       <h2>Risk And Reward</h2>
     </div>
   </div>
-  <table>
+    <table class="responsive-table">
     <thead><tr><th>Strategy</th><th>Symbol</th><th>Timeframe</th><th>Cap</th><th>Leverage</th><th>Stop</th><th>Take Profit</th><th>Reward/Risk</th><th>PnL</th></tr></thead>
     <tbody>
       {% for leg in summary.get("legs", []) %}
@@ -87,7 +157,7 @@
       <h2>Trade Summary</h2>
     </div>
   </div>
-  <table>
+    <table class="responsive-table">
     <thead><tr><th>Order</th><th>Symbol</th><th>Side</th><th>Status</th><th>Size</th><th>Average Fill</th><th>Fees</th><th>PnL</th><th>Leverage</th><th>Reward/Risk</th><th>Edge</th></tr></thead>
     <tbody>
       {% for order in summary.get("orders", []) %}
@@ -102,12 +172,16 @@
           <td>${{ "%.2f"|format(order.get("realized_pnl", 0)) }}</td>
           <td>{{ "%.2f"|format(order.get("leverage", 1)) }}x</td>
           <td>{{ "%.2f"|format(order.get("risk_reward", 0)) }}</td>
-          <td>{{ "%.2f"|format(order.get("edge_score", 0)) }} bps<br><span class="muted">{{ "%.0f"|format(order.get("signal_confidence", 0) * 100) }}% {{ order.get("market_source") or "" }}</span></td>
+          <td>
+            {{ "%.2f"|format(order.get("edge_score", 0)) }} bps<br>
+            <span class="muted">{{ "%.0f"|format(order.get("signal_confidence", 0) * 100) }}% {{ order.get("market_source") or "" }}</span>
+            {% if order.get("blocker_category") %}<br><span class="muted">{{ order.get("blocker_category") }}</span>{% endif %}
+          </td>
         </tr>
       {% else %}
         <tr>
           <td colspan="11">
-            No live order submitted{% if summary.get("no_order_failure_reason") %}: {{ summary.get("no_order_failure_reason") }}{% else %}.{% endif %}
+            No live order submitted{% if summary.get("no_order_failure_reason") %}: {{ summary.get("no_order_failure_reason") }}{% elif summary.get("runtime_notice", {}).get("message") %}: {{ summary.get("runtime_notice", {}).get("message") }}{% else %}.{% endif %}
           </td>
         </tr>
       {% endfor %}

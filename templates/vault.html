@@ -7,10 +7,11 @@
   <article class="vault-card">
     <span class="card-kicker">Algorithm Vault</span>
     <h1>Start Algorithm Cycle</h1>
-    <p class="muted">Select an available wallet balance, allocation amount, lock duration, and settlement asset. The algorithm profile is selected automatically based on market conditions.</p>
+    <p class="muted">Choose amount, duration, and settlement asset. The profile is selected automatically.</p>
 
     <form method="post" action="{{ url_for('consumer.start_cycle') }}" class="form-grid vault-form" data-disable-on-submit>
       {{ csrf_input()|safe }}
+      <input type="hidden" name="idempotency_key" value="" data-vault-idempotency-key>
       <label>Amount
         <input type="number" name="deposit_amount" step="0.000001" min="0" placeholder="0.00" required inputmode="decimal">
       </label>
@@ -33,7 +34,7 @@
       <div class="asset-selector duration-selector" role="radiogroup" aria-label="Lock duration">
         <label class="asset-option is-selected" data-asset-option>
           <input type="radio" name="lock_duration" value="1" checked>
-          <strong>1h</strong>
+          <strong>1H10</strong>
         </label>
         <label class="asset-option" data-asset-option>
           <input type="radio" name="lock_duration" value="24">
@@ -80,12 +81,57 @@
         {% endfor %}
       </div>
 
+      {% set one_h10_ctx = one_h10_live_context or {} %}
+      <section class="one-h10-live-panel" data-one-h10-panel>
+        <div class="section-heading compact-heading">
+          <div>
+            <span class="card-kicker">1H10 Live Execution</span>
+            <h2>Operator Readiness</h2>
+          </div>
+          <span class="status-badge">{{ "Enabled" if one_h10_ctx.get("enabled") else "Disabled" }}</span>
+        </div>
+        <p class="muted">{{ one_h10_ctx.get("target_copy") }}</p>
+        <dl class="cycle-details compact-details">
+          <div><dt>Providers</dt><dd>{{ one_h10_ctx.get("enabled_provider_count", 0) }} healthy</dd></div>
+          <div><dt>Free Margin</dt><dd>${{ "%.2f"|format(one_h10_ctx.get("total_free_margin_usd", 0.0)) }}</dd></div>
+          <div><dt>Dynamic Budget</dt><dd>${{ "%.2f"|format(one_h10_ctx.get("max_dynamic_allocation_usd", 0.0)) }}</dd></div>
+          {% set one_h10_ml = one_h10_ctx.get("ml_readiness", {}) %}
+          <div><dt>ML Readiness</dt><dd>{{ one_h10_ml.get("display_status") or ("Ready" if one_h10_ml.get("ready") else "Bootstrap / Not Ready") }}</dd></div>
+          <div><dt>Poll</dt><dd>{{ "%.0f"|format(one_h10_ctx.get("poll_seconds", 1.0)) }}s</dd></div>
+          <div><dt>Rebalance</dt><dd>{{ "%.0f"|format(one_h10_ctx.get("rebalance_seconds", 15.0)) }}s</dd></div>
+          <div><dt>Acknowledgement</dt><dd data-one-h10-ack-status>Not acknowledged</dd></div>
+        </dl>
+        {% if one_h10_ctx.get("providers") %}
+          <div class="provider-readiness-list">
+            {% for provider in one_h10_ctx.get("providers", []) %}
+              <div class="provider-readiness-row">
+                <strong>{{ provider.get("provider")|title }}</strong>
+                <span>{{ "Healthy" if provider.get("can_trade") and provider.get("available_margin_usd", 0) > 0 else "Blocked" }}</span>
+                <span>${{ "%.2f"|format(provider.get("available_margin_usd", 0.0)) }}</span>
+                {% if provider.get("blockers") %}<small>{{ provider.get("blockers")|join("; ") }}</small>{% endif %}
+              </div>
+            {% endfor %}
+          </div>
+        {% endif %}
+        {% if one_h10_ctx.get("safety_blockers") or one_h10_ctx.get("live_block_reason") %}
+          <div class="risk-note warning-note">
+            <strong>Current blockers</strong>
+            <span>{{ one_h10_ctx.get("live_block_reason") or one_h10_ctx.get("safety_blockers")|join(", ") }}</span>
+          </div>
+        {% endif %}
+      </section>
+
       <div class="risk-note">
         <strong>Vault risk notice</strong>
-        <span>Estimated performance can change during a cycle. Execution remains subject to market conditions, liquidity, spread, and backend risk checks.</span>
+        <span>Performance changes during a cycle. Execution remains gated by market, liquidity, spread, and risk checks.</span>
       </div>
 
-      <button type="submit" class="primary" data-loading-label="Starting Cycle...">Start 1h Cycle</button>
+      <label class="checkbox-row one-h10-live-ack" data-one-h10-live-ack>
+        <input type="checkbox" name="one_h10_live_ack" value="on">
+        <span>I acknowledge 1H10 can submit live leveraged orders and returns are not guaranteed.</span>
+      </label>
+
+      <button type="submit" class="primary" data-loading-label="Starting Cycle...">Start 1H10 Cycle</button>
     </form>
   </article>
 
@@ -100,7 +146,7 @@
         {% for cycle in active_cycles %}
           {% set cycle_pnl = cycle.selection_metadata.get("total_pnl_usd", 0.0) %}
           {% set summary = cycle.cycle_summary %}
-          {% set no_order_reason = cycle.selection_metadata.get("no_order_failure_reason") or cycle.validation_failure_reason or summary.get("no_order_failure_reason") %}
+          {% set no_order_reason = summary.get("no_order_failure_reason") %}
           {% set leverage = namespace(value=summary.get("max_leverage", 1.0)) %}
           {% for leg in cycle.allocation_legs %}
             {% if leg.leverage > leverage.value %}{% set leverage.value = leg.leverage %}{% endif %}
@@ -121,10 +167,20 @@
               <div><dt>Risk</dt><dd>{{ "%.0f"|format((1 - cycle.selection_metadata.get("signal_stability", 1.0)) * 100) }}%</dd></div>
               <div><dt>Reward/Risk</dt><dd>{{ "%.2f"|format(summary.get("risk_reward", 0.0)) }}</dd></div>
             </dl>
-            {% if no_order_reason %}
+            {% if summary.get("runtime_notice") %}
+              <div class="risk-note warning-note">
+                <strong>Market data backoff active</strong>
+                <span>{{ summary.get("runtime_notice", {}).get("message") }}</span>
+                {% if summary.get("runtime_notice", {}).get("retry_after") %}
+                  <span class="muted">Retry after {{ summary.get("runtime_notice", {}).get("retry_after") }}</span>
+                {% endif %}
+              </div>
+            {% endif %}
+            {% if summary.get("repairable_no_order") and no_order_reason %}
               <div class="risk-note danger-note">
                 <strong>No live order submitted</strong>
                 <span>{{ no_order_reason }}</span>
+                <span class="muted">Repair check: flask repair-limited-cycle --cycle-id {{ cycle.id }}</span>
               </div>
             {% endif %}
             <div class="cycle-item-footer">
@@ -154,7 +210,7 @@
     </div>
     <a href="{{ url_for('consumer.activity') }}" class="text-link">Full history</a>
   </div>
-  <table>
+  <table class="responsive-table">
     <thead><tr><th>Status</th><th>Asset</th><th>Amount</th><th>Profile</th><th>Est. PnL</th><th>Settlement</th><th>Unlocks</th><th></th></tr></thead>
     <tbody>
       {% for cycle in recent_cycles %}
@@ -182,5 +238,5 @@
 {% endblock %}
 
 {% block page_scripts %}
-<script src="{{ url_for('static', filename='js/vault.js') }}"></script>
+<script src="{{ url_for('static', filename='js/vault.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}"></script>
 {% endblock %}

@@ -98,6 +98,11 @@ class StrategyRun(db.Model):
 
     user = db.relationship("User", backref="strategy_runs")
     trading_connection = db.relationship("TradingConnection", backref="strategy_runs")
+    __table_args__ = (
+        db.Index("ix_strategy_run_user_status_created", "user_id", "status", "created_at"),
+        db.Index("ix_strategy_run_status_updated", "status", "updated_at"),
+        db.Index("ix_strategy_run_connection_status_created", "trading_connection_id", "status", "created_at"),
+    )
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -181,6 +186,11 @@ class VaultCycle(db.Model):
     strategy_run = db.relationship("StrategyRun", backref="vault_cycles")
     user = db.relationship("User", backref="vault_cycles")
     trading_connection = db.relationship("TradingConnection", backref="vault_cycles")
+    __table_args__ = (
+        db.Index("ix_vault_cycle_user_status_started", "user_id", "status", "started_at"),
+        db.Index("ix_vault_cycle_user_unlocks", "user_id", "unlocks_at"),
+        db.Index("ix_vault_cycle_connection_status_started", "trading_connection_id", "status", "started_at"),
+    )
 
     @property
     def expires_at(self) -> datetime:
@@ -212,7 +222,7 @@ class VaultCycle(db.Model):
 
     @cycle_summary.setter
     def cycle_summary(self, value: dict[str, Any]) -> None:
-        self.cycle_summary_json = json.dumps(value or {})
+        self.cycle_summary_json = json.dumps(value or {}, default=str)
 
 
 class VaultAllocationLeg(db.Model):
@@ -224,6 +234,8 @@ class VaultAllocationLeg(db.Model):
     optimizer_ranking_id = db.Column(db.Integer, db.ForeignKey("strategy_ranking.id"), nullable=True, index=True)
     symbol = db.Column(db.String(32), nullable=False, index=True)
     timeframe = db.Column(db.String(16), nullable=False)
+    provider = db.Column(db.String(64), nullable=False, default="global", index=True)
+    trading_connection_id = db.Column(db.Integer, db.ForeignKey("trading_connection.id"), nullable=True, index=True)
     allocation_cap_usd = db.Column(db.Float, nullable=False, default=0.0)
     leverage = db.Column(db.Float, nullable=False, default=1.0)
     status = db.Column(db.String(32), nullable=False, default="active", index=True)
@@ -236,6 +248,12 @@ class VaultAllocationLeg(db.Model):
     vault_cycle = db.relationship("VaultCycle", backref="allocation_legs")
     strategy_run = db.relationship("StrategyRun", backref="vault_allocation_legs")
     optimizer_ranking = db.relationship("StrategyRanking", backref="vault_allocation_legs")
+    trading_connection = db.relationship("TradingConnection", backref="vault_allocation_legs")
+    __table_args__ = (
+        db.Index("ix_vault_leg_cycle_status", "vault_cycle_id", "status"),
+        db.Index("ix_vault_leg_run_status", "strategy_run_id", "status"),
+        db.Index("ix_vault_leg_connection_symbol_status", "trading_connection_id", "symbol", "status"),
+    )
 
     @property
     def details(self) -> dict[str, Any]:
@@ -248,6 +266,85 @@ class VaultAllocationLeg(db.Model):
     @details.setter
     def details(self, value: dict[str, Any]) -> None:
         self.metadata_json = json.dumps(value or {})
+
+
+class LeveragedMarket(db.Model):
+    """Provider futures/perpetual market metadata used by 1H10 discovery."""
+
+    id = db.Column(db.Integer, primary_key=True)
+    provider = db.Column(db.String(64), nullable=False, index=True)
+    trading_connection_id = db.Column(db.Integer, db.ForeignKey("trading_connection.id"), nullable=True, index=True)
+    venue_symbol = db.Column(db.String(64), nullable=False, index=True)
+    symbol = db.Column(db.String(32), nullable=False, index=True)
+    status = db.Column(db.String(32), nullable=False, default="active", index=True)
+    settlement_asset = db.Column(db.String(32), nullable=False, default="USDC", index=True)
+    max_leverage = db.Column(db.Float, nullable=False, default=1.0)
+    tick_size = db.Column(db.Float, nullable=False, default=0.0)
+    lot_size = db.Column(db.Float, nullable=False, default=0.0)
+    contract_size = db.Column(db.Float, nullable=False, default=0.0)
+    min_size = db.Column(db.Float, nullable=False, default=0.0)
+    funding_rate = db.Column(db.Float, nullable=False, default=0.0)
+    liquidity_usd = db.Column(db.Float, nullable=False, default=0.0)
+    spread_bps = db.Column(db.Float, nullable=False, default=0.0)
+    fee_bps = db.Column(db.Float, nullable=False, default=0.0)
+    raw_json = db.Column(db.Text, nullable=False, default="{}")
+    last_seen_at = db.Column(db.DateTime, nullable=False, default=utcnow, index=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=utcnow)
+    updated_at = db.Column(db.DateTime, nullable=False, default=utcnow, onupdate=utcnow)
+
+    trading_connection = db.relationship("TradingConnection", backref="leveraged_markets")
+
+    __table_args__ = (
+        db.UniqueConstraint("provider", "venue_symbol", name="uq_leveraged_market_provider_symbol"),
+    )
+
+    @property
+    def raw(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.raw_json or "{}")
+        except json.JSONDecodeError:
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    @raw.setter
+    def raw(self, value: dict[str, Any]) -> None:
+        self.raw_json = json.dumps(value or {})
+
+
+class LeveragedMarketFeature(db.Model):
+    """Persisted higher-timeframe 1H10 feature payloads per provider market."""
+
+    id = db.Column(db.Integer, primary_key=True)
+    leveraged_market_id = db.Column(db.Integer, db.ForeignKey("leveraged_market.id"), nullable=False, index=True)
+    provider = db.Column(db.String(64), nullable=False, index=True)
+    symbol = db.Column(db.String(32), nullable=False, index=True)
+    timeframe = db.Column(db.String(16), nullable=False, index=True)
+    feature_schema_version = db.Column(db.String(64), nullable=False, default="1h10_feature_v1")
+    features_json = db.Column(db.Text, nullable=False, default="{}")
+    created_at = db.Column(db.DateTime, nullable=False, default=utcnow)
+    updated_at = db.Column(db.DateTime, nullable=False, default=utcnow, onupdate=utcnow)
+
+    leveraged_market = db.relationship("LeveragedMarket", backref="feature_rows")
+
+    __table_args__ = (
+        db.UniqueConstraint(
+            "leveraged_market_id",
+            "timeframe",
+            name="uq_leveraged_market_feature_timeframe",
+        ),
+    )
+
+    @property
+    def features(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.features_json or "{}")
+        except json.JSONDecodeError:
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    @features.setter
+    def features(self, value: dict[str, Any]) -> None:
+        self.features_json = json.dumps(value or {})
 
 
 class WalletTransaction(db.Model):
@@ -538,7 +635,7 @@ class Order(db.Model):
     created_at = db.Column(db.DateTime, nullable=False, default=utcnow)
     updated_at = db.Column(db.DateTime, nullable=False, default=utcnow, onupdate=utcnow)
 
-    fills = db.relationship("Fill", backref="order", lazy=True, cascade="all, delete-orphan")
+    fills = db.relationship("Fill", backref="order", lazy=True, cascade="all, delete-orphan", foreign_keys="Fill.order_id")
     user = db.relationship("User", backref="orders")
     trading_connection = db.relationship("TradingConnection", backref="orders")
 
@@ -559,14 +656,35 @@ class Fill(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     order_id = db.Column(db.Integer, db.ForeignKey("order.id"), nullable=False, index=True)
+    source_order_id = db.Column(db.Integer, db.ForeignKey("order.id"), nullable=True, index=True)
+    exchange_order_id = db.Column(db.String(120), nullable=True, index=True)
+    exchange_fill_id = db.Column(db.String(180), nullable=True, index=True)
     symbol = db.Column(db.String(32), nullable=False, index=True)
     side = db.Column(db.String(8), nullable=False)
     quantity = db.Column(db.Float, nullable=False)
     price = db.Column(db.Float, nullable=False)
     fee = db.Column(db.Float, nullable=False, default=0.0)
     pnl = db.Column(db.Float, nullable=False, default=0.0)
+    funding_fee = db.Column(db.Float, nullable=False, default=0.0)
+    fee_known = db.Column(db.Boolean, nullable=False, default=True)
+    realized_pnl_known = db.Column(db.Boolean, nullable=False, default=True)
     simulated = db.Column(db.Boolean, nullable=False, default=True)
+    metadata_json = db.Column(db.Text, nullable=False, default="{}")
     fill_time = db.Column(db.DateTime, nullable=False, default=utcnow, index=True)
+
+    source_order = db.relationship("Order", foreign_keys=[source_order_id])
+
+    @property
+    def details(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.metadata_json or "{}")
+        except json.JSONDecodeError:
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    @details.setter
+    def details(self, value: dict[str, Any]) -> None:
+        self.metadata_json = json.dumps(value or {}, default=str)
 
 
 class PositionSnapshot(db.Model):
@@ -621,6 +739,80 @@ class BacktestRun(db.Model):
     @result.setter
     def result(self, value: dict[str, Any]) -> None:
         self.result_json = json.dumps(value or {})
+
+
+class MLMarketHistory(db.Model):
+    """Bounded market-data windows collected for ML training and diagnostics."""
+
+    id = db.Column(db.Integer, primary_key=True)
+    provider = db.Column(db.String(64), nullable=False, index=True)
+    symbol = db.Column(db.String(32), nullable=False, index=True)
+    timeframe = db.Column(db.String(16), nullable=False, index=True)
+    mode = db.Column(db.String(16), nullable=False, default="live", index=True)
+    source = db.Column(db.String(64), nullable=False, default="ml_history_backfill", index=True)
+    status = db.Column(db.String(32), nullable=False, default="ok", index=True)
+    error = db.Column(db.Text, nullable=False, default="")
+    candle_count = db.Column(db.Integer, nullable=False, default=0)
+    liquidity_usd = db.Column(db.Float, nullable=False, default=0.0)
+    spread_bps = db.Column(db.Float, nullable=False, default=0.0)
+    funding_rate = db.Column(db.Float, nullable=False, default=0.0)
+    candles_json = db.Column(db.Text, nullable=False, default="[]")
+    order_book_json = db.Column(db.Text, nullable=False, default="{}")
+    funding_json = db.Column(db.Text, nullable=False, default="{}")
+    diagnostics_json = db.Column(db.Text, nullable=False, default="{}")
+    window_start = db.Column(db.DateTime, nullable=True, index=True)
+    window_end = db.Column(db.DateTime, nullable=True, index=True)
+    fetched_at = db.Column(db.DateTime, nullable=False, default=utcnow, index=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=utcnow, index=True)
+
+    @property
+    def candles(self) -> list[dict[str, Any]]:
+        try:
+            value = json.loads(self.candles_json or "[]")
+        except json.JSONDecodeError:
+            return []
+        return value if isinstance(value, list) else []
+
+    @candles.setter
+    def candles(self, value: list[dict[str, Any]]) -> None:
+        self.candles_json = json.dumps(value or [])
+        self.candle_count = len(value or [])
+
+    @property
+    def order_book(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.order_book_json or "{}")
+        except json.JSONDecodeError:
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    @order_book.setter
+    def order_book(self, value: dict[str, Any]) -> None:
+        self.order_book_json = json.dumps(value or {})
+
+    @property
+    def funding(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.funding_json or "{}")
+        except json.JSONDecodeError:
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    @funding.setter
+    def funding(self, value: dict[str, Any]) -> None:
+        self.funding_json = json.dumps(value or {})
+
+    @property
+    def diagnostics(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.diagnostics_json or "{}")
+        except json.JSONDecodeError:
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    @diagnostics.setter
+    def diagnostics(self, value: dict[str, Any]) -> None:
+        self.diagnostics_json = json.dumps(value or {})
 
 
 class OptimizerRun(db.Model):
@@ -701,6 +893,7 @@ class StrategyRanking(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     optimizer_run_id = db.Column(db.Integer, db.ForeignKey("optimizer_run.id"), nullable=False, index=True)
+    provider = db.Column(db.String(64), nullable=False, default="global", index=True)
     strategy_name = db.Column(db.String(120), nullable=False, index=True)
     symbol = db.Column(db.String(32), nullable=False, index=True)
     timeframe = db.Column(db.String(16), nullable=False)
@@ -800,6 +993,7 @@ class MLModelState(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     model_key = db.Column(db.String(120), unique=True, nullable=False, index=True)
+    provider = db.Column(db.String(64), nullable=False, default="global", index=True)
     horizon = db.Column(db.String(32), nullable=False, default="global", index=True)
     weights_json = db.Column(db.Text, nullable=False, default="{}")
     bias = db.Column(db.Float, nullable=False, default=0.0)
@@ -841,6 +1035,7 @@ class MLOfflineModel(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     model_key = db.Column(db.String(160), unique=True, nullable=False, index=True)
+    provider = db.Column(db.String(64), nullable=False, default="global", index=True)
     horizon = db.Column(db.String(32), nullable=False, default="global", index=True)
     model_type = db.Column(db.String(32), nullable=False, default="sklearn", index=True)
     status = db.Column(db.String(32), nullable=False, default="candidate", index=True)
@@ -886,6 +1081,7 @@ class MLTrainingEvent(db.Model):
 
     id = db.Column(db.Integer, primary_key=True)
     model_state_id = db.Column(db.Integer, db.ForeignKey("ml_model_state.id"), nullable=False, index=True)
+    provider = db.Column(db.String(64), nullable=False, default="global", index=True)
     source = db.Column(db.String(64), nullable=False, default="unknown", index=True)
     source_id = db.Column(db.String(120), nullable=True, index=True)
     mode = db.Column(db.String(32), nullable=False, default="live", index=True)
@@ -921,6 +1117,146 @@ class MLTrainingEvent(db.Model):
     @details.setter
     def details(self, value: dict[str, Any]) -> None:
         self.metadata_json = json.dumps(value or {})
+
+
+class RapidMLSession(db.Model):
+    """Operator-scoped rapid ML trading session and account-level caps."""
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False, index=True)
+    provider_scope = db.Column(db.String(32), nullable=False, default="both", index=True)
+    capital_usd = db.Column(db.Float, nullable=False)
+    status = db.Column(db.String(32), nullable=False, default="running", index=True)
+    submit_requested = db.Column(db.Boolean, nullable=False, default=False)
+    real_submit_enabled = db.Column(db.Boolean, nullable=False, default=False)
+    allocated_capital_json = db.Column(db.Text, nullable=False, default="{}")
+    blockers_json = db.Column(db.Text, nullable=False, default="[]")
+    summary_json = db.Column(db.Text, nullable=False, default="{}")
+    started_at = db.Column(db.DateTime, nullable=False, default=utcnow, index=True)
+    completed_at = db.Column(db.DateTime, nullable=True, index=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=utcnow, index=True)
+    updated_at = db.Column(db.DateTime, nullable=False, default=utcnow, onupdate=utcnow)
+
+    user = db.relationship("User", backref="rapid_ml_sessions")
+
+    @property
+    def allocated_capital(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.allocated_capital_json or "{}")
+        except json.JSONDecodeError:
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    @allocated_capital.setter
+    def allocated_capital(self, value: dict[str, Any]) -> None:
+        self.allocated_capital_json = json.dumps(value or {})
+
+    @property
+    def blockers(self) -> list[str]:
+        try:
+            value = json.loads(self.blockers_json or "[]")
+        except json.JSONDecodeError:
+            return []
+        return [str(item) for item in value] if isinstance(value, list) else []
+
+    @blockers.setter
+    def blockers(self, value: list[str]) -> None:
+        self.blockers_json = json.dumps([str(item) for item in (value or [])])
+
+    @property
+    def summary(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.summary_json or "{}")
+        except json.JSONDecodeError:
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    @summary.setter
+    def summary(self, value: dict[str, Any]) -> None:
+        self.summary_json = json.dumps(value or {})
+
+
+class RapidMLDecision(db.Model):
+    """Per-provider ML decision, risk decision, and reconciliation record."""
+
+    id = db.Column(db.Integer, primary_key=True)
+    session_id = db.Column(db.Integer, db.ForeignKey("rapid_ml_session.id"), nullable=False, index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False, index=True)
+    trading_connection_id = db.Column(db.Integer, db.ForeignKey("trading_connection.id"), nullable=True, index=True)
+    order_id = db.Column(db.Integer, db.ForeignKey("order.id"), nullable=True, index=True)
+    provider = db.Column(db.String(64), nullable=False, index=True)
+    symbol = db.Column(db.String(32), nullable=False, default="", index=True)
+    side = db.Column(db.String(8), nullable=False, default="")
+    action = db.Column(db.String(32), nullable=False, default="hold", index=True)
+    status = db.Column(db.String(32), nullable=False, default="preview", index=True)
+    confidence = db.Column(db.Float, nullable=False, default=0.0)
+    expected_return = db.Column(db.Float, nullable=False, default=0.0)
+    opportunity_score = db.Column(db.Float, nullable=False, default=0.0)
+    allocation_usd = db.Column(db.Float, nullable=False, default=0.0)
+    notional_usd = db.Column(db.Float, nullable=False, default=0.0)
+    order_intent_json = db.Column(db.Text, nullable=False, default="{}")
+    provider_state_json = db.Column(db.Text, nullable=False, default="{}")
+    ml_decisions_json = db.Column(db.Text, nullable=False, default="{}")
+    risk_json = db.Column(db.Text, nullable=False, default="{}")
+    blockers_json = db.Column(db.Text, nullable=False, default="[]")
+    created_at = db.Column(db.DateTime, nullable=False, default=utcnow, index=True)
+
+    session = db.relationship("RapidMLSession", backref="decisions")
+    user = db.relationship("User", backref="rapid_ml_decisions")
+    trading_connection = db.relationship("TradingConnection", backref="rapid_ml_decisions")
+    order = db.relationship("Order", backref="rapid_ml_decisions")
+
+    @property
+    def order_intent(self) -> dict[str, Any]:
+        return self._json_dict(self.order_intent_json)
+
+    @order_intent.setter
+    def order_intent(self, value: dict[str, Any]) -> None:
+        self.order_intent_json = json.dumps(value or {})
+
+    @property
+    def provider_state(self) -> dict[str, Any]:
+        return self._json_dict(self.provider_state_json)
+
+    @provider_state.setter
+    def provider_state(self, value: dict[str, Any]) -> None:
+        self.provider_state_json = json.dumps(value or {})
+
+    @property
+    def ml_decisions(self) -> dict[str, Any]:
+        return self._json_dict(self.ml_decisions_json)
+
+    @ml_decisions.setter
+    def ml_decisions(self, value: dict[str, Any]) -> None:
+        self.ml_decisions_json = json.dumps(value or {})
+
+    @property
+    def risk(self) -> dict[str, Any]:
+        return self._json_dict(self.risk_json)
+
+    @risk.setter
+    def risk(self, value: dict[str, Any]) -> None:
+        self.risk_json = json.dumps(value or {})
+
+    @property
+    def blockers(self) -> list[str]:
+        try:
+            value = json.loads(self.blockers_json or "[]")
+        except json.JSONDecodeError:
+            return []
+        return [str(item) for item in value] if isinstance(value, list) else []
+
+    @blockers.setter
+    def blockers(self, value: list[str]) -> None:
+        self.blockers_json = json.dumps([str(item) for item in (value or [])])
+
+    @staticmethod
+    def _json_dict(raw: str) -> dict[str, Any]:
+        try:
+            value = json.loads(raw or "{}")
+        except json.JSONDecodeError:
+            return {}
+        return value if isinstance(value, dict) else {}
 
 
 class StrategyValidation(db.Model):
