@@ -1,0 +1,57 @@
+{
+  "name": "AlgVault",
+  "short_name": "AlgVault",
+  "description": "Secure mobile vault trading workspace.",
+  "id": "/",
+  "start_url": "/",
+  "scope": "/",
+  "lang": "en-US",
+  "dir": "ltr",
+  "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
+  "background_color": "#05070d",
+  "theme_color": "#05070d",
+  "orientation": "portrait",
+  "categories": ["finance", "productivity"],
+  "prefer_related_applications": false,
+  "icons": [
+    {
+      "src": "/icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icons/apple-touch-icon.png",
+      "sizes": "180x180",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "Wallet",
+      "short_name": "Wallet",
+      "url": "/wallet/",
+      "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    },
+    {
+      "name": "Vault",
+      "short_name": "Vault",
+      "url": "/vault/",
+      "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    },
+    {
+      "name": "Risk",
+      "short_name": "Risk",
+      "url": "/admin/risk",
+      "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+    }
+  ]
+}

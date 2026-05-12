@@ -1,0 +1,25 @@
+[Unit]
+Description=Algorithm Vault Flask trading platform
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tradingbot
+Group=tradingbot
+WorkingDirectory=/opt/algorithm-vault/current
+EnvironmentFile=/etc/algorithm-vault/algorithm-vault.env
+ExecStartPre=/opt/algorithm-vault/current/scripts/production_bootstrap.sh
+ExecStart=/opt/algorithm-vault/current/.venv/bin/gunicorn -c /opt/algorithm-vault/current/deploy/gunicorn.conf.py wsgi:app
+ExecReload=/bin/kill -s HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=45
+KillSignal=SIGTERM
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectSystem=full
+ReadWritePaths=/opt/algorithm-vault/current /var/log/algorithm-vault
+
+[Install]
+WantedBy=multi-user.target

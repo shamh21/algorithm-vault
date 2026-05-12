@@ -1,0 +1,204 @@
+{% extends "base.html" %}
+
+{% block title %}Backtests · Algorithm Vault{% endblock %}
+
+{% block content %}
+<script type="application/json" id="backtest-initial-payload">{{ latest_payload|tojson }}</script>
+<script type="application/json" id="backtest-initial-symbols">{{ initial_symbols|tojson }}</script>
+
+<section
+  class="backtest-pwa-shell"
+  data-backtest-root
+  data-symbols-url="{{ url_for('backtests.symbols_api') }}"
+  data-quote-url="{{ url_for('backtests.quote_api') }}"
+  data-chart-lib-src="{{ url_for('static', filename='js/vendor/lightweight-charts.standalone.production.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}"
+>
+  <header class="backtest-pwa-top">
+    <div>
+      <span class="card-kicker">Paper Vault</span>
+      <h1>Backtests</h1>
+      <p>AI-native vault simulation across connected exchange conditions.</p>
+    </div>
+    <div class="backtest-balance-pill">
+      <span>Paper Cap</span>
+      <strong>${{ "%.0f"|format(allocation_cap_usd) }}</strong>
+    </div>
+  </header>
+
+  <form
+    method="post"
+    action="{{ url_for('backtests.run') }}"
+    class="backtest-pwa-grid"
+    data-backtest-form
+    data-paper-balance="{{ paper_balance_usd }}"
+    data-allocation-cap="{{ allocation_cap_usd }}"
+  >
+    {{ csrf_input()|safe }}
+    <input type="hidden" name="provider" value="global" data-backtest-provider>
+    <input type="hidden" name="symbol" value="BTC" data-backtest-symbol>
+    <input type="hidden" name="venue_symbol" value="BTC" data-backtest-venue-symbol>
+    <input type="hidden" name="timeframe" value="live" data-backtest-timeframe>
+    <input type="hidden" name="cycle_duration" value="1h10">
+
+    <section class="backtest-control-panel" aria-label="Vault simulation controls">
+      <div class="backtest-panel-head">
+        <div>
+          <span class="card-kicker">Simulation Engine</span>
+          <h2>Vault Autopilot</h2>
+        </div>
+        <span class="backtest-live-dot">Paper</span>
+      </div>
+
+      <div class="backtest-symbol-module">
+        <label for="backtest-symbol-search">Asset Universe</label>
+        <div class="backtest-search-box">
+          <input id="backtest-symbol-search" type="search" placeholder="Search symbols, venues" autocomplete="off" inputmode="search" data-symbol-search>
+        </div>
+        <div class="backtest-selected-asset" data-selected-asset>
+          <span class="backtest-token-icon">B</span>
+          <span>
+            <strong>BTC</strong>
+            <small>Configured · USDT</small>
+          </span>
+          <em>Ready</em>
+        </div>
+        <div class="backtest-symbol-list" role="listbox" aria-label="Supported assets" data-symbol-list>
+          <div class="backtest-skeleton-row"></div>
+          <div class="backtest-skeleton-row"></div>
+          <div class="backtest-skeleton-row"></div>
+        </div>
+      </div>
+
+      <div class="backtest-timeframe-module">
+        <span class="backtest-module-label">Timeframe</span>
+        <div class="backtest-timeframe-grid" role="radiogroup" aria-label="Backtest timeframe">
+          {% for timeframe in timeframes %}
+            <button type="button" class="{{ 'is-active' if loop.first else '' }}" data-timeframe-option="{{ timeframe.value }}">{{ timeframe.label }}</button>
+          {% endfor %}
+        </div>
+      </div>
+
+      <label class="backtest-allocation-module">Test Allocation Amount
+        <div class="backtest-allocation-card">
+          <div class="backtest-allocation-input-row">
+            <input
+              type="number"
+              name="allocation_amount_usd"
+              step="0.000001"
+              min="0.000001"
+              max="{{ allocation_cap_usd }}"
+              value="{{ allocation_default_usd }}"
+              inputmode="decimal"
+              data-backtest-allocation
+            >
+            <button type="button" data-backtest-max>MAX</button>
+          </div>
+          <div class="backtest-conversion-preview" data-conversion-preview>
+            <span>Live conversion</span>
+            <strong>--</strong>
+          </div>
+          <input type="range" min="0" max="{{ allocation_cap_usd }}" value="{{ allocation_default_usd }}" step="1" aria-label="Allocation amount" data-allocation-slider>
+        </div>
+      </label>
+
+      <section class="backtest-cycle-module" aria-label="Vault Cycle">
+        <div class="backtest-module-label">Vault Cycle</div>
+        <div class="backtest-cycle-card is-active">
+          <span>1H10</span>
+          <strong>60:00 MIN</strong>
+          <small>AI optimized high-frequency vault cycle</small>
+          <em data-cycle-summary>Ensemble, risk, liquidity, and execution models auto-calibrated.</em>
+        </div>
+      </section>
+
+      <section class="backtest-auto-metrics" aria-label="Auto-optimized system metrics">
+        <div class="backtest-module-label">Auto-Optimized Metrics</div>
+        <div class="backtest-auto-metric-grid">
+          <div><span>Fees</span><strong data-system-metric="fees">Auto</strong></div>
+          <div><span>Slippage</span><strong data-system-metric="slippage">Auto</strong></div>
+          <div><span>Exits</span><strong data-system-metric="exits">Dynamic</strong></div>
+          <div><span>Sizing</span><strong data-system-metric="sizing">ML Risk</strong></div>
+        </div>
+      </section>
+
+      <button type="submit" class="primary backtest-run-button" data-backtest-submit data-loading-label="Simulating...">Run Vault Simulation</button>
+      <div class="backtest-form-status" data-backtest-status aria-live="polite"></div>
+    </section>
+
+    <section class="backtest-result-panel" data-backtest-dashboard hidden>
+      <div class="backtest-result-head">
+        <div>
+          <span class="card-kicker">Latest Simulation</span>
+          <h2 data-backtest-title>Vault Ensemble</h2>
+        </div>
+        <span class="backtest-result-chip" data-backtest-summary>1H10</span>
+      </div>
+
+      <div class="backtest-metric-strip">
+        <div><span>ROI</span><strong data-metric="roi">0.00%</strong></div>
+        <div><span>PnL</span><strong data-metric="pnl">$0.00</strong></div>
+        <div><span>Win Rate</span><strong data-metric="win_rate">0.00%</strong></div>
+        <div><span>Drawdown</span><strong data-metric="max_drawdown">0.00%</strong></div>
+        <div><span>Trades</span><strong data-metric="trades">0</strong></div>
+        <div><span>Fees</span><strong data-metric="fees">$0.00</strong></div>
+      </div>
+
+      <div class="backtest-chart-panel">
+        <div class="backtest-chart-toolbar">
+          <div>
+            <span class="card-kicker">Projection</span>
+            <strong data-chart-title>Market + AI Overlay</strong>
+          </div>
+          <div class="backtest-chart-tabs" role="tablist" aria-label="Simulation chart mode">
+            <button type="button" class="is-active" data-chart-mode="market">Market</button>
+            <button type="button" data-chart-mode="equity">Equity</button>
+            <button type="button" data-chart-mode="pnl">PnL</button>
+            <button type="button" data-chart-mode="drawdown">Risk</button>
+          </div>
+        </div>
+        <div class="backtest-chart-stage">
+          <div class="backtest-lightweight-host" data-backtest-chart></div>
+          <canvas data-backtest-overlay aria-label="Projection and risk overlays"></canvas>
+        </div>
+      </div>
+
+      <div class="backtest-intel-grid">
+        <section class="backtest-intel-panel">
+          <div class="backtest-panel-mini-head">
+            <span>Autopilot</span>
+            <strong data-autopilot-confidence>--</strong>
+          </div>
+          <div class="backtest-intel-list" data-autopilot-list></div>
+        </section>
+
+        <section class="backtest-intel-panel">
+          <div class="backtest-panel-mini-head">
+            <span>Execution Quality</span>
+            <strong data-execution-score>--</strong>
+          </div>
+          <div class="backtest-intel-list" data-execution-list></div>
+        </section>
+      </div>
+
+      <section class="backtest-strategy-panel">
+        <div class="backtest-panel-mini-head">
+          <span>Strategy Ensemble</span>
+          <strong data-active-strategies>--</strong>
+        </div>
+        <div class="backtest-strategy-list" data-strategy-list></div>
+      </section>
+    </section>
+
+    <section class="backtest-empty-state" data-backtest-empty {% if latest_payload %}hidden{% endif %}>
+      <span class="panic-empty-mark" aria-hidden="true">AV</span>
+      <strong>Ready to simulate</strong>
+      <small>Select an asset, allocation, and timeframe to run the vault engine.</small>
+    </section>
+  </form>
+</section>
+{% endblock %}
+
+{% block page_scripts %}
+<script defer src="{{ url_for('static', filename='js/vendor/lightweight-charts.standalone.production.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}"></script>
+<script defer src="{{ url_for('static', filename='js/backtests.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}"></script>
+{% endblock %}

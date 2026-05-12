@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+
+{% block title %}Invite Codes · Admin{% endblock %}
+
+{% block content %}
+<section class="page-heading advanced-only">
+  <span class="card-kicker">Advanced / Admin</span>
+  <h1>Invite Codes</h1>
+  <p class="muted">Signup codes bind users to the treasury profit-share percentage used after Vault Cycle settlement.</p>
+</section>
+
+<section class="card">
+  <h2>Create Code</h2>
+  <form method="post" action="{{ url_for('admin.invite_codes') }}" class="form-grid compact-form" data-disable-on-submit>
+    {{ csrf_input()|safe }}
+    <label>
+      Code
+      <input type="text" name="code" placeholder="Auto-generate if blank" autocapitalize="characters">
+    </label>
+    <label>
+      Label
+      <input type="text" name="label" placeholder="Partner, campaign, or cohort">
+    </label>
+    <label>
+      Profit Share %
+      <input type="number" name="percent_profit" min="0" max="100" step="0.01" value="50" inputmode="decimal">
+    </label>
+    <label>
+      Max Uses
+      <input type="number" name="max_uses" min="0" step="1" value="0" inputmode="numeric">
+    </label>
+    <label class="toggle-row">
+      <input type="checkbox" name="is_active" checked>
+      <span>Active</span>
+    </label>
+    <button type="submit" data-loading-label="Saving...">Save Code</button>
+  </form>
+</section>
+
+<section class="card" data-row-cap="150">
+  <h2>Codes</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Code</th>
+        <th>Profit</th>
+        <th>Uses</th>
+        <th>Status</th>
+        <th>Control</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for invite in invite_codes %}
+        <tr>
+          <td><code>{{ invite.code }}</code><br><small class="muted">{{ invite.label or "No label" }}</small></td>
+          <td>{{ "%.2f"|format(invite.percent_profit or 0) }}%</td>
+          <td>{{ invite.usage_count }}{% if invite.max_uses %}/{{ invite.max_uses }}{% endif %}</td>
+          <td>{{ "Active" if invite.is_active else "Disabled" }}</td>
+          <td>
+            <details>
+              <summary class="button-link secondary">Edit</summary>
+              <form method="post" action="{{ url_for('admin.invite_codes') }}" class="form-grid compact-form" data-disable-on-submit>
+                {{ csrf_input()|safe }}
+                <input type="hidden" name="invite_id" value="{{ invite.id }}">
+                <label>Code <input type="text" name="code" value="{{ invite.code }}" required></label>
+                <label>Label <input type="text" name="label" value="{{ invite.label }}"></label>
+                <label>Profit Share % <input type="number" name="percent_profit" min="0" max="100" step="0.01" value="{{ "%.2f"|format(invite.percent_profit or 0) }}"></label>
+                <label>Max Uses <input type="number" name="max_uses" min="0" step="1" value="{{ invite.max_uses or 0 }}"></label>
+                <label class="toggle-row"><input type="checkbox" name="is_active" {% if invite.is_active %}checked{% endif %}><span>Active</span></label>
+                <button type="submit" data-loading-label="Updating...">Update</button>
+              </form>
+            </details>
+          </td>
+        </tr>
+      {% else %}
+        <tr><td colspan="5">No invite codes have been created.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

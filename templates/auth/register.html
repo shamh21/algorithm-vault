@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+
+{% block title %}Register · Algorithm Vault{% endblock %}
+
+{% block content %}
+<section class="auth-shell">
+  <article class="vault-card auth-card">
+    <span class="card-kicker">{{ "Invite Required" if invite_required else "Secure Signup" }}</span>
+    <h1>Create Account</h1>
+    {% if signup_enabled %}
+      <p class="muted">
+        {% if invite_required %}
+          Registration requires an invite code. After signup, app-based 2FA must be configured before wallet access.
+        {% else %}
+          Create an account, then configure app-based 2FA before wallet access.
+        {% endif %}
+      </p>
+      <form method="post" action="{{ url_for('auth.register_post') }}" class="form-grid" data-disable-on-submit>
+        {{ csrf_input()|safe }}
+        <label>Username
+          <input type="text" name="username" minlength="3" autocomplete="username" required>
+        </label>
+        <label>Password
+          <input type="password" name="password" minlength="8" autocomplete="new-password" required>
+        </label>
+        <label>Confirm Password
+          <input type="password" name="confirm_password" minlength="8" autocomplete="new-password" required>
+        </label>
+        {% if invite_required %}
+          <label>Invite Code
+            <input type="password" name="invite_code" required>
+          </label>
+        {% endif %}
+        <button type="submit" class="primary" data-loading-label="Creating...">Create Account</button>
+      </form>
+    {% else %}
+      <p class="muted">Public sign-up is disabled because <code>SIGNUP_INVITE_CODE</code> is not configured.</p>
+    {% endif %}
+    <p class="muted"><a class="text-link" href="{{ url_for('auth.login') }}">Back to sign in</a></p>
+  </article>
+</section>
+{% endblock %}

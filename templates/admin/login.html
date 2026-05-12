@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+
+{% block title %}Admin Login · Algorithm Vault{% endblock %}
+
+{% block content %}
+<section class="admin-login-shell">
+  <article class="vault-card admin-login-card">
+    <span class="card-kicker">Advanced / Admin</span>
+    <h1>Admin Access</h1>
+    {% if admin_configured %}
+      <p class="muted">Sign in to access strategy runs, risk diagnostics, backtests, open orders, panic controls, and validation tools.</p>
+      <form method="post" action="{{ url_for('admin.login_post', next=request.args.get('next', '')) }}" class="form-grid" data-disable-on-submit>
+        {{ csrf_input()|safe }}
+        <label>Username
+          <input type="text" name="username" autocomplete="username" value="{{ current_app.config['ADMIN_USERNAME'] }}" required>
+        </label>
+        <label>Password
+          <input type="password" name="password" autocomplete="current-password" required>
+        </label>
+        <button type="submit" class="primary" data-loading-label="Signing in...">Sign In</button>
+      </form>
+    {% else %}
+      <p class="muted">Admin access is closed because <code>ADMIN_PASSWORD</code> is not configured for this deployment.</p>
+    {% endif %}
+  </article>
+</section>
+{% endblock %}

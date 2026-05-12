@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+
+{% block title %}Strategies · Admin{% endblock %}
+
+{% block content %}
+<section class="page-heading advanced-only">
+  <span class="card-kicker">Advanced / Admin</span>
+  <h1>Strategy and Vault Internals</h1>
+  <p class="muted">Protected view for selected strategy mappings, validation records, and vault-started runs.</p>
+</section>
+
+<section class="grid two-up">
+  <article class="card">
+    <h2>Vault Strategy Mapping</h2>
+    <table>
+      <thead><tr><th>Cycle</th><th>Profile</th><th>Strategy</th><th>Symbol</th><th>Timeframe</th><th>Status</th><th>Execution</th></tr></thead>
+      <tbody>
+        {% for cycle in vault_cycles %}
+          <tr>
+            <td>#{{ cycle.id }}</td>
+            <td>{{ cycle.algorithm_profile }}</td>
+            <td>{{ cycle.selected_strategy_name }}</td>
+            <td>{{ cycle.strategy_run.symbol if cycle.strategy_run else "n/a" }}</td>
+            <td>{{ cycle.selected_timeframe or "n/a" }}</td>
+            <td>{{ cycle.status }}</td>
+            <td>{{ cycle.execution_substatus.replace("_", " ")|title }} / {{ cycle.live_validation_status.replace("_", " ")|title }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="7">No vault cycles yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </article>
+
+  <article class="card">
+    <h2>Strategy Runs</h2>
+    <table>
+      <thead><tr><th>ID</th><th>Name</th><th>Symbol</th><th>Status</th><th>Mode</th><th>Last Signal</th></tr></thead>
+      <tbody>
+        {% for run in strategy_runs %}
+          <tr>
+            <td>{{ run.id }}</td>
+            <td>{{ run.strategy_name }}</td>
+            <td>{{ run.symbol }} / {{ run.timeframe }}</td>
+            <td>{{ run.status }}</td>
+            <td>{{ run.mode }}</td>
+            <td>{{ run.last_signal.get('action', 'n/a') }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="6">No strategy runs recorded.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </article>
+</section>
+
+<section class="grid two-up">
+  <article class="card">
+    <h2>Automation Rankings</h2>
+    <table>
+      <thead><tr><th>Strategy</th><th>Symbol</th><th>Score</th><th>Net ROI</th><th>Status</th></tr></thead>
+      <tbody>
+        {% for ranking in strategy_rankings %}
+          <tr>
+            <td>{{ ranking.strategy_name }}</td>
+            <td>{{ ranking.symbol }} / {{ ranking.timeframe }}</td>
+            <td>{{ "%.3f"|format(ranking.score) }}</td>
+            <td>
+              {{ "%.3f"|format(ranking.ml_explanation.get("net_roi", {}).get("net_roi_score", 0) if ranking.ml_explanation else 0) }}<br>
+              <span class="muted">v2 {{ "%.3f"|format(ranking.ml_explanation.get("net_roi_v2", {}).get("net_roi_v2_score", 0) if ranking.ml_explanation else 0) }}</span>
+            </td>
+            <td>{{ "rejected" if ranking.rejected else "candidate" }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="5">No optimizer rankings yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </article>
+
+  <article class="card">
+    <h2>Validation and Shadow-Live</h2>
+    <table>
+      <thead><tr><th>Strategy</th><th>Stage</th><th>Status</th><th>Signals</th></tr></thead>
+      <tbody>
+        {% for validation in validations %}
+          <tr>
+            <td>{{ validation.strategy_name }}</td>
+            <td>{{ validation.stage }}</td>
+            <td>{{ validation.status }}</td>
+            <td>{{ validation.metrics.get('actionable_signals', validation.metrics.get('trade_count', 0)) }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="4">No validation records.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </article>
+</section>
+{% endblock %}

@@ -1,0 +1,264 @@
+{% extends "base.html" %}
+
+{% block title %}Risk Engine · Admin{% endblock %}
+
+{% block content %}
+<section
+  class="risk-mobile-shell"
+  data-risk-page
+  data-state-url="{{ url_for('admin.risk_state') }}"
+  data-save-url="{{ url_for('admin.save_risk_config') }}"
+  data-audit-url="{{ url_for('admin.risk_audit_events') }}"
+  data-refresh-url="{{ url_for('admin.refresh_risk_exchange_limits') }}"
+  data-next-audit-page="{{ audit_pagination.next_page or '' }}"
+>
+  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}" data-risk-csrf>
+
+  <header class="risk-sticky-hero">
+    <div>
+      <span class="card-kicker">Advanced / Admin</span>
+      <h1>Risk Engine Controls</h1>
+      <p>Exchange-grade protection layer for live allocation cycles.</p>
+    </div>
+    <div class="risk-health-ring" style="--risk-score: {{ risk_state.health_score }};" data-health-ring>
+      <strong data-health-score>{{ risk_state.health_score }}</strong>
+      <span>AI Score</span>
+    </div>
+  </header>
+
+  <section class="risk-status-grid" aria-label="Risk health summary">
+    <article class="risk-mini-panel risk-tone-{{ risk_state.safety_engine_status.tone }}">
+      <span>Safety Engine</span>
+      <strong data-safety-status>{{ risk_state.safety_engine_status.label }}</strong>
+    </article>
+    <article class="risk-mini-panel">
+      <span>Volatility</span>
+      <strong data-volatility-state>{{ risk_state.volatility_state }}</strong>
+    </article>
+    <article class="risk-mini-panel">
+      <span>Exchange Max</span>
+      <strong data-exchange-max>{{ "%.0f"|format(risk_state.exchange_limits.max_exchange_leverage) }}x</strong>
+    </article>
+    <article class="risk-mini-panel">
+      <span>Latency</span>
+      <strong data-latency-average>{{ "%.0f"|format(risk_state.latency.average_ms) }}ms</strong>
+    </article>
+  </section>
+
+  <section class="risk-panel risk-profile-card" aria-labelledby="risk-profile-title">
+    <div class="risk-section-head">
+      <div>
+        <span class="card-kicker">Smart Risk Profile</span>
+        <h2 id="risk-profile-title">Execution Posture</h2>
+      </div>
+      <span class="risk-soft-chip" data-profile-current>{{ risk_state.controls.profile|replace("-", " ")|title }}</span>
+    </div>
+    <div class="risk-segmented" role="radiogroup" aria-label="Smart risk profile">
+      {% for profile in risk_state.profiles %}
+        <button
+          type="button"
+          class="risk-segment {% if profile.key == risk_state.controls.profile %}is-active{% endif %}"
+          role="radio"
+          aria-checked="{{ 'true' if profile.key == risk_state.controls.profile else 'false' }}"
+          data-risk-profile="{{ profile.key }}"
+        >{{ profile.label }}</button>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section class="risk-control-stack" aria-label="Risk configuration controls">
+    <article class="risk-panel risk-control-card {% if risk_state.controls.daily_loss_unlimited %}is-unlimited{% endif %}" data-loss-card>
+      <div class="risk-section-head">
+        <div>
+          <span class="card-kicker">Daily Loss Limit</span>
+          <h2>Capital Drawdown Guard</h2>
+        </div>
+        <label class="risk-switch">
+          <input type="checkbox" data-loss-unlimited {% if risk_state.controls.daily_loss_unlimited %}checked{% endif %}>
+          <span></span>
+          Unlimited
+        </label>
+      </div>
+
+      <div class="risk-slider-value">
+        <strong><span data-loss-value>{{ "%.0f"|format(risk_state.controls.daily_loss_limit_pct) }}</span>%</strong>
+        <span data-loss-caption>{{ "Unlimited mode armed" if risk_state.controls.daily_loss_unlimited else "of detected capital" }}</span>
+      </div>
+      <input
+        type="range"
+        min="0"
+        max="100"
+        step="1"
+        value="{{ risk_state.controls.daily_loss_limit_pct }}"
+        data-loss-slider
+        {% if risk_state.controls.daily_loss_unlimited %}disabled{% endif %}
+      >
+      <label class="risk-input-row">
+        <span>Editable limit</span>
+        <input
+          type="number"
+          min="0"
+          max="100"
+          step="1"
+          value="{{ "%.0f"|format(risk_state.controls.daily_loss_limit_pct) }}"
+          inputmode="numeric"
+          data-loss-input
+          {% if risk_state.controls.daily_loss_unlimited %}disabled{% endif %}
+        >
+      </label>
+
+      <div class="risk-meter" aria-label="Estimated liquidation safety meter">
+        <span style="width: {{ [100 - (risk_state.controls.daily_loss_limit_pct|float), 12]|max }}%"></span>
+      </div>
+      <p class="risk-warning-copy" data-loss-warning {% if not risk_state.controls.daily_loss_unlimited %}hidden{% endif %}>
+        Unlimited mode disables all daily-loss cap gates. Panic lock, exchange health, stop-loss, leverage, and liquidation checks remain active.
+      </p>
+    </article>
+
+    <article class="risk-panel risk-control-card">
+      <div class="risk-section-head">
+        <div>
+          <span class="card-kicker">Max Leverage</span>
+          <h2>Exchange Range Selector</h2>
+        </div>
+        <span class="risk-soft-chip" data-leverage-cap>{{ "%.0f"|format(risk_state.exchange_limits.max_exchange_leverage) }}x max</span>
+      </div>
+
+      <div class="risk-leverage-display">
+        <button type="button" class="risk-step-button" data-leverage-step="-1" aria-label="Decrease leverage">-</button>
+        <strong><span data-leverage-value>{{ "%.0f"|format(risk_state.controls.max_leverage) }}</span>x</strong>
+        <button type="button" class="risk-step-button" data-leverage-step="1" aria-label="Increase leverage">+</button>
+      </div>
+      <input
+        type="range"
+        min="0"
+        max="{{ risk_state.exchange_limits.max_exchange_leverage }}"
+        step="1"
+        value="{{ risk_state.controls.max_leverage }}"
+        data-leverage-slider
+      >
+      <div class="risk-chip-rail" aria-label="Leverage quick presets">
+        {% for value in [1, 2, 3, 5, 10] %}
+          <button type="button" data-leverage-preset="{{ value }}" {% if value > risk_state.exchange_limits.max_exchange_leverage %}disabled{% endif %}>{{ value }}x</button>
+        {% endfor %}
+        <button type="button" data-leverage-preset="max">MAX</button>
+      </div>
+
+      <div class="risk-exchange-list" data-exchange-list>
+        {% for provider in risk_state.exchange_limits.providers %}
+          <span>{{ provider.label }} · {{ "%.0f"|format(provider.max_leverage) }}x · {{ provider.market_count }} markets</span>
+        {% else %}
+          <span>No active exchange market metadata yet.</span>
+        {% endfor %}
+      </div>
+    </article>
+
+    <article class="risk-panel risk-control-card risk-slippage-card">
+      <div class="risk-section-head">
+        <div>
+          <span class="card-kicker">Adaptive ML Slippage Engine</span>
+          <h2>Execution Quality</h2>
+        </div>
+        <span class="risk-pulse" aria-hidden="true"></span>
+      </div>
+      <div class="risk-slippage-grid">
+        <div>
+          <span>Live Estimate</span>
+          <strong data-slippage-estimate>{{ "%.1f"|format(risk_state.adaptive_slippage.estimate_bps) }} bps</strong>
+        </div>
+        <div>
+          <span>Confidence</span>
+          <strong data-slippage-confidence>{{ "%.0f"|format(risk_state.adaptive_slippage.confidence) }}%</strong>
+        </div>
+        <div>
+          <span>Market Quality</span>
+          <strong data-market-quality>{{ "%.0f"|format(risk_state.adaptive_slippage.market_quality) }}%</strong>
+        </div>
+        <div>
+          <span>Execution Health</span>
+          <strong data-execution-health>{{ "%.0f"|format(risk_state.adaptive_slippage.execution_health) }}%</strong>
+        </div>
+      </div>
+      <div class="risk-micro-chart" aria-hidden="true" data-slippage-chart>
+        {% for value in risk_state.adaptive_slippage.micro_chart %}
+          <span style="height: {{ [value, 8]|max }}%"></span>
+        {% endfor %}
+      </div>
+    </article>
+
+    <article class="risk-panel risk-latency-card">
+      <div class="risk-section-head">
+        <div>
+          <span class="card-kicker">Exchange Latency Monitor</span>
+          <h2>Connection Quality</h2>
+        </div>
+        <button type="button" class="risk-secondary-action" data-refresh-exchange>Refresh</button>
+      </div>
+      <div class="risk-latency-list" data-latency-list>
+        {% for provider in risk_state.latency.providers %}
+          <div>
+            <span>{{ provider.label }}</span>
+            <strong>{{ "%.0f"|format(provider.latency_ms) }}ms</strong>
+            <em>{{ provider.quality }}</em>
+          </div>
+        {% else %}
+          <div>
+            <span>No verified exchange</span>
+            <strong>--</strong>
+            <em>Connect first</em>
+          </div>
+        {% endfor %}
+      </div>
+    </article>
+  </section>
+
+  <section class="risk-panel risk-audit-panel" aria-labelledby="risk-audit-title">
+    <div class="risk-section-head">
+      <div>
+        <span class="card-kicker">Audit Timeline</span>
+        <h2 id="risk-audit-title">Audit Events</h2>
+      </div>
+      <span class="risk-soft-chip" data-audit-count>{{ audit_pagination.total }} retained</span>
+    </div>
+
+    <div class="risk-audit-feed" role="list" aria-label="Audit events" data-audit-feed>
+      {% include "advanced/_audit_event_cards.html" %}
+    </div>
+
+    <div class="risk-audit-loader" data-audit-loader hidden>
+      <span></span><span></span><span></span>
+    </div>
+
+    {% if audit_pagination.has_next %}
+      <a class="risk-load-more" href="{{ url_for('admin.risk', audit_page=audit_pagination.next_page) }}" data-load-more>Load more</a>
+    {% endif %}
+  </section>
+
+  <div class="risk-save-bar" data-save-bar hidden>
+    <div>
+      <strong>Unsaved risk changes</strong>
+      <span data-save-status>Review before applying.</span>
+    </div>
+    <button type="button" class="secondary" data-discard-risk>Reset</button>
+    <button type="button" class="primary" data-save-risk>Save</button>
+  </div>
+
+  <div class="risk-modal-backdrop" data-risk-modal hidden>
+    <section class="risk-confirm-modal" role="dialog" aria-modal="true" aria-labelledby="unlimited-loss-title">
+      <span class="card-kicker">Confirmation Required</span>
+      <h2 id="unlimited-loss-title">Unlimited Loss Limit</h2>
+      <p>This disables all daily-loss cap gates. Other live safety systems remain active.</p>
+      <div class="risk-modal-actions">
+        <button type="button" class="secondary" data-cancel-unlimited>Cancel</button>
+        <button type="button" class="danger-button" data-confirm-unlimited>Enable Unlimited</button>
+      </div>
+    </section>
+  </div>
+
+  <script type="application/json" id="initial-risk-state">{{ risk_state|tojson }}</script>
+</section>
+{% endblock %}
+
+{% block page_scripts %}
+<script defer src="{{ url_for('static', filename='js/risk.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}"></script>
+{% endblock %}

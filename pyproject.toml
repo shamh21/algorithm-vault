@@ -1,0 +1,49 @@
+[tool.coverage.run]
+branch = true
+source = ["app"]
+omit = [
+    "app/cli_commands/legacy.py",
+    "app/routes/consumer_parts/legacy.py",
+    "app/services/*_parts/legacy.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+
+[tool.ruff]
+target-version = "py311"
+line-length = 140
+extend-exclude = [
+    ".venv",
+    ".venv.broken-*",
+    "migrations/versions",
+    "app/cli_commands/legacy.py",
+    "app/routes/consumer_parts/legacy.py",
+    "app/services/*_parts/legacy.py",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "BLE", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+warn_unused_configs = true
+check_untyped_defs = true
+follow_imports = "skip"
+files = [
+    "app/settings_validation.py",
+    "app/services/audit_events.py",
+    "app/services/failures.py",
+    "app/services/response_envelope.py",
+    "app/services/vault_cycle_orchestrator.py",
+    "app/services/worker_lease.py",
+    "app/services/model_registry.py",
+    "app/workers/runner.py",
+]

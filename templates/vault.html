@@ -1,0 +1,322 @@
+{% extends "base.html" %}
+
+{% block title %}Vault · Algorithm Vault{% endblock %}
+
+{% block content %}
+{% set default_asset = vault_default_asset if vault_default_asset is defined else (balances[0].asset if balances else "USDC") %}
+<section class="vault-mobile-shell vault-execution-shell">
+  <article class="vault-card vault-start-card vault-command-card">
+    <div class="vault-title-row vault-command-head">
+      <div>
+        <span class="card-kicker">Algorithm Vault</span>
+        <h1>Vault Cycle</h1>
+      </div>
+      <span class="status-badge vault-cycle-live-badge">1H10</span>
+    </div>
+
+    <form
+      id="vault-start-form"
+      method="post"
+      action="{{ url_for('consumer.start_cycle') }}"
+      class="form-grid vault-form vault-execution-form"
+      data-vault-routing-form
+      data-routing-preview-url="{{ url_for('consumer.vault_routing_preview') }}"
+      data-readiness-url="{{ url_for('consumer.vault_readiness') }}"
+      data-start-cycle-url="/vault/start-cycle"
+    >
+      {{ csrf_input()|safe }}
+      <input type="hidden" name="idempotency_key" value="" data-vault-idempotency-key>
+      <input type="hidden" name="providers_submitted" value="1">
+
+      <section class="vault-form-section vault-cycle-module">
+        <div class="vault-section-label">
+          <span>01</span>
+          <strong>Select Vault Cycle</strong>
+        </div>
+        <div class="asset-selector duration-selector vault-cycle-selector" role="radiogroup" aria-label="Vault cycle">
+          {% for cycle in vault_cycle_options %}
+            <label class="asset-option vault-asset-option vault-cycle-option {% if loop.first %}is-selected{% endif %}" data-asset-option data-cycle-option>
+              <input type="radio" name="lock_duration" value="{{ cycle.duration_hours }}" {% if loop.first %}checked{% endif %}>
+              <span>
+                <strong>{{ cycle.label }}</strong>
+                <small>{{ cycle.summary }}</small>
+              </span>
+            </label>
+          {% endfor %}
+        </div>
+      </section>
+
+      <section class="vault-form-section vault-funding-module">
+        <div class="vault-section-label">
+          <span>02</span>
+          <strong>Settlement Asset</strong>
+        </div>
+        <label class="vault-field vault-select-field">Settlement
+          <select name="settlement_asset" data-settlement-asset data-default-settlement-asset="{{ default_asset }}">
+            {% for asset in settlement_assets %}
+              <option value="{{ asset }}" {% if asset == default_asset %}selected{% endif %}>{{ asset }}</option>
+            {% endfor %}
+          </select>
+        </label>
+
+        <label>Funding Balance</label>
+        <div class="asset-selector vault-asset-selector" role="radiogroup" aria-label="Funding balance">
+          {% for balance in balances %}
+            <label class="asset-option vault-asset-option {% if balance.asset == default_asset %}is-selected{% endif %}" data-asset-option data-available-balance="{{ "%.6f"|format(balance.available_balance) }}">
+              <input type="radio" name="deposit_asset" value="{{ balance.asset }}" {% if balance.asset == default_asset %}checked{% endif %}>
+              <span class="coin-icon" aria-hidden="true">{{ balance.asset[:1] }}</span>
+              <span>
+                <strong>{{ balance.asset }}</strong>
+                <small>{{ "%.6f"|format(balance.available_balance) }}</small>
+              </span>
+            </label>
+          {% endfor %}
+        </div>
+      </section>
+
+      <section class="vault-form-section vault-amount-module">
+        <div class="vault-section-label">
+          <span>03</span>
+          <strong>Enter Amount</strong>
+        </div>
+        <label class="vault-field">Amount
+          <div class="vault-amount-control">
+            <input type="number" name="deposit_amount" step="0.000001" min="0" placeholder="0.00" required inputmode="decimal" data-vault-amount>
+            <button type="button" class="vault-max-button" data-vault-max>MAX</button>
+          </div>
+        </label>
+      </section>
+
+      <section class="vault-form-section vault-routing-module">
+        <div class="vault-section-label">
+          <span>04</span>
+          <strong>Enabled Exchanges</strong>
+        </div>
+        <div class="vault-exchange-grid" data-provider-grid>
+          {% for provider in vault_provider_options %}
+            <label class="vault-exchange-card is-enabled" data-provider-card data-provider="{{ provider.provider }}">
+              <input type="checkbox" name="providers" value="{{ provider.provider }}" checked data-provider-toggle>
+              <span class="vault-provider-mark" aria-hidden="true">{{ provider.short_label }}</span>
+              <span class="vault-provider-copy">
+                <strong>{{ provider.label }}</strong>
+                <small data-provider-status>Checking</small>
+              </span>
+              <span class="vault-provider-toggle-ui" aria-hidden="true"></span>
+              <span class="vault-provider-metrics">
+                <span data-provider-score>--</span>
+                <strong data-provider-allocation>$0.00</strong>
+              </span>
+              <span class="vault-provider-blocker" data-provider-blocker hidden></span>
+            </label>
+          {% endfor %}
+        </div>
+      </section>
+
+      <section class="vault-form-section vault-preview-module" data-routing-preview>
+        <div class="vault-section-label">
+          <span>05</span>
+          <strong>Routing Preview</strong>
+        </div>
+        <div class="vault-routing-summary">
+          <span data-routing-engine>1H10 Smart Router</span>
+          <strong data-routing-total>$0.00</strong>
+        </div>
+        <div class="vault-readiness-state">
+          <span data-vault-state-label>Amount Required</span>
+          <strong data-routing-summary>Enter amount to generate route.</strong>
+        </div>
+        <div class="vault-routing-bars" data-routing-bars></div>
+        <div class="vault-routing-list" data-routing-list>
+          <div class="vault-routing-empty">Set an amount to preview exchange allocation.</div>
+        </div>
+        <div class="vault-routing-foot">
+          <span data-routing-readiness>Readiness pending</span>
+          <span data-routing-ml>ML policy check</span>
+        </div>
+      </section>
+
+      <section class="vault-form-section vault-risk-module">
+        <div class="vault-section-label">
+          <span>06</span>
+          <strong>Risk Parameters</strong>
+        </div>
+        <div class="vault-risk-summary">
+          <span>Live gates</span>
+          <strong data-routing-blocker-count>Checking</strong>
+        </div>
+        <div class="vault-top-blockers" data-vault-top-blockers></div>
+        <details class="vault-diagnostics-panel">
+          <summary>View all blockers</summary>
+          <div class="vault-diagnostics-list" data-vault-all-blockers></div>
+        </details>
+      </section>
+
+      <div class="vault-execution-actions vault-sticky-actions">
+        <label class="checkbox-row one-h10-live-ack" data-one-h10-live-ack>
+          <input type="checkbox" name="one_h10_live_ack" value="on">
+          <span>Confirm 1H10 live execution acknowledgement</span>
+        </label>
+        <div class="vault-start-disabled-reason" data-start-disabled-reason>Enter an amount to continue.</div>
+        <button type="submit" class="primary vault-start-button" data-loading-label="Starting 1H10..." disabled>
+          <span>Start 1H10 Cycle</span>
+        </button>
+      </div>
+    </form>
+    <div class="vault-result-sheet" data-vault-result-sheet hidden role="status" aria-live="polite">
+      <div class="vault-result-sheet-handle" aria-hidden="true"></div>
+      <strong data-vault-result-title>Vault Cycle</strong>
+      <p data-vault-result-message></p>
+    </div>
+  </article>
+
+  {% if active_cycles %}
+    <aside class="vault-card active-cycle-panel vault-active-card">
+      <div class="vault-section-heading">
+        <div>
+          <span class="card-kicker">Cycle Status</span>
+          <h2>{{ active_cycles|length }} Active Cycle{{ "" if active_cycles|length == 1 else "s" }}</h2>
+        </div>
+      </div>
+      <div class="active-cycle-list vault-cycle-card-list">
+        {% for cycle in active_cycles %}
+          {% set cycle_pnl = cycle.selection_metadata.get("total_pnl_usd", 0.0) %}
+          {% set coherence = cycle.cycle_summary.get("coherence_summary", {}) %}
+          {% set cycle_status = cycle.cycle_summary.get("cycle_status", {}) %}
+          {% set readiness = coherence.get("automationReadiness", "caution") %}
+          <article
+            class="active-cycle-item vault-cycle-card"
+            data-vault-cycle-card
+            data-cycle-status-url="{{ url_for('consumer.vault_cycle_status', cycle_id=cycle.id) }}"
+          >
+            <div class="vault-cycle-card-head">
+              <strong>{{ cycle.execution_substatus.replace("_", " ")|title }}</strong>
+              <span class="countdown-chip" data-countdown data-unlocks-at="{{ cycle.unlocks_at.isoformat() }}Z">Calculating...</span>
+            </div>
+            <section class="vault-cycle-signal-mini" aria-labelledby="vault-cycle-status-{{ cycle.id }}">
+              <div class="vault-cycle-signal-row">
+                <div>
+                  <span class="card-kicker" id="vault-cycle-status-{{ cycle.id }}">1H10 Vault Cycle Status</span>
+                  <strong data-cycle-phase aria-live="polite">{{ cycle_status.get("phaseLabel", "Collecting data") }}</strong>
+                </div>
+                <span class="metric-pill metric-pill-muted" data-cycle-readiness>
+                  Automation readiness: {{ readiness[:1]|upper }}{{ readiness[1:] }}
+                </span>
+              </div>
+              <div class="vault-cycle-signal-row">
+                <div>
+                  <span>Next-Move Forecast</span>
+                  <strong data-cycle-direction>{{ coherence.get("overallDirection", "neutral")|title }} horizon signal</strong>
+                </div>
+                <div>
+                  <span>Confidence</span>
+                  <strong data-cycle-confidence>{{ coherence.get("overallConfidence", 0) }}%</strong>
+                </div>
+                <div>
+                  <span>Coherence</span>
+                  <strong data-cycle-coherence>{{ coherence.get("coherenceScore", 0) }}%</strong>
+                </div>
+              </div>
+              <p data-cycle-summary>
+                {{ coherence.get("summary") or cycle_status.get("statusMessage") or "Market forecast updated." }}
+              </p>
+              {% set risk_notes = coherence.get("riskNotes", []) %}
+              <div class="vault-cycle-risk-mini" data-cycle-risk-notes>
+                {% if risk_notes %}
+                  {% for note in risk_notes[:2] %}
+                    <span>{{ note }}</span>
+                  {% endfor %}
+                {% else %}
+                  <span>Strategy coherence active</span>
+                {% endif %}
+              </div>
+              <span class="sr-only" data-cycle-next>
+                Next evaluation {{ cycle_status.get("nextScheduled1h10Cycle", "pending") }}
+              </span>
+            </section>
+            <dl class="cycle-details compact-details vault-compact-details">
+              <div><dt>Amount</dt><dd>{{ "%.6f"|format(cycle.deposit_amount) }} {{ cycle.deposit_asset }}</dd></div>
+              <div><dt>Settlement</dt><dd>{{ cycle.settlement_asset }}</dd></div>
+              <div><dt>Value</dt><dd>${{ "%.2f"|format(cycle.current_estimated_value_usd) }}</dd></div>
+              <div><dt>PnL</dt><dd class="{{ 'positive' if cycle_pnl >= 0 else 'negative' }}">${{ "%.2f"|format(cycle_pnl) }}</dd></div>
+            </dl>
+            {% if cycle.cycle_summary.get("allocations") %}
+              <div class="vault-allocation-mini-list">
+                {% for allocation in cycle.cycle_summary.get("allocations", []) %}
+                  <div class="vault-allocation-mini-row">
+                    <span>{{ allocation.provider|title }}</span>
+                    <strong>{{ "%.0f"|format(allocation.allocation_weight * 100) }}%</strong>
+                  </div>
+                {% endfor %}
+              </div>
+            {% endif %}
+            <div class="cycle-item-footer">
+              <a class="text-link" href="{{ url_for('consumer.cycle_detail', cycle_id=cycle.id) }}">Details</a>
+            </div>
+          </article>
+        {% endfor %}
+      </div>
+    </aside>
+  {% endif %}
+</section>
+
+<section class="vault-activity-card">
+  <div class="vault-section-heading">
+    <div>
+      <span class="card-kicker">Vault Activity</span>
+      <h2>Recent Cycles</h2>
+    </div>
+    <a href="{{ url_for('consumer.activity') }}" class="text-link">Full History</a>
+  </div>
+
+  <div class="vault-cycle-card-list">
+    {% for cycle in recent_cycles %}
+      {% set cycle_pnl = cycle.selection_metadata.get("total_pnl_usd", 0.0) %}
+      <article class="vault-cycle-card vault-history-card">
+        <div class="vault-cycle-card-head">
+          <strong>{{ cycle.execution_substatus.replace("_", " ")|title }}</strong>
+          <span class="status-badge">{{ cycle.algorithm_profile }}</span>
+        </div>
+        <dl class="cycle-details compact-details vault-compact-details">
+          <div><dt>Amount</dt><dd>{{ "%.6f"|format(cycle.deposit_amount) }} {{ cycle.deposit_asset }}</dd></div>
+          <div><dt>Settlement</dt><dd>{{ cycle.settlement_asset }}</dd></div>
+          <div><dt>PnL</dt><dd class="{{ 'positive' if cycle_pnl >= 0 else 'negative' }}">${{ "%.2f"|format(cycle_pnl) }}</dd></div>
+          <div><dt>Unlocks</dt><dd>{{ cycle.unlocks_at.strftime("%b %d, %H:%M") }}</dd></div>
+        </dl>
+        <div class="cycle-item-footer">
+          <a class="text-link" href="{{ url_for('consumer.cycle_detail', cycle_id=cycle.id) }}">Details</a>
+        </div>
+      </article>
+    {% else %}
+      <div class="vault-empty-state">No vault cycles yet.</div>
+    {% endfor %}
+  </div>
+
+  {% if cycle_page and cycle_page.total > 0 %}
+    <div class="wallet-pagination-summary">
+      {{ cycle_page.start_index }}-{{ cycle_page.end_index }} of {{ cycle_page.total }}
+    </div>
+  {% endif %}
+
+  {% if cycle_page and cycle_page.pages > 1 %}
+    <nav class="wallet-pagination vault-pagination" aria-label="Vault cycle pages">
+      {% if cycle_page.has_prev %}
+        <a class="pagination-button" href="{{ url_for('consumer.vault', cycle_page=cycle_page.prev_page) }}">Previous</a>
+      {% else %}
+        <span class="pagination-button is-disabled" aria-disabled="true">Previous</span>
+      {% endif %}
+      <span class="pagination-current">Page {{ cycle_page.page }} of {{ cycle_page.pages }}</span>
+      {% if cycle_page.has_next %}
+        <a class="pagination-button" href="{{ url_for('consumer.vault', cycle_page=cycle_page.next_page) }}">Next</a>
+      {% else %}
+        <span class="pagination-button is-disabled" aria-disabled="true">Next</span>
+      {% endif %}
+    </nav>
+  {% endif %}
+</section>
+
+<script type="application/json" id="initial-vault-routing-preview">{{ initial_routing_preview|tojson }}</script>
+{% endblock %}
+
+{% block page_scripts %}
+<script src="{{ url_for('static', filename='js/vault.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}"></script>
+{% endblock %}

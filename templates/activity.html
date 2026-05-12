@@ -1,0 +1,159 @@
+{% extends "base.html" %}
+
+{% block title %}Activity · Algorithm Vault{% endblock %}
+
+{% block content %}
+<section class="activity-page-shell" aria-labelledby="activity-title">
+  <div class="activity-compact-heading">
+    <div>
+      <span class="card-kicker">Activity</span>
+      <h1 id="activity-title">Activity</h1>
+    </div>
+  </div>
+
+  <div class="activity-feed-grid">
+    <article class="activity-panel" aria-labelledby="wallet-activity-title">
+      <div class="activity-section-heading">
+        <div>
+          <span class="card-kicker">Wallet Feed</span>
+          <h2 id="wallet-activity-title">Wallet Transactions</h2>
+        </div>
+        {% if activity_page and activity_page.total > 0 %}
+          <span class="activity-count">{{ activity_page.start_index }}-{{ activity_page.end_index }} of {{ activity_page.total }}</span>
+        {% endif %}
+      </div>
+
+      <div class="activity-list">
+        {% for item in transactions %}
+          {% set tx_type = (item.transaction_type or "wallet")|lower %}
+          {% set tx_label = (item.transaction_type or "wallet")|replace("_", " ")|title %}
+          {% set flow_class = "is-outflow" if tx_type in ["allocation", "withdraw", "withdrawal", "fee"] or item.amount < 0 else "is-inflow" %}
+          <article class="activity-card wallet-activity-item {{ flow_class }}">
+            <div class="activity-card-main">
+              <div class="activity-icon" aria-hidden="true">{{ item.asset[:1] }}</div>
+              <div class="activity-copy">
+                <div class="activity-title-row">
+                  <strong>{{ tx_label }}</strong>
+                  <span class="activity-status">{{ item.status|replace("_", " ")|title }}</span>
+                </div>
+                <time datetime="{{ item.created_at.isoformat() }}">{{ item.created_at.strftime("%b %d, %H:%M") }}</time>
+              </div>
+            </div>
+
+            <div class="activity-amount-block">
+              <strong>{{ "%.6f"|format(item.amount|abs) }} {{ item.asset }}</strong>
+              <span>{{ item.network or item.asset }}</span>
+            </div>
+
+            {% if item.withdraw_address or item.note %}
+              <div class="activity-meta-row">
+                {% if item.withdraw_address %}
+                  <span title="{{ item.withdraw_address }}">To {{ item.withdraw_address[:10] }}...{{ item.withdraw_address[-6:] }}</span>
+                {% endif %}
+                {% if item.note %}
+                  <span>{{ item.note }}</span>
+                {% endif %}
+              </div>
+            {% endif %}
+          </article>
+        {% else %}
+          <div class="activity-empty-state">No wallet transactions yet.</div>
+        {% endfor %}
+      </div>
+
+      {% if activity_page and activity_page.pages > 1 %}
+        <nav class="wallet-pagination activity-pagination" aria-label="Wallet transaction pages">
+          {% if activity_page.has_prev %}
+            <a class="pagination-button" href="{{ url_for('consumer.activity', activity_page=activity_page.prev_page, cycle_page=cycle_page.page) }}">Prev</a>
+          {% else %}
+            <span class="pagination-button is-disabled" aria-disabled="true">Prev</span>
+          {% endif %}
+          <span class="pagination-current">Page {{ activity_page.page }} of {{ activity_page.pages }}</span>
+          {% if activity_page.has_next %}
+            <a class="pagination-button" href="{{ url_for('consumer.activity', activity_page=activity_page.next_page, cycle_page=cycle_page.page) }}">Next</a>
+          {% else %}
+            <span class="pagination-button is-disabled" aria-disabled="true">Next</span>
+          {% endif %}
+        </nav>
+      {% endif %}
+    </article>
+
+    <article class="activity-panel" aria-labelledby="cycle-activity-title">
+      <div class="activity-section-heading">
+        <div>
+          <span class="card-kicker">Vault Feed</span>
+          <h2 id="cycle-activity-title">Vault Cycles</h2>
+        </div>
+        {% if cycle_page and cycle_page.total > 0 %}
+          <span class="activity-count">{{ cycle_page.start_index }}-{{ cycle_page.end_index }} of {{ cycle_page.total }}</span>
+        {% endif %}
+      </div>
+
+      <div class="activity-list">
+        {% for cycle in cycles %}
+          {% set cycle_pnl = cycle.selection_metadata.get("total_pnl_usd", 0.0) %}
+          {% set cycle_status = (cycle.execution_substatus or cycle.status or "cycle")|replace("_", " ")|title %}
+          {% set duration_hours = cycle.lock_duration_hours or 0 %}
+          <article class="activity-card cycle-activity-item">
+            <div class="activity-cycle-head">
+              <div>
+                <span class="activity-status">{{ cycle_status }}</span>
+                <strong>{{ cycle.algorithm_profile }} · {{ duration_hours }}h</strong>
+              </div>
+              <div class="activity-cycle-value">
+                <span>Value</span>
+                <strong>${{ "%.2f"|format(cycle.current_estimated_value_usd or 0.0) }}</strong>
+              </div>
+            </div>
+
+            <dl class="activity-metric-grid">
+              <div>
+                <dt>Allocation</dt>
+                <dd>{{ "%.6f"|format(cycle.deposit_amount) }} {{ cycle.deposit_asset }}</dd>
+              </div>
+              <div>
+                <dt>PnL</dt>
+                <dd class="{{ 'positive' if cycle_pnl >= 0 else 'negative' }}">${{ "%.2f"|format(cycle_pnl) }}</dd>
+              </div>
+              <div>
+                <dt>Settlement</dt>
+                <dd>{{ cycle.settlement_asset }}</dd>
+              </div>
+              <div>
+                <dt>Started</dt>
+                <dd><time datetime="{{ cycle.started_at.isoformat() }}">{{ cycle.started_at.strftime("%b %d, %H:%M") }}</time></dd>
+              </div>
+              <div>
+                <dt>Unlocks</dt>
+                <dd><time datetime="{{ cycle.unlocks_at.isoformat() }}">{{ cycle.unlocks_at.strftime("%b %d, %H:%M") }}</time></dd>
+              </div>
+            </dl>
+
+            <div class="activity-card-actions">
+              <a href="{{ url_for('consumer.cycle_detail', cycle_id=cycle.id) }}" class="activity-detail-button">Details</a>
+            </div>
+          </article>
+        {% else %}
+          <div class="activity-empty-state">No vault cycles yet.</div>
+        {% endfor %}
+      </div>
+
+      {% if cycle_page and cycle_page.pages > 1 %}
+        <nav class="wallet-pagination activity-pagination" aria-label="Vault cycle pages">
+          {% if cycle_page.has_prev %}
+            <a class="pagination-button" href="{{ url_for('consumer.activity', activity_page=activity_page.page, cycle_page=cycle_page.prev_page) }}">Prev</a>
+          {% else %}
+            <span class="pagination-button is-disabled" aria-disabled="true">Prev</span>
+          {% endif %}
+          <span class="pagination-current">Page {{ cycle_page.page }} of {{ cycle_page.pages }}</span>
+          {% if cycle_page.has_next %}
+            <a class="pagination-button" href="{{ url_for('consumer.activity', activity_page=activity_page.page, cycle_page=cycle_page.next_page) }}">Next</a>
+          {% else %}
+            <span class="pagination-button is-disabled" aria-disabled="true">Next</span>
+          {% endif %}
+        </nav>
+      {% endif %}
+    </article>
+  </div>
+</section>
+{% endblock %}

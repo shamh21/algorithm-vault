@@ -1,0 +1,15 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.6
+    hooks:
+      - id: ruff
+        args: ["--fix"]
+        files: ^(app/settings_validation\.py|app/services/(failures|worker_lease|model_registry)\.py|app/workers/|tests/test_(production_hardening_migrations|worker_and_runtime_hardening)\.py)$
+      - id: ruff-format
+        files: ^(app/settings_validation\.py|app/services/(failures|worker_lease|model_registry)\.py|app/workers/|tests/test_(production_hardening_migrations|worker_and_runtime_hardening)\.py)$
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.13.0
+    hooks:
+      - id: mypy
+        additional_dependencies: []
+        files: ^(app/settings_validation\.py|app/services/(failures|worker_lease|model_registry)\.py|app/workers/runner\.py)$

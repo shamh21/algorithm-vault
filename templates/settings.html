@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+
+{% block title %}Settings · Algorithm Vault{% endblock %}
+
+{% block content %}
+<section class="settings-shell">
+  <header class="settings-compact-header">
+    <span class="card-kicker">Settings</span>
+    <h1>Settings</h1>
+  </header>
+
+  <section class="settings-overview-grid" aria-label="Settings overview">
+    <article class="settings-panel app-mode-card">
+      <div class="settings-panel-head">
+        <div>
+          <span class="settings-label">App Mode</span>
+          <strong>{{ current_mode|replace('_', ' ')|upper }}</strong>
+        </div>
+        <span class="exchange-status-dot {{ 'status-live' if current_mode == 'live' else 'status-offline' }}" aria-hidden="true"></span>
+      </div>
+      <div class="settings-stat-row">
+        <span>Environment</span>
+        <span class="settings-mode-pill">{{ current_mode|replace('_', ' ')|upper }}</span>
+      </div>
+    </article>
+
+    <article class="settings-panel provider-overview-card">
+      <div class="settings-panel-head">
+        <div>
+          <span class="settings-label">Providers</span>
+          <strong>{{ enabled_provider_count }} Enabled</strong>
+        </div>
+        <a class="settings-icon-link" href="{{ url_for('settings.connections') }}" aria-label="Manage providers">Manage</a>
+      </div>
+      <div class="settings-stat-row">
+        <span>Saved</span>
+        <span>{{ trading_connections|length }} / {{ providers|length }}</span>
+      </div>
+    </article>
+  </section>
+
+  <section class="settings-provider-grid" aria-label="Provider status">
+    {% for card in provider_cards %}
+      <article class="provider-status-card {% if card.enabled %}is-enabled{% endif %}">
+        <div class="provider-status-main">
+          <span class="provider-mark" aria-hidden="true">{{ card.label[:1] }}</span>
+          <div>
+            <h2>{{ card.label }}</h2>
+            <span>{{ card.wallet_preview }}</span>
+          </div>
+        </div>
+        <div class="provider-status-meta">
+          <span class="connection-status status-{{ card.status }}">{{ card.status_label }}</span>
+          <span class="provider-health {{ card.health_class }}">{{ card.health_label }}</span>
+          <span class="provider-toggle-readout {{ 'positive' if card.enabled else 'muted' }}">
+            {{ "Enabled" if card.enabled else "Disabled" }}
+          </span>
+        </div>
+      </article>
+    {% endfor %}
+  </section>
+</section>
+{% endblock %}

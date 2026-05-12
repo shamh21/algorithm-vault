@@ -1,0 +1,444 @@
+{% extends "base.html" %}
+
+{% block title %}Cycle {{ cycle.id }} · Algorithm Vault{% endblock %}
+
+{% block content %}
+{% set status_label = cycle.status.replace("_", " ")|title %}
+{% set cycle_type = cycle.execution_substatus.replace("_", " ")|title %}
+{% set total_pnl = summary.get("total_pnl_usd", summary.get("realized_pnl_usd", 0) + summary.get("unrealized_pnl_usd", 0)) %}
+{% set realized_pnl = summary.get("realized_pnl_usd", 0) %}
+{% set unrealized_pnl = summary.get("unrealized_pnl_usd", 0) %}
+{% set roi_pct = summary.get("roi_pct", 0) %}
+{% set final_settlement_amount = summary.get("final_settlement_amount", cycle.final_settlement_amount or 0) %}
+{% set order_count = summary.get("order_count", summary.get("orders", [])|length) %}
+{% set cycle_status = summary.get("cycle_status", {}) %}
+{% set coherence = summary.get("coherence_summary", {}) %}
+{% set horizon_forecasts = summary.get("horizon_forecasts", []) %}
+{% set horizon_strategy_scores = summary.get("horizon_strategy_scores", []) %}
+{% set readiness = coherence.get("automationReadiness", "caution") %}
+
+<section class="cycle-detail-shell">
+  <header class="cycle-detail-header">
+    <div>
+      <span class="card-kicker">Cycle Detail</span>
+      <h1>Cycle #{{ cycle.id }}</h1>
+    </div>
+    <div class="cycle-header-pills" aria-label="Cycle metadata">
+      <span class="metric-pill metric-pill-status">{{ status_label }}</span>
+      <span class="metric-pill">{{ cycle_type }}</span>
+      <span class="metric-pill">{{ cycle.algorithm_profile }}</span>
+      <span class="metric-pill">{{ cycle.execution_mode|upper }}</span>
+    </div>
+  </header>
+
+  <article class="cycle-summary-card">
+    <div class="cycle-primary-grid">
+      <div class="cycle-hero-metric">
+        <span>Estimated Value</span>
+        <strong>${{ "%.2f"|format(summary.get("current_estimated_value_usd", cycle.current_estimated_value_usd)) }}</strong>
+      </div>
+      <div class="cycle-hero-metric">
+        <span>Final Settlement</span>
+        <strong>{{ "%.6f"|format(final_settlement_amount) }} {{ cycle.settlement_asset }}</strong>
+      </div>
+      <div class="cycle-hero-metric">
+        <span>Total PnL</span>
+        <strong class="{{ 'positive' if total_pnl >= 0 else 'negative' }}">${{ "%.2f"|format(total_pnl) }}</strong>
+      </div>
+      <div class="cycle-hero-metric">
+        <span>ROI</span>
+        <strong class="{{ 'positive' if roi_pct >= 0 else 'negative' }}">{{ "%.2f"|format(roi_pct) }}%</strong>
+      </div>
+    </div>
+
+    <div class="cycle-metric-groups">
+      <section class="cycle-metric-group" aria-labelledby="cycle-allocation-heading">
+        <h2 id="cycle-allocation-heading">Allocation</h2>
+        <dl class="cycle-metric-grid">
+          <div class="cycle-metric">
+            <dt>Allocation</dt>
+            <dd>{{ "%.6f"|format(cycle.deposit_amount) }} {{ cycle.deposit_asset }}</dd>
+          </div>
+          <div class="cycle-metric">
+            <dt>Cycle Type</dt>
+            <dd>{{ cycle_type }}</dd>
+          </div>
+          <div class="cycle-metric">
+            <dt>Lock Duration</dt>
+            <dd>{{ format_duration_seconds(cycle.lock_duration_seconds or cycle.lock_duration_hours * 3600) }}</dd>
+          </div>
+          <div class="cycle-metric">
+            <dt>Settlement Asset</dt>
+            <dd>{{ cycle.settlement_asset }}</dd>
+          </div>
+        </dl>
+      </section>
+
+      <section class="cycle-metric-group" aria-labelledby="cycle-value-heading">
+        <h2 id="cycle-value-heading">Value</h2>
+        <dl class="cycle-metric-grid">
+          <div class="cycle-metric">
+            <dt>Starting Value</dt>
+            <dd>${{ "%.2f"|format(summary.get("starting_value_usd", cycle.starting_value_usd)) }}</dd>
+          </div>
+          <div class="cycle-metric">
+            <dt>Estimated Value</dt>
+            <dd>${{ "%.2f"|format(summary.get("current_estimated_value_usd", cycle.current_estimated_value_usd)) }}</dd>
+          </div>
+          <div class="cycle-metric">
+            <dt>Final Settlement</dt>
+            <dd>{{ "%.6f"|format(final_settlement_amount) }} {{ cycle.settlement_asset }}</dd>
+          </div>
+          <div class="cycle-metric">
+            <dt>Target</dt>
+            <dd>${{ "%.2f"|format(summary.get("target_amount_usd", 0)) }}</dd>
+          </div>
+        </dl>
+      </section>
+
+      <section class="cycle-metric-group" aria-labelledby="cycle-trading-heading">
+        <h2 id="cycle-trading-heading">Trading</h2>
+        <dl class="cycle-metric-grid">
+          <div class="cycle-metric">
+            <dt>Realized PnL</dt>
+            <dd class="{{ 'positive' if realized_pnl >= 0 else 'negative' }}">${{ "%.2f"|format(realized_pnl) }}</dd>
+          </div>
+          <div class="cycle-metric">
+            <dt>Unrealized PnL</dt>
+            <dd class="{{ 'positive' if unrealized_pnl >= 0 else 'negative' }}">${{ "%.2f"|format(unrealized_pnl) }}</dd>
+          </div>
+          <div class="cycle-metric">
+            <dt>Fees</dt>
+            <dd>${{ "%.2f"|format(summary.get("fees_usd", 0)) }}</dd>
+          </div>
+          <div class="cycle-metric">
+            <dt>Max Leverage</dt>
+            <dd>{{ "%.2f"|format(summary.get("max_leverage", 1)) }}x</dd>
+          </div>
+          <div class="cycle-metric">
+            <dt>Reward/Risk</dt>
+            <dd>{{ "%.2f"|format(summary.get("risk_reward", 0)) }}</dd>
+          </div>
+          <div class="cycle-metric">
+            <dt>Slippage</dt>
+            <dd>{{ "%.2f"|format(summary.get("slippage_bps", 0)) }} bps</dd>
+          </div>
+        </dl>
+      </section>
+    </div>
+  </article>
+
+  {% if summary.get("runtime_notice") %}
+    {% set runtime_notice = summary.get("runtime_notice") %}
+    {% set notice_category = runtime_notice.get("blocker_category", "") %}
+    <section class="trade-activity-card cycle-runtime-notice">
+      <div class="cycle-section-heading">
+        <div>
+          <span class="card-kicker">Runtime Notice</span>
+          <h2>{% if notice_category == "rate_limited" %}Market data backoff active{% else %}Execution notice{% endif %}</h2>
+        </div>
+        <span class="metric-pill metric-pill-muted">{{ notice_category.replace("_", " ")|title if notice_category else "Notice" }}</span>
+      </div>
+      <div class="trade-empty-state">
+        <strong>{% if notice_category == "rate_limited" %}Provider rate limited market data or account data{% else %}{{ runtime_notice.get("kind", "Runtime notice").replace("_", " ")|title }}{% endif %}</strong>
+        {% if runtime_notice.get("message") and notice_category != "rate_limited" %}
+          <span>{{ runtime_notice.get("message") }}</span>
+        {% endif %}
+      </div>
+    </section>
+  {% endif %}
+
+  <section class="trade-activity-card vault-forecast-card" aria-labelledby="vault-cycle-forecast-heading">
+    <div class="cycle-section-heading">
+      <div>
+        <span class="card-kicker">1H10 Vault Cycle</span>
+        <h2 id="vault-cycle-forecast-heading">Market Forecast Updated</h2>
+      </div>
+      <span class="metric-pill metric-pill-muted" data-cycle-phase aria-live="polite">
+        {{ cycle_status.get("phaseLabel", "Collecting data") }}
+      </span>
+    </div>
+    <div class="vault-cycle-status-grid">
+      <div class="vault-cycle-status-item">
+        <span>Current Phase</span>
+        <strong>{{ cycle_status.get("phaseLabel", "Collecting data") }}</strong>
+      </div>
+      <div class="vault-cycle-status-item">
+        <span>Last Data Refresh</span>
+        <strong>{{ cycle_status.get("lastDataRefresh") or "Pending" }}</strong>
+      </div>
+      <div class="vault-cycle-status-item">
+        <span>Last Strategy Score</span>
+        <strong>{{ cycle_status.get("lastStrategyScore") or "Pending" }}</strong>
+      </div>
+      <div class="vault-cycle-status-item">
+        <span>Last ML Forecast</span>
+        <strong>{{ cycle_status.get("lastMlForecast") or "Pending" }}</strong>
+      </div>
+      <div class="vault-cycle-status-item">
+        <span>Last Completed Cycle</span>
+        <strong>{{ cycle_status.get("lastCompletedVaultCycle") or "Pending" }}</strong>
+      </div>
+      <div class="vault-cycle-status-item">
+        <span>Next 70-Min Evaluation</span>
+        <strong>{{ cycle_status.get("nextScheduled1h10Cycle") or "Pending" }}</strong>
+      </div>
+    </div>
+    {% if cycle_status.get("stale") or cycle_status.get("error") %}
+      <div class="vault-cycle-alert" role="status">
+        <strong>{{ "Error state" if cycle_status.get("error") else "Data stale" }}</strong>
+        <span>{{ cycle_status.get("error") or "Data stale - waiting for fresh market update" }}</span>
+      </div>
+    {% endif %}
+  </section>
+
+  <section class="trade-activity-card vault-forecast-card" aria-labelledby="next-move-heading">
+    <div class="cycle-section-heading">
+      <div>
+        <span class="card-kicker">Next-Move Forecast</span>
+        <h2 id="next-move-heading">{{ coherence.get("overallDirection", "neutral")|title }} Horizon Signal</h2>
+      </div>
+      <span class="metric-pill readiness-{{ readiness }}">{{ readiness.replace("notReady", "not ready")|title }}</span>
+    </div>
+    <div class="vault-forecast-summary-grid">
+      <div class="vault-forecast-score" aria-label="Overall forecast confidence {{ coherence.get('overallConfidence', 0) }} percent">
+        <span>Confidence</span>
+        <strong>{{ coherence.get("overallConfidence", 0) }}%</strong>
+      </div>
+      <div class="vault-forecast-score" aria-label="Strategy coherence score {{ coherence.get('coherenceScore', 0) }} percent">
+        <span>Coherence</span>
+        <strong>{{ coherence.get("coherenceScore", 0) }}%</strong>
+      </div>
+      <div class="vault-forecast-score">
+        <span>Automation Readiness</span>
+        <strong>{{ readiness.replace("notReady", "not ready")|title }}</strong>
+      </div>
+    </div>
+    <p class="vault-forecast-summary-copy">{{ coherence.get("summary") or "Market structure remains neutral while fresh data is evaluated." }}</p>
+  </section>
+
+  <section class="trade-activity-card vault-forecast-card" aria-labelledby="horizon-matrix-heading">
+    <div class="cycle-section-heading">
+      <div>
+        <span class="card-kicker">Strategy Coherence Active</span>
+        <h2 id="horizon-matrix-heading">Time Horizon Matrix</h2>
+      </div>
+      <span class="metric-pill">{{ horizon_forecasts|length }} Horizons</span>
+    </div>
+    <div class="vault-horizon-matrix" role="list">
+      {% for forecast in horizon_forecasts %}
+        {% set strategy = namespace(row={}) %}
+        {% for score in horizon_strategy_scores %}
+          {% if score.get("horizon") == forecast.get("horizon") %}
+            {% set strategy.row = score %}
+          {% endif %}
+        {% endfor %}
+        <article class="vault-horizon-card" role="listitem" data-direction="{{ forecast.get('direction', 'neutral') }}" data-quality="{{ forecast.get('dataQuality', 'insufficient') }}">
+          <div class="vault-horizon-card-head">
+            <strong>{{ forecast.get("horizon") }}</strong>
+            <span class="metric-pill">{{ forecast.get("direction", "neutral")|title }}</span>
+          </div>
+          <dl class="vault-horizon-metrics">
+            <div><dt>Confidence</dt><dd>{{ forecast.get("confidence", 0) }}%</dd></div>
+            <div><dt>Strategy Bias</dt><dd>{{ strategy.row.get("strategyBias", "neutral")|title }}</dd></div>
+            <div><dt>Risk Level</dt><dd>{{ strategy.row.get("riskLevel", forecast.get("volatilityRisk", "medium"))|title }}</dd></div>
+            <div><dt>Data Quality</dt><dd>{{ forecast.get("dataQuality", "insufficient")|title }}</dd></div>
+          </dl>
+          {% if forecast.get("derived") %}
+            <span class="vault-horizon-source">Derived from {{ forecast.get("sourceHorizon", "available") }} data</span>
+          {% endif %}
+        </article>
+      {% else %}
+        <div class="trade-empty-state">
+          <span class="metric-pill metric-pill-muted">Pending</span>
+          <strong>Waiting for horizon forecast data</strong>
+        </div>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section class="trade-activity-card vault-forecast-card" aria-labelledby="risk-notes-heading">
+    <div class="cycle-section-heading">
+      <div>
+        <span class="card-kicker">Conflict / Risk Notes</span>
+        <h2 id="risk-notes-heading">Automation Readiness: {{ readiness.replace("notReady", "Not Ready")|title }}</h2>
+      </div>
+      <span class="metric-pill">{{ coherence.get("overallDirection", "neutral")|title }}</span>
+    </div>
+    <div class="vault-risk-note-list">
+      {% for horizon in coherence.get("conflictingHorizons", []) %}
+        <span class="vault-risk-note">Higher-timeframe conflict detected: {{ horizon }}</span>
+      {% endfor %}
+      {% for note in coherence.get("riskNotes", []) %}
+        <span class="vault-risk-note">{{ note }}</span>
+      {% else %}
+        <span class="vault-risk-note">Strategy coherence active</span>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section class="trade-activity-card vault-forecast-card" aria-labelledby="explainability-heading">
+    <div class="cycle-section-heading">
+      <div>
+        <span class="card-kicker">Explainability</span>
+        <h2 id="explainability-heading">Signal Reasoning</h2>
+      </div>
+    </div>
+    <ul class="vault-explainability-list">
+      {% for item in summary.get("reasoning", []) %}
+        <li>{{ item }}</li>
+      {% else %}
+        {% for forecast in horizon_forecasts[:3] %}
+          {% for reason in forecast.get("reasoning", [])[:2] %}
+            <li>{{ reason }}</li>
+          {% endfor %}
+        {% else %}
+          <li>No forecast reasoning is available yet.</li>
+        {% endfor %}
+      {% endfor %}
+    </ul>
+  </section>
+
+  {% if summary.get("vault_cycle_engine") %}
+    <section class="trade-activity-card vault-cycle-live-card">
+      <div class="cycle-section-heading">
+        <div>
+          <span class="card-kicker">Exchange Routing</span>
+          <h2>Allocations</h2>
+        </div>
+        <span class="metric-pill">{{ summary.get("allocations", [])|length }} Exchange{{ "" if summary.get("allocations", [])|length == 1 else "s" }}</span>
+      </div>
+      <div class="vault-allocation-list">
+        {% for allocation in summary.get("allocations", []) %}
+          <article class="vault-allocation-row">
+            <div>
+              <strong>{{ allocation.provider|title }}</strong>
+              <span>{{ allocation.collateral_asset }} collateral</span>
+            </div>
+            <div class="vault-allocation-bar" aria-hidden="true">
+              <span style="width: {{ [100, allocation.allocation_weight * 100]|min }}%"></span>
+            </div>
+            <dl class="cycle-metric-grid trade-order-metrics">
+              <div class="cycle-metric"><dt>Amount</dt><dd>${{ "%.2f"|format(allocation.allocated_amount) }}</dd></div>
+              <div class="cycle-metric"><dt>Weight</dt><dd>{{ "%.1f"|format(allocation.allocation_weight * 100) }}%</dd></div>
+              <div class="cycle-metric"><dt>Score</dt><dd>{{ "%.3f"|format(allocation.risk_adjusted_score) }}</dd></div>
+              <div class="cycle-metric"><dt>Status</dt><dd>{{ allocation.status.replace("_", " ")|title }}</dd></div>
+            </dl>
+          </article>
+        {% endfor %}
+      </div>
+    </section>
+
+    <section class="trade-activity-card vault-cycle-live-card">
+      <div class="cycle-section-heading">
+        <div>
+          <span class="card-kicker">Transfers</span>
+          <h2>Funding And Settlement</h2>
+        </div>
+        <span class="metric-pill">{{ summary.get("settlement", {}).get("status", "not_started").replace("_", " ")|title }}</span>
+      </div>
+      <div class="vault-transfer-list">
+        {% for transfer in summary.get("transfers", []) %}
+          <article class="vault-transfer-row">
+            <div>
+              <strong>{{ transfer.direction.replace("_", " ")|title }}</strong>
+              <span>{{ transfer.provider|title }} · {{ transfer.asset }}{% if transfer.network %} · {{ transfer.network }}{% endif %}</span>
+            </div>
+            <span class="metric-pill">{{ transfer.status.replace("_", " ")|title }}</span>
+            <dl class="cycle-metric-grid trade-order-metrics">
+              <div class="cycle-metric"><dt>Requested</dt><dd>{{ "%.6f"|format(transfer.requested_amount) }}</dd></div>
+              <div class="cycle-metric"><dt>Confirmed</dt><dd>{{ "%.6f"|format(transfer.confirmed_amount) }}</dd></div>
+              <div class="cycle-metric"><dt>Fee</dt><dd>{{ "%.6f"|format(transfer.fee_amount) }}</dd></div>
+            </dl>
+          </article>
+        {% else %}
+          <div class="trade-empty-state">
+            <span class="metric-pill metric-pill-muted">Pending</span>
+            <strong>No transfer records</strong>
+          </div>
+        {% endfor %}
+      </div>
+    </section>
+
+    {% if summary.get("risk_events") %}
+      <section class="trade-activity-card vault-cycle-live-card">
+        <div class="cycle-section-heading">
+          <div>
+            <span class="card-kicker">Risk Monitor</span>
+            <h2>Risk Events</h2>
+          </div>
+        </div>
+        <div class="vault-transfer-list">
+          {% for event in summary.get("risk_events", []) %}
+            <article class="vault-transfer-row">
+              <div>
+                <strong>{{ event.rule_name.replace("_", " ")|title }}</strong>
+                <span>{{ event.reason }}</span>
+              </div>
+              <span class="metric-pill">{{ event.severity|title }}</span>
+            </article>
+          {% endfor %}
+        </div>
+      </section>
+    {% endif %}
+  {% endif %}
+
+  <section class="trade-activity-card">
+    <div class="cycle-section-heading">
+      <div>
+        <span class="card-kicker">Orders And Fills</span>
+        <h2>Trade Summary</h2>
+      </div>
+      <span class="metric-pill">{{ order_count }} Order{{ "" if order_count == 1 else "s" }}</span>
+    </div>
+
+    {% if summary.get("orders") %}
+      <div class="trade-activity-list">
+        {% for order in summary.get("orders", []) %}
+          {% set order_pnl = order.get("realized_pnl", 0) %}
+          {% set order_side = order.get("side", "")|lower %}
+          <article class="trade-order-card">
+            <div class="trade-order-head">
+              <div>
+                <strong>{{ order.get("symbol") }}</strong>
+                <span>{{ order.get("client_order_id") }}</span>
+              </div>
+              <div class="trade-order-tags">
+                <span class="metric-pill {{ 'buy' if order_side == 'buy' else 'sell' }}">{{ order.get("side")|title }}</span>
+                <span class="metric-pill">{{ order.get("status")|title }}</span>
+              </div>
+            </div>
+            <dl class="cycle-metric-grid trade-order-metrics">
+              <div class="cycle-metric">
+                <dt>Size</dt>
+                <dd>{{ "%.6f"|format(order.get("filled_quantity", 0)) }}</dd>
+              </div>
+              <div class="cycle-metric">
+                <dt>Average Fill</dt>
+                <dd>{{ "%.4f"|format(order.get("average_fill", 0)) }}</dd>
+              </div>
+              <div class="cycle-metric">
+                <dt>Fees</dt>
+                <dd>${{ "%.2f"|format(order.get("fees", 0)) }}</dd>
+              </div>
+              <div class="cycle-metric">
+                <dt>PnL</dt>
+                <dd class="{{ 'positive' if order_pnl >= 0 else 'negative' }}">${{ "%.2f"|format(order_pnl) }}</dd>
+              </div>
+              <div class="cycle-metric">
+                <dt>Leverage</dt>
+                <dd>{{ "%.2f"|format(order.get("leverage", 1)) }}x</dd>
+              </div>
+            </dl>
+          </article>
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="trade-empty-state">
+        <span class="metric-pill metric-pill-muted">Inactive</span>
+        <strong>No live orders</strong>
+      </div>
+    {% endif %}
+  </section>
+</section>
+{% endblock %}

@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+
+{% block title %}Home · Algorithm Vault{% endblock %}
+
+{% block content %}
+<section class="balance-home" data-provider-state-count="{{ enabled_provider_states|length }}">
+  <article class="portfolio-balance-card animate-entry" aria-labelledby="portfolio-balance-title">
+    <div class="portfolio-balance-meta">
+      <span class="card-kicker">Portfolio Balance</span>
+      <span class="portfolio-live-dot" aria-hidden="true"></span>
+    </div>
+    <h1 id="portfolio-balance-title" class="portfolio-balance-value">${{ "%.2f"|format(portfolio_total) }}</h1>
+  </article>
+</section>
+<script type="application/json" id="enabled-provider-states">{{ enabled_provider_states|tojson }}</script>
+{% endblock %}

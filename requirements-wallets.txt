@@ -1,0 +1,7 @@
+# Optional non-EVM wallet signing SDKs.
+-r requirements.txt
+
+bitcoinlib==0.7.8
+solders==0.27.1
+solana==0.36.11
+xrpl-py==4.5.0

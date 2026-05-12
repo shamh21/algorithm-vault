@@ -1,0 +1,5 @@
+# Complete non-conflicting local dependency set.
+# Includes the default runtime, pytest, ML, PyTorch, and wallet SDKs.
+# Install requirements-exchanges.txt separately for dYdX-specific work because
+# dydx-v4-client and solana currently require incompatible httpx ranges.
+-r requirements-dev.txt

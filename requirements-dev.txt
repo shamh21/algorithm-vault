@@ -1,0 +1,13 @@
+# Local test/development environment for repo-wide pytest.
+# dYdX is intentionally excluded because its SDK pins httpx<0.28 while
+# the Solana wallet SDK requires httpx>=0.28.
+-r requirements.txt
+-r requirements-ml.txt
+-r requirements-torch.txt
+-r requirements-wallets.txt
+
+pytest==9.0.3
+coverage[toml]>=7.6,<8
+mypy>=1.13,<2
+pre-commit>=4,<5
+ruff>=0.8,<1

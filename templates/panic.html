@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+
+{% block title %}Panic Controls - Algorithm Vault{% endblock %}
+
+{% block content %}
+<section id="panic-app" class="panic-shell" aria-labelledby="panic-title">
+  <article class="panic-console animate-entry">
+    <header class="panic-header">
+      <div class="panic-title-block">
+        <span class="panic-kicker">Emergency Control</span>
+        <h1 id="panic-title">Panic Controls</h1>
+      </div>
+
+      <div class="panic-state-rail" aria-label="Current safety state">
+        <div class="panic-state-pill">
+          <span>Current Mode</span>
+          <strong>{{ mode|upper }}</strong>
+        </div>
+        <div class="panic-state-pill {{ 'is-danger' if panic_lock else 'is-clear' }}">
+          <span>Panic Lock</span>
+          <strong>{{ "ON" if panic_lock else "OFF" }}</strong>
+        </div>
+      </div>
+    </header>
+
+    <form class="panic-action-form" method="post" action="{{ url_for('panic.activate') }}" data-panic-form>
+      {{ csrf_input()|safe }}
+      <button type="submit" class="panic-action-button" id="panic-btn" aria-describedby="panic-submit-status">
+        <span class="panic-button-mark" aria-hidden="true">!</span>
+        <span class="panic-button-copy">
+          <strong>Activate Panic</strong>
+          <small>Lock trading now</small>
+        </span>
+      </button>
+      <p class="panic-submit-status" id="panic-submit-status" role="status" aria-live="polite" hidden>
+        Emergency command submitting
+      </p>
+    </form>
+  </article>
+
+  <section class="panic-audit-panel animate-entry" aria-labelledby="panic-audit-title">
+    <header class="panic-section-header">
+      <span class="panic-kicker">Audit Feed</span>
+      <h2 id="panic-audit-title">Recent Panic Events</h2>
+    </header>
+
+    {% if audits %}
+      <div class="panic-timeline" role="list">
+      {% for audit in audits %}
+        <article class="panic-event" role="listitem">
+          <span class="panic-event-marker" aria-hidden="true"></span>
+          <div class="panic-event-body">
+            <div class="panic-event-meta">
+              <time datetime="{{ audit.created_at.isoformat() }}">
+                {{ audit.created_at.strftime("%Y-%m-%d %H:%M") }}
+              </time>
+              <span class="panic-event-badge">{{ audit.action|replace("_", " ")|upper }}</span>
+            </div>
+            <p>{{ audit.message }}</p>
+          </div>
+        </article>
+      {% endfor %}
+      </div>
+    {% else %}
+      <div class="panic-empty-state">
+        <span class="panic-empty-mark" aria-hidden="true">-</span>
+        <strong>No panic events</strong>
+        <span>Audit feed is clear</span>
+      </div>
+    {% endif %}
+  </section>
+</section>
+{% endblock %}
+
+{% block page_scripts %}
+<script>
+  (function () {
+    const form = document.querySelector('[data-panic-form]');
+    const btn = document.getElementById('panic-btn');
+    const status = document.getElementById('panic-submit-status');
+
+    if (form && btn) {
+      form.addEventListener('submit', function () {
+        btn.disabled = true;
+        btn.classList.add('is-loading');
+        btn.setAttribute('aria-busy', 'true');
+        btn.querySelector('strong').textContent = 'Activating...';
+        if (status) status.hidden = false;
+      });
+    }
+  })();
+</script>
+{% endblock %}
