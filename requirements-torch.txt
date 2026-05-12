@@ -1,0 +1,4 @@
+# Optional PyTorch dependencies for pytorch_* model families.
+-r requirements-ml.txt
+
+torch==2.11.0

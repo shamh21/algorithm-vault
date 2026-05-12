@@ -32,6 +32,8 @@ def validate_csrf_request() -> None:
 
     if not bool(current_app.config.get("WTF_CSRF_ENABLED", True)):
         return
+    if getattr(request, "routing_exception", None) is not None:
+        return
     if request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
         return
 

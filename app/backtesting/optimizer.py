@@ -3491,7 +3491,6 @@ class StrategyOptimizer:
         duration_bucket = EnhancedEnsembleAllocator.duration_bucket(optimizer_config.lock_duration_hours or 1)
         cap_usdc = self._duration_config_cap("HIGH_UPSIDE_LIVE_CAP_USDC_BY_DURATION", duration_bucket)
         cap_pct = self._duration_config_cap("HIGH_UPSIDE_LIVE_CAP_PCT_BY_DURATION", duration_bucket)
-        max_notional = float(self.config.get("HIGH_UPSIDE_MAX_POSITION_NOTIONAL_USD", 0.0) or 0.0)
         max_daily_loss = float(self.config.get("HIGH_UPSIDE_MAX_DAILY_LOSS_USDC", 0.0) or 0.0)
         blockers: list[str] = []
         if not bool(optimizer_config.high_upside_profile):
@@ -3502,8 +3501,6 @@ class StrategyOptimizer:
             blockers.append("HIGH_UPSIDE_LIVE_ELIGIBLE=false")
         if bool(Setting.get_json("high_upside_live_disabled", False)):
             blockers.append("high_upside_auto_disabled")
-        if max_notional <= 0:
-            blockers.append("HIGH_UPSIDE_MAX_POSITION_NOTIONAL_USD_missing")
         if max_daily_loss <= 0:
             blockers.append("HIGH_UPSIDE_MAX_DAILY_LOSS_USDC_missing")
         if cap_usdc <= 0:
@@ -3530,7 +3527,6 @@ class StrategyOptimizer:
             "provider": normalize_provider(optimizer_config.provider),
             "collateral_asset": provider_collateral_asset(optimizer_config.provider),
             "caps": {
-                "max_position_notional_usd": max_notional,
                 "max_daily_loss_usdc": max_daily_loss,
                 "duration_cap_usdc": cap_usdc,
                 "duration_cap_pct": cap_pct,

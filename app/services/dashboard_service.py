@@ -45,6 +45,69 @@ class DashboardPayloadService:
             "last_assembly_ms": 0.0,
         }
 
+    def get_shell_payload(
+        self,
+        *,
+        user: Any,
+        mode: str,
+        market_mode: str,
+        risk_engine: Any,
+        trading_connections: Any,
+        wallet_summary: Any,
+    ) -> dict[str, Any]:
+        """Return the lightweight authenticated dashboard shell payload."""
+
+        self.metrics["requests"] += 1
+        started_at = time.perf_counter()
+        account_payload = self._get_cached_segment(
+            self._account_segment_key(user, mode, False),
+            "DASHBOARD_ACCOUNT_SEGMENT_TTL_SECONDS",
+            "DASHBOARD_ACCOUNT_SEGMENT_STALE_SECONDS",
+            lambda: self._cached_account_payload(user, trading_connections, wallet_summary, False),
+            "dashboard-account",
+        )
+        active_connection = trading_connections.active_tradable_connection(user.id) if user else None
+        risk_status = risk_engine.status(
+            mode,
+            user_id=user.id if user else None,
+            trading_connection_id=active_connection.id if active_connection else None,
+        )
+        positions = self._limit_rows(account_payload.get("positions"), 30)
+        recent_trades = self._limit_rows(account_payload.get("recent_trades"), 30)
+        open_orders = self._limit_rows(account_payload.get("open_orders"), 30)
+        strategy_rankings = StrategyRanking.query.order_by(
+            StrategyRanking.score.desc(),
+            StrategyRanking.created_at.desc(),
+        ).limit(6).all()
+        strategy_runs = StrategyRun.query.order_by(StrategyRun.created_at.desc()).limit(6).all()
+        payload = {
+            "mode": mode,
+            "modes": ["live", "paper", "shadow_live", "paper_shadow"],
+            "balances": self._limit_rows(account_payload.get("balances"), 30),
+            "positions": positions,
+            "open_orders": open_orders,
+            "recent_trades": recent_trades,
+            "pnl": _pnl(mode, None, positions, recent_trades),
+            "paper_equity_curve": [],
+            "risk_status": risk_status,
+            "strategy_runs": [self._serialize_strategy_run(run) for run in strategy_runs],
+            "strategy_definitions": [],
+            "strategy_rankings": [self._serialize_ranking(row) for row in strategy_rankings],
+            "latest_feature_snapshot": {},
+            "external_adapter_status": {},
+            "pattern_model_status": {},
+            "shadow_observations": [],
+            "validations": [],
+            "local_orders": [],
+            "audits": [],
+            "alerts": self._limit_rows(account_payload.get("alerts"), 3),
+            "recent_risk": [],
+            "market_summary": [],
+            "shell": True,
+        }
+        self.metrics["last_assembly_ms"] = (time.perf_counter() - started_at) * 1000
+        return payload
+
     def get_payload(
         self,
         *,
@@ -97,10 +160,10 @@ class DashboardPayloadService:
         payload = {
             "mode": mode,
             "modes": static_payload["modes"],
-            "balances": account_payload["balances"],
-            "positions": trade_payload["positions"],
-            "open_orders": trade_payload["open_orders"],
-            "recent_trades": trade_payload["recent_trades"],
+            "balances": self._limit_rows(account_payload["balances"], 150),
+            "positions": self._limit_rows(trade_payload["positions"], 150),
+            "open_orders": self._limit_rows(trade_payload["open_orders"], 150),
+            "recent_trades": self._limit_rows(trade_payload["recent_trades"], 150),
             "pnl": pnl,
             "paper_equity_curve": static_payload["paper_equity_curve"],
             "risk_status": risk_status,
@@ -128,6 +191,37 @@ class DashboardPayloadService:
             ",".join(("account", "trades", "static")),
         )
         return payload
+
+    def activity_payload(self, *, limit: int = 30, cursor: str | None = None) -> dict[str, Any]:
+        """Return a bounded mixed dashboard activity feed."""
+
+        page_size = max(1, min(int(limit or 30), 150))
+        try:
+            offset = max(0, int(cursor or 0))
+        except (TypeError, ValueError):
+            offset = 0
+        scan_limit = min(150, offset + page_size + 1)
+        items: list[dict[str, Any]] = []
+        audits = AuditLog.query.order_by(AuditLog.created_at.desc()).limit(scan_limit).all()
+        orders = Order.query.order_by(Order.created_at.desc()).limit(scan_limit).all()
+        risk_events = RiskEvent.query.order_by(RiskEvent.created_at.desc()).limit(scan_limit).all()
+        for item in audits:
+            items.append(self._serialize_activity_audit(item))
+        for item in orders:
+            items.append(self._serialize_activity_order(item))
+        for item in risk_events:
+            items.append(self._serialize_activity_risk(item))
+        items.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
+        items = items[:150]
+        page = items[offset : offset + page_size]
+        next_offset = offset + len(page)
+        return {
+            "items": page,
+            "count": len(page),
+            "next_cursor": str(next_offset) if next_offset < len(items) else None,
+            "has_more": next_offset < len(items),
+            "updated_at": time.time(),
+        }
 
     def get_cache_stats(self) -> dict[str, Any]:
         with self._lock:
@@ -322,11 +416,11 @@ class DashboardPayloadService:
         alerts.extend([str(item) for item in (cached.get("alerts") or [])])
 
         return {
-            "balances": list(cached.get("balances") or []),
-            "positions": list(cached.get("positions") or []),
-            "recent_trades": list(cached.get("recent_fills") or []),
-            "open_orders": list(cached.get("open_orders") or []),
-            "alerts": alerts,
+            "balances": self._limit_rows(cached.get("balances"), 150),
+            "positions": self._limit_rows(cached.get("positions"), 150),
+            "recent_trades": self._limit_rows(cached.get("recent_fills"), 150),
+            "open_orders": self._limit_rows(cached.get("open_orders"), 150),
+            "alerts": self._limit_rows(alerts, 150),
         }
 
     def _cached_trade_payload(self, account_payload: dict[str, Any]) -> dict[str, Any]:
@@ -481,6 +575,51 @@ class DashboardPayloadService:
             "severity": payload.get("severity", "warning"),
             "created_at": item.created_at.isoformat() if item.created_at else None,
         }
+
+    @staticmethod
+    def _serialize_activity_audit(item: AuditLog) -> dict[str, Any]:
+        return {
+            "id": f"audit:{item.id}",
+            "kind": "audit",
+            "title": str(item.action or "Audit event").replace("_", " ").title(),
+            "detail": item.message,
+            "severity": "info",
+            "created_at": item.created_at.isoformat() if item.created_at else None,
+        }
+
+    @staticmethod
+    def _serialize_activity_order(item: Order) -> dict[str, Any]:
+        return {
+            "id": f"order:{item.id}",
+            "kind": "order",
+            "title": f"{str(item.side or '').upper()} {item.symbol}",
+            "detail": f"{item.status} {float(item.quantity or 0.0):.4f} @ {float(item.limit_price or 0.0):.4f}",
+            "severity": "trade",
+            "created_at": item.created_at.isoformat() if item.created_at else None,
+        }
+
+    @staticmethod
+    def _serialize_activity_risk(item: RiskEvent) -> dict[str, Any]:
+        payload = dict(item.payload or {})
+        return {
+            "id": f"risk:{item.id}",
+            "kind": "risk",
+            "title": str(item.rule_name or "Risk event").replace("_", " ").title(),
+            "detail": item.reason,
+            "severity": str(payload.get("severity", "warning") or "warning"),
+            "created_at": item.created_at.isoformat() if item.created_at else None,
+        }
+
+    @staticmethod
+    def _limit_rows(rows: Any, limit: int) -> list[Any]:
+        if rows is None:
+            return []
+        if isinstance(rows, list):
+            return rows[: max(0, int(limit or 0))]
+        try:
+            return list(rows)[: max(0, int(limit or 0))]
+        except TypeError:
+            return []
 
     @staticmethod
     def _safe_market_summary(market_data: Any, market_mode: str, config: dict[str, Any]) -> list[dict[str, Any]]:

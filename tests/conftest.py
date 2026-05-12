@@ -17,7 +17,6 @@ def app():
             "DEFAULT_PAPER_BALANCE": 1_000.0,
             "PAPER_BALANCE_MIN": 0.0,
             "PAPER_BALANCE_MAX": 1_000_000.0,
-            "MAX_POSITION_NOTIONAL": 10_000.0,
             "MAX_DAILY_LOSS_USDC": 100.0,
             "EXPLICIT_LIVE_CONFIRMED": False,
             "SECONDARY_CONFIRMATION": False,

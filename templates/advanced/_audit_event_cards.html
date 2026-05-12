@@ -1,0 +1,44 @@
+{% for audit in audit_events %}
+  {% if loop.changed(audit.date_label) %}
+    <div class="risk-audit-date" role="separator">{{ audit.date_label }}</div>
+  {% endif %}
+  <article class="risk-audit-card risk-audit-{{ audit.severity }}" role="listitem" data-audit-card data-audit-id="{{ audit.id }}">
+    <div class="risk-audit-main">
+      <div class="risk-audit-icon risk-audit-icon-{{ audit.icon_key }}" aria-hidden="true">
+        <span></span>
+      </div>
+      <div class="risk-audit-copy">
+        <div class="risk-audit-topline">
+          <h3>{{ audit.title }}</h3>
+          <span class="risk-severity-badge risk-severity-{{ audit.severity }}">{{ audit.tone_label }}</span>
+          <time datetime="{{ audit.created_iso }}">{{ audit.time_label }}</time>
+        </div>
+        <p>{{ audit.message }}</p>
+        <div class="risk-audit-meta">
+          <span>{{ audit.provider_badge }}</span>
+          {% for chip in audit.chips[:3] %}
+            <span>{{ chip }}</span>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+
+    <div class="risk-audit-actions" aria-label="Audit event actions">
+      <button type="button" class="risk-icon-button" data-copy-diagnostics data-copy-text="{{ audit.copy_text|e }}" aria-label="Copy diagnostics">
+        <span aria-hidden="true">C</span>
+      </button>
+      <button type="button" class="risk-icon-button" data-toggle-diagnostics aria-expanded="false" aria-label="Toggle diagnostics">
+        <span aria-hidden="true">+</span>
+      </button>
+    </div>
+
+    <div class="risk-diagnostics-drawer" data-diagnostics hidden>
+      <pre>{{ audit.diagnostics_json }}</pre>
+    </div>
+  </article>
+{% else %}
+  <div class="risk-audit-empty">
+    <strong>No audit events</strong>
+    <span>Risk audit timeline is clear.</span>
+  </div>
+{% endfor %}

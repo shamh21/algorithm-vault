@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
 from typing import Any
 
 import pyotp
@@ -1143,28 +1142,20 @@ def test_live_aggressive_leverage_cap_blocks_over_cap_orders(app) -> None:
     assert decision.rule_name == "aggressive_live_leverage_cap"
 
 
-def test_admin_opportunity_lab_renders_liquid_universe(app) -> None:
+def test_admin_backtests_no_longer_renders_opportunity_lab(app) -> None:
     app.config["DYNAMIC_UNIVERSE_ENABLED"] = True
     admin, secret = _create_user(username="opportunity-admin", role="admin")
-    app.extensions["services"]["market_universe"].liquid_universe = lambda mode, timeframe: [
-        SimpleNamespace(
-            as_dict=lambda: {
-                "symbol": "BTC",
-                "source": "dynamic_liquid",
-                "mid": 100.0,
-                "spread_bps": 5.0,
-                "liquidity_usd": 100_000.0,
-                "volatility_pct": 0.8,
-                "score": 1.5,
-            }
-        )
-    ]
+
+    def fail_liquid_universe(*args, **kwargs):
+        raise AssertionError("Backtests index should not load opportunity diagnostics.")
+
+    app.extensions["services"]["market_universe"].liquid_universe = fail_liquid_universe
 
     client = app.test_client()
     _login(client, admin.username, secret)
     response = client.get("/admin/backtests")
 
     assert response.status_code == 200
-    assert b"Opportunity Lab" in response.data
-    assert b"dynamic_liquid" in response.data
-    assert b"BTC" in response.data
+    assert b"Paper Vault" in response.data
+    assert b"Opportunity Lab" not in response.data
+    assert b"dynamic_liquid" not in response.data

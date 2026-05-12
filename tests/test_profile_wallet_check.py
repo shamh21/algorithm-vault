@@ -8,7 +8,6 @@ import pyotp
 from app.auth import encrypt_totp_secret, password_hash
 from app.extensions import db
 from app.models import TradingConnection, User, VaultCycle, WalletBalance, WalletTransaction
-from app.services.hyperliquid_client import ClientSnapshot
 
 
 def _create_user(username: str = "sufyanh", *, role: str = "admin") -> User:
@@ -129,21 +128,17 @@ def test_wallet_and_dashboard_pages_do_not_require_fresh_provider_snapshot(app) 
     assert wallet.status_code == 200
     assert dashboard.status_code == 200
     assert dashboard_api.status_code == 200
-    assert b"Refresh Snapshot" in wallet.data
+    assert b"Refresh Snapshot" not in wallet.data
+    assert b"Exchange Margin" not in wallet.data
 
 
-def test_wallet_exchange_snapshot_refresh_is_explicit_and_cached(app) -> None:
+def test_wallet_exchange_snapshot_refresh_param_no_longer_renders_margin(app) -> None:
     user = _create_user()
     _create_verified_connection(user)
     db.session.add(WalletBalance(user_id=user.id, asset="USDC", available_balance=10.0, estimated_usd_value=10.0))
     db.session.commit()
-    app.extensions["services"]["trading_connections"].account_snapshot = lambda user_id, mode, connection_id=None: ClientSnapshot(
-        mode,
-        [{"asset": "USDT", "type": "margin", "value": 0.0000000065, "withdrawable": 0.0000000065}],
-        [],
-        [],
-        [],
-        [],
+    app.extensions["services"]["trading_connections"].account_snapshot = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("wallet page must not refresh exchange margin snapshots")
     )
     client = app.test_client()
     _login(client, user)
@@ -151,5 +146,5 @@ def test_wallet_exchange_snapshot_refresh_is_explicit_and_cached(app) -> None:
     response = client.get("/wallet?refresh_exchange=1")
 
     assert response.status_code == 200
-    assert b"Exchange Margin" in response.data
-    assert b"0.0000000065" in response.data
+    assert b"Exchange Margin" not in response.data
+    assert b"Refresh Snapshot" not in response.data

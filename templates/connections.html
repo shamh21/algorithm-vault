@@ -3,61 +3,92 @@
 {% block title %}Trading Connections · Algorithm Vault{% endblock %}
 
 {% block content %}
-<section class="page-heading">
-  <span class="card-kicker">Live Trading</span>
-  <h1>Easy Connect</h1>
-  <p class="muted">Connect, verify, and activate a provider before live wallet, vault, or order execution can run.</p>
-</section>
-
-<section class="easy-connect-layout">
-  <article class="connection-wizard">
-    <div class="wizard-steps" aria-label="Connection setup steps">
-      <span class="is-complete">1 Provider</span>
-      <span class="{% if selected_spec %}is-complete{% endif %}">2 Credentials</span>
-      <span class="{% if selected_connection %}is-complete{% endif %}">3 Safety</span>
-      <span class="{% if selected_connection and selected_connection.verification_status == 'verified' %}is-complete{% endif %}">4 Verify</span>
+<section class="settings-shell connections-shell">
+  <header class="settings-compact-header connections-header">
+    <div>
+      <span class="card-kicker">Live Trading</span>
+      <h1>Providers</h1>
     </div>
+    <a class="settings-icon-link" href="{{ url_for('settings.index') }}">Settings</a>
+  </header>
 
-    <section class="wizard-section">
-      <div class="section-heading">
-        <div>
-          <span class="card-kicker">Step 1</span>
-          <h2>Choose Provider</h2>
-        </div>
-      </div>
-      <div class="provider-grid">
-        {% for key, spec in providers.items() %}
-          {% set existing = trading_connections|selectattr("provider", "equalto", key)|list|first %}
-          <a class="provider-tile {% if selected_provider == key %}is-selected{% endif %}" href="{{ url_for('settings.connection_provider', provider=key) }}">
-            <span class="provider-title">{{ spec.label }}</span>
-            <span class="provider-summary">{{ spec.summary }}</span>
-            <span class="status-badge {{ 'positive-badge' if spec.tradable else 'muted-badge' }}">
-              {{ "Live Ready" if spec.tradable else "Draft Only" }}
+  <section class="connection-summary-bar" aria-label="Provider summary">
+    <div>
+      <span class="settings-label">Enabled</span>
+      <strong>{{ enabled_provider_count }}</strong>
+    </div>
+    <div>
+      <span class="settings-label">Saved</span>
+      <strong>{{ trading_connections|length }}</strong>
+    </div>
+    <div>
+      <span class="settings-label">Available</span>
+      <strong>{{ providers|length }}</strong>
+    </div>
+  </section>
+
+  <section class="provider-management-grid" aria-label="Provider management">
+    {% for card in provider_cards %}
+      {% set connection = card.connection %}
+      <article class="provider-management-card {% if card.enabled %}is-enabled{% endif %} {% if selected_provider == card.key %}is-selected{% endif %}">
+        <div class="provider-card-head">
+          <a class="provider-title-link" href="{{ url_for('settings.connection_provider', provider=card.key) }}">
+            <span class="provider-mark" aria-hidden="true">{{ card.label[:1] }}</span>
+            <span>
+              <strong>{{ card.label }}</strong>
+              <small>{{ card.wallet_preview }}</small>
             </span>
-            {% if existing %}
-              <small>Saved · {{ existing.verification_status.replace("_", " ")|title }}</small>
-            {% endif %}
           </a>
-        {% endfor %}
-      </div>
-    </section>
-
-    <section class="wizard-section">
-      <div class="section-heading">
-        <div>
-          <span class="card-kicker">Step 2</span>
-          <h2>{{ selected_spec.label }} Setup</h2>
+          <span class="provider-toggle-readout {{ 'positive' if card.enabled else 'muted' }}">
+            {{ "Enabled" if card.enabled else "Disabled" }}
+          </span>
         </div>
+
+        <div class="provider-card-badges">
+          <span class="connection-status status-{{ card.status }}">{{ card.status_label }}</span>
+          <span class="provider-health {{ card.health_class }}">{{ card.health_label }}</span>
+          <span class="status-badge {{ 'positive-badge' if card.tradable else 'muted-badge' }}">
+            {{ "Live Ready" if card.tradable else "Draft" }}
+          </span>
+        </div>
+
+        <div class="provider-card-actions">
+          <a class="button-link secondary" href="{{ url_for('settings.connection_provider', provider=card.key) }}">
+            {{ "Edit" if connection else "Set Up" }}
+          </a>
+          {% if connection %}
+            {% if card.can_disable %}
+              <form method="post" action="{{ url_for('settings.disable_connection', connection_id=connection.id) }}" data-disable-on-submit>
+                {{ csrf_input()|safe }}
+                <button type="submit" class="provider-switch is-on" role="switch" aria-checked="true" data-loading-label="Disabling...">Disable</button>
+              </form>
+            {% else %}
+              <form method="post" action="{{ url_for('settings.activate_connection', connection_id=connection.id) }}" data-disable-on-submit>
+                {{ csrf_input()|safe }}
+                <button type="submit" class="provider-switch" role="switch" aria-checked="false" {% if not card.can_enable %}disabled{% endif %} data-loading-label="Enabling...">Enable</button>
+              </form>
+            {% endif %}
+          {% endif %}
+        </div>
+      </article>
+    {% endfor %}
+  </section>
+
+  <section class="connection-editor-grid">
+    <article class="connection-editor-card">
+      <div class="section-heading compact-heading">
+        <div>
+          <span class="card-kicker">Credentials</span>
+          <h2>{{ selected_spec.label }}</h2>
+        </div>
+        <span class="status-badge {{ 'positive-badge' if selected_spec.tradable else 'muted-badge' }}">
+          {{ selected_spec.connection_type.replace("_", " ")|title }}
+        </span>
       </div>
-      <p class="muted">{{ selected_spec.setup_hint }}</p>
-      {% if selected_spec.help_steps %}
-        <ol class="provider-steps">
-          {% for step in selected_spec.help_steps %}
-            <li>{{ step }}</li>
-          {% endfor %}
-        </ol>
-      {% endif %}
-      <form method="post" action="{{ url_for('settings.save_connection') }}" class="form-grid" data-disable-on-submit>
+
+      <p class="compact-muted">{{ selected_spec.setup_hint }}</p>
+
+      <form method="post" action="{{ url_for('settings.save_connection') }}" class="form-grid compact-form" data-disable-on-submit>
         {{ csrf_input()|safe }}
         <input type="hidden" name="provider" value="{{ selected_spec.key }}">
         <input type="hidden" name="connection_type" value="{{ selected_spec.connection_type }}">
@@ -70,177 +101,94 @@
               type="{{ field.type }}"
               name="{{ field.name }}"
               autocomplete="off"
-              placeholder="{{ 'Saved - leave blank to keep current value' if saved_secret else field.placeholder }}"
+              placeholder="{{ 'Saved - leave blank' if saved_secret else field.placeholder }}"
               value="{{ selected_connection.wallet_address if selected_connection and field.name == 'wallet_address' else metadata_value }}"
               {% if field.required and not saved_secret and not (selected_connection and field.name == 'wallet_address' and selected_connection.wallet_address) and not metadata_value %}required{% endif %}
             >
           </label>
         {% endfor %}
 
-        <div class="risk-note">
-          <strong>Never enter seed phrases.</strong>
-          <span>Exchange API secrets are encrypted. For Hyperliquid, use an API wallet/agent secret only, not your recovery phrase or main wallet seed.</span>
+        <div class="credential-note">
+          <strong>Seed phrases are blocked.</strong>
+          <span>Use limited API or delegated trading credentials only.</span>
         </div>
         <button type="submit" class="primary" data-loading-label="Saving...">
           {{ "Save Draft" if not selected_spec.tradable else "Save Connection" }}
         </button>
       </form>
-    </section>
+    </article>
 
-    <section class="wizard-section">
-      <div class="section-heading">
+    <aside class="connection-editor-card connection-state-card">
+      <div class="section-heading compact-heading">
         <div>
-          <span class="card-kicker">Step 3</span>
-          <h2>Safety Review</h2>
+          <span class="card-kicker">State</span>
+          <h2>Verify & Enable</h2>
         </div>
       </div>
-      <ul class="compact-list">
-        <li>Only verified live-ready connections can become active for execution.</li>
-        <li>Binance, KuCoin, and dYdX target perpetuals only in this app.</li>
-        <li>Uniswap requires approved wallet delegation, expiry, notional cap, and daily loss cap.</li>
-        <li>Withdrawals remain disabled unless explicitly enabled in configuration.</li>
-      </ul>
-      {% if selected_spec.capabilities %}
-        <div class="capability-row">
-          {% for capability in selected_spec.capabilities %}
-            <span class="status-badge positive-badge">{{ capability }}</span>
-          {% endfor %}
-        </div>
-      {% endif %}
-    </section>
-  </article>
 
-  <aside class="connection-status-panel">
-    <span class="card-kicker">Step 4</span>
-    <h2>Verify And Activate</h2>
-    {% if selected_connection %}
-      {% set status = selected_connection.verification_status or 'needs_verification' %}
-      {% set selected_can_activate = selected_spec.tradable and status == 'verified' %}
-      <dl class="cycle-details compact-details">
-        <div><dt>Provider</dt><dd>{{ selected_spec.label }}</dd></div>
-        <div><dt>Status</dt><dd><span class="connection-status status-{{ status }}">{{ status.replace("_", " ")|title }}</span></dd></div>
-        <div><dt>Active</dt><dd>{{ "Yes" if selected_connection.is_active else "No" }}</dd></div>
-        <div><dt>Wallet</dt><dd>{{ selected_connection.wallet_address[:18] ~ "..." if selected_connection.wallet_address else "Not set" }}</dd></div>
-        {% for field in selected_spec.fields if field.storage == 'metadata' and not field.sensitive %}
-          {% set metadata_value = selected_connection.provider_metadata.get(field.name) %}
-          {% if metadata_value %}
-            <div><dt>{{ field.label }}</dt><dd>{{ metadata_value }}</dd></div>
-          {% endif %}
-        {% endfor %}
-        <div><dt>Last Verified</dt><dd>{{ selected_connection.last_verified_at.strftime("%Y-%m-%d %H:%M") if selected_connection.last_verified_at else "Never" }}</dd></div>
-      </dl>
-      {% if selected_connection.last_verification_error %}
-        <div class="risk-note danger-note">
-          <strong>Action needed</strong>
-          <span>{{ selected_connection.last_verification_error }}</span>
-        </div>
-      {% endif %}
-      {% if selected_connection.provider == 'kucoin' %}
-        <div class="risk-note">
-          <strong>KuCoin IP whitelist</strong>
-          <span>Live vault cycles require this app's current egress IP to match the KuCoin API key whitelist. Use a stable VPS, VPN, or static egress IP before relying on live cycles.</span>
-        </div>
-      {% endif %}
-      {% if selected_connection_health %}
-        <div class="risk-note {% if not selected_connection_health.get('can_trade') %}danger-note{% endif %}">
-          <strong>Latest live access check</strong>
-          <span>
-            {{ "Can trade" if selected_connection_health.get("can_trade") else "Blocked" }}
-            · {{ selected_connection_health.get("last_checked_at", "not checked") }}
-            {% if selected_connection_health.get("client_ip") %}
-              · client IP {{ selected_connection_health.get("client_ip") }}
-            {% endif %}
-            {% if selected_connection_health.get("failure_reason") %}
-              · {{ selected_connection_health.get("failure_reason") }}
-            {% endif %}
-          </span>
-        </div>
-        {% set health_failure = selected_connection_health.get("failure_reason", "")|lower %}
-        {% if "cannot be decrypted" in health_failure or "totp_encryption_key" in health_failure %}
-          <div class="risk-note danger-note">
-            <strong>Saved credentials need re-entry</strong>
-            <span>The active connection was encrypted under a different key than this running app is using. Keep the current TOTP_ENCRYPTION_KEY, then delete or re-save this connection with every required secret filled in.</span>
+      {% if selected_connection %}
+        {% set status = selected_connection.verification_status or 'needs_verification' %}
+        {% set selected_can_enable = selected_spec.tradable and status == 'verified' and not selected_connection.is_active %}
+        <dl class="cycle-details compact-details">
+          <div><dt>Provider</dt><dd>{{ selected_spec.label }}</dd></div>
+          <div><dt>Status</dt><dd><span class="connection-status status-{{ status }}">{{ status.replace("_", " ")|title }}</span></dd></div>
+          <div><dt>Enabled</dt><dd>{{ "Yes" if selected_connection.is_active else "No" }}</dd></div>
+          <div><dt>Wallet</dt><dd>{{ selected_connection.wallet_address[:18] ~ "..." if selected_connection.wallet_address else "Not set" }}</dd></div>
+          <div><dt>Last Verified</dt><dd>{{ selected_connection.last_verified_at.strftime("%Y-%m-%d %H:%M") if selected_connection.last_verified_at else "Never" }}</dd></div>
+        </dl>
+
+        {% if selected_connection.last_verification_error %}
+          <div class="credential-note danger-note">
+            <strong>Action needed</strong>
+            <span>{{ selected_connection.last_verification_error }}</span>
           </div>
         {% endif %}
-      {% endif %}
-      <div class="connection-actions">
-        {% if selected_spec.verification_supported %}
-          <form method="post" action="{{ url_for('settings.verify_connection', connection_id=selected_connection.id) }}" data-disable-on-submit>
-            {{ csrf_input()|safe }}
-            <button type="submit" class="secondary" data-loading-label="Verifying...">Verify Connection</button>
-          </form>
-        {% else %}
-          <button type="button" class="secondary" disabled>Verification Not Available</button>
-        {% endif %}
-        <form method="post" action="{{ url_for('settings.activate_connection', connection_id=selected_connection.id) }}" data-disable-on-submit>
-          {{ csrf_input()|safe }}
-          <button type="submit" class="primary" {% if not selected_can_activate %}disabled{% endif %} data-loading-label="Activating...">Activate</button>
-        </form>
-      </div>
-      {% if selected_connection.is_active and selected_can_activate %}
-        <a class="button-link primary" href="{{ url_for('consumer.home') }}">Continue</a>
-      {% endif %}
-    {% else %}
-      <p class="muted">Save provider details first. Verification and activation controls will appear here.</p>
-      <div class="empty-state">
-        <span class="coin-icon" aria-hidden="true">C</span>
-        <strong>No saved {{ selected_spec.label }} connection</strong>
-      </div>
-    {% endif %}
-  </aside>
-</section>
 
-<section class="card">
-  <div class="section-heading">
-    <div>
-      <span class="card-kicker">Connections</span>
-      <h2>Saved Providers</h2>
-    </div>
-    <a class="text-link" href="{{ url_for('settings.index') }}">Settings</a>
-  </div>
-  <table>
-    <thead><tr><th>Provider</th><th>Type</th><th>Status</th><th>Active</th><th>Wallet</th><th>Updated</th><th>Action</th></tr></thead>
-    <tbody>
-      {% for connection in trading_connections %}
-        {% set spec = providers.get(connection.provider) %}
-        {% set can_activate = spec and spec.tradable and connection.verification_status == 'verified' %}
-        {% set health = connection_health_by_id.get(connection.id, {}) %}
-        <tr>
-          <td>{{ spec.label if spec else connection.provider|title }}</td>
-          <td>{{ connection.connection_type.replace("_", " ")|title }}</td>
-          <td><span class="connection-status status-{{ connection.verification_status }}">{{ connection.verification_status.replace("_", " ")|title }}</span></td>
-          <td>
-            {{ "Active" if connection.is_active else "Inactive" }}
-            {% if health %}
-              <br><span class="muted">{{ "Can trade" if health.get("can_trade") else "Blocked" }}{% if health.get("client_ip") %} · {{ health.get("client_ip") }}{% endif %}</span>
-            {% endif %}
-          </td>
-          <td>{{ connection.wallet_address[:18] ~ "..." if connection.wallet_address else "n/a" }}</td>
-          <td>{{ connection.updated_at.strftime("%Y-%m-%d %H:%M") }}</td>
-          <td>
-            <div class="table-actions">
-              <a class="button-link secondary" href="{{ url_for('settings.connection_provider', provider=connection.provider, connection_id=connection.id) }}">Open</a>
-              {% if spec and spec.verification_supported %}
-                <form method="post" action="{{ url_for('settings.verify_connection', connection_id=connection.id) }}">
-                  {{ csrf_input()|safe }}
-                  <button type="submit" class="secondary">Verify</button>
-                </form>
-              {% endif %}
-              <form method="post" action="{{ url_for('settings.activate_connection', connection_id=connection.id) }}">
-                {{ csrf_input()|safe }}
-                <button type="submit" class="primary" {% if not can_activate %}disabled{% endif %}>Activate</button>
-              </form>
-              <form method="post" action="{{ url_for('settings.delete_connection', connection_id=connection.id) }}">
-                {{ csrf_input()|safe }}
-                <button type="submit" class="danger-button">Delete</button>
-              </form>
-            </div>
-          </td>
-        </tr>
+        {% if selected_connection_health %}
+          <div class="provider-health-panel {{ 'is-ready' if selected_connection_health.get('can_trade') else 'is-blocked' }}">
+            <strong>{{ "Online" if selected_connection_health.get("can_trade") else "Blocked" }}</strong>
+            <span>
+              {{ selected_connection_health.get("last_checked_at", "not checked") }}
+              {% if selected_connection_health.get("client_ip") %} · {{ selected_connection_health.get("client_ip") }}{% endif %}
+              {% if selected_connection_health.get("failure_reason") %} · {{ selected_connection_health.get("failure_reason") }}{% endif %}
+            </span>
+          </div>
+        {% endif %}
+
+        <div class="connection-actions">
+          {% if selected_spec.verification_supported %}
+            <form method="post" action="{{ url_for('settings.verify_connection', connection_id=selected_connection.id) }}" data-disable-on-submit>
+              {{ csrf_input()|safe }}
+              <button type="submit" class="secondary" data-loading-label="Verifying...">Verify</button>
+            </form>
+          {% else %}
+            <button type="button" class="secondary" disabled>Verification Unavailable</button>
+          {% endif %}
+
+          {% if selected_connection.is_active %}
+            <form method="post" action="{{ url_for('settings.disable_connection', connection_id=selected_connection.id) }}" data-disable-on-submit>
+              {{ csrf_input()|safe }}
+              <button type="submit" class="provider-switch is-on" role="switch" aria-checked="true" data-loading-label="Disabling...">Disable</button>
+            </form>
+          {% else %}
+            <form method="post" action="{{ url_for('settings.activate_connection', connection_id=selected_connection.id) }}" data-disable-on-submit>
+              {{ csrf_input()|safe }}
+              <button type="submit" class="provider-switch" role="switch" aria-checked="false" {% if not selected_can_enable %}disabled{% endif %} data-loading-label="Enabling...">Enable</button>
+            </form>
+          {% endif %}
+
+          <form method="post" action="{{ url_for('settings.delete_connection', connection_id=selected_connection.id) }}" data-disable-on-submit>
+            {{ csrf_input()|safe }}
+            <button type="submit" class="danger-button" data-loading-label="Deleting...">Delete</button>
+          </form>
+        </div>
       {% else %}
-        <tr><td colspan="7">No trading connections yet.</td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
+        <div class="provider-empty-state">
+          <span class="provider-mark" aria-hidden="true">{{ selected_spec.label[:1] }}</span>
+          <strong>No saved {{ selected_spec.label }} connection</strong>
+        </div>
+      {% endif %}
+    </aside>
+  </section>
 </section>
 {% endblock %}

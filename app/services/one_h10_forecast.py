@@ -7,14 +7,21 @@ from typing import Any
 
 from ..ml.online_ranker import ONE_H10_HORIZON
 from .provider_assets import normalize_provider
+from .vault_coherence import (
+    build_horizon_forecasts,
+    calculate_coherence_summary,
+    format_vault_cycle_status,
+    score_horizon_strategy,
+)
 
 
 class OneH10ForecastService:
     """Build auditable 1H10 forecast suggestions without owning execution."""
 
-    def __init__(self, config: dict[str, Any], ml_decision_engine: Any | None = None) -> None:
+    def __init__(self, config: dict[str, Any], ml_decision_engine: Any | None = None, vault_coherence: Any | None = None) -> None:
         self.config = config
         self.ml_decision_engine = ml_decision_engine
+        self.vault_coherence = vault_coherence
 
     def forecast(
         self,
@@ -96,11 +103,12 @@ class OneH10ForecastService:
                 advisory_blockers.append("low_confidence")
         forecast["blockers"] = list(dict.fromkeys(str(item) for item in forecast["blockers"] if str(item)))
         forecast["advisory_blockers"] = list(dict.fromkeys(str(item) for item in advisory_blockers if str(item)))
+        forecast.update(self._coherence_payload(context, forecast))
         return forecast
 
     def _feature_blockers(self, context: dict[str, Any]) -> list[str]:
         blockers: list[str] = []
-        required = self.config.get("ONE_H10_FEATURE_TIMEFRAMES", ["15m", "1h", "4h"])
+        required = self.config.get("ONE_H10_REQUIRED_FEATURE_TIMEFRAMES", ["15m", "1h", "4h"])
         if isinstance(required, str):
             required = [item.strip() for item in required.split(",") if item.strip()]
         required_set = {str(item).strip() for item in (required or []) if str(item).strip()}
@@ -119,6 +127,73 @@ class OneH10ForecastService:
         if not fib or not levels or not timing:
             blockers.append("missing_fibonacci_features")
         return blockers
+
+    def _coherence_payload(self, context: dict[str, Any], forecast: dict[str, Any]) -> dict[str, Any]:
+        try:
+            if self.vault_coherence is not None:
+                horizon_forecasts = self.vault_coherence.build_horizon_forecasts(context)
+                horizon_strategy_scores = [
+                    self.vault_coherence.score_horizon_strategy(str(row.get("horizon")), row, context)
+                    for row in horizon_forecasts
+                ]
+                coherence_summary = self.vault_coherence.calculate_coherence_summary(horizon_forecasts, horizon_strategy_scores)
+                cycle_status = self.vault_coherence.format_vault_cycle_status(
+                    {
+                        "created_at": forecast.get("created_at"),
+                        "last_completed_vault_cycle": forecast.get("created_at"),
+                    },
+                    horizon_forecasts=horizon_forecasts,
+                    horizon_strategy_scores=horizon_strategy_scores,
+                    coherence_summary=coherence_summary,
+                )
+            else:
+                horizon_forecasts = build_horizon_forecasts(context, config=self.config)
+                horizon_strategy_scores = [
+                    score_horizon_strategy(str(row.get("horizon")), row, context, config=self.config)
+                    for row in horizon_forecasts
+                ]
+                coherence_summary = calculate_coherence_summary(horizon_forecasts, horizon_strategy_scores)
+                cycle_status = format_vault_cycle_status(
+                    {
+                        "created_at": forecast.get("created_at"),
+                        "last_completed_vault_cycle": forecast.get("created_at"),
+                    },
+                    horizon_forecasts=horizon_forecasts,
+                    horizon_strategy_scores=horizon_strategy_scores,
+                    coherence_summary=coherence_summary,
+                )
+        except Exception as exc:  # noqa: BLE001
+            horizon_forecasts = []
+            horizon_strategy_scores = []
+            coherence_summary = {
+                "overallDirection": "neutral",
+                "overallConfidence": 0,
+                "coherenceScore": 0,
+                "automationReadiness": "notReady",
+                "primaryHorizon": None,
+                "conflictingHorizons": [],
+                "riskNotes": ["Forecast scoring unavailable"],
+                "summary": "Forecast scoring unavailable; automation readiness is not ready.",
+                "updatedAt": datetime.utcnow().isoformat(),
+            }
+            cycle_status = format_vault_cycle_status({}, error=str(exc))
+
+        reasoning: list[str] = []
+        reasoning.extend(str(item) for item in coherence_summary.get("riskNotes", []) or [] if str(item))
+        primary = str(coherence_summary.get("primaryHorizon") or "")
+        for row in horizon_forecasts:
+            if primary and str(row.get("horizon")) != primary:
+                continue
+            reasoning.extend(str(item) for item in row.get("reasoning", []) or [] if str(item))
+        if not reasoning and coherence_summary.get("summary"):
+            reasoning.append(str(coherence_summary["summary"]))
+        return {
+            "horizon_forecasts": horizon_forecasts,
+            "horizon_strategy_scores": horizon_strategy_scores,
+            "coherence_summary": coherence_summary,
+            "cycle_status": cycle_status,
+            "reasoning": list(dict.fromkeys(reasoning))[:8],
+        }
 
     def _ml_decision(self, context: dict[str, Any], provider: str) -> dict[str, Any]:
         if self.ml_decision_engine is None:

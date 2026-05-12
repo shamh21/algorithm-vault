@@ -263,8 +263,21 @@ def test_cycle_settlement_persists_trade_risk_leverage_reward_summary(app, monke
     assert refreshed.cycle_summary["risk_reward"] == 2
     assert WalletTransaction.query.filter_by(user_id=user.id, transaction_type="settlement").count() == 1
     detail = client.get(f"/vault/cycles/{cycle.id}")
-    assert b"Token And Profit Logic" in detail.data
+    for removed_copy in [
+        b"Testing view",
+        b"Token And Profit Logic",
+        b"Cycle Mechanics",
+        b"1H10 Diagnostics",
+        b"Scanner, ML, And Blockers",
+        b"Submitted Orders",
+        b"Rejected Orders",
+        b"Failed Orders",
+    ]:
+        assert removed_copy not in detail.data
     assert b"summary-order" in detail.data
+    assert b"Trade Summary" in detail.data
+    assert b"Filled" in detail.data
+    assert b"2.00x" in detail.data
 
 
 def test_all_wallet_assets_render_in_allocation_and_settlement_selectors(app) -> None:

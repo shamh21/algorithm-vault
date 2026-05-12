@@ -31,6 +31,7 @@ from ..models import (
     VaultAllocationLeg,
     VaultCycle,
 )
+from ..services.model_registry import dataset_hash, feature_schema_hash
 from ..services.provider_assets import normalize_provider, provider_feature_context
 from .online_ranker import OnlineRanker, extract_features, horizon_from_duration, outcome_from_result
 from .features import MLFeatureFactory, ML_FEATURE_SCHEMA_VERSION
@@ -344,6 +345,7 @@ class MLDecisionEngine:
         horizon_key = self._horizon(horizon)
         objective_key = self._objective(objective)
         provider_key = normalize_provider(provider)
+        training_started_at = datetime.utcnow()
         rows = self.training_rows(
             family_key,
             horizon_key,
@@ -519,6 +521,21 @@ class MLDecisionEngine:
             validation_loss=metrics["validation_loss"],
             negative_error_rate=metrics["negative_error_rate"],
             drift=metrics["drift"],
+            feature_schema_hash=feature_schema_hash(FEATURE_SCHEMA_VERSION, feature_names),
+            dataset_version=f"{provider_key}:{horizon_key}:{len(rows)}:{len(valid_x)}",
+            dataset_hash=dataset_hash(
+                {
+                    "provider": provider_key,
+                    "horizon": horizon_key,
+                    "family": family_key,
+                    "training_rows": len(rows),
+                    "validation_rows": len(valid_x),
+                    "feature_names": feature_names,
+                    "target_distribution": target_distribution,
+                }
+            ),
+            training_started_at=training_started_at,
+            training_completed_at=datetime.utcnow(),
         )
         record.feature_names = feature_names
         record.metrics = metrics
@@ -572,6 +589,7 @@ class MLDecisionEngine:
         family_key = self._family(model_type)
         diagnostics = self.promotion_diagnostics(record, family_key)
         if not diagnostics["ready"]:
+            self._record_failed_promotion(family_key, provider_key, horizon_key, int(model_id), diagnostics["blockers"])
             return {"promoted": False, "horizon": horizon_key, "provider": provider_key, "model_id": model_id, **diagnostics}
         for promoted in MLOfflineModel.query.filter_by(
             horizon=horizon_key,
@@ -583,6 +601,7 @@ class MLDecisionEngine:
                 promoted.status = "archived"
         record.status = "promoted"
         record.promoted_at = datetime.utcnow()
+        self._record_promotion(record, model_family=family_key, promotion_source="ml_decision.promote_suite")
         db.session.commit()
         return {
             "promoted": True,
@@ -592,6 +611,34 @@ class MLDecisionEngine:
             "blockers": [],
             **(self._model_payload(record) or {}),
         }
+
+    def _record_promotion(self, record: MLOfflineModel, *, model_family: str, promotion_source: str) -> None:
+        if not has_app_context():
+            return
+        service = current_app.extensions.get("services", {}).get("model_registry")
+        if service is not None:
+            service.record_promotion(record, model_family=model_family, promotion_source=promotion_source)
+
+    def _record_failed_promotion(
+        self,
+        model_family: str,
+        provider: str,
+        horizon: str,
+        model_id: int | None,
+        blockers: list[str],
+    ) -> None:
+        if not has_app_context():
+            return
+        service = current_app.extensions.get("services", {}).get("model_registry")
+        if service is not None:
+            service.record_failed_promotion(
+                model_family=model_family,
+                provider=provider,
+                horizon=horizon,
+                model_id=model_id,
+                blockers=blockers,
+            )
+            db.session.commit()
 
     def promotion_diagnostics(self, record: MLOfflineModel | None, family: str | None = None) -> dict[str, Any]:
         if record is None:
@@ -1004,13 +1051,13 @@ class MLDecisionEngine:
         projected_roi_pct = max(prediction * target_roi_pct, expected_return * 100.0)
         distance_to_target_pct = max(0.0, target_roi_pct - projected_roi_pct)
         probability = max(0.0, min((prediction + 1.0) / 2.0, 1.0))
-        normal_cap = max(0.0, self._safe_float(context.get("allocation_amount_usd"), 0.0))
-        max_notional = max(0.0, self._safe_float(context.get("hard_max_notional_usdc"), normal_cap))
+        allocation_budget = max(
+            0.0,
+            self._safe_float(context.get("allocation_budget_usdc"), self._safe_float(context.get("allocation_amount_usd"), 0.0)),
+        )
         leverage_ceiling = max(1.0, self._safe_float(context.get("hard_max_leverage"), 1.0))
         cap_scale = max(0.05, min(probability, 1.0))
-        suggested_notional = normal_cap * cap_scale if normal_cap > 0 else 0.0
-        if max_notional > 0:
-            suggested_notional = min(suggested_notional, max_notional)
+        suggested_notional = allocation_budget * cap_scale if allocation_budget > 0 else 0.0
         leverage_suggestion = min(leverage_ceiling, max(1.0, 1.0 + max(prediction, 0.0) * 0.5))
         return {
             "objective": "extreme_upside",
@@ -1128,7 +1175,7 @@ class MLDecisionEngine:
             "order_type_suggestion": "limit" if maker else "market",
             "maker_taker_preference": "maker" if maker else "taker",
             "limit_offset_bps": limit_offset_bps,
-            "slippage_tolerance_pct": max(0.0, min(limit_offset_bps / 10_000.0, self._safe_float(self.config.get("MAX_SLIPPAGE_PCT"), 0.015))),
+            "slippage_tolerance_pct": max(0.0, min(limit_offset_bps / 10_000.0, 0.05)),
             "retry_policy": "no_retry",
         }
 

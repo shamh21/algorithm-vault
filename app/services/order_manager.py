@@ -20,7 +20,6 @@ from .db_retry import commit_with_retry
 from .trading_connections import TradingConnectionService
 
 
-TERMINAL_ORDER_STATUSES = {"cancelled", "filled", "rejected", "failed"}
 OPEN_ORDER_STATUSES = {"open", "submitted", "pending"}
 
 
@@ -158,6 +157,16 @@ class OrderManager:
             )
             return order
 
+        adaptive_slippage = decision.details.get("adaptive_slippage") if isinstance(decision.details, dict) else None
+        if isinstance(adaptive_slippage, dict):
+            intent.metadata = {
+                **dict(intent.metadata or {}),
+                "adaptive_slippage": adaptive_slippage,
+                "adaptive_slippage_pct": adaptive_slippage.get("max_acceptable_pct"),
+            }
+            details["adaptive_slippage"] = adaptive_slippage
+            order.details = details
+
         try:
             self._exchange_submit(order, intent)
         except Exception as exc:  # noqa: BLE001
@@ -165,49 +174,6 @@ class OrderManager:
 
         if order.status not in {"failed", "rejected"}:
             self._record_snapshot_for_symbol(order.symbol, order.mode, order.user_id, order.trading_connection_id)
-
-        return order
-
-    def cancel_order(self, order_id: int) -> Order:
-        order = Order.query.get_or_404(order_id)
-
-        if order.status in TERMINAL_ORDER_STATUSES:
-            return order
-
-        try:
-            if order.mode == "live" and order.exchange_order_id:
-                self._connector_for_order(order).cancel_order(order.mode, order.symbol, order.exchange_order_id)
-
-            order.status = "cancelled"
-            self._audit(
-                "cancel",
-                f"Cancelled order {order.client_order_id}",
-                {
-                    "order_id": order.id,
-                    "symbol": order.symbol,
-                    "mode": order.mode,
-                    "user_id": order.user_id,
-                    "trading_connection_id": order.trading_connection_id,
-                },
-            )
-            self._invalidate_snapshot_cache(order.user_id, order.mode, order.trading_connection_id)
-            commit_with_retry()
-        except Exception as exc:  # noqa: BLE001
-            order.rejection_reason = str(exc)
-            self._audit(
-                "cancel_failed",
-                f"Failed to cancel order {order.client_order_id}",
-                {
-                    "order_id": order.id,
-                    "symbol": order.symbol,
-                    "mode": order.mode,
-                    "error": str(exc),
-                    "user_id": order.user_id,
-                    "trading_connection_id": order.trading_connection_id,
-                },
-            )
-            commit_with_retry()
-            raise
 
         return order
 
@@ -432,9 +398,13 @@ class OrderManager:
         return exit_order
 
     def _create_order(self, intent: OrderIntent, approved: bool) -> Order:
+        vault_cycle_id = self._safe_int(intent.metadata.get("vault_cycle_id"))
+        vault_leg_id = self._safe_int(intent.metadata.get("vault_leg_id"))
         order = Order(
             user_id=intent.user_id,
             trading_connection_id=intent.trading_connection_id,
+            vault_cycle_id=vault_cycle_id if vault_cycle_id > 0 else None,
+            vault_leg_id=vault_leg_id if vault_leg_id > 0 else None,
             client_order_id=intent.idempotency_key,
             mode=intent.mode,
             symbol=intent.symbol,
@@ -465,7 +435,12 @@ class OrderManager:
         return order
 
     def _exchange_submit(self, order: Order, intent: OrderIntent) -> None:
-        max_slippage = self._safe_float(self.config.get("MAX_SLIPPAGE_PCT"), 0.0)
+        adaptive_payload = (intent.metadata or {}).get("adaptive_slippage")
+        adaptive_limit = self._safe_float(adaptive_payload.get("max_acceptable_pct"), intent.slippage_pct) if isinstance(adaptive_payload, dict) else intent.slippage_pct
+        max_slippage = self._safe_float(
+            (intent.metadata or {}).get("adaptive_slippage_pct"),
+            adaptive_limit,
+        )
         slippage_pct = self._submission_slippage_pct(intent.slippage_pct, max_slippage)
 
         if intent.user_id is not None and self.trading_connections is not None:
@@ -916,9 +891,11 @@ class OrderManager:
         raw = decision.get("raw") if isinstance(decision.get("raw"), dict) else {}
         if bool(decision.get("ready", False)) and self._safe_float(market_price) > 0:
             slippage = self._safe_float(raw.get("slippage_tolerance_pct"), intent.slippage_pct)
-            max_slippage = self._safe_float(self.config.get("MAX_SLIPPAGE_PCT"), slippage)
-            if max_slippage >= 0:
+            adaptive = self.risk_engine.adaptive_slippage_metrics({**metadata, "spread_bps": context.get("spread_bps", 0.0)}, slippage_pct=slippage)
+            max_slippage = self._safe_float(adaptive.get("max_acceptable_pct"), slippage)
+            if max_slippage > 0:
                 intent.slippage_pct = max(0.0, min(slippage, max_slippage))
+                metadata["adaptive_slippage"] = adaptive
             if str(raw.get("order_type_suggestion") or "").lower() == "limit":
                 offset_bps = max(0.0, self._safe_float(raw.get("limit_offset_bps"), 0.0))
                 offset = market_price * offset_bps / 10_000.0
@@ -1102,5 +1079,15 @@ class OrderManager:
 
         try:
             return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _safe_int(value: Any, default: int = 0) -> int:
+        if value is None:
+            return default
+
+        try:
+            return int(value)
         except (TypeError, ValueError):
             return default

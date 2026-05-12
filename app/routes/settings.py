@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from flask import Blueprint, current_app, flash, redirect, render_template, request, url_for
+from flask import Blueprint, flash, redirect, render_template, request, url_for
 
-from ..auth import current_user, require_admin_user, require_authenticated_user
+from ..auth import current_user, require_authenticated_user
 from ..extensions import db
-from ..models import AuditLog, Setting, TradingConnection, WalletBalance
-from ..runtime import available_modes, get_current_mode, get_service
+from ..models import AuditLog, Setting, TradingConnection
+from ..runtime import get_current_mode, get_service
 from ..services.connection_health import build_connection_health, latest_connection_health, store_connection_health
 
 
@@ -23,25 +23,26 @@ def _protect_settings():
 
 @settings_bp.get("/")
 def index():
-    feature_engine = get_service("feature_engine")
-    trading_connections = get_service("trading_connections")
+    service = get_service("trading_connections")
     user = current_user()
     connections = TradingConnection.query.filter_by(user_id=user.id).order_by(TradingConnection.updated_at.desc()).all() if user else []
+    provider_specs = service.provider_specs()
+    connection_health_by_id = {record.id: latest_connection_health(record.id) for record in connections}
+    enabled_connections = service.enabled_tradable_connections(user.id) if user else []
 
     return render_template(
         "settings.html",
         current_mode=get_current_mode(),
-        modes=available_modes(),
         panic_lock=Setting.get_json("panic_lock", False),
-        live_enabled=bool(current_app.config.get("ENABLE_LIVE_TRADING", False)),
         explicit_live_confirmed=Setting.get_json("explicit_live_confirmed", False),
         secondary_confirmation=Setting.get_json("secondary_confirmation", False),
         live_trading_blocked=Setting.get_json("live_trading_blocked", False),
-        use_real_addresses=Setting.get_json("use_real_addresses", bool(current_app.config.get("USE_REAL_ADDRESSES", False))),
-        external_adapter_status=feature_engine.external_status,
-        pattern_model_status=feature_engine.pattern_status,
         trading_connections=connections,
-        active_trading_connection=trading_connections.active_tradable_connection(user.id) if user else None,
+        enabled_trading_connections=enabled_connections,
+        enabled_provider_count=len(enabled_connections),
+        providers=provider_specs,
+        provider_cards=_provider_cards(connections, provider_specs, connection_health_by_id),
+        connection_health_by_id=connection_health_by_id,
     )
 
 
@@ -70,11 +71,14 @@ def _render_connections(provider: str | None = None):
     if selected_connection is None:
         selected_connection = next((record for record in records if record.provider == selected_provider), None)
     connection_health_by_id = {record.id: latest_connection_health(record.id) for record in records}
+    enabled_connections = service.enabled_tradable_connections(user.id) if user else []
     return render_template(
         "connections.html",
         trading_connections=records,
-        active_trading_connection=service.active_tradable_connection(user.id) if user else None,
+        enabled_trading_connections=enabled_connections,
+        enabled_provider_count=len(enabled_connections),
         providers=provider_specs,
+        provider_cards=_provider_cards(records, provider_specs, connection_health_by_id),
         selected_provider=selected_provider,
         selected_spec=provider_specs[selected_provider],
         selected_connection=selected_connection,
@@ -125,7 +129,7 @@ def save_connection():
         {"user_id": user.id, "trading_connection_id": connection.id, "provider": provider},
     )
     db.session.commit()
-    flash("Connection saved. Run verification before activating it for live trading.", "success")
+    flash("Connection saved. Verify it before enabling live flows.", "success")
     return redirect(url_for("settings.connection_provider", provider=provider, connection_id=connection.id))
 
 
@@ -165,7 +169,7 @@ def verify_connection(connection_id: int):
     )
     db.session.commit()
     if result["ok"]:
-        flash("Connection verified. Activate it to use live wallet, vault, and order workflows.", "success")
+        flash("Connection verified. Enable it to use live wallet, vault, and order workflows.", "success")
     else:
         flash(result.get("error") or "Connection verification failed.", "danger")
     return redirect(url_for("settings.connection_provider", provider=connection.provider, connection_id=connection.id))
@@ -187,12 +191,33 @@ def activate_connection(connection_id: int):
         return redirect(url_for("settings.connections"))
     _audit(
         "trading_connection_activated",
-        f"{connection.provider.title()} trading connection activated.",
+        f"{connection.provider.title()} trading connection enabled.",
         {"user_id": user.id, "trading_connection_id": connection.id, "provider": connection.provider},
     )
     db.session.commit()
-    flash("Trading connection activated.", "success")
-    return redirect(url_for("consumer.home"))
+    flash("Trading provider enabled.", "success")
+    return redirect(url_for("settings.connection_provider", provider=connection.provider, connection_id=connection.id))
+
+
+@settings_bp.post("/connections/<int:connection_id>/disable")
+def disable_connection(connection_id: int):
+    user = current_user()
+    if user is None:
+        return redirect(url_for("auth.login"))
+    service = get_service("trading_connections")
+    try:
+        connection = service.disable(user.id, connection_id)
+    except PermissionError:
+        flash("Trading connection was not found.", "danger")
+        return redirect(url_for("settings.connections"))
+    _audit(
+        "trading_connection_disabled",
+        f"{connection.provider.title()} trading connection disabled.",
+        {"user_id": user.id, "trading_connection_id": connection.id, "provider": connection.provider},
+    )
+    db.session.commit()
+    flash("Trading provider disabled.", "warning")
+    return redirect(url_for("settings.connection_provider", provider=connection.provider, connection_id=connection.id))
 
 
 @settings_bp.post("/connections/<int:connection_id>/delete")
@@ -221,24 +246,6 @@ def set_mode():
 
     db.session.commit()
     flash("Live-only mode is active.", "success")
-    return redirect(url_for("settings.index"))
-
-
-@settings_bp.post("/address-mode")
-def address_mode():
-    guard = require_admin_user()
-    if guard is not None:
-        return guard
-
-    enabled = request.form.get("use_real_addresses") == "on"
-    Setting.set_json("use_real_addresses", enabled)
-    _audit(
-        "address_mode_change",
-        f"Address mode changed to {'real-provider' if enabled else 'sandbox'} mode.",
-        {"use_real_addresses": enabled},
-    )
-    db.session.commit()
-    flash("Address mode updated.", "success")
     return redirect(url_for("settings.index"))
 
 
@@ -292,6 +299,60 @@ def panic_reset():
     db.session.commit()
     flash("Panic lock cleared. Trading remains manual and strategies must be restarted explicitly.", "warning")
     return redirect(url_for("settings.index"))
+
+
+def _provider_cards(
+    connections: list[TradingConnection],
+    provider_specs: dict[str, dict[str, Any]],
+    connection_health_by_id: dict[int, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    records_by_provider = {record.provider: record for record in reversed(connections)}
+    cards: list[dict[str, Any]] = []
+    for key, spec in provider_specs.items():
+        connection = records_by_provider.get(key)
+        status = str(getattr(connection, "verification_status", "") or "not_connected")
+        enabled = bool(connection and connection.is_active and status == "verified" and spec.get("tradable"))
+        health = connection_health_by_id.get(connection.id, {}) if connection and connection.id is not None else {}
+        can_trade = bool(health.get("can_trade")) if health else False
+        if health:
+            health_label = "Online" if can_trade else "Blocked"
+            health_class = "positive" if can_trade else "danger"
+        else:
+            health_label = "Not checked" if connection else "Not connected"
+            health_class = "muted"
+        cards.append(
+            {
+                "key": key,
+                "label": spec.get("label", key.title()),
+                "summary": spec.get("summary", ""),
+                "tradable": bool(spec.get("tradable")),
+                "verification_supported": bool(spec.get("verification_supported")),
+                "connection": connection,
+                "enabled": enabled,
+                "status": status,
+                "status_label": status.replace("_", " ").title(),
+                "health": health,
+                "health_label": health_label,
+                "health_class": health_class,
+                "wallet_preview": _connection_preview(connection),
+                "can_enable": bool(connection and spec.get("tradable") and status == "verified" and not enabled),
+                "can_disable": enabled,
+            }
+        )
+    return cards
+
+
+def _connection_preview(connection: TradingConnection | None) -> str:
+    if connection is None:
+        return "Not saved"
+    if connection.wallet_address:
+        value = str(connection.wallet_address)
+        return f"{value[:10]}...{value[-6:]}" if len(value) > 20 else value
+    if connection.encrypted_api_key:
+        return "API key saved"
+    if connection.encrypted_api_secret:
+        return "Secret saved"
+    return "Saved"
 
 
 def _audit(action: str, message: str, details: dict[str, Any]) -> None:

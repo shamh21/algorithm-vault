@@ -3,19 +3,34 @@
 from __future__ import annotations
 
 import json
+import math
 from typing import Any
 
-from flask import Blueprint, current_app, flash, redirect, render_template, request, url_for
+from flask import Blueprint, current_app, flash, jsonify, redirect, render_template, request, url_for
 
 from ..admin_auth import require_admin
+from ..auth import current_user
 from ..backtesting.engine import BacktestConfig
-from ..backtesting.optimizer import AGGRESSIVE_1H_WARNING, DYNAMIC_INTRADAY_WARNING, EXTREME_ROI_WARNING, Profile
+from ..backtesting.optimizer import Profile
 from ..extensions import db
-from ..models import BacktestRun, MLOfflineModel, MLModelState, OptimizerRun, StrategyRanking, StrategyRun
+from ..models import BacktestRun
 from ..runtime import get_service
 
 
 backtests_bp = Blueprint("backtests", __name__, url_prefix="/admin/backtests")
+
+_TIMEFRAME_SECONDS = {
+    "1m": 60,
+    "5m": 5 * 60,
+    "15m": 15 * 60,
+    "1h": 60 * 60,
+}
+
+_CYCLE_DURATIONS = {
+    "1h10": {"label": "1H10", "seconds": 70 * 60},
+    "4h": {"label": "4H", "seconds": 4 * 60 * 60},
+    "24h": {"label": "24H", "seconds": 24 * 60 * 60},
+}
 
 
 @backtests_bp.before_request
@@ -25,83 +40,84 @@ def _protect_backtests():
 
 @backtests_bp.get("/", strict_slashes=False)
 def index():
-    registry = get_service("strategy_registry")
-    feature_engine = get_service("feature_engine")
-    market_data = get_service("market_data")
-    market_universe = get_service("market_universe")
-    market_scanner = get_service("market_scanner")
-
-    runs = BacktestRun.query.order_by(BacktestRun.created_at.desc()).limit(20).all()
-    optimizer_runs = OptimizerRun.query.order_by(OptimizerRun.created_at.desc()).limit(5).all()
-    latest_optimizer = optimizer_runs[0] if optimizer_runs else None
-
-    rankings = []
-    aggressive_comparisons = []
-    if latest_optimizer is not None:
-        rankings = (
-            StrategyRanking.query.filter_by(optimizer_run_id=latest_optimizer.id)
-            .order_by(StrategyRanking.rejected.asc(), StrategyRanking.score.desc())
-            .limit(20)
-            .all()
-        )
-        aggressive_comparisons = _aggressive_comparisons(latest_optimizer.id)
+    simulator = get_service("backtest_vault_simulator")
+    latest_run = BacktestRun.query.order_by(BacktestRun.created_at.desc()).first()
 
     return render_template(
         "backtests/index.html",
-        strategies=registry.definitions(),
-        runs=runs,
-        latest_result=runs[0].result if runs else None,
-        optimizer_runs=optimizer_runs,
-        latest_optimizer=latest_optimizer,
-        rankings=rankings,
-        aggressive_comparisons=aggressive_comparisons,
-        universe_candidates=_universe_candidates(market_universe),
-        scanner_diagnostics=_scanner_diagnostics(market_scanner),
-        high_upside_status=_high_upside_status(),
-        latest_fibonacci=_latest_fibonacci(feature_engine, market_data),
-        aggressive_enabled=bool(current_app.config.get("AGGRESSIVE_1H_ENABLED", False)),
-        extreme_roi_enabled=bool(current_app.config.get("EXTREME_ROI_ENABLED", False)),
-        aggressive_warning=AGGRESSIVE_1H_WARNING,
-        dynamic_intraday_warning=DYNAMIC_INTRADAY_WARNING,
-        extreme_roi_warning=EXTREME_ROI_WARNING,
-        ml_ranker_enabled=bool(current_app.config.get("ML_RANKER_ENABLED", False)),
-        offline_ml_enabled=bool(current_app.config.get("ML_OFFLINE_MODELS_ENABLED", False)),
-        ml_model_states=MLModelState.query.order_by(MLModelState.horizon.asc()).all(),
-        offline_ml_models=MLOfflineModel.query.order_by(MLOfflineModel.created_at.desc()).limit(5).all(),
-        offline_ml_status=_offline_ml_status(),
+        latest_payload=_backtest_response_payload(latest_run) if latest_run else {},
+        initial_symbols=simulator.symbol_payload(user=current_user(), limit=40),
+        paper_balance_usd=simulator.allocation_cap_usd(),
+        allocation_default_usd=simulator.allocation_default_usd(),
+        allocation_cap_usd=simulator.allocation_cap_usd(),
+        timeframes=simulator.timeframes(),
+    )
+
+
+@backtests_bp.get("/api/symbols")
+def symbols_api():
+    simulator = get_service("backtest_vault_simulator")
+    return jsonify(
+        simulator.symbol_payload(
+            user=current_user(),
+            query=str(request.args.get("q", "")),
+            cursor=_arg_int("cursor", 0),
+            limit=_arg_int("limit", 40),
+            refresh=_arg_bool("refresh"),
+        )
+    )
+
+
+@backtests_bp.get("/api/quote")
+def quote_api():
+    simulator = get_service("backtest_vault_simulator")
+    return jsonify(
+        simulator.quote_payload(
+            provider=str(request.args.get("provider", "")),
+            symbol=str(request.args.get("symbol", "")),
+            venue_symbol=str(request.args.get("venue_symbol", "")),
+            allocation_usd=_arg_float("allocation_usd", simulator.allocation_default_usd()),
+        )
     )
 
 
 @backtests_bp.post("/run")
 def run():
-    engine = get_service("backtest_engine")
+    simulator = get_service("backtest_vault_simulator")
+    wants_json = _wants_json_response()
 
     try:
-        parameters = _parse_json_object(request.form.get("parameters_json"), "Backtest parameters")
-        parameters.update(_strategy_form_parameters())
-        config = _backtest_config(parameters)
+        request_input = simulator.parse_input(request.form)
     except ValueError as exc:
+        if wants_json:
+            return jsonify({"ok": False, "error": str(exc)}), 400
         flash(str(exc), "danger")
         return redirect(url_for("backtests.index"))
 
     try:
-        result = engine.run(config)
+        simulation = simulator.run(request_input)
     except Exception as exc:  # noqa: BLE001
-        flash(f"Backtest failed: {exc}", "danger")
+        message = str(exc)
+        if wants_json:
+            return jsonify({"ok": False, "error": message}), 500
+        flash(message, "danger")
         return redirect(url_for("backtests.index"))
 
     record = BacktestRun(
-        strategy_name=config.strategy_name,
-        symbol=config.symbol,
-        timeframe=config.timeframe,
+        strategy_name=simulation["record"]["strategy_name"],
+        symbol=simulation["record"]["symbol"],
+        timeframe=simulation["record"]["timeframe"],
     )
-    record.parameters = _backtest_parameters_dict(config)
-    record.result = result
+    record.parameters = simulation["parameters"]
+    record.result = simulation["result"]
 
     db.session.add(record)
     db.session.commit()
 
-    flash("Backtest completed. Results are candle-based simulation only.", "success")
+    if wants_json:
+        return jsonify(simulator.response_payload(record))
+
+    flash("Vault simulation completed.", "success")
     return redirect(url_for("backtests.index"))
 
 
@@ -171,6 +187,10 @@ def _backtest_config(parameters: dict[str, Any]) -> BacktestConfig:
     strategy_name = str(request.form.get("strategy_name", "ema_crossover")).strip()
     symbol = str(request.form.get("symbol", "BTC")).upper().strip()
     timeframe = str(request.form.get("timeframe", current_app.config.get("DEFAULT_TIMEFRAME", "15m"))).strip()
+    cycle_key = _cycle_duration_key()
+    cycle_seconds = int(_CYCLE_DURATIONS[cycle_key]["seconds"])
+    allocation_amount = _form_float("allocation_amount_usd", _allocation_default_usd())
+    paper_balance = _paper_balance_usd()
 
     if not strategy_name:
         raise ValueError("Strategy name is required.")
@@ -178,21 +198,42 @@ def _backtest_config(parameters: dict[str, Any]) -> BacktestConfig:
         raise ValueError("Symbol is required.")
     if not timeframe:
         raise ValueError("Timeframe is required.")
+    if strategy_name not in get_service("strategy_registry").names():
+        raise ValueError("Unknown strategy selected.")
+    if symbol not in current_app.config.get("ALLOWED_SYMBOLS", ["BTC"]):
+        raise ValueError("Unknown symbol selected.")
+    if timeframe not in _TIMEFRAME_SECONDS:
+        raise ValueError("Unsupported timeframe selected.")
+    if allocation_amount <= 0:
+        raise ValueError("Test allocation amount must be greater than zero.")
+    if allocation_amount > paper_balance:
+        raise ValueError(f"Test allocation amount cannot exceed ${paper_balance:,.2f} paper funds.")
 
+    parameters = dict(parameters or {})
+    parameters.update(
+        {
+            "sandbox_backtest": True,
+            "simulated_capital_only": True,
+            "paper_balance_usd": paper_balance,
+            "vault_cycle_duration": cycle_key,
+            "lock_duration_seconds": cycle_seconds,
+            "lock_duration_hours": max(1, math.ceil(cycle_seconds / 3600)),
+        }
+    )
     return BacktestConfig(
         strategy_name=strategy_name,
         symbol=symbol,
         timeframe=timeframe,
         mode="testnet",
-        initial_balance=_form_float("initial_balance", current_app.config.get("DEFAULT_PAPER_BALANCE", 10_000.0)),
+        initial_balance=allocation_amount,
         fee_bps=_form_float("fee_bps", current_app.config.get("FEE_BPS", 5.0)),
         slippage_bps=_form_float("slippage_bps", current_app.config.get("SIM_SLIPPAGE_BPS", 8.0)),
         stop_loss_pct=_form_float("stop_loss_pct", 0.01),
         take_profit_pct=_form_float("take_profit_pct", 0.02),
-        position_size_fraction=_form_float("position_size_fraction", 0.1),
+        position_size_fraction=1.0,
         parameters=parameters,
         sizing_mode=str(request.form.get("sizing_mode", "fixed_fraction")).strip(),
-        fixed_dollar_size=_form_float("fixed_dollar_size", current_app.config.get("FIXED_DOLLAR_SIZE", 100.0)),
+        fixed_dollar_size=allocation_amount,
         risk_per_trade_pct=_form_float("risk_per_trade_pct", current_app.config.get("RISK_PER_TRADE_PCT", 0.01)),
         max_daily_loss=_form_float("max_daily_loss", current_app.config.get("MAX_DAILY_LOSS_USDC", 100.0)),
         max_drawdown_pct=_form_float("max_drawdown_pct", current_app.config.get("MAX_BACKTEST_DRAWDOWN_PCT", 0.2)),
@@ -212,36 +253,6 @@ def _backtest_config(parameters: dict[str, Any]) -> BacktestConfig:
         ),
         funding_cost_bps=_form_float("funding_cost_bps", 0.0),
     )
-
-
-def _strategy_form_parameters() -> dict[str, Any]:
-    keys = [
-        "ema_fast_period",
-        "ema_slow_period",
-        "rsi_period",
-        "rsi_oversold",
-        "rsi_overbought",
-        "atr_stop_multiplier",
-        "atr_take_multiplier",
-        "volume_spike_multiplier",
-        "minimum_signal_score",
-        "trend_weight",
-        "rsi_weight",
-        "volume_weight",
-        "fibonacci_filter_weight",
-        "external_weight",
-    ]
-
-    parsed: dict[str, Any] = {}
-
-    for key in keys:
-        value = request.form.get(key)
-        if value in {None, ""}:
-            continue
-
-        parsed[key] = _parse_number(value, key)
-
-    return parsed
 
 
 def _backtest_parameters_dict(config: BacktestConfig) -> dict[str, Any]:
@@ -270,136 +281,171 @@ def _backtest_parameters_dict(config: BacktestConfig) -> dict[str, Any]:
     }
 
 
+def _backtest_candles(config: BacktestConfig) -> list[dict[str, Any]]:
+    timeframe_seconds = _TIMEFRAME_SECONDS.get(config.timeframe, 15 * 60)
+    duration_seconds = int((config.parameters or {}).get("lock_duration_seconds") or _CYCLE_DURATIONS["1h10"]["seconds"])
+    warmup_candles = 30
+    candle_limit = max(30, warmup_candles + math.ceil(duration_seconds / timeframe_seconds))
+    return get_service("market_data").get_candles(config.symbol, config.timeframe, mode="testnet", limit=candle_limit)
+
+
+def _backtest_response_payload(run: BacktestRun) -> dict[str, Any]:
+    result = run.result if isinstance(run.result, dict) else {}
+    if result.get("vault_simulation"):
+        return get_service("backtest_vault_simulator").response_payload(run)
+    params = run.parameters if isinstance(run.parameters, dict) else {}
+    nested = params.get("parameters") if isinstance(params.get("parameters"), dict) else {}
+    duration_key = str(nested.get("vault_cycle_duration") or "1h10")
+    duration = _CYCLE_DURATIONS.get(duration_key, _CYCLE_DURATIONS["1h10"])
+    initial_balance = _safe_float(params.get("initial_balance"), _safe_float(result.get("allocation_amount_usd"), 0.0))
+    final_equity = _safe_float(result.get("final_equity"), initial_balance)
+    pnl = final_equity - initial_balance
+    trades = result.get("trades") if isinstance(result.get("trades"), list) else []
+    wins = len([trade for trade in trades if _safe_float(trade.get("pnl")) > 0])
+    losses = len([trade for trade in trades if _safe_float(trade.get("pnl")) < 0])
+    flat = max(0, len(trades) - wins - losses)
+    payload = {
+        "ok": True,
+        "run_id": run.id,
+        "summary": {
+            "strategy": run.strategy_name,
+            "symbol": run.symbol,
+            "timeframe": run.timeframe,
+            "duration": duration["label"],
+            "allocation": initial_balance,
+            "leverage": _safe_float(params.get("leverage"), 1.0),
+            "paper_balance": _safe_float(nested.get("paper_balance_usd"), _paper_balance_usd()),
+        },
+        "metrics": {
+            "roi": _safe_float(result.get("total_return")),
+            "pnl": pnl,
+            "win_rate": _safe_float(result.get("win_rate")),
+            "max_drawdown": _safe_float(result.get("max_drawdown")),
+            "trades": int(result.get("trade_count") or 0),
+            "fees": _safe_float(result.get("fees_paid")),
+            "ending_balance": final_equity,
+        },
+        "charts": {
+            "equity": _series_from_equity(result, "equity", initial_balance),
+            "pnl": _pnl_series(result, initial_balance),
+            "drawdown": _drawdown_series(result),
+            "growth": _growth_series(result, initial_balance),
+            "win_loss": {"wins": wins, "losses": losses, "flat": flat},
+            "trade_distribution": _trade_distribution(trades),
+        },
+        "result": _json_safe(result),
+    }
+    return _json_safe(payload)
+
+
+def _series_from_equity(result: dict[str, Any], key: str, default_value: float = 0.0) -> list[dict[str, float]]:
+    points = result.get("equity_curve") if isinstance(result.get("equity_curve"), list) else []
+    series = [
+        {"x": _safe_float(point.get("timestamp")), "y": _safe_float(point.get(key), default_value)}
+        for point in points
+        if isinstance(point, dict)
+    ]
+    return _downsample_series(series)
+
+
+def _pnl_series(result: dict[str, Any], initial_balance: float) -> list[dict[str, float]]:
+    points = result.get("equity_curve") if isinstance(result.get("equity_curve"), list) else []
+    series = [
+        {"x": _safe_float(point.get("timestamp")), "y": _safe_float(point.get("equity"), initial_balance) - initial_balance}
+        for point in points
+        if isinstance(point, dict)
+    ]
+    return _downsample_series(series)
+
+
+def _growth_series(result: dict[str, Any], initial_balance: float) -> list[dict[str, float]]:
+    points = result.get("equity_curve") if isinstance(result.get("equity_curve"), list) else []
+    base = max(initial_balance, 1e-9)
+    series = [
+        {"x": _safe_float(point.get("timestamp")), "y": (_safe_float(point.get("equity"), initial_balance) - initial_balance) / base}
+        for point in points
+        if isinstance(point, dict)
+    ]
+    return _downsample_series(series)
+
+
+def _drawdown_series(result: dict[str, Any]) -> list[dict[str, float]]:
+    points = result.get("drawdown_curve") if isinstance(result.get("drawdown_curve"), list) else []
+    series = [
+        {"x": _safe_float(point.get("timestamp")), "y": _safe_float(point.get("drawdown"))}
+        for point in points
+        if isinstance(point, dict)
+    ]
+    return _downsample_series(series)
+
+
+def _trade_distribution(trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    buckets = [
+        {"label": "< -2%", "min": -math.inf, "max": -0.02, "count": 0},
+        {"label": "-2% to 0", "min": -0.02, "max": 0.0, "count": 0},
+        {"label": "0 to 2%", "min": 0.0, "max": 0.02, "count": 0},
+        {"label": "> 2%", "min": 0.02, "max": math.inf, "count": 0},
+    ]
+    for trade in trades:
+        value = _safe_float(trade.get("return"))
+        for bucket in buckets:
+            if bucket["min"] <= value < bucket["max"]:
+                bucket["count"] += 1
+                break
+    return [{"label": bucket["label"], "count": bucket["count"]} for bucket in buckets]
+
+
+def _downsample_series(series: list[dict[str, float]]) -> list[dict[str, float]]:
+    max_points = max(12, int(current_app.config.get("BACKTEST_MAX_CHART_POINTS", 240) or 240))
+    if len(series) <= max_points:
+        return series
+    step = math.ceil(len(series) / max_points)
+    sampled = series[::step]
+    if sampled[-1] != series[-1]:
+        sampled.append(series[-1])
+    return sampled
+
+
+def _cycle_duration_key() -> str:
+    raw = str(request.form.get("cycle_duration", "1h10")).strip().lower()
+    return raw if raw in _CYCLE_DURATIONS else "1h10"
+
+
+def _paper_balance_usd() -> float:
+    return float(current_app.config.get("BACKTEST_PAPER_BALANCE_USD", 10_000.0) or 10_000.0)
+
+
+def _allocation_default_usd() -> float:
+    default = float(current_app.config.get("BACKTEST_ALLOCATION_DEFAULT_USD", 10_000.0) or 10_000.0)
+    return min(max(default, 0.0), _paper_balance_usd())
+
+
+def _wants_json_response() -> bool:
+    if str(request.args.get("response", "")).strip().lower() == "json":
+        return True
+    return bool(request.accept_mimetypes.accept_json and not request.accept_mimetypes.accept_html)
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    return value
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if math.isfinite(parsed) else default
+
+
 def _auto_deploy_rankings(result: dict[str, Any], limit: int, manager: Any) -> int:
     return 0
-
-
-def _aggressive_comparisons(optimizer_run_id: int) -> list[dict[str, Any]]:
-    rankings = (
-        StrategyRanking.query.filter_by(optimizer_run_id=optimizer_run_id, profile=Profile.AGGRESSIVE_1H.value)
-        .order_by(StrategyRanking.score.desc())
-        .all()
-    )
-    grouped: dict[tuple[str, str, str, str], dict[str, Any]] = {}
-
-    for ranking in rankings:
-        key = (ranking.symbol, ranking.timeframe, ranking.strategy_name, ranking.profile)
-        explanation = ranking.ml_explanation if isinstance(ranking.ml_explanation, dict) else {}
-        net_roi_v2 = explanation.get("net_roi_v2") if isinstance(explanation.get("net_roi_v2"), dict) else {}
-        row = grouped.setdefault(
-            key,
-            {
-                "symbol": ranking.symbol,
-                "timeframe": ranking.timeframe,
-                "strategy_name": ranking.strategy_name,
-                "profile": ranking.profile,
-                "best_score": ranking.score,
-                "net_roi_v2_score": net_roi_v2.get("net_roi_v2_score", 0.0),
-                "roi_quality_grade": net_roi_v2.get("roi_quality_grade", "D"),
-                "regime_support": net_roi_v2.get("regime_support", "regime-neutral"),
-                "convex_edge_score": ranking.convex_edge_score or 0.0,
-                "mfe_mae_ratio": ranking.mfe_mae_ratio or 0.0,
-                "capacity_multiple": ranking.capacity_multiple or 0.0,
-                "cost_adjusted_recent_1h_return": ranking.cost_adjusted_recent_1h_return or 0.0,
-                "decay_penalty": ranking.decay_penalty or 0.0,
-                "recent_1h_return": ranking.recent_1h_return or 0.0,
-                "edge_score": ranking.edge_score or 0.0,
-                "expectancy": ranking.expectancy or 0.0,
-                "cost_drag_bps": ranking.cost_drag_bps or 0.0,
-                "accepted": 0,
-                "rejected": 0,
-                "no_trade_reason": ranking.no_trade_reason or ranking.rejection_reason or "",
-            },
-        )
-        row["best_score"] = max(float(row["best_score"] or 0.0), float(ranking.score or 0.0))
-        row["net_roi_v2_score"] = max(float(row["net_roi_v2_score"] or 0.0), float(net_roi_v2.get("net_roi_v2_score", 0.0) or 0.0))
-        if net_roi_v2.get("roi_quality_grade") in {"A", "B"}:
-            row["roi_quality_grade"] = net_roi_v2.get("roi_quality_grade")
-        if net_roi_v2.get("regime_support") == "regime-supported":
-            row["regime_support"] = "regime-supported"
-        row["convex_edge_score"] = max(float(row["convex_edge_score"] or 0.0), float(ranking.convex_edge_score or 0.0))
-        row["mfe_mae_ratio"] = max(float(row["mfe_mae_ratio"] or 0.0), float(ranking.mfe_mae_ratio or 0.0))
-        row["capacity_multiple"] = max(float(row["capacity_multiple"] or 0.0), float(ranking.capacity_multiple or 0.0))
-        row["cost_adjusted_recent_1h_return"] = max(float(row["cost_adjusted_recent_1h_return"] or 0.0), float(ranking.cost_adjusted_recent_1h_return or 0.0))
-        row["decay_penalty"] = max(float(row["decay_penalty"] or 0.0), float(ranking.decay_penalty or 0.0))
-        row["recent_1h_return"] = max(float(row["recent_1h_return"] or 0.0), float(ranking.recent_1h_return or 0.0))
-        row["edge_score"] = max(float(row["edge_score"] or 0.0), float(ranking.edge_score or 0.0))
-        row["expectancy"] = max(float(row["expectancy"] or 0.0), float(ranking.expectancy or 0.0))
-        row["cost_drag_bps"] = max(float(row["cost_drag_bps"] or 0.0), float(ranking.cost_drag_bps or 0.0))
-        if ranking.rejected:
-            row["rejected"] += 1
-        else:
-            row["accepted"] += 1
-        if not row["no_trade_reason"]:
-            row["no_trade_reason"] = ranking.no_trade_reason or ranking.rejection_reason or ""
-
-    return sorted(grouped.values(), key=lambda item: float(item["best_score"]), reverse=True)[:20]
-
-
-def _latest_fibonacci(feature_engine: Any, market_data: Any) -> dict[str, Any]:
-    symbols = current_app.config.get("ALLOWED_SYMBOLS", ["BTC"])
-    symbol = symbols[0] if symbols else "BTC"
-    timeframe = current_app.config.get("DEFAULT_TIMEFRAME", "15m")
-
-    try:
-        candles = market_data.get_candles(symbol, timeframe, mode="testnet", limit=80)
-        return feature_engine.snapshot(symbol=symbol, timeframe=timeframe, candles=candles).fibonacci_levels
-    except Exception as exc:  # noqa: BLE001
-        return {"symbol": symbol, "timeframe": timeframe, "error": str(exc)}
-
-
-def _universe_candidates(market_universe: Any) -> list[dict[str, Any]]:
-    if not current_app.config.get("DYNAMIC_UNIVERSE_ENABLED", False):
-        return []
-    try:
-        return [
-            candidate.as_dict()
-            for candidate in market_universe.liquid_universe("testnet", "5m")[:10]
-        ]
-    except Exception:  # noqa: BLE001
-        return []
-
-
-def _scanner_diagnostics(market_scanner: Any) -> dict[str, Any]:
-    if not current_app.config.get("DYNAMIC_UNIVERSE_ENABLED", False):
-        return {"accepted": [], "rejected": [], "rejection_breakdown": {}, "rejection_rate": 0.0}
-    try:
-        symbols = list(current_app.config.get("ALLOWED_SYMBOLS", ["BTC"]))
-        market_scanner.score_candidates(
-            symbols,
-            mode="testnet",
-            timeframe="5m",
-            duration_seconds=3600,
-            strategy_name="scalping",
-            optimizer_profile="dynamic_intraday",
-        )
-        return dict(getattr(market_scanner, "last_scan_diagnostics", {}) or {})
-    except Exception as exc:  # noqa: BLE001
-        return {"accepted": [], "rejected": [], "rejection_breakdown": {}, "rejection_rate": 0.0, "error": str(exc)}
-
-
-def _high_upside_status() -> dict[str, Any]:
-    risk_status = get_service("risk_engine").status("live")
-    return {
-        "profile_enabled": bool(current_app.config.get("HIGH_UPSIDE_PROFILE_ENABLED", False)),
-        "live_eligible": bool(current_app.config.get("HIGH_UPSIDE_LIVE_ELIGIBLE", False)),
-        "auto_disabled": bool((risk_status.get("high_upside") or {}).get("auto_disabled", False)),
-        "disabled_reason": (risk_status.get("high_upside") or {}).get("disabled_reason", {}),
-        "max_scanner_rejection_rate": float(current_app.config.get("HIGH_UPSIDE_MAX_SCANNER_REJECTION_RATE", 0.65) or 0.65),
-    }
-
-
-def _offline_ml_status() -> dict[str, Any]:
-    try:
-        readiness = get_service("offline_ranker").readiness("1h")
-    except Exception as exc:  # noqa: BLE001
-        readiness = {"ready": False, "blockers": [str(exc)], "promoted_model": None}
-    return {
-        "enabled": bool(current_app.config.get("ML_OFFLINE_MODELS_ENABLED", False)),
-        "blend_enabled": bool(current_app.config.get("ML_OFFLINE_BLEND_ENABLED", False)),
-        "requires_for_high_upside": bool(current_app.config.get("HIGH_UPSIDE_REQUIRE_PROMOTED_ML", True)),
-        "readiness": readiness,
-    }
 
 
 def _symbols() -> list[str]:
@@ -440,3 +486,21 @@ def _parse_number(value: Any, key: str) -> float | int:
         return float(text) if "." in text else int(text)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{key} must be numeric.") from exc
+
+
+def _arg_int(key: str, default: int) -> int:
+    try:
+        return int(str(request.args.get(key, default)).strip())
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _arg_float(key: str, default: float) -> float:
+    try:
+        return float(str(request.args.get(key, default)).strip())
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _arg_bool(key: str) -> bool:
+    return str(request.args.get(key, "")).strip().lower() in {"1", "true", "yes", "on"}

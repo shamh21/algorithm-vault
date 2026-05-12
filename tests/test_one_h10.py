@@ -1203,6 +1203,100 @@ def test_one_h10_start_creates_provider_tagged_legs(app, monkeypatch) -> None:
     ]
 
 
+def test_vault_routing_preview_reports_provider_allocations_without_creating_cycle(app, monkeypatch) -> None:
+    _confirm_one_h10_live(app)
+    app.config["ML_ALL_AREAS_ENABLED"] = False
+    app.config["ONE_H10_BOOTSTRAP_LIVE_ENABLED"] = True
+    app.config["ONE_H10_REQUIRE_PROMOTED_ML"] = False
+    user, secret = _create_user("routingpreview")
+    hyperliquid = _connection(app, user, "hyperliquid", active=True)
+    kucoin = _connection(app, user, "kucoin", active=False)
+    service = app.extensions["services"]["trading_connections"]
+    monkeypatch.setattr(service, "can_trade", lambda user_id, mode, connection_id=None: True)
+
+    def snapshot(user_id: int, mode: str, connection_id: int | None = None) -> ClientSnapshot:
+        if connection_id == hyperliquid.id:
+            return ClientSnapshot(mode, [{"asset": "USDC", "type": "margin", "value": 60.0, "withdrawable": 60.0}], [], [], [], [])
+        return ClientSnapshot(mode, [{"asset": "USDT", "type": "futures", "value": 20.0, "withdrawable": 20.0}], [], [], [], [])
+
+    monkeypatch.setattr(service, "account_snapshot", snapshot)
+
+    client = app.test_client()
+    _login(client, user.username, secret)
+    response = client.get(
+        "/api/vault/routing-preview?cycle_type=one_h10&amount=20&deposit_asset=USDC&settlement_asset=USDC&providers=hyperliquid&providers=kucoin"
+    )
+
+    payload = response.get_json()
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["cycle"]["type"] == "one_h10"
+    assert payload["summary"]["ready_provider_count"] == 2
+    rows = {row["provider"]: row for row in payload["providers"]}
+    assert rows["hyperliquid"]["target_amount"] == pytest.approx(15.0)
+    assert rows["kucoin"]["target_amount"] == pytest.approx(5.0)
+    assert rows["hyperliquid"]["allocation_weight"] == pytest.approx(0.75)
+    assert rows["kucoin"]["allocation_weight"] == pytest.approx(0.25)
+    assert VaultCycle.query.filter_by(user_id=user.id).count() == 0
+
+
+def test_one_h10_start_honors_selected_provider_filter(app, monkeypatch) -> None:
+    _confirm_one_h10_live(app)
+    app.config["AGGRESSIVE_1H_MAX_COST_DRAG_BPS"] = 30.0
+    user, secret = _create_user("providerfilter")
+    db.session.add(WalletBalance(user_id=user.id, asset="USDC", available_balance=100.0, estimated_usd_value=100.0))
+    hyperliquid = _connection(app, user, "hyperliquid", active=True)
+    kucoin = _connection(app, user, "kucoin", active=False)
+    db.session.add_all(
+        [
+            LeveragedMarket(provider="hyperliquid", venue_symbol="BTC", symbol="BTC", status="active", settlement_asset="USDC", max_leverage=50, liquidity_usd=1_000_000),
+            LeveragedMarket(provider="kucoin", venue_symbol="XBTUSDTM", symbol="BTC", status="active", settlement_asset="USDT", max_leverage=50, liquidity_usd=1_000_000),
+        ]
+    )
+    db.session.flush()
+    for market in LeveragedMarket.query.all():
+        _feature(market, score=1.0, liquidity=1_000_000)
+    db.session.commit()
+    market_data = app.extensions["services"]["market_data"]
+    market_data.get_mid_price = lambda symbol, mode: 100.0
+    market_data.get_order_book = lambda symbol, mode: {"levels": [[{"px": "99.9", "sz": "1000"}], [{"px": "100.1", "sz": "1000"}]]}
+    market_data.get_candles = lambda symbol, timeframe, mode, limit: _candles(limit)
+    app.extensions["services"]["strategy_manager"].start = lambda run_id: None
+    service = app.extensions["services"]["trading_connections"]
+    monkeypatch.setattr(service, "can_trade", lambda user_id, mode, connection_id=None: True)
+
+    def snapshot(user_id: int, mode: str, connection_id: int | None = None) -> ClientSnapshot:
+        asset = "USDT" if connection_id == kucoin.id else "USDC"
+        return ClientSnapshot(mode, [{"asset": asset, "type": "margin", "value": 50.0, "withdrawable": 50.0}], [], [], [], [])
+
+    monkeypatch.setattr(service, "account_snapshot", snapshot)
+    monkeypatch.setattr(app.extensions["services"]["leveraged_markets"], "sync_for_user", lambda *args, **kwargs: [])
+    monkeypatch.setitem(app.extensions["services"], "one_h10_forecast", _PassingOneH10Forecast())
+
+    client = app.test_client()
+    _login(client, user.username, secret)
+    response = client.post(
+        "/vault/start",
+        data={
+            "deposit_amount": "10",
+            "deposit_asset": "USDC",
+            "lock_duration": "1",
+            "settlement_asset": "USDC",
+            "providers_submitted": "1",
+            "providers": "kucoin",
+            "one_h10_live_ack": "on",
+        },
+    )
+
+    assert response.status_code == 302
+    cycle = VaultCycle.query.filter_by(user_id=user.id).one()
+    legs = VaultAllocationLeg.query.filter_by(vault_cycle_id=cycle.id).all()
+    assert {leg.provider for leg in legs} == {"kucoin"}
+    assert {leg.trading_connection_id for leg in legs} == {kucoin.id}
+    assert hyperliquid.id not in {leg.trading_connection_id for leg in legs}
+    assert cycle.selection_metadata["requested_provider_filter"] == ["kucoin"]
+
+
 def test_one_h10_start_serializes_promoted_model_datetimes(app, monkeypatch) -> None:
     _confirm_one_h10_live(app)
     app.config["AGGRESSIVE_1H_MAX_COST_DRAG_BPS"] = 30.0
@@ -1286,7 +1380,7 @@ def test_one_h10_start_rejects_missing_live_ack(app) -> None:
     assert VaultCycle.query.filter_by(user_id=user.id).count() == 0
     assert balance.available_balance == 100.0
     assert balance.locked_balance == 0.0
-    assert b"Confirm the 1H10 live leveraged-order acknowledgement" in response.data
+    assert b"Confirm the 1H10 acknowledgement" in response.data
 
 
 def test_one_h10_start_rejects_when_live_flag_disabled(app) -> None:

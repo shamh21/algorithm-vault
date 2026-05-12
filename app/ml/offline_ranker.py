@@ -13,6 +13,7 @@ from flask import current_app, has_app_context
 
 from ..extensions import db
 from ..models import MLMarketHistory, MLOfflineModel, MLTrainingEvent, StrategyRanking
+from ..services.model_registry import dataset_hash, feature_schema_hash
 from ..services.provider_assets import normalize_provider, provider_feature_context
 from .features import MLFeatureFactory
 from .online_ranker import OnlineRanker, extract_features, horizon_from_duration, outcome_from_result
@@ -48,6 +49,7 @@ class OfflineRanker:
     ) -> dict[str, Any]:
         horizon_key = str(horizon or "global").lower()
         provider_key = normalize_provider(provider)
+        training_started_at = datetime.utcnow()
         requested = self._model_types(model_types)
         blockers: list[str] = []
         if not bool(self.config.get("ML_OFFLINE_MODELS_ENABLED", False)):
@@ -129,6 +131,19 @@ class OfflineRanker:
                 validation_loss=metrics["validation_loss"],
                 negative_error_rate=metrics["negative_error_rate"],
                 drift=metrics["drift"],
+                feature_schema_hash=feature_schema_hash(FEATURE_SCHEMA_VERSION, feature_names),
+                dataset_version=f"{provider_key}:{horizon_key}:{len(rows)}:{len(valid_x)}",
+                dataset_hash=dataset_hash(
+                    {
+                        "provider": provider_key,
+                        "horizon": horizon_key,
+                        "training_rows": len(rows),
+                        "validation_rows": len(valid_x),
+                        "feature_names": feature_names,
+                    }
+                ),
+                training_started_at=training_started_at,
+                training_completed_at=datetime.utcnow(),
             )
             record.feature_names = feature_names
             record.metrics = metrics
@@ -159,6 +174,7 @@ class OfflineRanker:
             return {"promoted": False, "horizon": horizon_key, "provider": provider_key, "model_id": model_id, "blockers": ["model_not_found"]}
         diagnostics = self.promotion_diagnostics(record)
         if not diagnostics["ready"]:
+            self._record_failed_promotion("offline_ranker", provider_key, horizon_key, int(model_id), diagnostics["blockers"])
             return {"promoted": False, **diagnostics}
 
         for promoted in (
@@ -170,8 +186,37 @@ class OfflineRanker:
                 promoted.status = "archived"
         record.status = "promoted"
         record.promoted_at = datetime.utcnow()
+        self._record_promotion(record, model_family="offline_ranker", promotion_source="offline_ranker.promote")
         db.session.commit()
         return {"promoted": True, **self._model_payload(record), "blockers": []}
+
+    def _record_promotion(self, record: MLOfflineModel, *, model_family: str, promotion_source: str) -> None:
+        if not has_app_context():
+            return
+        service = current_app.extensions.get("services", {}).get("model_registry")
+        if service is not None:
+            service.record_promotion(record, model_family=model_family, promotion_source=promotion_source)
+
+    def _record_failed_promotion(
+        self,
+        model_family: str,
+        provider: str,
+        horizon: str,
+        model_id: int | None,
+        blockers: list[str],
+    ) -> None:
+        if not has_app_context():
+            return
+        service = current_app.extensions.get("services", {}).get("model_registry")
+        if service is not None:
+            service.record_failed_promotion(
+                model_family=model_family,
+                provider=provider,
+                horizon=horizon,
+                model_id=model_id,
+                blockers=blockers,
+            )
+            db.session.commit()
 
     def score_payload(
         self,

@@ -16,6 +16,7 @@ from urllib.parse import urlencode
 
 import requests
 
+from .failures import ProviderConnectionError
 from .hyperliquid_client import ClientSnapshot
 
 
@@ -46,7 +47,20 @@ UNISWAP_TOKENS = {
 }
 
 
-class ProviderRequestError(RuntimeError):
+def _balance_available(balances: list[dict[str, Any]], asset: str) -> float:
+    asset_key = str(asset or "").upper().strip()
+    for row in balances or []:
+        row_asset = str(row.get("asset") or row.get("currency") or "").upper().strip()
+        if row_asset != asset_key:
+            continue
+        for key in ("withdrawable", "available", "available_balance", "free", "value", "total"):
+            value = _safe_float(row.get(key))
+            if value > 0:
+                return value
+    return 0.0
+
+
+class ProviderRequestError(ProviderConnectionError):
     """Raised when a provider API returns an unusable response."""
 
     def __init__(
@@ -471,7 +485,178 @@ class KucoinFuturesConnector:
         ]
 
     def withdraw_from_bridge(self, mode: str, amount: float, destination: str) -> dict[str, Any]:
-        raise RuntimeError("KuCoin withdrawals are intentionally disabled in this app.")
+        return self.withdraw_to_address(mode, "USDT", amount, destination)
+
+    def deposit_address(self, mode: str, asset: str, network: str | None = None) -> dict[str, Any]:
+        if mode != "live":
+            raise RuntimeError("KuCoin deposit addresses are available in live mode only.")
+        asset_key = str(asset or "").upper().strip()
+        params: dict[str, Any] = {"currency": asset_key}
+        chain = self._kucoin_chain(network)
+        if chain:
+            params["chain"] = chain
+        response = self._signed_spot("GET", self._path("KUCOIN_DEPOSIT_ADDRESSES_PATH", "/api/v3/deposit-addresses"), params=params)
+        data = _response_data(response)
+        row: dict[str, Any]
+        if isinstance(data, list):
+            row = next((dict(item) for item in data if isinstance(item, dict)), {})
+        elif isinstance(data, dict):
+            row = data
+        else:
+            row = {}
+        address = str(row.get("address") or row.get("toAddress") or "").strip()
+        if not address:
+            raise RuntimeError(f"KuCoin returned no deposit address for {asset_key}.")
+        return {
+            "asset": asset_key,
+            "network": str(network or row.get("chain") or row.get("chainName") or ""),
+            "address": address,
+            "memo": str(row.get("memo") or row.get("tag") or ""),
+            "status": "active",
+            "raw": row or response,
+        }
+
+    def reserve_funds(self, mode: str, asset: str, amount: float) -> dict[str, Any]:
+        snapshot = self.account_snapshot(mode)
+        asset_key = str(asset or "").upper().strip()
+        requested = max(0.0, float(amount or 0.0))
+        available = _balance_available(snapshot.balances, asset_key)
+        if available + 1e-9 < requested:
+            raise RuntimeError(f"KuCoin {asset_key} reserve unavailable: {available:.6f} < {requested:.6f}.")
+        return {
+            "status": "confirmed",
+            "provider_reference": f"kucoin-reserve-{uuid.uuid4().hex}",
+            "asset": asset_key,
+            "confirmed_amount": requested,
+            "available_before": available,
+            "raw": {"reserve_type": "exchange_balance"},
+        }
+
+    def internal_transfer(
+        self,
+        mode: str,
+        asset: str,
+        amount: float,
+        *,
+        from_account_type: str,
+        to_account_type: str,
+        client_reference: str | None = None,
+    ) -> dict[str, Any]:
+        if mode != "live":
+            raise RuntimeError("KuCoin internal transfers are available in live mode only.")
+        client_oid = str(client_reference or uuid.uuid4().hex)[:128]
+        body = {
+            "clientOid": client_oid,
+            "type": "INTERNAL",
+            "currency": str(asset or "").upper().strip(),
+            "amount": self._decimal(max(0.0, float(amount or 0.0))),
+            "fromAccountType": str(from_account_type or "MAIN").upper(),
+            "toAccountType": str(to_account_type or "TRADE").upper(),
+        }
+        response = self._signed_spot("POST", self._path("KUCOIN_UNIVERSAL_TRANSFER_PATH", "/api/v3/accounts/universal-transfer"), body=body)
+        data = _response_data(response)
+        return {
+            "status": "submitted",
+            "provider_reference": str((data if isinstance(data, dict) else {}).get("orderId") or client_oid),
+            "client_reference": client_oid,
+            "raw": response,
+        }
+
+    def withdraw_to_address(
+        self,
+        mode: str,
+        asset: str,
+        amount: float,
+        destination: str,
+        network: str | None = None,
+        memo: str | None = None,
+        client_reference: str | None = None,
+    ) -> dict[str, Any]:
+        if mode != "live":
+            raise RuntimeError("KuCoin withdrawals are available in live mode only.")
+        asset_key = str(asset or "").upper().strip()
+        requested = max(0.0, float(amount or 0.0))
+        if requested <= 0:
+            raise ValueError("KuCoin withdrawal amount must be positive.")
+        body: dict[str, Any] = {
+            "currency": asset_key,
+            "toAddress": str(destination or "").strip(),
+            "amount": self._decimal(requested),
+            "withdrawType": "ADDRESS",
+            "remark": str(client_reference or "algorithm-vault-cycle")[:64],
+        }
+        chain = self._kucoin_chain(network)
+        if chain:
+            body["chain"] = chain
+        if memo:
+            body["memo"] = str(memo)
+        response = self._signed_spot("POST", self._path("KUCOIN_WITHDRAWALS_PATH", "/api/v3/withdrawals"), body=body)
+        data = _response_data(response)
+        provider_reference = str((data if isinstance(data, dict) else {}).get("withdrawalId") or "")
+        return {
+            "status": "submitted",
+            "provider_reference": provider_reference,
+            "asset": asset_key,
+            "network": str(network or ""),
+            "confirmed_amount": requested,
+            "raw": response,
+        }
+
+    def transfer_status(self, mode: str, provider_reference: str, transfer_type: str | None = None) -> dict[str, Any]:
+        return {
+            "status": "submitted" if provider_reference else "unknown",
+            "provider_reference": str(provider_reference or ""),
+            "transfer_type": transfer_type or "withdrawal",
+            "raw": {},
+        }
+
+    def convert_stablecoin(
+        self,
+        mode: str,
+        from_asset: str,
+        to_asset: str,
+        amount: float,
+        max_slippage_bps: float,
+        client_reference: str | None = None,
+    ) -> dict[str, Any]:
+        if mode != "live":
+            raise RuntimeError("KuCoin conversion is available in live mode only.")
+        from_key = str(from_asset or "").upper().strip()
+        to_key = str(to_asset or "").upper().strip()
+        if {from_key, to_key} - {"USDC", "USDT", "ETH"}:
+            raise RuntimeError("KuCoin conversion supports USDT, USDC, and ETH only.")
+        requested = max(0.0, float(amount or 0.0))
+        quote = self._signed_spot(
+            "GET",
+            self._path("KUCOIN_CONVERT_QUOTE_PATH", "/api/v1/convert/quote"),
+            params={"fromCurrency": from_key, "toCurrency": to_key, "fromCurrencySize": self._decimal(requested)},
+        )
+        quote_data = _response_data(quote)
+        if not isinstance(quote_data, dict) or not quote_data.get("quoteId"):
+            raise RuntimeError("KuCoin conversion quote was unavailable.")
+        from_size = _safe_float(quote_data.get("fromCurrencySize"), requested)
+        to_size = _safe_float(quote_data.get("toCurrencySize"))
+        expected = requested if from_key in {"USDC", "USDT"} and to_key in {"USDC", "USDT"} else 0.0
+        if expected > 0 and to_size > 0:
+            slippage_bps = abs((to_size - expected) / expected) * 10_000
+            if slippage_bps > max(0.0, float(max_slippage_bps or 0.0)):
+                raise RuntimeError(f"KuCoin conversion slippage {slippage_bps:.2f} bps exceeds configured limit.")
+        body = {
+            "clientOrderId": str(client_reference or uuid.uuid4().hex)[:128],
+            "quoteId": str(quote_data["quoteId"]),
+            "accountType": "BOTH",
+        }
+        order = self._signed_spot("POST", self._path("KUCOIN_CONVERT_ORDER_PATH", "/api/v1/convert/order"), body=body)
+        order_data = _response_data(order)
+        return {
+            "status": "submitted",
+            "provider_reference": str((order_data if isinstance(order_data, dict) else {}).get("orderId") or body["clientOrderId"]),
+            "from_asset": from_key,
+            "to_asset": to_key,
+            "requested_amount": from_size or requested,
+            "confirmed_amount": to_size,
+            "raw": {"quote": quote, "order": order},
+        }
 
     def discover_leveraged_markets(self, mode: str) -> list[dict[str, Any]]:
         if mode != "live":
@@ -563,6 +748,26 @@ class KucoinFuturesConnector:
         params: dict[str, Any] | None = None,
         body: dict[str, Any] | None = None,
     ) -> Any:
+        return self._signed_with_base(method, path, params=params, body=body, base_url=self._base_url())
+
+    def _signed_spot(
+        self,
+        method: str,
+        path: str,
+        params: dict[str, Any] | None = None,
+        body: dict[str, Any] | None = None,
+    ) -> Any:
+        return self._signed_with_base(method, path, params=params, body=body, base_url=self._spot_base_url())
+
+    def _signed_with_base(
+        self,
+        method: str,
+        path: str,
+        params: dict[str, Any] | None = None,
+        body: dict[str, Any] | None = None,
+        *,
+        base_url: str,
+    ) -> Any:
         params = dict(params or {})
         body_text = json.dumps(body or {}, separators=(",", ":")) if body else ""
         endpoint = path + (f"?{urlencode(params, doseq=True)}" if params else "")
@@ -585,7 +790,7 @@ class KucoinFuturesConnector:
             payload = _request_with_retries(
                 self.session,
                 method,
-                self._base_url() + path,
+                base_url + path,
                 provider="KuCoin",
                 attempts=self._retry_attempts(),
                 sleep_seconds=self._retry_sleep_seconds(),
@@ -645,6 +850,9 @@ class KucoinFuturesConnector:
     def _base_url(self) -> str:
         return str(self.config.get("KUCOIN_FUTURES_BASE_URL", "https://api-futures.kucoin.com")).rstrip("/")
 
+    def _spot_base_url(self) -> str:
+        return str(self.config.get("KUCOIN_SPOT_BASE_URL", "https://api.kucoin.com")).rstrip("/")
+
     def _timeout(self) -> float:
         return max(1.0, _safe_float(self.config.get("PROVIDER_TIMEOUT_SECONDS"), 10.0))
 
@@ -656,6 +864,27 @@ class KucoinFuturesConnector:
 
     def _path(self, key: str, default: str) -> str:
         return str(self.config.get(key, default)).strip() or default
+
+    @staticmethod
+    def _kucoin_chain(network: str | None) -> str:
+        key = re.sub(r"[^A-Za-z0-9]", "", str(network or "")).upper()
+        mapping = {
+            "ETH": "eth",
+            "ETHEREUM": "eth",
+            "ERC20": "eth",
+            "ARBITRUM": "arb",
+            "ARBITRUMONE": "arb",
+            "TRON": "trx",
+            "TRC20": "trx",
+            "BSC": "bsc",
+            "BEP20": "bsc",
+            "SOL": "sol",
+            "SOLANA": "sol",
+            "POLYGON": "matic",
+            "MATIC": "matic",
+            "BASE": "base",
+        }
+        return mapping.get(key, str(network or "").strip())
 
     def _margin_mode(self) -> str:
         value = str(self.metadata.get("margin_mode") or self.config.get("KUCOIN_MARGIN_MODE", "ISOLATED")).strip().upper()
@@ -988,7 +1217,6 @@ class UniswapDelegatedConnector:
         token = self._token(symbol)
         exact_output = side.lower() == "buy"
         amount = self._swap_amount(quantity, token)
-        self._enforce_notional_cap(quantity, limit_price)
         quote = self._post(
             "/quote",
             {
@@ -1046,8 +1274,6 @@ class UniswapDelegatedConnector:
         expires_at = _parse_datetime(self.metadata.get("delegation_expires_at"))
         if expires_at is None or expires_at <= datetime.now(timezone.utc):
             raise RuntimeError("Wallet delegation is expired or missing an expiry.")
-        if _safe_float(self.metadata.get("max_notional_usd")) <= 0:
-            raise RuntimeError("Uniswap max notional cap is required.")
         if _safe_float(self.metadata.get("daily_loss_usd")) <= 0:
             raise RuntimeError("Uniswap daily loss cap is required.")
 
@@ -1077,13 +1303,6 @@ class UniswapDelegatedConnector:
 
     def _swap_amount(self, quantity: float, token: dict[str, Any]) -> int:
         return max(1, int(float(quantity) * (10 ** int(token["token_decimals"]))))
-
-    def _enforce_notional_cap(self, quantity: float, limit_price: float | None) -> None:
-        if limit_price is None or limit_price <= 0:
-            return
-        notional = abs(float(quantity) * float(limit_price))
-        if notional > _safe_float(self.metadata.get("max_notional_usd")):
-            raise RuntimeError("Uniswap delegated order exceeds max notional cap.")
 
     def _protocols(self) -> list[str]:
         raw = str(self.metadata.get("protocols") or self.config.get("UNISWAP_PROTOCOLS", "V2,V3,V4")).strip()

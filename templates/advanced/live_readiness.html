@@ -58,12 +58,10 @@
       <div><dt>Daily Loss Limit</dt><dd>{{ "%.4f"|format(risk_status.daily_loss_limit) }}</dd></div>
       <div><dt>Cooldown</dt><dd>{{ risk_status.cooldown_minutes_remaining }} min</dd></div>
       <div><dt>Max Leverage</dt><dd>{{ risk_status.max_leverage }}</dd></div>
-      <div><dt>Max Notional</dt><dd>${{ "%.2f"|format(risk_status.max_position_notional) }}</dd></div>
-      <div><dt>Max Slippage</dt><dd>{{ "%.4f"|format(risk_status.max_slippage_pct) }}</dd></div>
+      <div><dt>Adaptive Slippage</dt><dd>{{ "%.2f"|format(risk_status.adaptive_slippage.estimate_bps or 0) }} bps</dd></div>
       <div><dt>High-Upside Profile</dt><dd>{{ "Enabled" if risk_status.high_upside.profile_enabled else "Disabled" }}</dd></div>
       <div><dt>High-Upside Live Eligible</dt><dd>{{ "Yes" if risk_status.high_upside.live_eligible else "No" }}</dd></div>
       <div><dt>High-Upside Auto Disable</dt><dd>{{ "Active" if risk_status.high_upside.auto_disabled else "Clear" }}</dd></div>
-      <div><dt>High-Upside Max Notional</dt><dd>${{ "%.2f"|format(risk_status.high_upside.max_position_notional or 0) }}</dd></div>
       <div><dt>High-Upside Daily Loss</dt><dd>${{ "%.2f"|format(risk_status.high_upside.max_daily_loss or 0) }}</dd></div>
     </dl>
   </article>

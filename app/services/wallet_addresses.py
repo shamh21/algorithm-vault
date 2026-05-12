@@ -9,7 +9,7 @@ from typing import Any, Protocol
 from flask import current_app, has_app_context
 
 from ..extensions import db
-from ..models import DepositAddress, Setting, WalletAddress
+from ..models import DepositAddress, WalletAddress
 
 
 class DepositAddressProvider(Protocol):
@@ -278,12 +278,13 @@ def validate_withdraw_address(address: str, asset: str, network: str | None = No
 
 
 def use_real_addresses(config: dict[str, Any] | None = None) -> bool:
-    """Return the runtime address mode, using settings when available."""
+    """Return the runtime address mode.
 
-    default = bool((config or {}).get("USE_REAL_ADDRESSES", False))
-    if has_app_context():
-        return bool(Setting.get_json("use_real_addresses", default))
-    return default
+    Real deposit and withdrawal address flows are always enabled; custody,
+    approval, encryption, and configured-address gates still fail closed.
+    """
+
+    return True
 
 
 def _link_generated_wallet_address(deposit_address: DepositAddress) -> None:

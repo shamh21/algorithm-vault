@@ -1,14 +1,154 @@
 # Algorithm Vault Local Live Runbook
 
-Algorithm Vault is configured as a local, live-only Flask application. Live execution is still gated by 2FA, a verified active trading connection, explicit risk controls, wallet readiness, withdrawal approval, panic lock, daily loss limits, notional caps, slippage caps, leverage caps, and stop-loss requirements.
+Algorithm Vault is configured as a local, live-only Flask application. Live execution is still gated by 2FA, a verified active trading connection, explicit risk controls, wallet readiness, withdrawal approval, panic lock, daily loss limits, adaptive ML slippage, exchange leverage limits, allocation budgets, and stop-loss requirements.
+
+## Developer Quick Start
+
+Algorithm Vault is a Python Flask/Jinja app with static PWA assets. It uses `pip` and `requirements*.txt`; there is no `package.json`, Capacitor, Expo, CocoaPods, or native iOS project in this repo.
+
+Prerequisites:
+
+- Python 3.10 or newer
+- `pip`, `venv`, and `curl`
+- Optional for local production preview: a browser with PWA/service-worker support
+
+Create a local environment and install the fast default runtime:
+
+```bash
+python3 -m venv --copies .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip 'setuptools<82' wheel
+python -m pip install -r requirements.txt
+```
+
+Create a local `.env` and replace the placeholder secrets:
+
+```bash
+cp .env.example .env
+python -c "import secrets; print(secrets.token_urlsafe(48))" # FLASK_SECRET_KEY
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())" # TOTP_ENCRYPTION_KEY
+```
+
+Validate the setup:
+
+```bash
+scripts/check_local_setup.sh
+```
+
+Run the web app in Flask development mode:
+
+```bash
+scripts/run_local_dev.sh
+```
+
+Open `http://127.0.0.1:5000`. Override the bind without editing files:
+
+```bash
+PORT=5001 scripts/run_local_dev.sh
+HOST=0.0.0.0 PORT=5000 scripts/run_local_dev.sh
+```
+
+Preview the production-style web/PWA stack locally:
+
+```bash
+scripts/run_local_production.sh
+GUNICORN_BIND=127.0.0.1:8765 scripts/healthcheck.sh
+```
+
+Open `http://127.0.0.1:8765`. The PWA manifest and service worker are served from `/manifest.json` and `static/js/sw.js`.
+
+For desktop-only HTTPS diagnostics, generate a local-only certificate and run the separate HTTPS Flask server:
+
+```bash
+scripts/create_local_https_cert.sh
+scripts/run_local_https.sh
+```
+
+Open `https://127.0.0.1:5443` on the desktop. The HTTPS runner binds to `0.0.0.0`, keeps the normal HTTP dev command unchanged, enables secure cookies for that HTTPS origin, and reads cert paths from `LOCAL_HTTPS_CERT` and `LOCAL_HTTPS_KEY` or ignored `.env.local-https`. Generated local certs and keys stay under `.local-certs/` and are ignored by git.
+
+Do not use self-signed certificates or private LAN IP HTTPS URLs for iPhone PWA install testing. iPhone Safari and installed PWAs must use `https://app.algvault.com` or a stable public HTTPS tunnel hostname with a valid trusted certificate.
+
+## iPhone PWA HTTPS setup
+
+Do not install AlgVault from `https://172.20.10.6` or any private LAN IP HTTPS URL. Safari shows certificate warnings before app code loads, so JavaScript, CSS, service workers, splash screens, and PWA code cannot hide or fix that warning.
+
+Use one of these stable HTTPS origins:
+
+- Production: `https://app.algvault.com`
+- Development fallback: a static ngrok HTTPS domain or Cloudflare Tunnel hostname
+- Hosted fallback: a Netlify, Vercel, or Cloudflare Pages HTTPS deployment URL
+
+For local tunnel testing, run the Flask app locally and expose it through a stable public HTTPS hostname:
+
+```bash
+HOST=0.0.0.0 PORT=5000 scripts/run_local_dev.sh
+ngrok http --domain=YOUR_STATIC_NGROK_DOMAIN 5000
+```
+
+Or:
+
+```bash
+cloudflared tunnel --url http://localhost:5000
+```
+
+Then reinstall the iPhone PWA from the trusted URL:
+
+1. Delete the old AlgVault PWA icon from the iPhone Home Screen.
+2. Clear Safari website data for the old `172.20.10.6` origin if needed.
+3. Open `https://app.algvault.com` or the stable tunnel hostname in Safari.
+4. Confirm Safari does not show "This connection is not private."
+5. Use Safari Share > Add to Home Screen.
+6. Launch AlgVault from the Home Screen.
+7. Confirm no network requests go to `172.20.10.6`.
+8. Confirm service worker scope is `/`.
+9. Confirm manifest `start_url` is `/`.
+
+Build and test checks:
+
+```bash
+python -m flask --app wsgi:app routes
+python -m pip install -r requirements-dev.txt
+python -m pytest -q
+```
+
+Troubleshooting:
+
+- Missing env vars: run `scripts/check_local_setup.sh --strict`, then update `.env`.
+- Wrong Python: use Python 3.10+ and recreate `.venv` if needed.
+- Port already in use: change `PORT` or stop the existing listener.
+- PWA looks stale: hard refresh or clear the browser service worker/cache for the local origin.
+- Package mismatch: this repo uses `pip` requirements files, not npm/yarn/pnpm.
+- Production readiness fails: `flask production-readiness --strict` is intentionally stricter than local dev and requires live secrets, RPC/indexer URLs, withdrawal caps, and safety settings.
 
 ## Setup
 
 1. Create and activate a Python environment.
-2. Install dependencies:
+2. Install the fast default runtime:
 
 ```bash
-pip install -r requirements.txt
+python -m pip install --upgrade pip 'setuptools<82' wheel
+python -m pip install -r requirements.txt
+```
+
+If an existing `.venv` reports a missing `.venv/bin/python3`, leave the active shell first and recreate it cleanly:
+
+```bash
+deactivate 2>/dev/null || true
+mv .venv ".venv.broken-$(date +%Y%m%d%H%M%S)"
+python3 -m venv --copies .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip 'setuptools<82' wheel
+python -m pip install -r requirements.txt
+```
+
+Optional dependency groups are split out so local startup is not blocked by heavyweight SDKs:
+
+```bash
+python -m pip install -r requirements-ml.txt        # sklearn/XGBoost ranker workflows
+python -m pip install -r requirements-torch.txt     # PyTorch model families
+python -m pip install -r requirements-wallets.txt   # BTC/Solana/XRPL wallet signing
+python -m pip install -r requirements-full.txt      # non-conflicting local extras
+python -m pip install -r requirements-exchanges.txt # dYdX SDK; use separately from wallet extras if pip reports httpx conflicts
 ```
 
 3. Copy `.env.example` to `.env` and fill real local values. Do not commit `.env`.
@@ -23,6 +163,7 @@ python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().d
 Run the full suite:
 
 ```bash
+python -m pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
@@ -39,6 +180,150 @@ flask production-readiness --strict
 ```
 
 Strict readiness exits nonzero until required live secrets, RPC/indexer URLs, token contracts, withdrawal caps, and safety settings are configured.
+
+## Optimized Local Production Run
+
+Use this on macOS or any local workstation when you want the production WSGI stack without Ubuntu Nginx/systemd:
+
+```bash
+scripts/run_local_production.sh
+```
+
+Defaults keep local startup convenient: one Gunicorn worker, four threads, SQLite WAL enabled, a persistent local database at `instance/algorithm_vault_local_production.db`, local in-process workers enabled, and bind `127.0.0.1:8765`. Override without editing files:
+
+```bash
+PORT=8000 scripts/run_local_production.sh
+HOST=0.0.0.0 PORT=8765 scripts/run_local_production.sh
+DATABASE_URL=postgresql+psycopg://tradingbot:<password>@127.0.0.1:5432/tradingbot scripts/run_local_production.sh
+```
+
+The local production runner intentionally keeps `SESSION_COOKIE_SECURE=false` because it previews the WSGI stack over plain HTTP. Use `scripts/run_local_https.sh` only for desktop HTTPS diagnostics. Use `https://app.algvault.com` or a stable public HTTPS tunnel for iPhone PWA testing, and use the VPS/Nginx path for production HTTPS cookies.
+
+Healthcheck the same bind from another terminal:
+
+```bash
+GUNICORN_BIND=127.0.0.1:8765 scripts/healthcheck.sh
+```
+
+If the default port is already serving a healthy app, the runner exits cleanly and prints the URL instead of retrying Gunicorn. Stop local Gunicorn processes with:
+
+```bash
+scripts/stop_local_production.sh
+```
+
+The Nginx and systemd commands below are for an Ubuntu VPS, not macOS.
+
+## Vercel Web + Render Worker Runtime
+
+Vercel serves the Flask web/API surface through `server.py`; the always-on trading worker runs separately on Render through `render.yaml`. Both services must point at the same PostgreSQL database and use the same production secrets.
+
+Prepare static assets for Vercel locally:
+
+```bash
+scripts/prepare_vercel_static.sh
+```
+
+Before first production traffic, provision a Vercel Marketplace Postgres database, set the Vercel env vars from `deploy/env.vercel.example`, set the Render worker env vars from `deploy/env.render-worker.example`, then run migrations against that database:
+
+```bash
+SKIP_SCHEMA_BOOTSTRAP=1 python -m flask --app wsgi:app db upgrade
+```
+
+Vercel production defaults should include:
+
+```bash
+APP_ENV=production
+DEPLOYMENT_TARGET=vercel
+APP_MODE=live
+ENABLE_LIVE_TRADING=true
+WORKER_MODE=web
+ENABLE_IN_PROCESS_WORKERS=false
+WORKER_PROCESS_CONFIGURED=true
+SCHEMA_BOOTSTRAP_ENABLED=false
+```
+
+Render worker defaults should match the same database and secrets, with `WORKER_MODE=worker` and start command `python -m app.workers.runner`.
+
+For live exchange access, configure Vercel Static IPs or Secure Compute for web/API egress and fixed Render worker egress IPs, then allowlist those addresses with each exchange. Keep `WALLET_WITHDRAWALS_ENABLED=false` unless KMS/HSM/MPC custody, signer isolation, SDK checks, and withdrawal caps are fully configured.
+
+## VPS/Postgres Runtime
+
+For a VPS deployment, use Postgres, run Alembic migrations explicitly, and run live strategy/scanner/treasury work in the dedicated DB-lease worker instead of Gunicorn web workers. Production defaults set `ENABLE_IN_PROCESS_WORKERS=false`; queued strategy runs are picked up by `python -m app.workers.runner`.
+
+```bash
+export DEPLOYMENT_TARGET=vps
+export DATABASE_URL=postgresql+psycopg://tradingbot:<password>@127.0.0.1:5432/tradingbot
+export WEB_CONCURRENCY=2
+export GUNICORN_THREADS=4
+export WORKER_MODE=web
+export ENABLE_IN_PROCESS_WORKERS=false
+export WORKER_PROCESS_CONFIGURED=true
+flask db upgrade
+flask production-readiness --strict
+gunicorn -c deploy/gunicorn.conf.py wsgi:app
+```
+
+Start the worker in a second process or via `deploy/systemd/algorithm-vault-worker.service`:
+
+```bash
+WORKER_MODE=worker python -m app.workers.runner
+# or one-shot diagnostics:
+flask worker start --once --job strategy_starter
+```
+
+Postgres is the supported VPS database backend. Local SQLite remains valid for local operation, but production startup no longer creates or patches schema implicitly; schema changes are versioned under `migrations/`.
+
+Production deployment templates live under `deploy/`:
+
+```bash
+sudo install -d -o tradingbot -g tradingbot /etc/algorithm-vault /var/log/algorithm-vault
+sudo cp deploy/env.production.example /etc/algorithm-vault/algorithm-vault.env
+sudo cp deploy/nginx/algorithm-vault.conf /etc/nginx/sites-available/algorithm-vault
+sudo ln -sfn /etc/nginx/sites-available/algorithm-vault /etc/nginx/sites-enabled/algorithm-vault
+sudo cp deploy/systemd/algorithm-vault.service /etc/systemd/system/algorithm-vault.service
+sudo cp deploy/systemd/algorithm-vault-worker.service /etc/systemd/system/algorithm-vault-worker.service
+sudo nginx -t
+sudo systemctl daemon-reload
+sudo systemctl enable --now algorithm-vault algorithm-vault-worker
+```
+
+Use `wsgi:app` with `deploy/gunicorn.conf.py` for production. The default bind is `127.0.0.1:8000`; Nginx owns external ports, redirects HTTP to HTTPS, terminates TLS with a valid certificate for `app.algvault.com`, and proxies health, app, static, service-worker, manifest, icons, and SSE stream traffic. Confirm DNS for `app.algvault.com` points at the deployment host and that the certificate chain is valid before installing the iPhone PWA.
+
+Production environment files should keep HTTPS posture enabled:
+
+```bash
+APP_ENV=production
+DEPLOYMENT_TARGET=vps
+PREFERRED_URL_SCHEME=https
+PUBLIC_APP_ORIGIN=https://app.algvault.com
+PUBLIC_API_ORIGIN=https://app.algvault.com
+PROXY_FIX_ENABLED=true
+SESSION_COOKIE_SECURE=true
+SESSION_COOKIE_HTTPONLY=true
+SESSION_COOKIE_SAMESITE=Lax
+SECURE_HEADERS_HSTS_ENABLED=true
+```
+
+Browser API calls, auth redirects, manifest URLs, service-worker registration, and EventSource streams resolve through `PUBLIC_APP_ORIGIN` and `PUBLIC_API_ORIGIN`. The default production topology keeps both on `https://app.algvault.com`, so no CORS allowlist is required. If a future deployment uses `https://api.algvault.com`, add the corresponding CORS, CSRF, cookie-domain, and `connect-src` policy changes before switching browser traffic. Fill `/etc/algorithm-vault/algorithm-vault.env` with real values, then run:
+
+```bash
+scripts/production_bootstrap.sh
+flask db upgrade
+scripts/healthcheck.sh
+flask production-readiness --strict
+```
+
+Before compacting a large local SQLite database, run the protected cleanup command in dry-run mode:
+
+```bash
+flask prune-efficiency-data --protect-username sufyanh
+```
+
+To delete old noisy `strategy/no_trade` and transient backoff diagnostics, require the exact confirmation phrase. The command backs up SQLite first and refuses to continue unless the protected `sufyanh` account can be verified. It does not delete users, wallet balances, wallet transactions, wallet/deposit addresses, ledger events, withdrawals, trading connections, vault cycles, orders, or fills.
+
+```bash
+flask prune-efficiency-data --protect-username sufyanh --confirm PRUNE-EFFICIENCY-DATA --vacuum
+```
 
 Check the local `sufyanh` profile and in-app wallet without touching exchange balances or submitting orders:
 
@@ -93,7 +378,7 @@ Hyperliquid remains routed through the official Python SDK and requires an API w
 For the first real funds test, keep the command path CLI-only:
 
 ```bash
-python3 -m pip install -r requirements.txt
+python3 -m pip install -r requirements-dev.txt
 python3 -m pytest -q
 flask production-readiness --strict
 flask live-funds-readiness --provider active --user-id <id> --ranking-id <id>
@@ -127,7 +412,7 @@ flask live-rapid-ml-trader --user-id <id> --capital-usd <amount> --provider both
 RAPID_ML_LIVE_ENABLED=true RAPID_ML_PREVIEW_ONLY=false CANARY_PREVIEW_ONLY=false flask live-rapid-ml-trader --user-id <id> --capital-usd <amount> --provider both --submit --confirm RAPID-ML-LIVE
 ```
 
-`ml-quality-report --compact` is read-only and shows blocked families, promoted/candidate model IDs, ready candidate IDs, and exact retrain/promote commands for each provider/family. Omit `--compact` when you need full metrics. `RAPID_ML_AUTO_FUTURES_UNIVERSE_ENABLED` defaults to `true`; `RAPID_ML_MAX_SYMBOLS_PER_PROVIDER` defaults to `48` to keep live API usage bounded while selecting from the discovered futures universe. `RAPID_ML_ML_SIZING_ENABLED` defaults to `true`, so order notional is derived from promoted model confidence, edge, allocator, risk, ROI, and cap-policy signals; `RAPID_ML_HARD_CAP_USDC` defaults to `0`, meaning no fixed rapid notional cap is applied unless you explicitly set one. Sizing is still constrained by the user-provided capital, available balance, exchange minimum notional, daily loss, slippage, stop/take requirements, and open-position reconciliation. `RAPID_ML_MAX_DAILY_LOSS_PCT` defaults to `0.05` and is clamped at `0.10`; it cannot be disabled. `RAPID_ML_DECISION_INTERVAL_MS` defaults to `1000`, and `RAPID_ML_MAX_ORDER_RATE_PER_PROVIDER` defaults to one opening order per provider per second. The loop does not force an order every interval; it submits only when promoted ML expected edge clears the conservative profitability gate: round-trip provider fees (`RAPID_ML_FEE_BPS_BY_PROVIDER_JSON`), expected slippage (`RAPID_ML_SLIPPAGE_BPS`), live spread or `RAPID_ML_UNKNOWN_SPREAD_BPS`, `RAPID_ML_COST_RESERVE_BPS`, `RAPID_ML_MIN_CONFIDENCE`, `RAPID_ML_MIN_EDGE_AGREEMENT`, and `RAPID_ML_MIN_EDGE_BPS`. Rapid scoring builds leakage-safe live candle features using `RAPID_ML_FEATURE_TIMEFRAME` and `RAPID_ML_FEATURE_CANDLE_LIMIT`; missing or stale features block submission. Provider circuit breakers use `RAPID_ML_CIRCUIT_BREAKER_WINDOW_MINUTES` so stale transient failures do not permanently block a now-healthy venue. Offline ranker scoring also respects `ML_OFFLINE_SAFE_SCORING_MODEL_TYPES`; keep it at `sklearn` unless XGBoost scoring has been separately validated in this runtime.
+`ml-quality-report --compact` is read-only and shows blocked families, promoted/candidate model IDs, ready candidate IDs, and exact retrain/promote commands for each provider/family. Omit `--compact` when you need full metrics. `RAPID_ML_AUTO_FUTURES_UNIVERSE_ENABLED` defaults to `true`; `RAPID_ML_MAX_SYMBOLS_PER_PROVIDER` defaults to `48` to keep live API usage bounded while selecting from the discovered futures universe. `RAPID_ML_ML_SIZING_ENABLED` defaults to `true`, so order size is derived from promoted model confidence, edge, allocator, risk, ROI, user-provided capital, and available balance. Sizing is still constrained by exchange minimum order value, daily loss, adaptive slippage, stop/take requirements, and open-position reconciliation. `RAPID_ML_MAX_DAILY_LOSS_PCT` defaults to `0.05` and is clamped at `0.10` unless the admin risk page explicitly enables unlimited daily-loss mode. `RAPID_ML_DECISION_INTERVAL_MS` defaults to `1000`, and `RAPID_ML_MAX_ORDER_RATE_PER_PROVIDER` defaults to one opening order per provider per second. The loop does not force an order every interval; it submits only when promoted ML expected edge clears the conservative profitability gate: round-trip provider fees (`RAPID_ML_FEE_BPS_BY_PROVIDER_JSON`), expected slippage (`RAPID_ML_SLIPPAGE_BPS`), live spread or `RAPID_ML_UNKNOWN_SPREAD_BPS`, `RAPID_ML_COST_RESERVE_BPS`, `RAPID_ML_MIN_CONFIDENCE`, `RAPID_ML_MIN_EDGE_AGREEMENT`, and `RAPID_ML_MIN_EDGE_BPS`. Rapid scoring builds leakage-safe live candle features using `RAPID_ML_FEATURE_TIMEFRAME` and `RAPID_ML_FEATURE_CANDLE_LIMIT`; missing or stale features block submission. Provider circuit breakers use `RAPID_ML_CIRCUIT_BREAKER_WINDOW_MINUTES` so stale transient failures do not permanently block a now-healthy venue. Offline ranker scoring also respects `ML_OFFLINE_SAFE_SCORING_MODEL_TYPES`; keep it at `sklearn` unless XGBoost scoring has been separately validated in this runtime.
 
 Activate KuCoin only after the Hyperliquid order, audit log, provider order status, balances, open orders, and positions are understood. Activating one verified connection deactivates the user's other trading connections:
 
@@ -136,7 +421,7 @@ flask activate-trading-connection --user-id <id> --connection-id <kucoin-connect
 flask live-auto-canary --user-id <id> --provider kucoin --research-budget-minutes 30
 ```
 
-The first canary cap defaults to `FIRST_CANARY_MAX_NOTIONAL_USDT=1`. If the venue minimum order size blocks the preferred cap, set `FIRST_CANARY_USE_MIN_SIZE_FALLBACK=true` only long enough to use `FIRST_CANARY_FALLBACK_MAX_NOTIONAL_USDT=2`. Keep `CANARY_PREVIEW_ONLY=true` until the readiness and preview output are reviewed. To submit exactly one canary:
+The first canary allocation budget defaults to `FIRST_CANARY_ALLOCATION_BUDGET_USDT=1`. If the venue minimum order size blocks the preferred budget, set `FIRST_CANARY_USE_MIN_SIZE_FALLBACK=true` only long enough to use `FIRST_CANARY_FALLBACK_ALLOCATION_BUDGET_USDT=2`. Keep `CANARY_PREVIEW_ONLY=true` until the readiness and preview output are reviewed. To submit exactly one canary:
 
 ```bash
 CANARY_PREVIEW_ONLY=false flask live-canary-trade --ranking-id <id> --user-id <id> --connection-id <connection-id> --submit --confirm LIVE-CANARY-TRADE

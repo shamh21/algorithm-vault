@@ -24,7 +24,7 @@
         {% if errors and errors.get("withdraw_address") %}<span class="field-error">{{ errors.get("withdraw_address") }}</span>{% endif %}
       </label>
       <label>Amount
-        <input type="number" name="amount" min="0" max="{{ [balance.available_balance, max_withdrawal_amount or 0]|max }}" step="0.000001" inputmode="decimal" value="{{ form_values.amount if form_values else '' }}" required>
+        <input type="number" name="amount" min="0" max="{{ max_withdrawal_amount or 0 }}" step="0.000001" inputmode="decimal" value="{{ form_values.amount if form_values else '' }}" required>
         {% if errors and errors.get("amount") %}<span class="field-error">{{ errors.get("amount") }}</span>{% endif %}
       </label>
       {% if max_withdrawal_amount and max_withdrawal_amount > 0 %}

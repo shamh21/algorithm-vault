@@ -11,6 +11,8 @@ import secrets
 import time
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime
+from decimal import Decimal, ROUND_DOWN
 from typing import Any, Protocol
 
 from cryptography.fernet import Fernet
@@ -20,15 +22,18 @@ from eth_account import Account
 from flask import current_app, has_app_context
 
 from ..extensions import db
-from ..models import DepositAddress, Setting, WalletAccount, WalletAddress, WalletAuditLog, WalletBalance, WalletLedgerEvent, WalletTransaction, WalletWithdrawal
+from ..models import DepositAddress, WalletAccount, WalletAddress, WalletAuditLog, WalletBalance, WalletLedgerEvent, WalletTransaction, WalletWithdrawal
+from .failures import WalletBroadcastError, WalletCustodyError
 
 
 EVM_NETWORKS = {"ETHEREUM", "ARBITRUM", "OPTIMISM", "BASE", "POLYGON", "AVALANCHE", "BSC"}
 EVM_ASSETS = {"ETH", "USDC", "USDT"}
+ERC20_TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 BTC_NETWORKS = {"BITCOIN"}
 SOL_NETWORKS = {"SOLANA"}
 XRP_NETWORKS = {"XRPLEDGER"}
 BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+XRP_BASE58_ALPHABET = "rpshnaf39wBUDNEGHJKLM4PQRST7VWXYZ2bcdeCg65jkm8oFqi1tuvAxyz"
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,8 +147,6 @@ class RealWalletCustodyService:
         network_key = self._network_key(network_name)
         blockers: list[str] = []
 
-        if not self._real_address_mode_enabled():
-            blockers.append("USE_REAL_ADDRESSES is disabled")
         if not self.enabled:
             blockers.append("WALLET_REAL_CUSTODY_ENABLED is disabled")
         if not bool(self.config.get("WALLET_ALLOW_IN_APP_KEYGEN", False)):
@@ -353,6 +356,28 @@ class RealWalletCustodyService:
             },
         )
         db.session.flush()
+        if has_app_context():
+            try:
+                current_app.extensions["services"]["platform_treasury"].reserve_for_deposit(
+                    wallet_address,
+                    event,
+                    amount=delta,
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._audit(
+                    user_id=wallet_address.user_id,
+                    wallet_account_id=wallet_address.wallet_account_id,
+                    action="wallet_deposit_gas_reserve_failed",
+                    status="failed",
+                    message=f"Deposit credited, but treasury gas reserve processing failed: {exc}",
+                    metadata={
+                        "asset": wallet_address.asset,
+                        "network": wallet_address.network,
+                        "wallet_ledger_event_id": event.id,
+                        "reason": str(exc),
+                    },
+                )
+        db.session.flush()
         return {"credited": delta, "checked": True}
 
     def recover_evm_token_deposit(
@@ -378,8 +403,6 @@ class RealWalletCustodyService:
             blockers.append("Transaction hash is required")
         if not self.enabled:
             blockers.append("Real wallet custody is disabled")
-        if not self._real_address_mode_enabled():
-            blockers.append("USE_REAL_ADDRESSES is disabled")
         if not self._has_valid_encryption_key():
             blockers.append("TOTP_ENCRYPTION_KEY must be a valid Fernet key")
         if not self._adapter_for(asset_key, network):
@@ -477,21 +500,227 @@ class RealWalletCustodyService:
 
     def sign_and_broadcast(self, withdrawal: WalletWithdrawal, *, mode: str) -> BroadcastResult:
         if str(mode or "").lower() != "live":
-            raise RuntimeError("Real wallet withdrawals can only be broadcast in live mode.")
+            raise WalletCustodyError("Real wallet withdrawals can only be broadcast in live mode.", code="wallet_live_mode_required")
         if not self.enabled:
-            raise RuntimeError("Real wallet custody is disabled.")
+            raise WalletCustodyError("Real wallet custody is disabled.", code="wallet_custody_disabled")
+        preflight = self.withdrawal_preflight(withdrawal)
+        if preflight.get("blockers") and not preflight.get("gas_topup_required"):
+            blockers = [str(item) for item in preflight["blockers"]]
+            raise WalletCustodyError("; ".join(blockers), code="wallet_preflight_blocked", context={"blockers": blockers})
+        if preflight.get("gas_topup_required"):
+            raise WalletCustodyError(
+                "source wallet has insufficient ETH for token transfer gas",
+                code="wallet_gas_topup_required",
+            )
         wallet_address = self._withdrawal_source(withdrawal)
         adapter = self._require_adapter(withdrawal.asset, withdrawal.network)
         private_key = self._private_key(wallet_address)
-        return adapter.sign_and_broadcast(withdrawal, private_key)
+        try:
+            return adapter.sign_and_broadcast(withdrawal, private_key)
+        except WalletCustodyError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise WalletBroadcastError(
+                "Wallet broadcast failed through custody adapter.",
+                code="wallet_broadcast_failed",
+                context={"withdrawal_id": withdrawal.id, "asset": withdrawal.asset, "network": withdrawal.network},
+            ) from exc
 
     def release_failed_withdrawal(self, withdrawal: WalletWithdrawal) -> None:
         balance = WalletBalance.query.filter_by(user_id=withdrawal.user_id, asset=withdrawal.asset).one_or_none()
         if balance is None:
             return
         amount = float(withdrawal.amount or 0.0)
-        balance.locked_balance = max(0.0, float(balance.locked_balance or 0.0) - amount)
-        balance.available_balance = float(balance.available_balance or 0.0) + amount
+        locked = max(0.0, float(balance.locked_balance or 0.0))
+        released = min(locked, amount)
+        balance.locked_balance = max(0.0, locked - released)
+        balance.available_balance = float(balance.available_balance or 0.0) + released
+        if withdrawal.asset in {"USDC", "USDT", "USD"}:
+            balance.estimated_usd_value = float(balance.available_balance or 0.0) + float(balance.locked_balance or 0.0)
+
+    def complete_withdrawal_lock(self, withdrawal: WalletWithdrawal) -> None:
+        balance = WalletBalance.query.filter_by(user_id=withdrawal.user_id, asset=withdrawal.asset).one_or_none()
+        if balance is None:
+            return
+        locked = max(0.0, float(balance.locked_balance or 0.0))
+        balance.locked_balance = max(0.0, locked - min(locked, float(withdrawal.amount or 0.0)))
+        if withdrawal.asset in {"USDC", "USDT", "USD"}:
+            balance.estimated_usd_value = float(balance.available_balance or 0.0) + float(balance.locked_balance or 0.0)
+
+    def withdrawal_preflight(self, withdrawal: WalletWithdrawal) -> dict[str, Any]:
+        """Select a source wallet and verify EVM token/gas readiness before signing."""
+
+        asset = self._asset_key(withdrawal.asset)
+        network = str(withdrawal.network or "").strip() or "native"
+        network_key = self._network_key(network)
+        if network_key not in EVM_NETWORKS or asset not in EVM_ASSETS:
+            return {"ready": True, "blockers": [], "source_wallet_address_id": withdrawal.source_wallet_address_id}
+
+        adapter = self._require_adapter(asset, network)
+        gas_adapter = self._require_adapter("ETH", network)
+        amount = max(0.0, float(withdrawal.amount or 0.0))
+        candidates = self._withdrawal_source_candidates(withdrawal)
+        gas_fee = max(0.0, float(adapter.estimate_fee(asset, network, withdrawal.destination_address, amount) or 0.0))
+        rows: list[dict[str, Any]] = []
+        selected: WalletAddress | None = None
+        selected_needs_gas = False
+
+        for candidate in candidates:
+            token_snapshot = adapter.get_balance(candidate.address, asset, network)
+            token_balance = max(0.0, float(token_snapshot.amount or 0.0)) if token_snapshot.checked else 0.0
+            gas_snapshot = gas_adapter.get_balance(candidate.address, "ETH", network)
+            eth_balance = max(0.0, float(gas_snapshot.amount or 0.0)) if gas_snapshot.checked else 0.0
+            has_token = token_balance + 1e-12 >= amount
+            gas_needed = gas_fee if asset != "ETH" else amount + gas_fee
+            has_gas = eth_balance + 1e-18 >= gas_needed
+            row = {
+                "wallet_address_id": candidate.id,
+                "address": candidate.address,
+                "token_balance": token_balance,
+                "eth_balance": eth_balance,
+                "estimated_gas_eth": gas_fee,
+                "has_token": has_token,
+                "has_gas": has_gas,
+                "token_checked": bool(token_snapshot.checked),
+                "gas_checked": bool(gas_snapshot.checked),
+                "token_reason": token_snapshot.reason,
+                "gas_reason": gas_snapshot.reason,
+            }
+            rows.append(row)
+            if has_token and has_gas:
+                selected = candidate
+                selected_needs_gas = False
+                break
+            if has_token and selected is None:
+                selected = candidate
+                selected_needs_gas = asset != "ETH"
+
+        blockers: list[str] = []
+        if selected is None:
+            blockers.append(f"no active {asset} wallet has enough on-chain balance for withdrawal")
+        elif selected_needs_gas:
+            blockers.append("source wallet has insufficient ETH for token transfer gas")
+        if selected is not None:
+            withdrawal.source_wallet_address_id = selected.id
+        return {
+            "ready": selected is not None and not selected_needs_gas,
+            "gas_topup_required": bool(selected is not None and selected_needs_gas),
+            "blockers": blockers,
+            "source_wallet_address_id": selected.id if selected is not None else None,
+            "source_address": selected.address if selected is not None else "",
+            "estimated_gas_eth": gas_fee,
+            "candidates": rows,
+        }
+
+    def verified_withdrawable_amount(self, user_id: int, asset: str, network: str, local_available: float) -> float:
+        asset_key = self._asset_key(asset)
+        network_name = str(network or "").strip() or "native"
+        network_key = self._network_key(network_name)
+        app_available = max(0.0, float(local_available or 0.0))
+        if network_key not in EVM_NETWORKS or asset_key not in EVM_ASSETS:
+            return app_available
+        adapter = self._require_adapter(asset_key, network_name)
+        gas_adapter = self._require_adapter("ETH", network_name)
+        max_amount = 0.0
+        treasury_ready = False
+        if has_app_context():
+            try:
+                treasury_status = current_app.extensions["services"]["platform_treasury"].status(include_events=False)
+                treasury_ready = bool(treasury_status.get("ready"))
+                solvency_state = ((treasury_status.get("solvency") or {}).get("state") or {})
+                if solvency_state and str(solvency_state.get("health_status") or "") in {"critical", "emergency"}:
+                    treasury_ready = False
+            except Exception:
+                treasury_ready = False
+        for source in (
+            WalletAddress.query.filter_by(user_id=user_id, asset=asset_key, network=network_name, status="active")
+            .order_by(WalletAddress.rotation_index.desc(), WalletAddress.created_at.desc())
+            .all()
+        ):
+            snapshot = adapter.get_balance(source.address, asset_key, network_name)
+            if not snapshot.checked:
+                continue
+            amount = max(0.0, float(snapshot.amount or 0.0))
+            if asset_key == "ETH":
+                gas_fee = max(0.0, float(adapter.estimate_fee(asset_key, network_name, source.address, amount) or 0.0))
+                amount = max(0.0, amount - gas_fee)
+            else:
+                gas_fee = max(0.0, float(adapter.estimate_fee(asset_key, network_name, source.address, amount) or 0.0))
+                gas = gas_adapter.get_balance(source.address, "ETH", network_name)
+                gas_ok = bool(gas.checked and float(gas.amount or 0.0) + 1e-18 >= gas_fee)
+                if not gas_ok and not treasury_ready:
+                    amount = 0.0
+            max_amount = max(max_amount, amount)
+        return min(app_available, max_amount)
+
+    def reconcile_withdrawal(self, withdrawal: WalletWithdrawal, *, commit: bool = False) -> dict[str, Any]:
+        if withdrawal.status in {"complete", "failed", "rejected"}:
+            return {"withdrawal_id": withdrawal.id, "status": withdrawal.status, "changed": False, "terminal": True}
+        if withdrawal.status == "pending_gas_topup":
+            return {"withdrawal_id": withdrawal.id, "status": withdrawal.status, "changed": False, "pending_gas_topup": True}
+        if withdrawal.status != "submitted" or not withdrawal.provider_reference:
+            return {"withdrawal_id": withdrawal.id, "status": withdrawal.status, "changed": False, "skipped": True}
+        adapter = self._require_adapter(withdrawal.asset, withdrawal.network)
+        confirmation = adapter.confirm_transaction(withdrawal.provider_reference, withdrawal.asset, withdrawal.network)
+        receipt = confirmation.get("raw") if isinstance(confirmation, dict) else None
+        if not receipt:
+            return {"withdrawal_id": withdrawal.id, "status": withdrawal.status, "changed": False, "receipt": None}
+        details = withdrawal.details
+        details["reconciled_onchain"] = {"receipt": receipt}
+        result = {
+            "withdrawal_id": withdrawal.id,
+            "tx_hash": withdrawal.provider_reference,
+            "receipt_status": receipt.get("status"),
+            "changed": False,
+            "status": withdrawal.status,
+        }
+        if receipt.get("status") == "0x1" and self._receipt_matches_withdrawal(withdrawal, receipt):
+            result["status"] = "complete"
+            result["changed"] = withdrawal.status != "complete"
+            if commit:
+                withdrawal.status = "complete"
+                withdrawal.completed_at = datetime.utcnow()
+                details["reconciled_onchain"].update({"status": "complete"})
+                withdrawal.details = details
+                self.complete_withdrawal_lock(withdrawal)
+                self._update_withdrawal_transaction(withdrawal, "complete", f"Withdrawal workflow {withdrawal.id} confirmed on-chain.")
+                if has_app_context():
+                    solvency = current_app.extensions.get("services", {}).get("treasury_solvency")
+                    if solvency is not None:
+                        solvency.record_withdrawal_gas_usage(withdrawal, withdrawal.details.get("provider_response", {}), receipt=receipt)
+                self._audit(
+                    user_id=withdrawal.user_id,
+                    wallet_withdrawal_id=withdrawal.id,
+                    action="withdrawal_reconciled_complete",
+                    status="complete",
+                    message="Withdrawal confirmed on-chain during reconciliation.",
+                    metadata=details["reconciled_onchain"],
+                )
+            return result
+        if receipt.get("status") == "0x0":
+            result["status"] = "failed"
+            result["changed"] = withdrawal.status != "failed"
+            if commit:
+                withdrawal.status = "failed"
+                withdrawal.failure_reason = "On-chain receipt status 0x0; no matching transfer logs. Funds unlocked during reconciliation."
+                withdrawal.completed_at = datetime.utcnow()
+                details["reconciled_onchain"].update({"status": "failed", "reason": withdrawal.failure_reason})
+                withdrawal.details = details
+                self.release_failed_withdrawal(withdrawal)
+                self._update_withdrawal_transaction(withdrawal, "failed", withdrawal.failure_reason)
+                self._audit(
+                    user_id=withdrawal.user_id,
+                    wallet_withdrawal_id=withdrawal.id,
+                    action="withdrawal_reconciled_failed",
+                    status="failed",
+                    message=withdrawal.failure_reason,
+                    metadata=details["reconciled_onchain"],
+                )
+            return result
+        result["matched_transfer"] = self._receipt_matches_withdrawal(withdrawal, receipt)
+        if commit:
+            withdrawal.details = details
+        return result
 
     def reconcile_custody_balance(self, user_id: int, asset: str) -> dict[str, Any]:
         """Repair the custody balance row from completed custody ledger activity."""
@@ -553,22 +782,72 @@ class RealWalletCustodyService:
         }
 
     def _withdrawal_source(self, withdrawal: WalletWithdrawal) -> WalletAddress:
-        if withdrawal.source_wallet_address_id:
-            source = db.session.get(WalletAddress, int(withdrawal.source_wallet_address_id))
-        else:
-            source = (
-                WalletAddress.query.filter_by(
-                    user_id=withdrawal.user_id,
-                    asset=withdrawal.asset,
-                    network=withdrawal.network,
-                    status="active",
-                )
-                .order_by(WalletAddress.rotation_index.desc())
-                .first()
-            )
+        candidates = self._withdrawal_source_candidates(withdrawal)
+        source = candidates[0] if candidates else None
         if source is None:
             raise RuntimeError("No active source wallet address is available for withdrawal.")
         return source
+
+    def _withdrawal_source_candidates(self, withdrawal: WalletWithdrawal) -> list[WalletAddress]:
+        if withdrawal.source_wallet_address_id:
+            source = db.session.get(WalletAddress, int(withdrawal.source_wallet_address_id))
+            return [source] if source is not None else []
+        return (
+            WalletAddress.query.filter_by(
+                user_id=withdrawal.user_id,
+                asset=withdrawal.asset,
+                network=withdrawal.network,
+                status="active",
+            )
+            .order_by(WalletAddress.rotation_index.desc(), WalletAddress.created_at.desc(), WalletAddress.id.desc())
+            .all()
+        )
+
+    def _receipt_matches_withdrawal(self, withdrawal: WalletWithdrawal, receipt: dict[str, Any]) -> bool:
+        asset = self._asset_key(withdrawal.asset)
+        if asset == "ETH":
+            tx = EvmWalletAdapter(self.config)._rpc("eth_getTransactionByHash", [withdrawal.provider_reference], network=withdrawal.network)  # noqa: SLF001
+            if not isinstance(tx, dict):
+                return False
+            if str(tx.get("to") or "").lower() != str(withdrawal.destination_address or "").lower():
+                return False
+            value = int(str(tx.get("value") or "0x0"), 16) / 10**18
+            return value + 1e-12 >= float(withdrawal.amount or 0.0)
+        adapter = EvmWalletAdapter(self.config)
+        contract = adapter._token_contract(asset, withdrawal.network).lower()  # noqa: SLF001
+        decimals = adapter._token_decimals(asset, withdrawal.network)  # noqa: SLF001
+        amount_units = _decimal_units(withdrawal.amount, decimals)
+        source = self._withdrawal_source(withdrawal)
+        source_topic = "0x" + source.address.lower().replace("0x", "").rjust(64, "0")
+        destination_topic = "0x" + withdrawal.destination_address.lower().replace("0x", "").rjust(64, "0")
+        for log in receipt.get("logs") or []:
+            if str(log.get("address") or "").lower() != contract:
+                continue
+            topics = [str(topic).lower() for topic in (log.get("topics") or [])]
+            if len(topics) < 3 or topics[0] != ERC20_TRANSFER_TOPIC:
+                continue
+            if topics[1] != source_topic or topics[2] != destination_topic:
+                continue
+            transferred = int(str(log.get("data") or "0x0"), 16)
+            if transferred >= amount_units:
+                return True
+        return False
+
+    def _update_withdrawal_transaction(self, withdrawal: WalletWithdrawal, status: str, note: str) -> None:
+        transaction = (
+            WalletTransaction.query.filter(
+                WalletTransaction.user_id == withdrawal.user_id,
+                WalletTransaction.asset == withdrawal.asset,
+                WalletTransaction.transaction_type == "withdrawal",
+                WalletTransaction.note.like(f"%Withdrawal workflow {withdrawal.id}:%"),
+            )
+            .order_by(WalletTransaction.created_at.desc())
+            .first()
+        )
+        if transaction is None:
+            return
+        transaction.status = status
+        transaction.note = note
 
     def _recoverable_evm_source(self, user_id: int, address: str, target_asset: str) -> WalletAddress | None:
         matches = [
@@ -731,10 +1010,7 @@ class RealWalletCustodyService:
         return default
 
     def _real_address_mode_enabled(self) -> bool:
-        enabled = bool(self.config.get("USE_REAL_ADDRESSES", False))
-        if has_app_context():
-            enabled = bool(Setting.get_json("use_real_addresses", enabled))
-        return enabled
+        return True
 
     def _has_valid_encryption_key(self) -> bool:
         configured = str(self.config.get("TOTP_ENCRYPTION_KEY", "") or "").strip()
@@ -858,11 +1134,9 @@ class EvmWalletAdapter:
             return WalletBalanceSnapshot(0.0, asset_key, False, reason=f"EVM balance check failed: {exc}")
 
     def estimate_fee(self, asset: str, network: str, destination: str, amount: float) -> float:
-        gas = 21_000 if _asset_key(asset) == "ETH" else 70_000
-        try:
-            gas_price = int(str(self._rpc("eth_gasPrice", [], network=network) or "0x0"), 16)
-        except Exception:  # noqa: BLE001
-            gas_price = 0
+        asset_key = _asset_key(asset)
+        gas = self._estimated_gas_limit(asset_key, network, destination, amount)
+        gas_price = self._gas_price_wei(network)
         return gas * gas_price / 10**18
 
     def sign_and_broadcast(self, withdrawal: WalletWithdrawal, private_key: str) -> BroadcastResult:
@@ -872,15 +1146,17 @@ class EvmWalletAdapter:
         from_address = source.address if source is not None else Account.from_key(private_key).address
         rpc_url = self._rpc_url(network)
         nonce = int(str(self._rpc("eth_getTransactionCount", [from_address, "pending"], network=network) or "0x0"), 16)
-        rpc_gas_price = int(str(self._rpc("eth_gasPrice", [], network=network) or "0x0"), 16)
-        gas_price = max(rpc_gas_price, self._minimum_gas_price_wei())
+        gas_price_payload = self._gas_price_payload(network)
+        rpc_gas_price = int(gas_price_payload.get("rpc_gas_price_wei", 0) or 0)
+        gas_price = int(gas_price_payload.get("gas_price_wei", 0) or 0)
         chain_id = int(self._chain_config(network).get("chain_id", 1) or 1)
         eth_balance_wei = int(str(self._rpc("eth_getBalance", [from_address, "pending"], network=network) or "0x0"), 16)
         token_contract = ""
         amount_units = 0
         if asset == "ETH":
             value = int(float(withdrawal.amount or 0.0) * 10**18)
-            required_wei = value + 21_000 * gas_price
+            gas_limit = self._estimated_gas_limit(asset, network, withdrawal.destination_address, withdrawal.amount, from_address=from_address)
+            required_wei = value + gas_limit * gas_price
             if eth_balance_wei < required_wei:
                 raise RuntimeError(
                     "source wallet has insufficient ETH for withdrawal amount plus gas"
@@ -890,7 +1166,7 @@ class EvmWalletAdapter:
                 "nonce": nonce,
                 "to": withdrawal.destination_address,
                 "value": value,
-                "gas": 21_000,
+                "gas": gas_limit,
                 "gasPrice": gas_price,
                 "data": b"",
             }
@@ -900,13 +1176,16 @@ class EvmWalletAdapter:
                 raise RuntimeError(f"{asset} token contract is not configured")
             token_contract = contract
             decimals = self._token_decimals(asset, network)
-            amount_units = int(float(withdrawal.amount or 0.0) * 10**decimals)
-            gas_limit = 70_000
+            amount_units = _decimal_units(withdrawal.amount, decimals)
+            gas_limit = self._estimated_gas_limit(asset, network, withdrawal.destination_address, withdrawal.amount, from_address=from_address)
             required_gas_wei = gas_limit * gas_price
             if eth_balance_wei < required_gas_wei:
                 raise RuntimeError(
                     f"source wallet has insufficient ETH for {asset} token transfer gas"
                 )
+            token_balance_units = self._token_balance_units(from_address, asset, network)
+            if token_balance_units < amount_units:
+                raise RuntimeError(f"source wallet has insufficient {asset} token balance")
             data = "0xa9059cbb" + withdrawal.destination_address.lower().replace("0x", "").rjust(64, "0") + hex(amount_units)[2:].rjust(64, "0")
             tx = {
                 "chainId": chain_id,
@@ -931,6 +1210,7 @@ class EvmWalletAdapter:
             "nonce": nonce,
             "rpc_gas_price_wei": rpc_gas_price,
             "gas_price_wei": gas_price,
+            "fee_source": gas_price_payload.get("fee_source", "eth_gasPrice"),
             "gas_limit": int(tx.get("gas", 0) or 0),
             "source": from_address,
             "destination": withdrawal.destination_address,
@@ -967,6 +1247,87 @@ class EvmWalletAdapter:
         gwei = max(0.0, float(self.config.get("WALLET_EVM_MIN_GAS_PRICE_GWEI", 2.0) or 0.0))
         return int(gwei * 10**9)
 
+    def _gas_price_wei(self, network: str) -> int:
+        return int(self._gas_price_payload(network).get("gas_price_wei", 0) or 0)
+
+    def _gas_price_payload(self, network: str) -> dict[str, Any]:
+        minimum = self._minimum_gas_price_wei()
+        try:
+            fee_history = self._rpc("eth_feeHistory", ["0x3", "pending", [50]], network=network)
+            if isinstance(fee_history, dict):
+                base_fees = fee_history.get("baseFeePerGas") or []
+                rewards = fee_history.get("reward") or []
+                latest_base = int(str(base_fees[-1] if base_fees else "0x0"), 16)
+                reward_values = [
+                    int(str(row[0]), 16)
+                    for row in rewards
+                    if isinstance(row, list) and row
+                ]
+                priority = max(reward_values or [minimum // 10, 1])
+                estimated = latest_base + priority
+                return {
+                    "gas_price_wei": max(estimated, minimum),
+                    "rpc_gas_price_wei": estimated,
+                    "fee_source": "eth_feeHistory",
+                    "base_fee_wei": latest_base,
+                    "priority_fee_wei": priority,
+                }
+        except Exception:
+            pass
+        try:
+            rpc_gas_price = int(str(self._rpc("eth_gasPrice", [], network=network) or "0x0"), 16)
+        except Exception:  # noqa: BLE001
+            rpc_gas_price = 0
+        return {
+            "gas_price_wei": max(rpc_gas_price, minimum),
+            "rpc_gas_price_wei": rpc_gas_price,
+            "fee_source": "eth_gasPrice",
+        }
+
+    def _estimated_gas_limit(
+        self,
+        asset: str,
+        network: str,
+        destination: str,
+        amount: float,
+        *,
+        from_address: str | None = None,
+    ) -> int:
+        asset_key = _asset_key(asset)
+        fallback_key = "WALLET_EVM_FALLBACK_ETH_GAS_LIMIT" if asset_key == "ETH" else "WALLET_EVM_FALLBACK_ERC20_GAS_LIMIT"
+        fallback = max(21_000, int(float(self.config.get(fallback_key, 21_000 if asset_key == "ETH" else 70_000) or 0)))
+        buffer = max(1.0, float(self.config.get("WALLET_EVM_GAS_LIMIT_BUFFER_MULTIPLIER", 1.20) or 1.0))
+        tx: dict[str, Any]
+        if asset_key == "ETH":
+            tx = {
+                "to": str(destination or "").strip(),
+                "value": hex(int(float(amount or 0.0) * 10**18)),
+            }
+        else:
+            contract = self._token_contract(asset_key, network)
+            if not contract:
+                return int(math.ceil(fallback * buffer))
+            decimals = self._token_decimals(asset_key, network)
+            tx = {
+                "to": contract,
+                "value": "0x0",
+                "data": self._erc20_transfer_data(destination, _decimal_units(amount, decimals)),
+            }
+        estimate_from = str(from_address or self.config.get("WALLET_EVM_ESTIMATE_FROM_ADDRESS", "") or "").strip()
+        if re.fullmatch(r"0x[a-fA-F0-9]{40}", estimate_from):
+            tx["from"] = estimate_from
+        try:
+            estimated = int(str(self._rpc("eth_estimateGas", [tx], network=network) or "0x0"), 16)
+        except Exception:
+            estimated = fallback
+        if estimated <= 0:
+            estimated = fallback
+        return int(math.ceil(max(estimated, fallback) * buffer))
+
+    @staticmethod
+    def _erc20_transfer_data(destination: str, amount_units: int) -> str:
+        return "0xa9059cbb" + str(destination or "").lower().replace("0x", "").rjust(64, "0") + hex(int(amount_units or 0))[2:].rjust(64, "0")
+
     def _rpc_url(self, network: str) -> str:
         chain_config = self._chain_config(network)
         return str(chain_config.get("rpc_url") or self.config.get("WALLET_EVM_RPC_URL", "") or "").strip()
@@ -999,6 +1360,14 @@ class EvmWalletAdapter:
             if decimals is not None:
                 return int(decimals)
         return 6 if asset_key in {"USDC", "USDT"} else 18
+
+    def _token_balance_units(self, address: str, asset: str, network: str) -> int:
+        contract = self._token_contract(asset, network)
+        if not contract:
+            return 0
+        data = "0x70a08231" + str(address or "").lower().replace("0x", "").rjust(64, "0")
+        raw = self._rpc("eth_call", [{"to": contract, "data": data}, "latest"], network=network)
+        return int(str(raw or "0x0"), 16)
 
     def _rpc(self, method: str, params: list[Any], *, network: str) -> Any:
         return _json_rpc(self._rpc_url(network), method, params)
@@ -1204,8 +1573,17 @@ class XrpWalletAdapter:
     def generate_wallet(self, asset: str, network: str) -> GeneratedWallet:
         try:
             from xrpl.wallet import Wallet
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError("xrpl-py is required for XRP wallet generation") from exc
+        except Exception:  # noqa: BLE001
+            private_key = ec.generate_private_key(ec.SECP256K1())
+            private_value = private_key.private_numbers().private_value.to_bytes(32, "big")
+            public_key = private_key.public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.CompressedPoint)
+            return GeneratedWallet(
+                _xrp_classic_address(public_key),
+                private_value.hex(),
+                public_key.hex(),
+                "secp256k1",
+                "xrp",
+            )
 
         wallet = Wallet.create()
         return GeneratedWallet(
@@ -1236,8 +1614,6 @@ class XrpWalletAdapter:
         rpc_url = str(self.config.get("WALLET_XRP_RPC_URL", "") or "").strip()
         if not rpc_url:
             raise RuntimeError("XRP RPC URL is not configured")
-        if not private_key.startswith("s"):
-            raise RuntimeError("Existing XRP key material is not an XRPL seed and cannot be signed by this adapter")
         try:
             from xrpl.clients import JsonRpcClient
             from xrpl.models.transactions import Payment
@@ -1247,7 +1623,16 @@ class XrpWalletAdapter:
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError("xrpl-py is required for XRP signing") from exc
 
-        wallet = Wallet.from_seed(private_key)
+        private_key_value = str(private_key or "").strip()
+        if private_key_value.startswith("s"):
+            wallet = Wallet.from_seed(private_key_value)
+        else:
+            public_key = _secp256k1_public_key_from_private(private_key_value)
+            wallet = Wallet(
+                public_key=public_key,
+                private_key=private_key_value.upper(),
+                master_address=_xrp_classic_address(bytes.fromhex(public_key)),
+            )
         payment = Payment(
             account=wallet.classic_address,
             destination=withdrawal.destination_address,
@@ -1332,6 +1717,24 @@ def _base58check(payload: bytes) -> str:
     return _base58(payload + checksum)
 
 
+def _xrp_classic_address(public_key: bytes) -> str:
+    return _base58check_with_alphabet(b"\x00" + _hash160(public_key), XRP_BASE58_ALPHABET)
+
+
+def _secp256k1_public_key_from_private(private_key_hex: str) -> str:
+    private_value = int(str(private_key_hex or "").strip(), 16)
+    private_key = ec.derive_private_key(private_value, ec.SECP256K1())
+    return private_key.public_key().public_bytes(
+        serialization.Encoding.X962,
+        serialization.PublicFormat.CompressedPoint,
+    ).hex().upper()
+
+
+def _base58check_with_alphabet(payload: bytes, alphabet: str) -> str:
+    checksum = hashlib.sha256(hashlib.sha256(payload).digest()).digest()[:4]
+    return _base58(payload + checksum, alphabet=alphabet)
+
+
 def _base58(payload: bytes, *, alphabet: str = BASE58_ALPHABET) -> str:
     value = int.from_bytes(payload, "big")
     encoded = ""
@@ -1353,6 +1756,12 @@ def _asset_key(asset: str) -> str:
 
 def _network_key(network: str) -> str:
     return "".join(ch for ch in str(network or "").upper() if ch.isalnum())
+
+
+def _decimal_units(amount: Any, decimals: int) -> int:
+    value = Decimal(str(amount or "0"))
+    scale = Decimal(10) ** int(decimals)
+    return int((value * scale).to_integral_value(rounding=ROUND_DOWN))
 
 
 def _float(value: Any, default: float = 0.0) -> float:

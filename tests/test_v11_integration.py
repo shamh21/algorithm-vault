@@ -76,11 +76,15 @@ def test_live_order_metadata_preserves_feature_snapshot_on_rejection(app) -> Non
                 "rule_based_signal": True,
                 "risk_reward": 2.0,
                 "pattern_prediction": {"label": "neutral", "probability": 0.5, "confidence": 0.0},
+                "vault_cycle_id": "123",
+                "vault_leg_id": "456",
             },
         )
     )
 
     assert order.status == "rejected"
+    assert order.vault_cycle_id == 123
+    assert order.vault_leg_id == 456
     assert db.session.get(Order, order.id).details["feature_snapshot"] == {"ema_trend": 1.0}
 
 

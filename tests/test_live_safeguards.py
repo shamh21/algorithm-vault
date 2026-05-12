@@ -156,7 +156,7 @@ def test_ml_policy_hard_cap_and_take_profit_remain_non_bypassable(app, monkeypat
     assert exit_decision.rule_name == "take_profit_required"
 
 
-def test_aggressive_1h_live_rejected_by_exposure_cap(app) -> None:
+def test_aggressive_1h_live_uses_allocation_instead_of_exposure_cap(app) -> None:
     risk_engine = app.extensions["services"]["risk_engine"]
     _add_shadow_validation()
     intent = _intent()
@@ -164,11 +164,10 @@ def test_aggressive_1h_live_rejected_by_exposure_cap(app) -> None:
 
     decision = risk_engine.evaluate(intent, market_price=100.0, has_trading_access=True)
 
-    assert not decision.approved
-    assert decision.rule_name == "aggressive_1h_live_cap"
+    assert decision.approved
 
 
-def test_extreme_roi_live_rejected_by_exposure_cap(app) -> None:
+def test_extreme_roi_live_uses_allocation_instead_of_exposure_cap(app) -> None:
     risk_engine = app.extensions["services"]["risk_engine"]
     _add_shadow_validation()
     intent = _intent()
@@ -176,8 +175,7 @@ def test_extreme_roi_live_rejected_by_exposure_cap(app) -> None:
 
     decision = risk_engine.evaluate(intent, market_price=100.0, has_trading_access=True)
 
-    assert not decision.approved
-    assert decision.rule_name == "aggressive_1h_live_cap"
+    assert decision.approved
 
 
 def test_live_does_not_require_shadow_live_validation(app) -> None:
@@ -242,7 +240,6 @@ def test_high_upside_live_requires_caps_and_shadow_validation(app) -> None:
     app.config["HIGH_UPSIDE_PROFILE_ENABLED"] = True
     app.config["HIGH_UPSIDE_LIVE_ELIGIBLE"] = True
     _enable_high_upside_auto_live_gate(app)
-    app.config["HIGH_UPSIDE_MAX_POSITION_NOTIONAL_USD"] = 50.0
     app.config["HIGH_UPSIDE_MAX_DAILY_LOSS_USDC"] = 20.0
     app.config["HIGH_UPSIDE_LIVE_CAP_USDC_BY_DURATION"] = {"1h": 100.0}
     app.config["HIGH_UPSIDE_LIVE_CAP_PCT_BY_DURATION"] = {"1h": 0.5}
@@ -273,14 +270,13 @@ def test_high_upside_live_fails_closed_when_required_caps_missing(app) -> None:
 
     assert not decision.approved
     assert decision.rule_name == "high_upside_caps_missing"
-    assert "HIGH_UPSIDE_MAX_POSITION_NOTIONAL_USD" in decision.details["missing"]
+    assert "HIGH_UPSIDE_MAX_DAILY_LOSS_USDC" in decision.details["missing"]
 
 
 def test_high_upside_live_requires_promoted_offline_ml_by_default(app) -> None:
     app.config["HIGH_UPSIDE_PROFILE_ENABLED"] = True
     app.config["HIGH_UPSIDE_LIVE_ELIGIBLE"] = True
     _enable_high_upside_auto_live_gate(app)
-    app.config["HIGH_UPSIDE_MAX_POSITION_NOTIONAL_USD"] = 50.0
     app.config["HIGH_UPSIDE_MAX_DAILY_LOSS_USDC"] = 20.0
     app.config["HIGH_UPSIDE_LIVE_CAP_USDC_BY_DURATION"] = {"1h": 100.0}
     app.config["HIGH_UPSIDE_LIVE_CAP_PCT_BY_DURATION"] = {"1h": 0.5}
@@ -305,7 +301,6 @@ def test_high_upside_live_requires_promoted_ml_signal_when_enabled(app, monkeypa
     app.config["HIGH_UPSIDE_REQUIRE_PROMOTED_ML"] = False
     app.config["ML_SIGNAL_MODEL_ENABLED"] = True
     app.config["ML_SIGNAL_REQUIRE_PROMOTED"] = True
-    app.config["HIGH_UPSIDE_MAX_POSITION_NOTIONAL_USD"] = 50.0
     app.config["HIGH_UPSIDE_MAX_DAILY_LOSS_USDC"] = 20.0
     app.config["HIGH_UPSIDE_LIVE_CAP_USDC_BY_DURATION"] = {"1h": 100.0}
     app.config["HIGH_UPSIDE_LIVE_CAP_PCT_BY_DURATION"] = {"1h": 0.5}
@@ -346,7 +341,6 @@ def test_high_upside_live_accepts_promoted_ml_without_ranking_blend(app, tmp_pat
     app.config["HIGH_UPSIDE_PROFILE_ENABLED"] = True
     app.config["HIGH_UPSIDE_LIVE_ELIGIBLE"] = True
     _enable_high_upside_auto_live_gate(app)
-    app.config["HIGH_UPSIDE_MAX_POSITION_NOTIONAL_USD"] = 50.0
     app.config["HIGH_UPSIDE_MAX_DAILY_LOSS_USDC"] = 20.0
     app.config["HIGH_UPSIDE_LIVE_CAP_USDC_BY_DURATION"] = {"1h": 100.0}
     app.config["HIGH_UPSIDE_LIVE_CAP_PCT_BY_DURATION"] = {"1h": 0.5}
@@ -390,7 +384,6 @@ def test_high_upside_live_auto_disables_on_offline_calibration_breach(app, tmp_p
     app.config["HIGH_UPSIDE_PROFILE_ENABLED"] = True
     app.config["HIGH_UPSIDE_LIVE_ELIGIBLE"] = True
     _enable_high_upside_auto_live_gate(app)
-    app.config["HIGH_UPSIDE_MAX_POSITION_NOTIONAL_USD"] = 50.0
     app.config["HIGH_UPSIDE_MAX_DAILY_LOSS_USDC"] = 20.0
     app.config["HIGH_UPSIDE_LIVE_CAP_USDC_BY_DURATION"] = {"1h": 100.0}
     app.config["HIGH_UPSIDE_LIVE_CAP_PCT_BY_DURATION"] = {"1h": 0.5}
@@ -438,7 +431,6 @@ def test_high_upside_daily_loss_breach_auto_disables_profile(app) -> None:
     app.config["HIGH_UPSIDE_PROFILE_ENABLED"] = True
     app.config["HIGH_UPSIDE_LIVE_ELIGIBLE"] = True
     _enable_high_upside_auto_live_gate(app)
-    app.config["HIGH_UPSIDE_MAX_POSITION_NOTIONAL_USD"] = 50.0
     app.config["HIGH_UPSIDE_MAX_DAILY_LOSS_USDC"] = 1.0
     app.config["HIGH_UPSIDE_LIVE_CAP_USDC_BY_DURATION"] = {"1h": 100.0}
     app.config["HIGH_UPSIDE_LIVE_CAP_PCT_BY_DURATION"] = {"1h": 0.5}
@@ -471,7 +463,7 @@ def test_high_upside_daily_loss_breach_auto_disables_profile(app) -> None:
     assert Setting.get_json("high_upside_live_disabled_reason")["reason"] == "daily_loss_limit_breach"
 
 
-def test_max_return_live_eligible_reuses_existing_aggressive_caps(app) -> None:
+def test_max_return_live_eligible_is_not_blocked_by_removed_aggressive_caps(app) -> None:
     app.config["MAX_RETURN_LIVE_ELIGIBLE"] = True
     risk_engine = app.extensions["services"]["risk_engine"]
     _add_shadow_validation()
@@ -485,10 +477,7 @@ def test_max_return_live_eligible_reuses_existing_aggressive_caps(app) -> None:
 
     decision = risk_engine.evaluate(intent, market_price=100.0, has_trading_access=True)
 
-    assert not decision.approved
-    assert decision.rule_name == "aggressive_1h_live_cap"
-    assert decision.details["effective_cap"] == 25.0
-    assert decision.details["duration_bucket"] == "24h"
+    assert decision.approved
 
 
 def test_pair_live_blocked_without_explicit_gate(app) -> None:
@@ -569,7 +558,7 @@ def test_aggressive_1h_live_allowed_when_hard_caps_pass(app) -> None:
     assert decision.approved
 
 
-def test_aggressive_1h_live_rejected_when_exposure_cap_exceeded(app) -> None:
+def test_aggressive_1h_live_ignores_removed_exposure_cap(app) -> None:
     app.config["AGGRESSIVE_1H_LIVE_CAP_USDC"] = 25.0
     app.config["AGGRESSIVE_1H_LIVE_CAP_PCT"] = 0.02
     risk_engine = app.extensions["services"]["risk_engine"]
@@ -595,12 +584,10 @@ def test_aggressive_1h_live_rejected_when_exposure_cap_exceeded(app) -> None:
 
     decision = risk_engine.evaluate(intent, market_price=100.0, has_trading_access=True)
 
-    assert not decision.approved
-    assert decision.rule_name == "aggressive_1h_live_cap"
-    assert decision.reason == "Aggressive 1H live exposure exceeds configured cap."
+    assert decision.approved
 
 
-def test_experimental_duration_live_uses_existing_caps_without_duration_map(app) -> None:
+def test_experimental_duration_live_uses_allocation_without_duration_cap(app) -> None:
     app.config["EXPERIMENTAL_DURATION_ENSEMBLE_LIVE_ELIGIBLE"] = True
     risk_engine = app.extensions["services"]["risk_engine"]
     _add_shadow_validation()
@@ -615,13 +602,10 @@ def test_experimental_duration_live_uses_existing_caps_without_duration_map(app)
 
     decision = risk_engine.evaluate(intent, market_price=100.0, has_trading_access=True)
 
-    assert not decision.approved
-    assert decision.rule_name == "aggressive_1h_live_cap"
-    assert decision.details["effective_cap"] == 25.0
-    assert decision.details["duration_bucket"] == "24h"
+    assert decision.approved
 
 
-def test_experimental_duration_live_cap_map_can_tighten_cap(app) -> None:
+def test_experimental_duration_live_cap_map_no_longer_tightens_allocation(app) -> None:
     app.config["EXPERIMENTAL_DURATION_ENSEMBLE_LIVE_ELIGIBLE"] = True
     app.config["EXPERIMENTAL_LIVE_CAP_USDC_BY_DURATION"] = {"24h": 10.0}
     app.config["EXPERIMENTAL_LIVE_CAP_PCT_BY_DURATION"] = {"24h": 0.01}
@@ -638,16 +622,13 @@ def test_experimental_duration_live_cap_map_can_tighten_cap(app) -> None:
 
     decision = risk_engine.evaluate(intent, market_price=100.0, has_trading_access=True)
 
-    assert not decision.approved
-    assert decision.rule_name == "aggressive_1h_live_cap"
-    assert decision.details["effective_cap"] == 10.0
+    assert decision.approved
 
 
-def test_experimental_duration_live_cap_map_does_not_bypass_notional(app) -> None:
+def test_experimental_duration_live_does_not_use_removed_position_notional(app) -> None:
     app.config["EXPERIMENTAL_DURATION_ENSEMBLE_LIVE_ELIGIBLE"] = True
     app.config["EXPERIMENTAL_LIVE_CAP_USDC_BY_DURATION"] = {"24h": 1_000.0}
     app.config["EXPERIMENTAL_LIVE_CAP_PCT_BY_DURATION"] = {"24h": 1.0}
-    app.config["MAX_POSITION_NOTIONAL"] = 15.0
     risk_engine = app.extensions["services"]["risk_engine"]
     _add_shadow_validation()
     intent = _intent()
@@ -661,12 +642,10 @@ def test_experimental_duration_live_cap_map_does_not_bypass_notional(app) -> Non
 
     decision = risk_engine.evaluate(intent, market_price=100.0, has_trading_access=True)
 
-    assert not decision.approved
-    assert decision.rule_name == "max_notional"
+    assert decision.approved
 
 
-def test_reduce_only_exit_is_not_blocked_by_opening_notional_cap(app) -> None:
-    app.config["MAX_POSITION_NOTIONAL"] = 15.0
+def test_reduce_only_exit_is_not_blocked_by_removed_opening_allocation_budget(app) -> None:
     risk_engine = app.extensions["services"]["risk_engine"]
     intent = _intent()
     intent.side = "sell"

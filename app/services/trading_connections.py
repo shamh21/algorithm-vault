@@ -24,7 +24,6 @@ from .live_provider_adapters import (
     UniswapDelegatedConnector,
 )
 
-
 SUPPORTED_PROVIDERS = {"hyperliquid", "binance", "kucoin", "uniswap", "dydx"}
 SUPPORTED_CONNECTION_TYPES = {"cex_api_key", "dex_wallet", "permissioned_key", "wallet_delegation"}
 VERIFIED_STATUS = "verified"
@@ -44,7 +43,7 @@ PROVIDER_SPECS: dict[str, dict[str, Any]] = {
         "setup_hint": "Create or use a Hyperliquid API wallet/agent with trading permissions, then enter the API wallet secret and account address. Never enter a recovery phrase.",
         "help_steps": [
             "Create an API wallet/agent with trading permission only.",
-            "Do not enable withdrawal permission.",
+            "Keep withdrawal permission disabled unless Vault Cycle automatic settlement is explicitly enabled and capped.",
             "Enter the API wallet/agent private key or secret, plus the account address, then verify.",
             "Do not paste a seed phrase or your main wallet recovery phrase.",
         ],
@@ -81,18 +80,18 @@ PROVIDER_SPECS: dict[str, dict[str, Any]] = {
         "tradable": True,
         "verification_supported": True,
         "summary": "Live KuCoin futures connection for balances, positions, orders, and vault execution.",
-        "setup_hint": "Create a KuCoin futures API key with futures trading permission. Do not enable withdrawals or transfers.",
+        "setup_hint": "Create a KuCoin futures API key with futures trading permission. Enable transfer/withdrawal permissions only for capped Vault Cycle automation with IP restrictions and address allowlisting.",
         "help_steps": [
             "Create a futures-capable API key from KuCoin.",
             "Enter the key, secret, and API passphrase exactly as created.",
-            "Keep withdrawal and transfer permissions disabled, then verify.",
+            "For standard trading keep withdrawals disabled; for Vault Cycle automation use a restricted key with transfer/withdrawal permissions and favorite-address controls.",
         ],
         "fields": [
             {"name": "api_key", "label": "API Key", "type": "text", "required": True, "placeholder": "KuCoin API key"},
             {"name": "api_secret", "label": "API Secret", "type": "password", "required": True, "placeholder": "Encrypted at rest"},
             {"name": "passphrase", "label": "Passphrase", "type": "password", "required": True, "placeholder": "KuCoin API passphrase"},
         ],
-        "capabilities": ["Futures orders", "Balances", "Positions", "Open orders", "Panic flatten"],
+        "capabilities": ["Futures orders", "Balances", "Positions", "Open orders", "Panic flatten", "Vault Cycle transfers", "Stablecoin conversion", "Allowlisted withdrawals"],
     },
     "uniswap": {
         "key": "uniswap",
@@ -104,7 +103,7 @@ PROVIDER_SPECS: dict[str, dict[str, Any]] = {
         "setup_hint": "Connect a wallet through WalletConnect/Reown, then save delegation limits. Seed phrases and private keys are never accepted.",
         "help_steps": [
             "Connect the wallet you want to trade from and approve a limited delegation.",
-            "Set an expiry, max notional, allowed tokens/protocols, and daily loss cap.",
+            "Set an expiry, allowed tokens/protocols, and daily loss cap.",
             "Verification fails closed until delegation status is approved and the Uniswap API key is configured.",
         ],
         "fields": [
@@ -112,13 +111,12 @@ PROVIDER_SPECS: dict[str, dict[str, Any]] = {
             {"name": "chain_id", "label": "Chain ID", "type": "number", "required": True, "placeholder": "1", "storage": "metadata"},
             {"name": "delegation_status", "label": "Delegation Status", "type": "text", "required": True, "placeholder": "approved", "storage": "metadata"},
             {"name": "delegation_expires_at", "label": "Delegation Expiry", "type": "datetime-local", "required": True, "placeholder": "YYYY-MM-DDTHH:MM", "storage": "metadata"},
-            {"name": "max_notional_usd", "label": "Max Notional USD", "type": "number", "required": True, "placeholder": "100", "storage": "metadata"},
             {"name": "daily_loss_usd", "label": "Daily Loss Cap USD", "type": "number", "required": True, "placeholder": "25", "storage": "metadata"},
             {"name": "allowed_tokens", "label": "Allowed Tokens", "type": "text", "required": True, "placeholder": "ETH,BTC", "storage": "metadata"},
             {"name": "protocols", "label": "Protocols", "type": "text", "required": False, "placeholder": "V2,V3,V4", "storage": "metadata"},
             {"name": "session_topic", "label": "WalletConnect Session", "type": "text", "required": True, "placeholder": "Reown session topic/reference", "storage": "metadata"},
         ],
-        "capabilities": ["Delegated swaps", "Permit2-aware routing", "Notional caps", "Daily loss cap"],
+        "capabilities": ["Delegated swaps", "Permit2-aware routing", "Daily loss cap"],
     },
     "dydx": {
         "key": "dydx",
@@ -155,6 +153,22 @@ class TradingCredentials:
     api_secret: str
     passphrase: str
     wallet_address: str
+
+
+def _balance_available(balances: list[dict[str, Any]], asset: str) -> float:
+    asset_key = str(asset or "").upper().strip()
+    for row in balances or []:
+        row_asset = str(row.get("asset") or row.get("currency") or "").upper().strip()
+        if row_asset != asset_key:
+            continue
+        for key in ("withdrawable", "available", "available_balance", "free", "value", "total"):
+            try:
+                value = float(row.get(key, 0.0) or 0.0)
+            except (TypeError, ValueError):
+                value = 0.0
+            if value > 0:
+                return value
+    return 0.0
 
 
 class TradingConnector(Protocol):
@@ -196,6 +210,38 @@ class TradingConnector(Protocol):
         ...
 
     def withdraw_from_bridge(self, mode: str, amount: float, destination: str) -> dict[str, Any]:
+        ...
+
+    def deposit_address(self, mode: str, asset: str, network: str | None = None) -> dict[str, Any]:
+        ...
+
+    def reserve_funds(self, mode: str, asset: str, amount: float) -> dict[str, Any]:
+        ...
+
+    def withdraw_to_address(
+        self,
+        mode: str,
+        asset: str,
+        amount: float,
+        destination: str,
+        network: str | None = None,
+        memo: str | None = None,
+        client_reference: str | None = None,
+    ) -> dict[str, Any]:
+        ...
+
+    def transfer_status(self, mode: str, provider_reference: str, transfer_type: str | None = None) -> dict[str, Any]:
+        ...
+
+    def convert_stablecoin(
+        self,
+        mode: str,
+        from_asset: str,
+        to_asset: str,
+        amount: float,
+        max_slippage_bps: float,
+        client_reference: str | None = None,
+    ) -> dict[str, Any]:
         ...
 
 
@@ -273,6 +319,79 @@ class HyperliquidTradingConnector:
     def withdraw_from_bridge(self, mode: str, amount: float, destination: str) -> dict[str, Any]:
         return self.client.withdraw_from_bridge(mode, amount, destination)
 
+    def deposit_address(self, mode: str, asset: str, network: str | None = None) -> dict[str, Any]:
+        asset_key = str(asset or "").upper().strip()
+        network_key = str(network or "Arbitrum").strip() or "Arbitrum"
+        if mode != "live" or asset_key != "USDC":
+            raise RuntimeError("Hyperliquid Vault Cycle funding supports live USDC only.")
+        return {
+            "asset": asset_key,
+            "network": network_key,
+            "address": getattr(self.client, "account_address", "") or "",
+            "memo": "",
+            "status": "manual_bridge_required",
+            "raw": {
+                "rail": "hyperliquid_bridge2",
+                "credit_rule": "USDC bridge deposits credit the sending account on Hyperliquid.",
+            },
+        }
+
+    def reserve_funds(self, mode: str, asset: str, amount: float) -> dict[str, Any]:
+        snapshot = self.account_snapshot(mode)
+        asset_key = str(asset or "").upper().strip()
+        requested = max(0.0, float(amount or 0.0))
+        available = _balance_available(snapshot.balances, asset_key)
+        if available + 1e-9 < requested:
+            raise RuntimeError(f"Hyperliquid {asset_key} reserve unavailable: {available:.6f} < {requested:.6f}.")
+        return {
+            "status": "confirmed",
+            "provider_reference": f"hyperliquid-reserve-{int(time.time() * 1000)}",
+            "asset": asset_key,
+            "confirmed_amount": requested,
+            "available_before": available,
+            "raw": {"reserve_type": "exchange_balance"},
+        }
+
+    def withdraw_to_address(
+        self,
+        mode: str,
+        asset: str,
+        amount: float,
+        destination: str,
+        network: str | None = None,
+        memo: str | None = None,
+        client_reference: str | None = None,
+    ) -> dict[str, Any]:
+        asset_key = str(asset or "").upper().strip()
+        if asset_key != "USDC":
+            raise RuntimeError("Hyperliquid bridge withdrawals support USDC only.")
+        response = self.withdraw_from_bridge(mode, amount, destination)
+        return {
+            **response,
+            "asset": asset_key,
+            "network": str(network or "Arbitrum"),
+            "client_reference": client_reference,
+        }
+
+    def transfer_status(self, mode: str, provider_reference: str, transfer_type: str | None = None) -> dict[str, Any]:
+        return {
+            "status": "submitted" if provider_reference else "unknown",
+            "provider_reference": str(provider_reference or ""),
+            "transfer_type": transfer_type or "withdrawal",
+            "raw": {},
+        }
+
+    def convert_stablecoin(
+        self,
+        mode: str,
+        from_asset: str,
+        to_asset: str,
+        amount: float,
+        max_slippage_bps: float,
+        client_reference: str | None = None,
+    ) -> dict[str, Any]:
+        raise RuntimeError("Hyperliquid connector does not provide USDT/USDC conversion.")
+
 
 class UnsupportedTradingConnector:
     """Fail-closed placeholder for future providers."""
@@ -306,6 +425,38 @@ class UnsupportedTradingConnector:
 
     def withdraw_from_bridge(self, mode: str, amount: float, destination: str) -> dict[str, Any]:
         raise RuntimeError(f"{self.provider} connector does not support withdrawals.")
+
+    def deposit_address(self, mode: str, asset: str, network: str | None = None) -> dict[str, Any]:
+        raise RuntimeError(f"{self.provider} connector does not support deposit address lookup.")
+
+    def reserve_funds(self, mode: str, asset: str, amount: float) -> dict[str, Any]:
+        raise RuntimeError(f"{self.provider} connector does not support exchange reserve accounting.")
+
+    def withdraw_to_address(
+        self,
+        mode: str,
+        asset: str,
+        amount: float,
+        destination: str,
+        network: str | None = None,
+        memo: str | None = None,
+        client_reference: str | None = None,
+    ) -> dict[str, Any]:
+        raise RuntimeError(f"{self.provider} connector does not support automated withdrawals.")
+
+    def transfer_status(self, mode: str, provider_reference: str, transfer_type: str | None = None) -> dict[str, Any]:
+        return {"status": "unsupported", "provider_reference": str(provider_reference or ""), "raw": {}}
+
+    def convert_stablecoin(
+        self,
+        mode: str,
+        from_asset: str,
+        to_asset: str,
+        amount: float,
+        max_slippage_bps: float,
+        client_reference: str | None = None,
+    ) -> dict[str, Any]:
+        raise RuntimeError(f"{self.provider} connector does not support stablecoin conversion.")
 
 
 class TradingConnectionService:
@@ -377,7 +528,6 @@ class TradingConnectionService:
 
         if is_active and self._is_verified_tradable(connection):
             connection.is_active = True
-            self._deactivate_other_connections(user_id, connection)
 
         db.session.flush()
         return connection
@@ -414,6 +564,21 @@ class TradingConnectionService:
     def verified_tradable_connections(self, user_id: int, providers: list[str] | None = None) -> list[TradingConnection]:
         provider_filter = {self._normalize_provider(provider) for provider in (providers or []) if str(provider or "").strip()}
         query = TradingConnection.query.filter_by(user_id=int(user_id), verification_status=VERIFIED_STATUS)
+        connections: list[TradingConnection] = []
+        for connection in query.order_by(TradingConnection.updated_at.desc(), TradingConnection.id.desc()).all():
+            if provider_filter and connection.provider not in provider_filter:
+                continue
+            if self.provider_spec(connection.provider)["tradable"]:
+                connections.append(connection)
+        return connections
+
+    def enabled_tradable_connections(self, user_id: int, providers: list[str] | None = None) -> list[TradingConnection]:
+        provider_filter = {self._normalize_provider(provider) for provider in (providers or []) if str(provider or "").strip()}
+        query = TradingConnection.query.filter_by(
+            user_id=int(user_id),
+            is_active=True,
+            verification_status=VERIFIED_STATUS,
+        )
         connections: list[TradingConnection] = []
         for connection in query.order_by(TradingConnection.updated_at.desc(), TradingConnection.id.desc()).all():
             if provider_filter and connection.provider not in provider_filter:
@@ -478,13 +643,24 @@ class TradingConnectionService:
                     return cached
 
         try:
-            snapshot = self._connector_for_connection(connection).account_snapshot(mode)
+            connector = self.connector_for_user(int(user_id), int(connection.id or connection_id or 0) or None)
+            snapshot_reader = getattr(connector, "account_snapshot", None)
+            if callable(snapshot_reader):
+                snapshot = snapshot_reader(mode)
+            else:
+                positions_reader = getattr(connector, "get_positions", None)
+                positions = positions_reader(mode) if callable(positions_reader) else []
+                snapshot = ClientSnapshot(mode, [], positions or [], [], [], [])
             clone = self._clone_snapshot(snapshot)
         except Exception as exc:  # noqa: BLE001
-            self._record_snapshot_backoff(cache_key, exc)
-            stale = self._cached_snapshot_nolock(cache_key, mode, allow_stale=True)
-            if stale is not None:
-                return stale
+            if self._is_transient_provider_error(exc):
+                self._record_snapshot_backoff(cache_key, exc)
+                stale = self._cached_snapshot_nolock(cache_key, mode, allow_stale=True)
+                if stale is not None:
+                    return stale
+            else:
+                with self._snapshot_guard:
+                    self._snapshot_backoff.pop(cache_key, None)
             return ClientSnapshot(mode, [], [], [], [], [str(exc)])
         finally:
             with self._snapshot_guard:
@@ -580,8 +756,13 @@ class TradingConnectionService:
         connection = self.get_for_user(user_id, connection_id)
         if not self._is_verified_tradable(connection):
             raise ValueError("Only verified live-ready connections can be activated.")
-        self._deactivate_other_connections(user_id, connection)
         connection.is_active = True
+        db.session.flush()
+        return connection
+
+    def disable(self, user_id: int, connection_id: int) -> TradingConnection:
+        connection = self.get_for_user(user_id, connection_id)
+        connection.is_active = False
         db.session.flush()
         return connection
 
@@ -596,11 +777,6 @@ class TradingConnectionService:
             passphrase=self._decrypt_connection_secret(spec, "passphrase", connection.encrypted_passphrase),
             wallet_address=connection.wallet_address or "",
         )
-
-    def _deactivate_other_connections(self, user_id: int, active: TradingConnection) -> None:
-        for connection in TradingConnection.query.filter_by(user_id=user_id).all():
-            if connection is not active and connection.id != active.id:
-                connection.is_active = False
 
     def _connector_for_connection(self, connection: TradingConnection) -> TradingConnector:
         spec = self.provider_spec(connection.provider)

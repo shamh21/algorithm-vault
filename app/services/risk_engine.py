@@ -174,11 +174,11 @@ class RiskEngine:
         if quantity <= 0:
             return self._reject("invalid_size", "Order quantity must be greater than zero.")
 
-        max_leverage = self._config_float("MAX_LEVERAGE", 1.0)
+        max_leverage = self._exchange_max_leverage(metadata, symbol)
         if leverage <= 0 or leverage > max_leverage:
             return self._reject(
                 "max_leverage",
-                f"Requested leverage exceeds configured cap of {max_leverage}.",
+                f"Requested leverage exceeds exchange cap of {max_leverage}.",
                 {"requested_leverage": leverage, "max_leverage": max_leverage},
             )
         if mode == "live" and is_one_h10:
@@ -239,24 +239,6 @@ class RiskEngine:
             if not ml_policy_decision.approved:
                 return ml_policy_decision
 
-        max_notional = (
-            self._config_float("HIGH_UPSIDE_MAX_POSITION_NOTIONAL_USD", 0.0)
-            if mode == "live" and self._is_high_upside_profile(metadata)
-            else self._config_float("MAX_POSITION_NOTIONAL", 0.0)
-        )
-
-        if not reduce_only and max_notional > 0 and notional > max_notional:
-            return self._reject(
-                "high_upside_max_notional" if self._is_high_upside_profile(metadata) else "max_notional",
-                f"Order notional {notional:.2f} exceeds cap {max_notional:.2f}.",
-                {"notional": notional, "max_notional": max_notional},
-            )
-
-        if mode == "live" and not reduce_only and self._uses_experimental_live_caps(metadata):
-            cap_decision = self._validate_aggressive_live_cap(metadata, notional, user_id, trading_connection_id)
-            if not cap_decision.approved:
-                return cap_decision
-
         stop_loss = self._optional_positive_float(getattr(intent, "stop_loss", None))
         take_profit = self._optional_positive_float(getattr(intent, "take_profit", None))
 
@@ -315,21 +297,18 @@ class RiskEngine:
                 return rr_decision
 
         slippage_pct = self._projected_slippage_pct(intent, reference_price, limit_price)
-        max_slippage = self._config_float("MAX_SLIPPAGE_PCT", 0.0)
+        adaptive_slippage = self.adaptive_slippage_metrics(metadata, slippage_pct=slippage_pct)
+        adaptive_limit = self._safe_float(adaptive_slippage.get("max_acceptable_pct"), 0.0)
 
-        if max_slippage >= 0 and slippage_pct > max_slippage:
+        if adaptive_limit > 0 and slippage_pct > adaptive_limit:
             return self._reject(
-                "slippage_cap",
-                f"Projected slippage {slippage_pct:.4f} exceeds threshold {max_slippage:.4f}.",
-                {"slippage_pct": slippage_pct, "max_slippage_pct": max_slippage},
+                "adaptive_slippage_cap",
+                f"Projected slippage {slippage_pct:.4f} exceeds adaptive ML limit {adaptive_limit:.4f}.",
+                {"slippage_pct": slippage_pct, "adaptive_slippage": adaptive_slippage},
             )
 
         loss_used = abs(min(0.0, self.daily_realized_pnl(mode, user_id=user_id, trading_connection_id=trading_connection_id)))
-        daily_loss_limit = (
-            self._config_float("HIGH_UPSIDE_MAX_DAILY_LOSS_USDC", 0.0)
-            if mode == "live" and self._is_high_upside_profile(metadata)
-            else self._config_float("MAX_DAILY_LOSS_USDC", 0.0)
-        )
+        daily_loss_limit = self._daily_loss_limit_usdc(mode, metadata)
 
         if daily_loss_limit > 0 and loss_used >= daily_loss_limit:
             if mode == "live" and self._is_high_upside_profile(metadata):
@@ -359,6 +338,7 @@ class RiskEngine:
                 "reference_price": reference_price,
                 "notional": notional,
                 "slippage_pct": slippage_pct,
+                "adaptive_slippage": adaptive_slippage,
                 "fibonacci_alignment": metadata.get("fibonacci_alignment", {}),
                 "reward_risk": metadata.get("risk_reward"),
                 "shadow_validation_id": shadow_validation_id,
@@ -387,6 +367,145 @@ class RiskEngine:
             )
         )
 
+    def risk_controls(self) -> dict[str, Any]:
+        """Return persisted admin risk controls with conservative defaults."""
+
+        raw = Setting.get_json("risk_controls", {})
+        payload = raw if isinstance(raw, dict) else {}
+        default_pct = self._safe_float(payload.get("daily_loss_limit_pct"), 5.0)
+        return {
+            "daily_loss_limit_pct": max(0.0, min(default_pct, 100.0)),
+            "daily_loss_unlimited": bool(payload.get("daily_loss_unlimited", False)),
+            "max_leverage": max(0.0, self._safe_float(payload.get("max_leverage"), self._config_float("MAX_LEVERAGE", 1.0))),
+            "profile": self._risk_profile(payload.get("profile")),
+        }
+
+    def save_risk_controls(self, payload: dict[str, Any]) -> dict[str, Any]:
+        controls = {
+            "daily_loss_limit_pct": max(0.0, min(self._safe_float(payload.get("daily_loss_limit_pct"), 5.0), 100.0)),
+            "daily_loss_unlimited": bool(payload.get("daily_loss_unlimited", False)),
+            "max_leverage": max(0.0, self._safe_float(payload.get("max_leverage"), self._config_float("MAX_LEVERAGE", 1.0))),
+            "profile": self._risk_profile(payload.get("profile")),
+        }
+        Setting.set_json("risk_controls", controls)
+        return controls
+
+    def daily_loss_unlimited(self) -> bool:
+        return bool(self.risk_controls().get("daily_loss_unlimited", False))
+
+    def _daily_loss_limit_usdc(self, mode: str, metadata: dict[str, Any]) -> float:
+        if self.daily_loss_unlimited():
+            return 0.0
+        raw_controls = Setting.get_json("risk_controls", {})
+        controls_saved = isinstance(raw_controls, dict) and "daily_loss_limit_pct" in raw_controls
+        controls = self.risk_controls()
+        pct = self._safe_float(controls.get("daily_loss_limit_pct"), 0.0)
+        capital = self._risk_capital_usdc(metadata)
+        if controls_saved and pct > 0 and capital > 0:
+            return capital * pct / 100.0
+        if mode == "live" and self._is_high_upside_profile(metadata):
+            return self._config_float("HIGH_UPSIDE_MAX_DAILY_LOSS_USDC", 0.0)
+        return self._config_float("MAX_DAILY_LOSS_USDC", 0.0)
+
+    def _ml_hard_daily_loss_limit_usdc(self, metadata: dict[str, Any]) -> float:
+        if self.daily_loss_unlimited():
+            return 0.0
+        raw_controls = Setting.get_json("risk_controls", {})
+        controls_saved = isinstance(raw_controls, dict) and "daily_loss_limit_pct" in raw_controls
+        capital = self._risk_capital_usdc(metadata)
+        pct = self._safe_float(self.risk_controls().get("daily_loss_limit_pct"), 0.0)
+        if controls_saved and pct > 0 and capital > 0:
+            return capital * pct / 100.0
+        return self._config_float("ML_LIVE_HARD_DAILY_LOSS_USDC", 0.50)
+
+    def _risk_capital_usdc(self, metadata: dict[str, Any]) -> float:
+        payload = metadata or {}
+        for key in (
+            "account_equity_usd",
+            "allocation_amount_usd",
+            "allocation_cap_usd",
+            "available_margin_usd",
+            "user_input_amount_usd",
+            "starting_value_usd",
+            "capital_usd",
+        ):
+            value = self._safe_float(payload.get(key), 0.0)
+            if value > 0:
+                return value
+        return 0.0
+
+    def _exchange_max_leverage(self, metadata: dict[str, Any], symbol: str) -> float:
+        payload = metadata or {}
+        provider = normalize_provider(payload.get("provider") or payload.get("execution_venue"))
+        venue_symbol = str(payload.get("venue_symbol") or payload.get("provider_symbol") or symbol or "").upper()
+        symbol_key = str(symbol or "").upper()
+        exchange_cap = 0.0
+        query = LeveragedMarket.query.filter_by(status="active")
+        if provider and provider != "global":
+            query = query.filter_by(provider=provider)
+        if symbol_key or venue_symbol:
+            match = (
+                query.filter((LeveragedMarket.symbol == symbol_key) | (LeveragedMarket.venue_symbol == venue_symbol))
+                .order_by(LeveragedMarket.max_leverage.desc())
+                .first()
+            )
+            if match is not None:
+                exchange_cap = self._safe_float(match.max_leverage, 0.0)
+        if exchange_cap <= 0:
+            match = query.order_by(LeveragedMarket.max_leverage.desc()).first()
+            if match is not None:
+                exchange_cap = self._safe_float(match.max_leverage, 0.0)
+        if exchange_cap <= 0:
+            exchange_cap = self._config_float("MAX_LEVERAGE", 1.0)
+        admin_cap = self._safe_float(self.risk_controls().get("max_leverage"), exchange_cap)
+        if admin_cap <= 0:
+            return 0.0
+        return max(0.0, min(exchange_cap, admin_cap))
+
+    def adaptive_slippage_metrics(self, metadata: dict[str, Any], *, slippage_pct: float | None = None) -> dict[str, Any]:
+        payload = metadata or {}
+        spread_bps = max(0.0, self._safe_float(payload.get("spread_bps"), self._safe_float(payload.get("observed_spread_bps"), 8.0)))
+        liquidity_usd = max(0.0, self._safe_float(payload.get("liquidity_usd"), self._safe_float(payload.get("orderbook_depth_usd"), 0.0)))
+        latency_ms = max(0.0, self._safe_float(payload.get("exchange_latency_ms"), self._safe_float(payload.get("latency_ms"), 0.0)))
+        volatility_pct = max(0.0, self._safe_float(payload.get("volatility_pct"), self._safe_float(payload.get("recent_volatility_pct"), 0.0)))
+        historical_pct = self._recent_reported_slippage_pct(payload)
+        requested_pct = max(0.0, self._safe_float(slippage_pct, self._safe_float(payload.get("slippage_pct"), 0.0)))
+
+        spread_component = max(spread_bps * 1.35, 2.0)
+        latency_component = min(latency_ms / 55.0, 35.0)
+        volatility_component = min(volatility_pct * 1_000.0, 45.0)
+        history_component = historical_pct * 10_000.0 * 1.15
+        estimate_bps = max(spread_component + latency_component + volatility_component, history_component, requested_pct * 10_000.0)
+        if liquidity_usd > 0:
+            estimate_bps *= 0.92 if liquidity_usd >= 1_000_000 else 1.08
+        estimate_bps = max(2.0, min(estimate_bps, 500.0))
+        max_acceptable_pct = min(max((estimate_bps * 1.35) / 10_000.0, 0.0002), 0.05)
+
+        quality = 100.0
+        quality -= min(spread_bps * 1.8, 34.0)
+        quality -= min(latency_ms / 35.0, 24.0)
+        quality -= min(volatility_pct * 350.0, 28.0)
+        if liquidity_usd > 0:
+            quality += min(liquidity_usd / 250_000.0, 12.0)
+        market_quality = max(0.0, min(quality, 100.0))
+        confidence = max(30.0, min(96.0, 55.0 + (12.0 if spread_bps > 0 else 0.0) + (12.0 if liquidity_usd > 0 else 0.0) + (10.0 if historical_pct > 0 else 0.0) - min(latency_ms / 120.0, 18.0)))
+        execution_health = max(0.0, min((market_quality * 0.58) + (confidence * 0.42), 100.0))
+        volatility_state = "Extreme" if volatility_pct >= 0.08 or spread_bps >= 45 else "Elevated" if volatility_pct >= 0.025 or spread_bps >= 18 else "Calm"
+
+        return {
+            "estimate_pct": estimate_bps / 10_000.0,
+            "estimate_bps": estimate_bps,
+            "max_acceptable_pct": max_acceptable_pct,
+            "confidence": confidence,
+            "market_quality": market_quality,
+            "execution_health": execution_health,
+            "spread_bps": spread_bps,
+            "latency_ms": latency_ms,
+            "liquidity_usd": liquidity_usd,
+            "volatility_state": volatility_state,
+            "model": "adaptive_ml",
+        }
+
     def _safety_envelope(
         self,
         intent: Any,
@@ -400,10 +519,11 @@ class RiskEngine:
         metadata = dict(getattr(intent, "metadata", {}) or {})
         is_one_h10 = self._is_one_h10(metadata)
         hard_cap = self._ml_live_hard_cap(metadata)
-        hard_daily_loss = self._config_float("ML_LIVE_HARD_DAILY_LOSS_USDC", 0.50)
+        hard_daily_loss = self._ml_hard_daily_loss_limit_usdc(metadata)
+        unlimited_loss = self.daily_loss_unlimited()
         user_id = getattr(intent, "user_id", None)
         trading_connection_id = getattr(intent, "trading_connection_id", None)
-        dynamic_cap, dynamic_cap_details = self._one_h10_dynamic_notional_cap(
+        dynamic_budget, dynamic_budget_details = self._one_h10_dynamic_allocation_budget(
             metadata,
             leverage=self._safe_float(getattr(intent, "leverage", 1.0), 1.0),
         )
@@ -423,17 +543,21 @@ class RiskEngine:
         if reference_price <= 0:
             blockers.append("safety_reference_price_missing")
         if is_one_h10:
-            if dynamic_cap <= 0:
+            if dynamic_budget <= 0:
                 blockers.append("safety_one_h10_dynamic_cap_missing")
-            elif notional > dynamic_cap + 1e-9:
+                blockers.append("safety_one_h10_allocation_budget_missing")
+            elif notional > dynamic_budget + 1e-9:
                 blockers.append("safety_one_h10_dynamic_cap_breached")
+                blockers.append("safety_one_h10_allocation_budget_breached")
         elif hard_cap <= 0:
             if not bool(metadata.get("rapid_ml")):
                 blockers.append("safety_ml_live_hard_cap_missing")
         elif notional > hard_cap + 1e-9:
             blockers.append("safety_ml_live_hard_cap_breached")
         loss_used = abs(min(0.0, self.daily_realized_pnl(mode, user_id=user_id, trading_connection_id=trading_connection_id)))
-        if hard_daily_loss <= 0:
+        if unlimited_loss:
+            pass
+        elif hard_daily_loss <= 0:
             blockers.append("safety_ml_live_hard_daily_loss_missing")
         elif loss_used >= hard_daily_loss:
             blockers.append("safety_ml_live_hard_daily_loss_reached")
@@ -449,9 +573,12 @@ class RiskEngine:
                 "reference_price": reference_price,
                 "notional": notional,
                 "hard_cap_usdc": hard_cap,
-                "one_h10_dynamic_cap_usd": dynamic_cap if is_one_h10 else None,
-                "one_h10_dynamic_cap": dynamic_cap_details if is_one_h10 else {},
+                "one_h10_dynamic_cap_usd": dynamic_budget if is_one_h10 else None,
+                "one_h10_dynamic_cap": dynamic_budget_details if is_one_h10 else {},
+                "one_h10_allocation_budget_usd": dynamic_budget if is_one_h10 else None,
+                "one_h10_allocation_budget": dynamic_budget_details if is_one_h10 else {},
                 "hard_daily_loss_usdc": hard_daily_loss,
+                "daily_loss_unlimited": unlimited_loss,
                 "loss_used_usdc": loss_used,
                 "policy_live_authority": self.config.get("ML_POLICY_LIVE_AUTHORITY", "guarded"),
                 "ml_policy_required": bool(metadata.get("ml_policy_required", False)),
@@ -474,8 +601,8 @@ class RiskEngine:
         metadata = dict(getattr(intent, "metadata", {}) or {})
         is_one_h10 = self._is_one_h10(metadata)
         leverage = self._safe_float(getattr(intent, "leverage", 1.0), 1.0)
-        dynamic_cap, dynamic_cap_details = self._one_h10_dynamic_notional_cap(metadata, leverage=leverage)
-        ml_live_cap = dynamic_cap if is_one_h10 and dynamic_cap > 0 else self._ml_live_hard_cap(metadata)
+        dynamic_budget, dynamic_budget_details = self._one_h10_dynamic_allocation_budget(metadata, leverage=leverage)
+        ml_live_cap = dynamic_budget if is_one_h10 and dynamic_budget > 0 else self._ml_live_hard_cap(metadata)
         horizon = self._ml_policy_horizon(metadata)
         provider_key = normalize_provider(metadata.get("provider") or metadata.get("execution_venue"))
         context = {
@@ -494,9 +621,11 @@ class RiskEngine:
             "stop_loss_pct": self._stop_loss_pct(intent, reference_price),
             "take_profit_pct": self._take_profit_pct(intent, reference_price),
             "ml_live_hard_cap_usdc": ml_live_cap,
-            "one_h10_dynamic_cap_usd": dynamic_cap,
-            "one_h10_dynamic_cap": dynamic_cap_details,
-            "ml_live_hard_daily_loss_usdc": self._config_float("ML_LIVE_HARD_DAILY_LOSS_USDC", 0.50),
+            "one_h10_dynamic_cap_usd": dynamic_budget,
+            "one_h10_dynamic_cap": dynamic_budget_details,
+            "one_h10_allocation_budget_usd": dynamic_budget,
+            "one_h10_allocation_budget": dynamic_budget_details,
+            "ml_live_hard_daily_loss_usdc": self._ml_hard_daily_loss_limit_usdc(metadata),
             "hard_max_leverage": self._config_float("MAX_LEVERAGE", 1.0),
             "safety_envelope_ready": safety_envelope.ready,
         }
@@ -553,7 +682,8 @@ class RiskEngine:
                     "enabled_families": enabled_families,
                     "notional": notional,
                     "horizon": horizon,
-                    "one_h10_dynamic_cap_usd": dynamic_cap,
+                    "one_h10_dynamic_cap_usd": dynamic_budget,
+                    "one_h10_allocation_budget_usd": dynamic_budget,
                     "bootstrap_live": True,
                 },
             )
@@ -598,8 +728,9 @@ class RiskEngine:
                 if suggested_leverage > leverage_cap + 1e-9:
                     blockers.append("ml_cap_policy_leverage_cap_breach")
                 if is_one_h10:
-                    if dynamic_cap > 0 and suggested > dynamic_cap + 1e-9:
+                    if dynamic_budget > 0 and suggested > dynamic_budget + 1e-9:
                         blockers.append("ml_cap_policy_dynamic_cap_breach")
+                        blockers.append("ml_cap_policy_allocation_budget_breach")
                 else:
                     hard_cap = self._ml_live_hard_cap(metadata)
                     if hard_cap > 0 and suggested > hard_cap + 1e-9:
@@ -612,7 +743,8 @@ class RiskEngine:
             "enabled_families": enabled_families,
             "notional": notional,
             "horizon": horizon,
-            "one_h10_dynamic_cap_usd": dynamic_cap if is_one_h10 else None,
+            "one_h10_dynamic_cap_usd": dynamic_budget if is_one_h10 else None,
+            "one_h10_allocation_budget_usd": dynamic_budget if is_one_h10 else None,
         }
         if blockers:
             return self._reject(
@@ -640,7 +772,7 @@ class RiskEngine:
             return explicit
         return self._duration_bucket(payload.get("duration_hours") or payload.get("lock_duration_hours") or "1h")
 
-    def _one_h10_dynamic_notional_cap(self, metadata: dict[str, Any], *, leverage: float) -> tuple[float, dict[str, Any]]:
+    def _one_h10_dynamic_allocation_budget(self, metadata: dict[str, Any], *, leverage: float) -> tuple[float, dict[str, Any]]:
         payload = metadata or {}
         if not self._is_one_h10(payload):
             return 0.0, {}
@@ -659,32 +791,32 @@ class RiskEngine:
                 margin_sources[key] = value
         effective_leverage = max(1.0, self._safe_float(leverage, 1.0))
         margin_cap = min(margin_sources.values()) if margin_sources else 0.0
-        margin_notional_cap = margin_cap * effective_leverage if margin_cap > 0 else 0.0
+        leveraged_allocation_budget = margin_cap * effective_leverage if margin_cap > 0 else 0.0
 
-        notional_sources: dict[str, float] = {}
+        capacity_sources: dict[str, float] = {}
         for key in (
             "liquidity_capacity",
             "liquidity_capacity_usd",
             "orderbook_capacity_usd",
-            "exchange_max_notional_usd",
-            "max_order_notional_usd",
+            "exchange_capacity_usd",
+            "max_order_capacity_usd",
         ):
             value = self._safe_float(payload.get(key), 0.0)
             if value > 0:
-                notional_sources[key] = value
+                capacity_sources[key] = value
 
         candidates = []
-        if margin_notional_cap > 0:
-            candidates.append(margin_notional_cap)
-        candidates.extend(notional_sources.values())
+        if leveraged_allocation_budget > 0:
+            candidates.append(leveraged_allocation_budget)
+        candidates.extend(capacity_sources.values())
         cap = min(candidates) if candidates else 0.0
         return cap, {
-            "cap_usd": cap,
+            "budget_usd": cap,
             "margin_cap_usd": margin_cap,
-            "margin_notional_cap_usd": margin_notional_cap,
+            "leveraged_allocation_budget_usd": leveraged_allocation_budget,
             "leverage": effective_leverage,
             "margin_sources": margin_sources,
-            "notional_sources": notional_sources,
+            "capacity_sources": capacity_sources,
         }
 
     def _evaluate_live_gate(self, intent: Any) -> RiskDecision:
@@ -1044,19 +1176,19 @@ class RiskEngine:
             "explicit_live_confirmed": True,
             "secondary_confirmation": True,
             "daily_realized_pnl": self.daily_realized_pnl(mode, user_id=user_id, trading_connection_id=trading_connection_id),
-            "daily_loss_limit": self._config_float("MAX_DAILY_LOSS_USDC", 0.0),
+            "daily_loss_limit": self._daily_loss_limit_usdc(mode, {}),
+            "daily_loss_unlimited": self.daily_loss_unlimited(),
+            "risk_controls": self.risk_controls(),
             "cooldown_minutes_remaining": self.cooldown_remaining(mode, user_id=user_id, trading_connection_id=trading_connection_id),
             "max_leverage": self._config_float("MAX_LEVERAGE", 1.0),
-            "max_position_notional": self._config_float("MAX_POSITION_NOTIONAL", 0.0),
-            "max_slippage_pct": self._config_float("MAX_SLIPPAGE_PCT", 0.0),
+            "adaptive_slippage": self.adaptive_slippage_metrics({}),
             "high_upside": {
                 "profile_enabled": bool(self.config.get("HIGH_UPSIDE_PROFILE_ENABLED", False)),
                 "live_eligible": bool(self.config.get("HIGH_UPSIDE_LIVE_ELIGIBLE", False)),
                 "auto_live_enabled": bool(self.config.get("HIGH_UPSIDE_AUTO_LIVE_ENABLED", False)),
                 "auto_disabled": bool(Setting.get_json("high_upside_live_disabled", False)),
                 "disabled_reason": Setting.get_json("high_upside_live_disabled_reason", {}),
-                "max_position_notional": self._config_float("HIGH_UPSIDE_MAX_POSITION_NOTIONAL_USD", 0.0),
-                "max_daily_loss": self._config_float("HIGH_UPSIDE_MAX_DAILY_LOSS_USDC", 0.0),
+                "max_daily_loss": self._daily_loss_limit_usdc(mode, {"high_upside_profile": True}),
                 "requires_promoted_offline_ml": bool(self.config.get("HIGH_UPSIDE_REQUIRE_PROMOTED_ML", True)),
                 "offline_ml_readiness": OfflineRanker(self.config).readiness(self._duration_bucket("1h"), require_blend=False),
                 "requires_ml_signal": bool(self.config.get("HIGH_UPSIDE_REQUIRE_ML_SIGNAL", True)),
@@ -1080,7 +1212,7 @@ class RiskEngine:
                     "live_authority": self.config.get("ML_POLICY_LIVE_AUTHORITY", "guarded"),
                     "sandbox_bypass_enabled": bool(self.config.get("ML_POLICY_SANDBOX_BYPASS_ENABLED", True)),
                     "live_hard_cap_usdc": self._config_float("ML_LIVE_HARD_CAP_USDC", 10.0),
-                    "live_hard_daily_loss_usdc": self._config_float("ML_LIVE_HARD_DAILY_LOSS_USDC", 0.50),
+                    "live_hard_daily_loss_usdc": self._ml_hard_daily_loss_limit_usdc({}),
                     "target_roi_1h_pct": self._config_float("ML_TARGET_ROI_1H_PCT", 1000.0),
                     "target_roi_1w_pct": self._config_float("ML_TARGET_ROI_1W_PCT", 100.0),
                 },
@@ -1090,7 +1222,7 @@ class RiskEngine:
                     "ml_vault_tick_enabled": bool(self.config.get("ML_VAULT_TICK_ENABLED", False)),
                     "ml_vault_provider_scope": self.config.get("ML_VAULT_PROVIDER_SCOPE", "all"),
                     "ml_vault_max_cap_usdc": self._config_float("ML_VAULT_MAX_CAP_USDC", 10.0),
-                    "ml_vault_max_daily_loss_usdc": self._config_float("ML_VAULT_MAX_DAILY_LOSS_USDC", 0.50),
+                    "ml_vault_max_daily_loss_usdc": 0.0 if self.daily_loss_unlimited() else self._config_float("ML_VAULT_MAX_DAILY_LOSS_USDC", 0.50),
                     "ml_vault_leverage_policy": self.config.get("ML_VAULT_LEVERAGE_POLICY", "exchange_max_gated"),
                     "ml_vault_min_liquidation_buffer_pct": self._config_float("ML_VAULT_MIN_LIQUIDATION_BUFFER_PCT", 0.20),
                     "max_live_cycles_per_day": self._config_int("HIGH_UPSIDE_MAX_LIVE_CYCLES_PER_DAY", 1),
@@ -1138,9 +1270,7 @@ class RiskEngine:
                 "High-upside live orders require config and DB secondary confirmation.",
             )
         missing: list[str] = []
-        if self._config_float("HIGH_UPSIDE_MAX_POSITION_NOTIONAL_USD", 0.0) <= 0:
-            missing.append("HIGH_UPSIDE_MAX_POSITION_NOTIONAL_USD")
-        if self._config_float("HIGH_UPSIDE_MAX_DAILY_LOSS_USDC", 0.0) <= 0:
+        if not self.daily_loss_unlimited() and self._config_float("HIGH_UPSIDE_MAX_DAILY_LOSS_USDC", 0.0) <= 0:
             missing.append("HIGH_UPSIDE_MAX_DAILY_LOSS_USDC")
         duration_bucket = self._duration_bucket(metadata.get("duration_hours") or metadata.get("lock_duration_hours") or metadata.get("duration_bucket"))
         if self._duration_cap("HIGH_UPSIDE_LIVE_CAP_USDC_BY_DURATION", duration_bucket, 0.0) <= 0:
@@ -1514,6 +1644,35 @@ class RiskEngine:
             return value.replace(tzinfo=timezone.utc)
 
         return value.astimezone(timezone.utc)
+
+    @staticmethod
+    def _risk_profile(value: Any) -> str:
+        profile = str(value or "balanced").strip().lower().replace("_", "-")
+        if profile in {"conservative", "balanced", "aggressive", "maximum-performance"}:
+            return profile
+        if profile in {"maximum performance", "max", "maximum"}:
+            return "maximum-performance"
+        return "balanced"
+
+    def _recent_reported_slippage_pct(self, metadata: dict[str, Any]) -> float:
+        provider = normalize_provider((metadata or {}).get("provider") or (metadata or {}).get("execution_venue"))
+        values: list[float] = []
+        query = Order.query.filter(Order.mode == "live").order_by(Order.created_at.desc(), Order.id.desc()).limit(40)
+        for order in query.all():
+            details = order.details or {}
+            if provider and provider != "global" and normalize_provider(details.get("provider") or details.get("execution_venue")) != provider:
+                continue
+            value = self._safe_float(
+                details.get("reported_slippage"),
+                self._safe_float(details.get("submitted_slippage_pct"), self._safe_float(details.get("slippage_pct"), 0.0)),
+            )
+            if value > 0:
+                values.append(value)
+            if len(values) >= 8:
+                break
+        if not values:
+            return 0.0
+        return sum(values) / len(values)
 
     def _config_float(self, key: str, default: float = 0.0) -> float:
         return self._safe_float(self.config.get(key), default)

@@ -7,6 +7,7 @@
   <span class="card-kicker">Advanced / Admin</span>
   <h1>Wallet Withdrawals</h1>
   <p class="muted">Manual withdrawal requests remain locked and unbroadcast until an admin approves them and live risk gates are clear.</p>
+  <a href="{{ url_for('admin.platform_treasury') }}" class="button-link secondary">Platform Treasury</a>
 </section>
 
 {% if panic_lock %}
@@ -54,6 +55,13 @@
               <form method="post" action="{{ url_for('admin.reject_wallet_withdrawal', withdrawal_id=withdrawal.id) }}" class="inline-form" data-disable-on-submit>
                 {{ csrf_input()|safe }}
                 <input type="hidden" name="reason" value="Withdrawal rejected by admin.">
+                <button type="submit" class="secondary" data-loading-label="Rejecting...">Reject</button>
+              </form>
+            {% elif withdrawal.status == "pending_gas_topup" %}
+              <a href="{{ url_for('admin.platform_treasury') }}" class="button-link secondary">Treasury</a>
+              <form method="post" action="{{ url_for('admin.reject_wallet_withdrawal', withdrawal_id=withdrawal.id) }}" class="inline-form" data-disable-on-submit>
+                {{ csrf_input()|safe }}
+                <input type="hidden" name="reason" value="Withdrawal rejected while waiting for gas top-up.">
                 <button type="submit" class="secondary" data-loading-label="Rejecting...">Reject</button>
               </form>
             {% else %}

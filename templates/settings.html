@@ -3,63 +3,61 @@
 {% block title %}Settings · Algorithm Vault{% endblock %}
 
 {% block content %}
-<section class="page-heading">
-  <span class="card-kicker">Settings</span>
-  <h1>Wallet Preferences</h1>
-  <p class="muted">Wallet, vault cycles, and settlement preferences in one clean view.</p>
-</section>
+<section class="settings-shell">
+  <header class="settings-compact-header">
+    <span class="card-kicker">Settings</span>
+    <h1>Settings</h1>
+  </header>
 
-<section class="grid two-up">
-  <article class="wallet-card">
-    <h2>App Mode</h2>
-    <p class="muted">Current environment mode</p>
-    <div class="mode-chip mode-chip-{{ current_mode }}">
-      <span class="mode-dot" aria-hidden="true"></span>
-      <span>{{ current_mode|replace('_', ' ')|upper }}</span>
-    </div>
-    <p class="muted">Live is disabled until a verified trading connection is active.</p>
-  </article>
-
-  <article class="wallet-card">
-    <h2>Trading Connection</h2>
-    {% if active_trading_connection %}
-      <div class="mode-chip">
-        <span class="mode-dot" aria-hidden="true"></span>
-        <span>{{ active_trading_connection.provider|upper }}</span>
+  <section class="settings-overview-grid" aria-label="Settings overview">
+    <article class="settings-panel app-mode-card">
+      <div class="settings-panel-head">
+        <div>
+          <span class="settings-label">App Mode</span>
+          <strong>{{ current_mode|replace('_', ' ')|upper }}</strong>
+        </div>
+        <span class="exchange-status-dot {{ 'status-live' if current_mode == 'live' else 'status-offline' }}" aria-hidden="true"></span>
       </div>
-        <p class="muted">Live wallet and vault execution use only your active connection.</p>
-    {% else %}
-        <p class="muted">Connect an exchange or wallet account before live trading.</p>
-    {% endif %}
-    <a href="{{ url_for('settings.connections') }}" class="button-link primary">Manage Connections</a>
-  </article>
-</section>
+      <div class="settings-stat-row">
+        <span>Environment</span>
+        <span class="settings-mode-pill">{{ current_mode|replace('_', ' ')|upper }}</span>
+      </div>
+    </article>
 
-<section class="grid two-up">
-  <article class="wallet-card">
-    <h2>Risk Notices</h2>
-    <ul class="compact-list">
-      <li>Live execution requires an active verified trading connection.</li>
-      <li>Risk checks enforce stop loss, notional, slippage, leverage, daily loss, cooldown, and panic-lock gates.</li>
-      <li>Optimizer output is advisory and does not bypass live eligibility controls.</li>
-    </ul>
-  </article>
-</section>
+    <article class="settings-panel provider-overview-card">
+      <div class="settings-panel-head">
+        <div>
+          <span class="settings-label">Providers</span>
+          <strong>{{ enabled_provider_count }} Enabled</strong>
+        </div>
+        <a class="settings-icon-link" href="{{ url_for('settings.connections') }}" aria-label="Manage providers">Manage</a>
+      </div>
+      <div class="settings-stat-row">
+        <span>Saved</span>
+        <span>{{ trading_connections|length }} / {{ providers|length }}</span>
+      </div>
+    </article>
+  </section>
 
-{% if current_user and current_user.is_admin %}
-<section class="grid two-up">
-  <article class="wallet-card">
-    <h2>Address Mode</h2>
-    <form method="post" action="{{ url_for('settings.address_mode') }}" class="form-grid" data-disable-on-submit>
-      {{ csrf_input()|safe }}
-      <label class="checkbox-row">
-        <input type="checkbox" name="use_real_addresses" {% if use_real_addresses %}checked{% endif %}>
-        Use real generated wallet addresses and real withdrawal submission
-      </label>
-      <button type="submit" data-loading-label="Updating...">Update Address Mode</button>
-    </form>
-    <p class="muted">When disabled, wallet address generation fails closed until real custody or configured custody addresses are available.</p>
-  </article>
+  <section class="settings-provider-grid" aria-label="Provider status">
+    {% for card in provider_cards %}
+      <article class="provider-status-card {% if card.enabled %}is-enabled{% endif %}">
+        <div class="provider-status-main">
+          <span class="provider-mark" aria-hidden="true">{{ card.label[:1] }}</span>
+          <div>
+            <h2>{{ card.label }}</h2>
+            <span>{{ card.wallet_preview }}</span>
+          </div>
+        </div>
+        <div class="provider-status-meta">
+          <span class="connection-status status-{{ card.status }}">{{ card.status_label }}</span>
+          <span class="provider-health {{ card.health_class }}">{{ card.health_label }}</span>
+          <span class="provider-toggle-readout {{ 'positive' if card.enabled else 'muted' }}">
+            {{ "Enabled" if card.enabled else "Disabled" }}
+          </span>
+        </div>
+      </article>
+    {% endfor %}
+  </section>
 </section>
-{% endif %}
 {% endblock %}

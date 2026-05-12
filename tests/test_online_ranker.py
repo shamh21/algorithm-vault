@@ -1309,7 +1309,7 @@ def test_promoted_non_signal_family_decisions_use_artifact_scores(app, tmp_path,
     monkeypatch.setattr(engine, "_score_artifact", lambda artifact_payload, context: 0.73)
     extreme = engine.decision(
         "pytorch_extreme_upside",
-        {"score": 1.0, "allocation_amount_usd": 10.0, "hard_max_notional_usdc": 10.0},
+        {"score": 1.0, "allocation_amount_usd": 10.0, "allocation_budget_usdc": 10.0},
         horizon="1h",
     )
     risk_policy = engine.decision("pytorch_risk_policy", {"score": 1.0, "notional": 8.0}, horizon="1h")

@@ -300,7 +300,7 @@ def _enable_canary_submit_gates(app, monkeypatch) -> None:
     app.config["LIVE_MICRO_CANARY_PREVIEW_ONLY"] = False
     app.config["LIVE_MICRO_CANARY_LIVE_SUBMIT_ENABLED"] = True
     app.config["LIVE_MICRO_CANARY_ALLOW_MIN_NOTIONAL_ORDER"] = False
-    app.config["LIVE_MICRO_CANARY_MAX_NOTIONAL_USD"] = 10.0
+    app.config["LIVE_MICRO_CANARY_ORDER_BUDGET_USD"] = 10.0
     app.config["LIVE_MICRO_CANARY_DEFAULT_MIN_NOTIONAL_USD"] = 0.5
     app.config["LIVE_MICRO_CANARY_MIN_NOTIONAL_BUFFER_USD"] = 0.5
     Setting.set_json("explicit_live_confirmed", True)
@@ -320,7 +320,7 @@ def _enable_micro_canary(app, *, max_allocation: float = 1.0, preview_only: bool
     app.config["LIVE_MICRO_CANARY_PREVIEW_ONLY"] = preview_only
     app.config["LIVE_MICRO_CANARY_LIVE_SUBMIT_ENABLED"] = False
     app.config["LIVE_MICRO_CANARY_ALLOW_MIN_NOTIONAL_ORDER"] = False
-    app.config["LIVE_MICRO_CANARY_MAX_NOTIONAL_USD"] = 10.0
+    app.config["LIVE_MICRO_CANARY_ORDER_BUDGET_USD"] = 10.0
     app.config["LIVE_MICRO_CANARY_DEFAULT_MIN_NOTIONAL_USD"] = max_allocation * 0.5
     app.config["LIVE_MICRO_CANARY_MIN_NOTIONAL_BUFFER_USD"] = 0.5
 
@@ -1676,7 +1676,6 @@ def test_high_upside_live_readiness_and_risk_gate_require_auto_live_enabled(app)
     app.config["HIGH_UPSIDE_LIVE_ELIGIBLE"] = True
     app.config["HIGH_UPSIDE_AUTO_LIVE_ENABLED"] = False
     app.config["HIGH_UPSIDE_REQUIRE_PROMOTED_ML"] = False
-    app.config["HIGH_UPSIDE_MAX_POSITION_NOTIONAL_USD"] = 20.0
     app.config["HIGH_UPSIDE_MAX_DAILY_LOSS_USDC"] = 5.0
     app.config["HIGH_UPSIDE_LIVE_CAP_USDC_BY_DURATION"] = {"1h": 10.0}
     app.config["HIGH_UPSIDE_LIVE_CAP_PCT_BY_DURATION"] = {"1h": 1.0}
@@ -1710,7 +1709,6 @@ def test_high_upside_live_readiness_reports_continuous_cycle_limits(app) -> None
     app.config["HIGH_UPSIDE_LIVE_ELIGIBLE"] = True
     app.config["HIGH_UPSIDE_AUTO_LIVE_ENABLED"] = True
     app.config["HIGH_UPSIDE_REQUIRE_PROMOTED_ML"] = False
-    app.config["HIGH_UPSIDE_MAX_POSITION_NOTIONAL_USD"] = 20.0
     app.config["HIGH_UPSIDE_MAX_DAILY_LOSS_USDC"] = 5.0
     app.config["HIGH_UPSIDE_LIVE_CAP_USDC_BY_DURATION"] = {"1h": 10.0}
     app.config["HIGH_UPSIDE_LIVE_CAP_PCT_BY_DURATION"] = {"1h": 1.0}
@@ -1808,7 +1806,6 @@ def _enable_ml_live_vault_gates(app) -> None:
     app.config["HIGH_UPSIDE_AUTO_LIVE_ENABLED"] = True
     app.config["HIGH_UPSIDE_PROFILE_ENABLED"] = True
     app.config["HIGH_UPSIDE_LIVE_ELIGIBLE"] = True
-    app.config["HIGH_UPSIDE_MAX_POSITION_NOTIONAL_USD"] = 10.0
     app.config["HIGH_UPSIDE_MAX_DAILY_LOSS_USDC"] = 0.50
     app.config["HIGH_UPSIDE_LIVE_CAP_USDC_BY_DURATION"] = {"1h": 10.0}
     app.config["HIGH_UPSIDE_LIVE_CAP_PCT_BY_DURATION"] = {"1h": 1.0}
@@ -1929,7 +1926,6 @@ def test_ml_live_vault_preview_extreme_objective_reports_clipped_dynamic_caps(ap
     app.config["ML_DYNAMIC_CAPS_ENABLED"] = True
     app.config["ML_EXTREME_UPSIDE_MODEL_ENABLED"] = True
     app.config["ML_LIVE_VAULT_MAX_CAP_USDC"] = 10.0
-    app.config["HIGH_UPSIDE_MAX_POSITION_NOTIONAL_USD"] = 10.0
     app.config["HIGH_UPSIDE_LIVE_CAP_USDC_BY_DURATION"] = {"1h": 10.0}
     app.config["HIGH_UPSIDE_MAX_DAILY_LOSS_USDC"] = 0.50
     seen_contexts: list[dict[str, Any]] = []
@@ -2781,7 +2777,7 @@ def test_activate_trading_connection_requires_exact_confirmation(app) -> None:
     assert "ACTIVATE-LIVE-CONNECTION" in result.output
 
 
-def test_activate_trading_connection_switches_verified_provider_and_audits(app) -> None:
+def test_activate_trading_connection_enables_verified_provider_and_audits(app) -> None:
     user, hyperliquid, _ranking = _add_canary_ranking()
     service = app.extensions["services"]["trading_connections"]
     kucoin = service.create_or_update(
@@ -2813,13 +2809,14 @@ def test_activate_trading_connection_switches_verified_provider_and_audits(app) 
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["activated"] is True
+    assert payload["enabled"] is True
     assert payload["active_connection_id"] == kucoin.id
     assert payload["provider"] == "kucoin"
-    assert hyperliquid.id in payload["deactivated_connection_ids"]
+    assert set(payload["enabled_connection_ids"]) == {hyperliquid.id, kucoin.id}
     assert db.session.get(TradingConnection, kucoin.id).is_active is True
-    assert db.session.get(TradingConnection, hyperliquid.id).is_active is False
+    assert db.session.get(TradingConnection, hyperliquid.id).is_active is True
     audit = AuditLog.query.filter_by(action="trading_connection_activated", trading_connection_id=kucoin.id).one()
-    assert audit.details["deactivated_connections"][0]["connection_id"] == hyperliquid.id
+    assert set(audit.details["enabled_connection_ids"]) == {hyperliquid.id, kucoin.id}
 
 
 def test_provider_balance_readiness_uses_exchange_collateral_asset(app) -> None:
@@ -2916,9 +2913,8 @@ def test_live_canary_preview_never_submits_order(app, monkeypatch) -> None:
     assert payload["size"] > 0
     assert payload["confidence"] == 0.5
     assert payload["projected_order"]["symbol"] == "BTC"
-    assert payload["projected_order"]["notional"] <= app.config["MAX_POSITION_NOTIONAL"]
     assert payload["projected_order"]["notional"] <= 1.0
-    assert payload["sizing"]["effective_notional_cap"] == 1.0
+    assert payload["sizing"]["effective_allocation_budget_usd"] == 1.0
     assert payload["signal_quality"]["net_roi_v2_score"] > 0
     audit = AuditLog.query.filter_by(action="live_canary_preview").one()
     assert audit.details["preview_only"] is True
@@ -2980,7 +2976,7 @@ def test_live_canary_can_use_two_usdt_min_size_fallback(app, monkeypatch) -> Non
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["ready"] is True
-    assert payload["sizing"]["effective_notional_cap"] == 2.0
+    assert payload["sizing"]["effective_allocation_budget_usd"] == 2.0
     assert payload["projected_order"]["notional"] <= 2.0
 
 
@@ -3021,7 +3017,7 @@ def test_live_micro_canary_preview_caps_ten_usdt_account(app, monkeypatch) -> No
     assert payload["live_micro_canary"]["enabled"] is True
     assert payload["live_micro_canary"]["account_usd"] == 10.0
     assert payload["live_micro_canary"]["max_allocation_usd"] == 1.0
-    assert payload["sizing"]["effective_notional_cap"] == 1.0
+    assert payload["sizing"]["effective_allocation_budget_usd"] == 1.0
     assert payload["sizing"]["risk_fraction"] <= 0.01
     assert payload["sizing"]["risk_budget"] <= 0.10
     assert payload["projected_order"]["notional"] <= 1.0
@@ -3030,7 +3026,7 @@ def test_live_micro_canary_preview_caps_ten_usdt_account(app, monkeypatch) -> No
 
 def test_live_micro_canary_two_usdt_cap_is_upper_bound(app, monkeypatch) -> None:
     _enable_micro_canary(app, max_allocation=2.0)
-    app.config["FIRST_CANARY_MAX_NOTIONAL_USDT"] = 5.0
+    app.config["FIRST_CANARY_ALLOCATION_BUDGET_USDT"] = 5.0
     user, connection, ranking = _add_canary_ranking()
     service = app.extensions["services"]["trading_connections"]
     connection.encrypted_api_secret = service._encrypt("0x" + ("1" * 64))
@@ -3055,7 +3051,7 @@ def test_live_micro_canary_two_usdt_cap_is_upper_bound(app, monkeypatch) -> None
     payload = json.loads(result.output)
     assert payload["ready"] is True
     assert payload["live_micro_canary"]["max_allocation_usd"] == 2.0
-    assert payload["sizing"]["effective_notional_cap"] == 2.0
+    assert payload["sizing"]["effective_allocation_budget_usd"] == 2.0
     assert payload["projected_order"]["notional"] <= 2.0
 
 
@@ -3208,7 +3204,7 @@ def test_live_micro_canary_blocks_first_canary_min_size_bypass(app, monkeypatch)
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["ready"] is True
-    assert payload["sizing"]["effective_notional_cap"] == 1.0
+    assert payload["sizing"]["effective_allocation_budget_usd"] == 1.0
     assert payload["projected_order"]["notional"] <= 1.0
 
 
@@ -3462,7 +3458,7 @@ def test_find_live_canary_ranking_stops_on_accepted_ranking(app, monkeypatch) ->
     assert payload["market_data_readiness"]["ready"] is True
     assert payload["sweeps"][0]["data_source"] == "live"
     assert payload["selected_readiness"]["live_micro_canary"]["enabled"] is True
-    assert payload["selected_readiness"]["canary_preview"]["sizing"]["effective_notional_cap"] == 1.0
+    assert payload["selected_readiness"]["canary_preview"]["sizing"]["effective_allocation_budget_usd"] == 1.0
     assert payload["selected_readiness"]["canary_preview"]["projected_order"]["notional"] <= 1.0
     assert payload["fallback_attempted"] is False
     assert payload["fallback_used"] is False
@@ -5306,7 +5302,7 @@ def test_submit_live_canary_allows_min_notional_once_when_confirmed(app, monkeyp
     _enable_canary_submit_gates(app, monkeypatch)
     app.config["LIVE_MICRO_CANARY_DEFAULT_MIN_NOTIONAL_USD"] = 10.0
     app.config["LIVE_MICRO_CANARY_ALLOW_MIN_NOTIONAL_ORDER"] = True
-    app.config["LIVE_MICRO_CANARY_MAX_NOTIONAL_USD"] = 10.0
+    app.config["LIVE_MICRO_CANARY_ORDER_BUDGET_USD"] = 10.0
     user, connection, ranking = _add_canary_ranking()
     _patch_canary_market(app, monkeypatch)
     service = app.extensions["services"]["trading_connections"]
@@ -5581,7 +5577,7 @@ def test_live_canary_submit_uses_order_manager_with_live_caps(app, monkeypatch) 
     assert order.details["live_canary"] is True
     assert order.details["optimizer_ranking_id"] == ranking.id
     assert order.trading_connection_id == connection.id
-    assert order.quantity * 100.0 <= app.config["MAX_POSITION_NOTIONAL"]
+    assert order.quantity * 100.0 <= 1.0
     assert order.leverage == 1.0
     assert order.fills[0].price == 100.0
     assert int(captured["risk_calls"]) >= 2

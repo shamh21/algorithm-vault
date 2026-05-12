@@ -1,0 +1,324 @@
+{% extends "base.html" %}
+
+{% block title %}Platform Treasury · Admin{% endblock %}
+
+{% block content %}
+{% set solvency = treasury.solvency or {} %}
+{% set solvency_state = solvency.state or {} %}
+<section class="treasury-shell advanced-only"
+  data-treasury-dashboard
+  data-solvency-url="{{ url_for('admin.platform_treasury_solvency_api') }}"
+  data-stream-url="{{ url_for('admin.platform_treasury_stream') }}">
+  <header class="treasury-hero">
+    <div>
+      <span class="card-kicker">Advanced / Admin</span>
+      <h1>Platform Treasury</h1>
+      <p class="muted">ETH reserve, gas sponsorship, global withdrawal liability, vault settlement deductions, and referral allocation tracking.</p>
+    </div>
+    <div class="treasury-status-pill treasury-status-{{ treasury.reserve_health.state }}">
+      <span data-treasury-health>{{ treasury.reserve_health.state|title }}</span>
+      <strong>{{ "Ready" if treasury.ready else "Blocked" }}</strong>
+    </div>
+  </header>
+
+  {% if treasury.blockers %}
+    <section class="banner warning" role="status">
+      <div class="mode-banner-main">
+        <span class="mode-banner-label">Treasury Setup</span>
+        <strong>Action needed</strong>
+      </div>
+      <p>{{ treasury.blockers|join("; ") }}</p>
+    </section>
+  {% endif %}
+
+  {% if panic_lock %}
+    <section class="banner danger" role="status">
+      <div class="mode-banner-main">
+        <span class="mode-banner-label">Panic Lock</span>
+        <strong>Gas sponsorship is blocked</strong>
+      </div>
+    </section>
+  {% endif %}
+
+  <section class="treasury-metric-strip" aria-label="Treasury metrics">
+    <div>
+      <span>ETH Balance</span>
+      <strong data-treasury-balance>{{ "%.8f"|format(solvency_state.total_eth_balance or treasury.eth_balance or 0) }}</strong>
+    </div>
+    <div>
+      <span>Global Liability</span>
+      <strong data-treasury-liability>{{ "%.8f"|format(solvency_state.total_estimated_liability or 0) }} ETH</strong>
+    </div>
+    <div>
+      <span>Reserve Ratio</span>
+      <strong data-treasury-ratio>{{ "%.2f"|format(solvency_state.reserve_ratio or 0) }}x</strong>
+    </div>
+    <div>
+      <span>Runway</span>
+      <strong data-treasury-runway>{% if solvency_state.projected_runway %}{{ "%.1f"|format(solvency_state.projected_runway) }}h{% elif treasury.analytics.gas_runway_withdrawals %}{{ "%.1f"|format(treasury.analytics.gas_runway_withdrawals) }} tx{% else %}n/a{% endif %}</strong>
+    </div>
+    <div>
+      <span>Queue</span>
+      <strong data-treasury-queue>{{ treasury.analytics.queue_waiting }}</strong>
+    </div>
+    <div>
+      <span>Deficit To Target</span>
+      <strong data-treasury-deficit>{{ "%.8f"|format(solvency_state.deficit_eth or 0) }} ETH</strong>
+    </div>
+    <div>
+      <span>Top-Ups 30d</span>
+      <strong>{{ "%.6f"|format(treasury.analytics.withdrawal_topups_eth_30d or 0) }} ETH</strong>
+    </div>
+    <div>
+      <span>Profit Share</span>
+      <strong>{{ "%.4f"|format(treasury.analytics.referral_allocation_source_total or 0) }}</strong>
+    </div>
+  </section>
+
+  <section class="treasury-live-grid">
+    <article class="treasury-panel treasury-chart-card">
+      <div class="treasury-panel-head">
+        <div>
+          <span class="card-kicker">Forecast</span>
+          <h2>Reserve Runway</h2>
+        </div>
+        <span class="treasury-live-dot" data-treasury-stream-status>Live</span>
+      </div>
+      <canvas height="180" data-treasury-chart aria-label="Treasury reserve forecast"></canvas>
+    </article>
+
+    <article class="treasury-panel treasury-alert-card">
+      <div class="treasury-panel-head">
+        <div>
+          <span class="card-kicker">Alerts</span>
+          <h2>Solvency Events</h2>
+        </div>
+        <button type="button" class="secondary" data-treasury-alert-toggle>Review</button>
+      </div>
+      <div class="treasury-alert-list" data-treasury-alert-list>
+        {% for alert in solvency.alerts[:4] %}
+          <div class="treasury-alert-item treasury-alert-{{ alert.severity }}">
+            <strong>{{ alert.event_type.replace("_", " ")|title }}</strong>
+            <span>{{ alert.message }}</span>
+          </div>
+        {% else %}
+          <p class="muted">No treasury solvency alerts.</p>
+        {% endfor %}
+      </div>
+    </article>
+  </section>
+
+  <section class="treasury-panel treasury-wallet-panel">
+    <div class="treasury-panel-head">
+      <div>
+        <span class="card-kicker">Reserve Wallet</span>
+        <h2>Active Treasury</h2>
+      </div>
+      <a href="{{ url_for('admin.invite_codes') }}" class="button-link secondary">Invite Codes</a>
+    </div>
+    {% if treasury.active_wallet %}
+      <dl class="treasury-wallet-grid">
+        <div><dt>Network</dt><dd>{{ treasury.active_wallet.network }}</dd></div>
+        <div><dt>Rotation</dt><dd>#{{ treasury.active_wallet.rotation_index }}</dd></div>
+        <div><dt>Retryable Jobs</dt><dd>{{ treasury.analytics.retryable_jobs }}</dd></div>
+        <div><dt>Failed Jobs</dt><dd>{{ treasury.analytics.failed_jobs }}</dd></div>
+      </dl>
+      <code class="treasury-address">{{ treasury.active_wallet.address }}</code>
+      {% if treasury.balance_error %}<p class="field-error">{{ treasury.balance_error }}</p>{% endif %}
+    {% else %}
+      <p class="muted">No active platform treasury wallet exists.</p>
+    {% endif %}
+  </section>
+
+  <section class="treasury-actions">
+    <form method="post" action="{{ url_for('admin.process_platform_treasury_queue') }}" class="inline-form" data-disable-on-submit>
+      {{ csrf_input()|safe }}
+      <button type="submit" data-loading-label="Processing...">Process Queue</button>
+    </form>
+    <form method="post" action="{{ url_for('admin.rebalance_platform_treasury') }}" class="inline-form" data-disable-on-submit>
+      {{ csrf_input()|safe }}
+      <input type="hidden" name="network" value="Ethereum">
+      <button type="submit" data-loading-label="Rebalancing...">Rebalance</button>
+    </form>
+    {% if treasury.paused %}
+      <form method="post" action="{{ url_for('admin.resume_platform_treasury') }}" class="inline-form" data-disable-on-submit>
+        {{ csrf_input()|safe }}
+        <button type="submit" data-loading-label="Resuming...">Resume</button>
+      </form>
+    {% else %}
+      <form method="post" action="{{ url_for('admin.pause_platform_treasury') }}" class="inline-form" data-disable-on-submit>
+        {{ csrf_input()|safe }}
+        <button type="submit" class="secondary" data-loading-label="Pausing...">Pause</button>
+      </form>
+    {% endif %}
+    <form method="post" action="{{ url_for('admin.create_platform_treasury') }}" class="treasury-confirm-form" data-disable-on-submit>
+      {{ csrf_input()|safe }}
+      <input type="text" name="confirm" placeholder="CREATE-PLATFORM-TREASURY" aria-label="Create confirmation">
+      <button type="submit" data-loading-label="Creating...">Create</button>
+    </form>
+    <form method="post" action="{{ url_for('admin.rotate_platform_treasury') }}" class="treasury-confirm-form" data-disable-on-submit>
+      {{ csrf_input()|safe }}
+      <input type="text" name="confirm" placeholder="ROTATE-PLATFORM-TREASURY" aria-label="Rotate confirmation">
+      <button type="submit" class="secondary" data-loading-label="Rotating...">Rotate</button>
+    </form>
+  </section>
+
+  <section class="treasury-panel">
+    <div class="treasury-panel-head">
+      <div>
+        <span class="card-kicker">Withdrawal Queue</span>
+        <h2>Gas + Solvency Queue</h2>
+      </div>
+      <strong>{{ pending_gas_topups|length }}</strong>
+    </div>
+    <div class="treasury-table-wrap" data-row-cap="150">
+      <table>
+        <thead>
+          <tr>
+            <th>Withdrawal</th>
+            <th>Status</th>
+            <th>User</th>
+            <th>Asset</th>
+            <th>Amount</th>
+            <th>Destination</th>
+            <th>Control</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for withdrawal in pending_gas_topups %}
+            <tr>
+              <td>#{{ withdrawal.id }}</td>
+              <td>{{ withdrawal.status.replace("_", " ")|title }}</td>
+              <td>{{ withdrawal.user_id }}</td>
+              <td>{{ withdrawal.asset }}</td>
+              <td>{{ "%.8f"|format(withdrawal.amount) }}</td>
+              <td><code>{{ withdrawal.destination_address }}</code></td>
+              <td>
+                <form method="post" action="{{ url_for('admin.top_up_withdrawal_gas', withdrawal_id=withdrawal.id) }}" class="inline-form" data-disable-on-submit>
+                  {{ csrf_input()|safe }}
+                  <input type="hidden" name="confirm" value="TOP-UP-WITHDRAWAL-GAS">
+                  <button type="submit" data-loading-label="Funding...">Top Up</button>
+                </form>
+              </td>
+            </tr>
+          {% else %}
+            <tr><td colspan="7">No withdrawals are waiting for gas top-up or treasury solvency recovery.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="treasury-panel">
+    <div class="treasury-panel-head">
+      <div>
+        <span class="card-kicker">Reserve Accounting</span>
+        <h2>Reserve Jobs</h2>
+      </div>
+      <strong>{{ reserve_jobs|length }}</strong>
+    </div>
+    <div class="treasury-table-wrap" data-row-cap="150">
+      <table>
+        <thead>
+          <tr>
+            <th>Type</th>
+            <th>Status</th>
+            <th>Source</th>
+            <th>Reserve</th>
+            <th>Reference</th>
+            <th>Control</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for job in reserve_jobs %}
+            <tr>
+              <td>{{ job.job_type.replace("_", " ")|title }}</td>
+              <td>{{ job.status.replace("_", " ")|title }}</td>
+              <td>{{ "%.6f"|format(job.conversion_amount or 0) }} {{ job.conversion_asset or job.asset }}</td>
+              <td>{{ "%.8f"|format(job.converted_eth_amount or job.reserve_eth_target or 0) }} ETH</td>
+              <td>{{ job.treasury_tx_reference or job.provider_reference or "n/a" }}</td>
+              <td>
+                {% if job.status in ["failed", "retryable", "paused", "submitted", "pending"] %}
+                  <form method="post" action="{{ url_for('admin.retry_platform_treasury_job', job_id=job.id) }}" class="inline-form" data-disable-on-submit>
+                    {{ csrf_input()|safe }}
+                    <button type="submit" class="secondary" data-loading-label="Retrying...">Retry</button>
+                  </form>
+                {% else %}
+                  <span class="muted">No action</span>
+                {% endif %}
+              </td>
+            </tr>
+          {% else %}
+            <tr><td colspan="6">No treasury reserve jobs recorded.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="treasury-panel">
+    <div class="treasury-panel-head">
+      <div>
+        <span class="card-kicker">Audit Trail</span>
+        <h2>Recent Events</h2>
+      </div>
+      <strong>{{ treasury.events|length }}</strong>
+    </div>
+    <div class="treasury-table-wrap" data-row-cap="150">
+      <table>
+        <thead>
+          <tr>
+            <th>Type</th>
+            <th>Status</th>
+            <th>Amount</th>
+            <th>Gas Reserve</th>
+            <th>Reference</th>
+            <th>Created</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for event in treasury.events %}
+            <tr>
+              <td>{{ event.event_type.replace("_", " ")|title }}</td>
+              <td>{{ event.status.replace("_", " ")|title }}</td>
+              <td>{{ "%.8f"|format(event.amount or 0) }} {{ event.asset }}</td>
+              <td>{{ "%.8f"|format(event.gas_reserve_contribution or 0) }} ETH</td>
+              <td>{{ event.provider_reference or "n/a" }}</td>
+              <td>{{ event.created_at or "n/a" }}</td>
+            </tr>
+          {% else %}
+            <tr><td colspan="6">No treasury events recorded.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <div class="treasury-bottom-sheet" data-treasury-alert-sheet aria-hidden="true">
+    <div class="treasury-sheet-panel">
+      <div class="treasury-panel-head">
+        <div>
+          <span class="card-kicker">Treasury Alerts</span>
+          <h2>Reserve Risk</h2>
+        </div>
+        <button type="button" class="secondary" data-treasury-alert-close>Close</button>
+      </div>
+      <div class="treasury-alert-list" data-treasury-sheet-list>
+        {% for alert in solvency.alerts %}
+          <div class="treasury-alert-item treasury-alert-{{ alert.severity }}">
+            <strong>{{ alert.event_type.replace("_", " ")|title }}</strong>
+            <span>{{ alert.message }}</span>
+          </div>
+        {% else %}
+          <p class="muted">No treasury solvency alerts.</p>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+</section>
+{% endblock %}
+
+{% block page_scripts %}
+  <script defer src="{{ url_for('static', filename='js/vendor/chart.umd.min.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}"></script>
+  <script defer src="{{ url_for('static', filename='js/treasury.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}"></script>
+{% endblock %}

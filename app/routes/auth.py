@@ -21,7 +21,7 @@ from ..auth import (
     verify_totp,
 )
 from ..extensions import db
-from ..models import TradingConnection, User
+from ..models import ReferralInviteCode, TradingConnection, User
 
 
 auth_bp = Blueprint("auth", __name__)
@@ -29,10 +29,11 @@ auth_bp = Blueprint("auth", __name__)
 
 @auth_bp.get("/register")
 def register():
+    invite_required = bool(current_app.config.get("SIGNUP_INVITE_CODE")) or _managed_invites_available()
     return render_template(
         "auth/register.html",
         signup_enabled=True,
-        invite_required=bool(current_app.config.get("SIGNUP_INVITE_CODE")),
+        invite_required=invite_required,
     )
 
 
@@ -44,7 +45,12 @@ def register_post():
     confirm = request.form.get("confirm_password", "")
     invite_code = str(request.form.get("invite_code", "")).strip()
 
-    if invite and invite_code != invite:
+    managed_invite = _managed_invite_for(invite_code)
+    managed_required = _managed_invites_available()
+    if managed_required and managed_invite is None:
+        flash("Invite code is invalid.", "danger")
+        return redirect(url_for("auth.register"))
+    if invite and not managed_required and invite_code != invite:
         flash("Invite code is invalid.", "danger")
         return redirect(url_for("auth.register"))
 
@@ -64,8 +70,15 @@ def register_post():
         flash("That username is already registered.", "danger")
         return redirect(url_for("auth.register"))
 
-    user = User(username=username, password_hash=password_hash(password), role="user")
+    user = User(
+        username=username,
+        password_hash=password_hash(password),
+        role="user",
+        referral_invite_code_id=managed_invite.id if managed_invite is not None else None,
+    )
     db.session.add(user)
+    if managed_invite is not None:
+        managed_invite.usage_count = int(managed_invite.usage_count or 0) + 1
     db.session.commit()
 
     login_user(user, two_factor_verified=False)
@@ -162,6 +175,20 @@ def setup_2fa():
 
 def _clean_username(value: str | None) -> str:
     return str(value or "").strip().lower()
+
+
+def _managed_invites_available() -> bool:
+    return ReferralInviteCode.query.filter_by(is_active=True).first() is not None
+
+
+def _managed_invite_for(code: str) -> ReferralInviteCode | None:
+    value = str(code or "").strip()
+    if not value:
+        return None
+    invite = ReferralInviteCode.query.filter_by(code=value, is_active=True).one_or_none()
+    if invite is None or not invite.available:
+        return None
+    return invite
 
 
 def _post_auth_redirect(user: User) -> str:

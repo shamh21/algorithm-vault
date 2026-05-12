@@ -575,8 +575,15 @@ class MarketScannerService:
         payload = dict(preferred.features or {})
         payload["one_h10_feature_timeframes"] = sorted(rows_by_timeframe)
         payload["one_h10_feature_updated_at"] = str(getattr(preferred, "updated_at", "") or "")
+        payload["one_h10_horizon_features"] = {}
         for timeframe, row in rows_by_timeframe.items():
             features = dict(row.features or {})
+            payload["one_h10_horizon_features"][timeframe] = {
+                **features,
+                "timeframe": timeframe,
+                "updated_at": str(getattr(row, "updated_at", "") or ""),
+                "source": "leveraged_market_feature",
+            }
             prefix = f"tf_{timeframe.replace(' ', '_')}_"
             for key in (
                 "rsi",

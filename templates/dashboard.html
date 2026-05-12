@@ -1,361 +1,343 @@
 {% extends "base.html" %}
 
 {% block content %}
-<main id="dashboard-app">
-<section class="grid two-up animate-entry" style="margin-bottom:0.5rem;">
-  <div class="card" style="display:flex; justify-content:space-between; align-items:center;">
-    <span class="muted">Equity</span>
-    <strong>{{ "%.2f"|format(pnl.realized + pnl.unrealized) }}</strong>
-  </div>
-  <div class="card" style="display:flex; justify-content:space-between; align-items:center;">
-    <span class="muted">Daily PnL</span>
-    <strong class="{{ 'positive' if risk_status.daily_realized_pnl >= 0 else 'negative' }}">
-      {{ "%.4f"|format(risk_status.daily_realized_pnl) }}
-    </strong>
-  </div>
-</section>
-<section class="grid two-up">
-  <article class="card animate-entry">
-    <h2>Overview</h2>
-    <ul class="compact-list" id="overview-list">
-      <li><strong>Mode:</strong> {{ mode|upper }}</li>
-      <li><strong>Realized PnL:</strong> <span class="{{ 'positive' if pnl.realized >= 0 else 'negative' }}">{{ "%.4f"|format(pnl.realized) }}</span></li>
-      <li><strong>Unrealized PnL:</strong> <span class="{{ 'positive' if pnl.unrealized >= 0 else 'negative' }}">{{ "%.4f"|format(pnl.unrealized) }}</span></li>
-      <li><strong>Panic Lock:</strong> {{ "ON" if risk_status.panic_lock else "OFF" }}</li>
-      <li><strong>Cooldown:</strong> {{ risk_status.cooldown_minutes_remaining }} minute(s)</li>
-    </ul>
-    {% if alerts %}
-      <div class="alert-list">
-        {% for alert in alerts %}
-          <p class="flash warning">{{ alert }}</p>
+<section
+  id="dashboard-app"
+  class="trading-dashboard-shell"
+  data-dashboard
+  data-opportunities-url="{{ url_for('dashboard.dashboard_opportunities') }}"
+  data-chart-url="{{ url_for('dashboard.dashboard_chart') }}"
+  data-stream-url="{{ url_for('dashboard.dashboard_stream') }}"
+  data-activity-url="{{ url_for('dashboard.dashboard_activity') }}"
+  data-performance-url="{{ url_for('dashboard.dashboard_performance') }}"
+  data-chart-module-src="{{ url_for('static', filename='js/dashboard-chart.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}"
+  data-chart-lib-src="{{ url_for('static', filename='js/vendor/lightweight-charts.standalone.production.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}"
+>
+  <script type="application/json" id="dashboard-initial-payload">
+    {{ {
+      "mode": mode,
+      "pnl": pnl,
+      "risk_status": risk_status,
+      "market_summary": market_summary,
+      "strategy_rankings": strategy_rankings,
+      "positions": positions,
+      "open_orders": open_orders,
+      "recent_trades": recent_trades,
+      "alerts": alerts
+    }|tojson }}
+  </script>
+
+  <header class="trade-command-bar">
+    <div class="trade-command-copy">
+      <span class="trade-kicker">Live Operations</span>
+      <h1>Algorithm Vault</h1>
+      <p>{{ mode|upper }} intelligence desk</p>
+    </div>
+    <div class="trade-health-pill" data-stream-status>
+      <span class="trade-health-dot" aria-hidden="true"></span>
+      <span>Connecting</span>
+    </div>
+  </header>
+
+  <section class="trade-account-strip" aria-label="Account summary">
+    <div class="trade-metric">
+      <span>Equity</span>
+      <strong data-equity-value>{{ "%.2f"|format((pnl.realized|float) + (pnl.unrealized|float)) }}</strong>
+    </div>
+    <div class="trade-metric">
+      <span>Daily PnL</span>
+      <strong class="{{ 'positive' if risk_status.daily_realized_pnl >= 0 else 'negative' }}" data-daily-pnl>
+        {{ "%.4f"|format(risk_status.daily_realized_pnl|float) }}
+      </strong>
+    </div>
+    <div class="trade-metric">
+      <span>Risk</span>
+      <strong>{{ "Blocked" if risk_status.live_trading_blocked else "Armed" }}</strong>
+    </div>
+    <div class="trade-metric">
+      <span>Panic</span>
+      <strong>{{ "ON" if risk_status.panic_lock else "OFF" }}</strong>
+    </div>
+  </section>
+
+  {% if alerts %}
+    <section class="trade-alert-strip" aria-live="polite">
+      {% for alert in alerts[:3] %}
+        <p>{{ alert }}</p>
+      {% endfor %}
+    </section>
+  {% endif %}
+
+  <section class="trade-layout">
+    <article class="trade-panel opportunity-panel">
+      <div class="trade-panel-head">
+        <div>
+          <span class="trade-kicker">Scanner</span>
+          <h2>Dynamic Opportunities</h2>
+        </div>
+        <button type="button" class="trade-icon-button" data-refresh-opportunities aria-label="Refresh opportunities">↻</button>
+      </div>
+      <div class="opportunity-list" data-opportunity-list role="list">
+        {% for ranking in strategy_rankings[:6] %}
+          <button
+            type="button"
+            class="opportunity-card is-placeholder"
+            data-provider="{{ ranking.provider|default('global') }}"
+            data-symbol="{{ ranking.symbol }}"
+            data-venue-symbol="{{ ranking.symbol }}"
+          >
+            <span class="opportunity-rank">#{{ loop.index }}</span>
+            <span class="opportunity-main">
+              <strong>{{ ranking.symbol }}</strong>
+              <small>{{ ranking.strategy_name|replace("_", " ")|title }}</small>
+            </span>
+            <span class="opportunity-score">{{ "%.2f"|format(ranking.score|float) }}</span>
+          </button>
+        {% else %}
+          <div class="opportunity-empty dashboard-skeleton" data-opportunity-empty>Loading ranked markets.</div>
         {% endfor %}
       </div>
-    {% endif %}
-  </article>
+    </article>
 
-  <article class="card animate-entry">
-    <h2>Start Strategy</h2>
-    <form method="post" action="{{ url_for('dashboard.start_strategy') }}" class="form-grid">
-      {{ csrf_input()|safe }}
-      <label>Strategy
-        <select name="strategy_name">
-          {% for strategy in strategy_definitions %}
-            <option value="{{ strategy.name }}">{{ strategy.name }}</option>
+    <article class="trade-panel chart-panel" data-chart-panel>
+      <div class="trade-panel-head chart-head">
+        <div>
+          <span class="trade-kicker" data-chart-provider>Forecast</span>
+          <h2 data-chart-title>Market Projection</h2>
+        </div>
+        <div class="timeframe-tabs" role="tablist" aria-label="Chart timeframe">
+          {% for timeframe in ["live", "1m", "5m", "15m", "45m", "4h"] %}
+            <button type="button" class="{{ 'is-active' if loop.first else '' }}" data-timeframe="{{ timeframe }}">{{ timeframe|upper }}</button>
           {% endfor %}
-        </select>
-      </label>
-      <label>Symbol
-        <select name="symbol">
-          {% for symbol in current_app.config['ALLOWED_SYMBOLS'] %}
-            <option value="{{ symbol }}">{{ symbol }}</option>
-          {% endfor %}
-        </select>
-      </label>
-      <label>Timeframe
-        <select name="timeframe">
-          {% for timeframe in ['1m', '5m', '15m', '1h'] %}
-            <option value="{{ timeframe }}">{{ timeframe }}</option>
-          {% endfor %}
-        </select>
-      </label>
-      <label>Mode
-        <input type="text" value="{{ mode|upper }}" disabled>
-      </label>
-      <label>Parameters JSON
-        <textarea name="parameters_json" rows="4">{}</textarea>
-      </label>
-      <button type="submit">Start Strategy</button>
-    </form>
-  </article>
-</section>
+        </div>
+      </div>
+      <div class="chart-stage">
+        <div class="chart-canvas-host" data-lightweight-chart></div>
+        <canvas class="forecast-overlay" data-forecast-overlay aria-hidden="true"></canvas>
+        <div class="chart-loading" data-chart-loading>Loading forecast</div>
+      </div>
+      <div class="forecast-summary-grid">
+        <div><span>Direction</span><strong data-forecast-direction>Hold</strong></div>
+        <div><span>ROI</span><strong data-forecast-roi>0.00%</strong></div>
+        <div><span>Confidence</span><strong data-forecast-confidence>0%</strong></div>
+        <div><span>R/R</span><strong data-forecast-risk>0.00</strong></div>
+      </div>
+    </article>
+  </section>
 
-<section class="grid three-up">
-  <article class="card animate-entry">
-    <h2>Balances</h2>
-    <table>
-      <thead><tr><th>Asset</th><th>Type</th><th>Value</th></tr></thead>
-      <tbody>
-        {% for balance in balances %}
-          <tr><td>{{ balance.asset }}</td><td>{{ balance.type }}</td><td>{{ "%.4f"|format(balance.value) }}</td></tr>
+  <section class="trade-intelligence-grid">
+    <article class="trade-panel intelligence-panel">
+      <div class="trade-panel-head">
+        <div>
+          <span class="trade-kicker">Setup</span>
+          <h2>Trade Intelligence</h2>
+        </div>
+      </div>
+      <dl class="intelligence-list" data-intelligence-panel>
+        <div><dt>Pair</dt><dd data-intel-pair>--</dd></div>
+        <div><dt>Exchange</dt><dd data-intel-provider>--</dd></div>
+        <div><dt>Entry</dt><dd data-intel-entry>--</dd></div>
+        <div><dt>Exit</dt><dd data-intel-exit>--</dd></div>
+        <div><dt>Stop</dt><dd data-intel-stop>--</dd></div>
+        <div><dt>Liquidity</dt><dd data-intel-liquidity>--</dd></div>
+        <div><dt>Slippage</dt><dd data-intel-slippage>--</dd></div>
+        <div><dt>ML Agreement</dt><dd data-intel-ml>--</dd></div>
+        <div><dt>Fibonacci</dt><dd data-intel-fib>--</dd></div>
+      </dl>
+    </article>
+
+    <article class="trade-panel market-panel">
+      <div class="trade-panel-head">
+        <div>
+          <span class="trade-kicker">Markets</span>
+          <h2>Market Monitor</h2>
+        </div>
+      </div>
+      <div class="market-tape" id="market-summary-body" data-market-tape>
+        {% for item in market_summary[:8] %}
+          <div class="market-tape-row">
+            <strong>{{ item.symbol }}</strong>
+            <span>{{ "%.4f"|format(item.mid|float) }}</span>
+            <em class="{{ 'positive' if item.change_pct >= 0 else 'negative' }}">{{ "%.2f"|format(item.change_pct|float) }}%</em>
+          </div>
         {% else %}
-          <tr><td colspan="3">No balance data.</td></tr>
+          <div class="market-tape-row"><strong>N/A</strong><span>0.0000</span><em>0.00%</em></div>
         {% endfor %}
-      </tbody>
-    </table>
-  </article>
+      </div>
+    </article>
 
-  <article class="card animate-entry">
-    <h2>Market Monitor</h2>
-    <table>
-      <thead><tr><th>Symbol</th><th>Mid</th><th>Change %</th></tr></thead>
-      <tbody id="market-summary-body">
-        {% for item in market_summary %}
-          <tr>
-            <td>{{ item.symbol }}</td>
-            <td>{{ "%.4f"|format(item.mid) }}</td>
-            <td><span class="{{ 'positive' if item.change_pct >= 0 else 'negative' }}">{{ "%.2f"|format(item.change_pct) }}</span></td>
-          </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </article>
+    <article class="trade-panel activity-panel">
+      <div class="trade-panel-head">
+        <div>
+          <span class="trade-kicker">Live Feed</span>
+          <h2>Activity</h2>
+        </div>
+      </div>
+      <div class="activity-feed" data-activity-feed role="list">
+        <div class="activity-empty dashboard-skeleton">Waiting for live activity.</div>
+      </div>
+    </article>
+  </section>
 
-  <article class="card animate-entry">
-    <h2>Risk Status</h2>
-    <ul class="compact-list">
-      <li>Max Daily Loss: {{ risk_status.daily_loss_limit }}</li>
-      <li>Current Daily PnL: {{ "%.4f"|format(risk_status.daily_realized_pnl) }}</li>
-      <li>Max Leverage: {{ risk_status.max_leverage }}</li>
-      <li>Max Notional: {{ risk_status.max_position_notional }}</li>
-      <li>Max Slippage: {{ risk_status.max_slippage_pct }}</li>
-      <li>Live Blocked: {{ "yes" if risk_status.live_trading_blocked else "no" }}</li>
-    </ul>
-  </article>
-</section>
+  <nav class="quick-action-bar" aria-label="Dashboard quick actions">
+    <button type="button" data-quick-action="allocate" data-action-href="{{ url_for('consumer.vault') }}">
+      <span>Allocate</span>
+    </button>
+    <button type="button" data-quick-action="cycle" data-action-href="{{ url_for('consumer.vault') }}">
+      <span>Cycle</span>
+    </button>
+    <button type="button" data-quick-action="panic" data-action-href="{{ url_for('panic.index') }}">
+      <span>Stop</span>
+    </button>
+    <button type="button" data-quick-action="risk" data-action-href="{{ url_for('admin.risk') }}">
+      <span>Risk</span>
+    </button>
+    <button type="button" data-quick-action="refresh" data-refresh-opportunities>
+      <span>Refresh</span>
+    </button>
+    <button type="button" data-quick-action="fullscreen">
+      <span>Chart</span>
+    </button>
+  </nav>
 
-<section class="grid two-up">
-  <article class="card animate-entry">
-    <h2>Feature Snapshot</h2>
-    {% if latest_feature_snapshot.error is defined %}
-      <p class="muted">{{ latest_feature_snapshot.error }}</p>
-    {% else %}
+  <section class="dashboard-bottom-sheet" data-preview-sheet aria-hidden="true">
+    <div class="sheet-handle" aria-hidden="true"></div>
+    <div class="sheet-head">
+      <div>
+        <span class="trade-kicker">Preview Only</span>
+        <h2 data-sheet-title>Best Setup</h2>
+      </div>
+      <button type="button" class="trade-icon-button" data-close-preview aria-label="Close preview">×</button>
+    </div>
+    <dl class="intelligence-list compact" data-sheet-body></dl>
+    <a class="button-link primary sheet-action" data-sheet-action href="{{ url_for('consumer.vault') }}">Open Vault Flow</a>
+  </section>
+  <div class="sheet-backdrop" data-preview-backdrop aria-hidden="true"></div>
+
+  <section class="ops-accordion">
+    <details class="trade-panel" open>
+      <summary>Automation Rankings</summary>
+      <div class="ops-table-wrap">
+        <table>
+          <thead><tr><th>Strategy</th><th>Score</th><th>Recent</th><th>Drawdown</th><th>Status</th></tr></thead>
+          <tbody>
+            {% for ranking in strategy_rankings %}
+              <tr>
+                <td>{{ ranking.strategy_name }}<br><span class="muted">{{ ranking.symbol }} / {{ ranking.timeframe }}</span></td>
+                <td>{{ "%.3f"|format(ranking.score|float) }}</td>
+                <td>{{ "%.2f"|format((ranking.recent_performance_score|float) * 100) }}%</td>
+                <td>{{ "%.2f"|format((ranking.max_drawdown|float) * 100) }}%</td>
+                <td>{{ "rejected" if ranking.rejected else "live-readiness candidate" }}</td>
+              </tr>
+            {% else %}
+              <tr><td colspan="5">No optimizer rankings yet.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </details>
+
+    <details class="trade-panel" open>
+      <summary>Open Orders</summary>
+      <div class="ops-table-wrap">
+        <table>
+          <thead><tr><th>Symbol</th><th>Side</th><th>Price</th><th>Size</th><th>Reduce</th></tr></thead>
+          <tbody>
+            {% for order in open_orders %}
+              <tr>
+                <td>{{ order.symbol }}</td>
+                <td>{{ order.side }}</td>
+                <td>{{ "%.4f"|format(order.price|float) }}</td>
+                <td>{{ "%.4f"|format(order.size|float) }}</td>
+                <td>{{ "yes" if order.reduce_only else "no" }}</td>
+              </tr>
+            {% else %}
+              <tr><td colspan="5">No open orders.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </details>
+
+    <details class="trade-panel">
+      <summary>Positions</summary>
+      <div class="ops-table-wrap">
+        <table>
+          <thead><tr><th>Symbol</th><th>Qty</th><th>Entry</th><th>Mark</th><th>Unrealized PnL</th></tr></thead>
+          <tbody>
+            {% for position in positions %}
+              <tr>
+                <td>{{ position.symbol }}</td>
+                <td>{{ "%.4f"|format(position.quantity|float) }}</td>
+                <td>{{ "%.4f"|format(position.entry_price|float) }}</td>
+                <td>{{ "%.4f"|format((position.mark_price if position.mark_price is defined else position.mark_value)|float) }}</td>
+                <td><span class="{{ 'positive' if position.unrealized_pnl >= 0 else 'negative' }}">{{ "%.4f"|format(position.unrealized_pnl|float) }}</span></td>
+              </tr>
+            {% else %}
+              <tr><td colspan="5">No open positions.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </details>
+
+    <details class="trade-panel">
+      <summary>Risk Status</summary>
       <ul class="compact-list">
-        <li>{{ latest_feature_snapshot.symbol }} / {{ latest_feature_snapshot.timeframe }}</li>
-        <li>EMA Fast / Slow: {{ "%.4f"|format(latest_feature_snapshot.ema_fast) }} / {{ "%.4f"|format(latest_feature_snapshot.ema_slow) }}</li>
-        <li>RSI: {{ "%.2f"|format(latest_feature_snapshot.rsi) }}</li>
-        <li>ATR %: {{ "%.4f"|format(latest_feature_snapshot.atr_pct * 100) }}%</li>
-        <li>Volume Spike: {{ "yes" if latest_feature_snapshot.volume_spike.is_spike else "no" }} ({{ "%.2f"|format(latest_feature_snapshot.volume_spike.ratio) }}x)</li>
-        <li>Pattern Model: {{ pattern_model_status.name }} / {{ pattern_model_status.status }}</li>
+        <li>Max Daily Loss: {{ risk_status.daily_loss_limit }}</li>
+        <li>Current Daily PnL: {{ "%.4f"|format(risk_status.daily_realized_pnl|float) }}</li>
+        <li>Max Leverage: {{ risk_status.max_leverage }}</li>
+        <li>Adaptive Slippage: {{ "%.2f"|format((risk_status.adaptive_slippage.estimate_bps or 0)|float) }} bps</li>
+        <li>Live Blocked: {{ "yes" if risk_status.live_trading_blocked else "no" }}</li>
       </ul>
-    {% endif %}
-  </article>
+    </details>
 
-  <article class="card animate-entry">
-    <h2>Fibonacci Risk Context</h2>
-    {% if latest_feature_snapshot.fibonacci_levels is defined %}
-      <ul class="compact-list">
-        <li>Trend: {{ latest_feature_snapshot.fibonacci_levels.trend }}</li>
-        <li>Swing High: {{ "%.4f"|format(latest_feature_snapshot.fibonacci_levels.swing_high) }}</li>
-        <li>Swing Low: {{ "%.4f"|format(latest_feature_snapshot.fibonacci_levels.swing_low) }}</li>
-        <li>Golden Zone: {{ "%.4f"|format(latest_feature_snapshot.fibonacci_levels.golden_zone.lower) }} - {{ "%.4f"|format(latest_feature_snapshot.fibonacci_levels.golden_zone.upper) }}</li>
-      </ul>
-    {% else %}
-      <p class="muted">No Fibonacci context available.</p>
-    {% endif %}
-    <h3>External Inputs</h3>
-    <ul class="compact-list">
-      {% for adapter in external_adapter_status %}
-        <li>{{ adapter.name }}: {{ adapter.status }}</li>
-      {% endfor %}
-    </ul>
-  </article>
+    <details class="trade-panel">
+      <summary>Strategy Runs</summary>
+      <div class="ops-table-wrap">
+        <table>
+          <thead><tr><th>Name</th><th>Symbol</th><th>Status</th><th>Last Signal</th></tr></thead>
+          <tbody>
+            {% for run in strategy_runs %}
+              <tr>
+                <td>{{ run.strategy_name }}</td>
+                <td>{{ run.symbol }} / {{ run.timeframe }}</td>
+                <td>{{ run.status }}</td>
+                <td>{{ run.last_signal.get('action', 'n/a') }}</td>
+              </tr>
+            {% else %}
+              <tr><td colspan="4">No strategy runs recorded.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </details>
+
+    <details class="trade-panel">
+      <summary>Recent Trades</summary>
+      <div class="ops-table-wrap">
+        <table>
+          <thead><tr><th>Symbol</th><th>Side</th><th>Price</th><th>Size</th><th>Closed PnL</th></tr></thead>
+          <tbody>
+            {% for trade in recent_trades %}
+              <tr>
+                <td>{{ trade.symbol }}</td>
+                <td>{{ trade.side }}</td>
+                <td>{{ "%.4f"|format(trade.price|float) }}</td>
+                <td>{{ "%.4f"|format(trade.size|float) }}</td>
+                <td>{{ "%.4f"|format(trade.closed_pnl|float) }}</td>
+              </tr>
+            {% else %}
+              <tr><td colspan="5">No recent trades.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </details>
+  </section>
 </section>
+{% endblock %}
 
-<section class="grid two-up">
-  <article class="card animate-entry">
-    <h2>Positions</h2>
-    <table>
-      <thead><tr><th>Symbol</th><th>Qty</th><th>Entry</th><th>Mark</th><th>Unrealized PnL</th></tr></thead>
-      <tbody>
-        {% for position in positions %}
-          <tr>
-            <td>{{ position.symbol }}</td>
-            <td>{{ "%.4f"|format(position.quantity) }}</td>
-            <td>{{ "%.4f"|format(position.entry_price) }}</td>
-            <td>{{ "%.4f"|format(position.mark_price if position.mark_price is defined else position.mark_value) }}</td>
-            <td><span class="{{ 'positive' if position.unrealized_pnl >= 0 else 'negative' }}">{{ "%.4f"|format(position.unrealized_pnl) }}</span></td>
-          </tr>
-        {% else %}
-          <tr><td colspan="5">No open positions.</td></tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </article>
-
-  <article class="card animate-entry">
-    <h2>Open Orders</h2>
-    <table>
-      <thead><tr><th>Symbol</th><th>Side</th><th>Price</th><th>Size</th><th>Reduce</th></tr></thead>
-      <tbody>
-        {% for order in open_orders %}
-          <tr>
-            <td>{{ order.symbol }}</td>
-            <td>{{ order.side }}</td>
-            <td>{{ "%.4f"|format(order.price) }}</td>
-            <td>{{ "%.4f"|format(order.size) }}</td>
-            <td>{{ "yes" if order.reduce_only else "no" }}</td>
-          </tr>
-        {% else %}
-          <tr><td colspan="5">No open orders.</td></tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </article>
-</section>
-
-<section class="grid two-up">
-  <article class="card animate-entry">
-    <h2>Automation Rankings</h2>
-    <table>
-      <thead><tr><th>Strategy</th><th>Score</th><th>Recent</th><th>Drawdown</th><th>Status</th></tr></thead>
-      <tbody>
-        {% for ranking in strategy_rankings %}
-          <tr>
-            <td>{{ ranking.strategy_name }}<br><span class="muted">{{ ranking.symbol }} / {{ ranking.timeframe }}</span></td>
-            <td>{{ "%.3f"|format(ranking.score) }}</td>
-            <td>{{ "%.2f"|format(ranking.recent_performance_score * 100) }}%</td>
-            <td>{{ "%.2f"|format(ranking.max_drawdown * 100) }}%</td>
-            <td>{{ "rejected" if ranking.rejected else "live-readiness candidate" }}</td>
-          </tr>
-        {% else %}
-          <tr><td colspan="5">No optimizer rankings yet.</td></tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </article>
-
-  <article class="card animate-entry">
-    <h2>Shadow-Live Probation</h2>
-    <table>
-      <thead><tr><th>Strategy</th><th>Stage</th><th>Status</th><th>Signals</th></tr></thead>
-      <tbody>
-        {% for validation in validations %}
-          <tr>
-            <td>{{ validation.strategy_name }}<br><span class="muted">{{ validation.symbol }} / {{ validation.timeframe }}</span></td>
-            <td>{{ validation.stage }}</td>
-            <td>{{ validation.status }}</td>
-            <td>{{ validation.metrics.get('actionable_signals', validation.metrics.get('trade_count', 0)) }}</td>
-          </tr>
-        {% else %}
-          <tr><td colspan="4">No validation records yet.</td></tr>
-        {% endfor %}
-      </tbody>
-    </table>
-    <h3>Recent Live Signals</h3>
-    <table>
-      <thead><tr><th>Strategy</th><th>Action</th><th>Mid</th><th>Spread bps</th></tr></thead>
-      <tbody>
-        {% for observation in shadow_observations %}
-          <tr>
-            <td>{{ observation.strategy_name }}</td>
-            <td>{{ observation.signal_action }}</td>
-            <td>{{ "%.4f"|format(observation.live_mid) }}</td>
-            <td>{{ "%.2f"|format(observation.observed_spread_bps) }}</td>
-          </tr>
-        {% else %}
-          <tr><td colspan="4">No pre-live validation observations yet.</td></tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </article>
-</section>
-
-<section class="grid two-up">
-  <article class="card animate-entry">
-    <h2>Strategy Runs</h2>
-    <table>
-      <thead><tr><th>Name</th><th>Symbol</th><th>Status</th><th>Last Signal</th><th>Action</th></tr></thead>
-      <tbody>
-        {% for run in strategy_runs %}
-          <tr>
-            <td>{{ run.strategy_name }}</td>
-            <td>{{ run.symbol }} / {{ run.timeframe }}</td>
-            <td>{{ run.status }}</td>
-            <td>{{ run.last_signal.get('action', 'n/a') }}</td>
-            <td>
-              {% if run.status == 'running' %}
-                <form method="post" action="{{ url_for('dashboard.stop_strategy', run_id=run.id) }}">
-                  {{ csrf_input()|safe }}
-                  <button type="submit" class="secondary">Stop</button>
-                </form>
-              {% else %}
-                stopped
-              {% endif %}
-            </td>
-          </tr>
-        {% else %}
-          <tr><td colspan="5">No strategy runs recorded.</td></tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </article>
-
-  <article class="card animate-entry">
-    <h2>Alerts and Risk Events</h2>
-    <ul class="compact-list">
-      {% for event in recent_risk %}
-        <li><strong>{{ event.rule_name }}</strong>: {{ event.reason }}</li>
-      {% else %}
-        <li>No recent risk rejections.</li>
-      {% endfor %}
-    </ul>
-    <h3>Recent Trades</h3>
-    <table>
-      <thead><tr><th>Symbol</th><th>Side</th><th>Price</th><th>Size</th><th>Closed PnL</th></tr></thead>
-      <tbody>
-        {% for trade in recent_trades %}
-          <tr>
-            <td>{{ trade.symbol }}</td>
-            <td>{{ trade.side }}</td>
-            <td>{{ "%.4f"|format(trade.price) }}</td>
-            <td>{{ "%.4f"|format(trade.size) }}</td>
-            <td>{{ "%.4f"|format(trade.closed_pnl) }}</td>
-          </tr>
-        {% else %}
-          <tr><td colspan="5">No recent trades.</td></tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </article>
-</section>
-
-<script>
-  let refreshTimer = null;
-
-  async function refreshDashboard() {
-    try {
-      const response = await fetch("{{ url_for('dashboard.dashboard_data') }}");
-      if (!response.ok) {
-        return;
-      }
-      const payload = await response.json();
-      const marketBody = document.getElementById("market-summary-body");
-      marketBody.innerHTML = payload.market_summary.map((item) => `
-        <tr>
-          <td>${item.symbol}</td>
-          <td>${item.mid.toFixed(4)}</td>
-          <td class="${item.change_pct >= 0 ? 'positive' : 'negative'}">
-            ${item.change_pct.toFixed(2)}
-          </td>
-        </tr>
-      `).join("");
-    } catch (error) {
-      console.warn("Dashboard refresh failed", error);
-    }
-  }
-
-  function startRefresh() {
-    if (refreshTimer) return;
-    refreshTimer = setInterval(refreshDashboard, 15000);
-  }
-
-  function stopRefresh() {
-    if (refreshTimer) {
-      clearInterval(refreshTimer);
-      refreshTimer = null;
-    }
-  }
-
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden) {
-      stopRefresh();
-    } else {
-      startRefresh();
-      refreshDashboard();
-    }
-  });
-
-  startRefresh();
-</script>
-</main>
+{% block page_scripts %}
+<script defer src="{{ url_for('static', filename='js/dashboard.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}"></script>
 {% endblock %}

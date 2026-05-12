@@ -13,6 +13,7 @@ from flask import current_app, has_app_context
 
 from ..extensions import db
 from ..models import MLMarketHistory, MLOfflineModel
+from ..services.model_registry import dataset_hash, feature_schema_hash
 from ..services.provider_assets import normalize_provider, provider_feature_context
 from .features import MLFeatureFactory
 from .offline_ranker import OfflineRanker
@@ -60,6 +61,7 @@ class MLSignalModel:
         horizon_key = str(horizon or "1h").lower()
         model_key = str(model_type or "pytorch_gru").lower()
         provider_key = normalize_provider(provider)
+        training_started_at = datetime.utcnow()
         raw_rows = self.training_rows(
             horizon_key,
             objective=objective,
@@ -181,6 +183,20 @@ class MLSignalModel:
             validation_loss=float(metrics["validation_loss"]),
             negative_error_rate=float(metrics["false_positive_rate"]),
             drift=0.0,
+            feature_schema_hash=feature_schema_hash(FEATURE_SCHEMA_VERSION, feature_names),
+            dataset_version=f"{provider_key}:{horizon_key}:{len(rows)}:{len(valid_x)}",
+            dataset_hash=dataset_hash(
+                {
+                    "provider": provider_key,
+                    "horizon": horizon_key,
+                    "training_rows": len(rows),
+                    "validation_rows": len(valid_x),
+                    "feature_names": feature_names,
+                    "target_distribution": target_distribution,
+                }
+            ),
+            training_started_at=training_started_at,
+            training_completed_at=datetime.utcnow(),
         )
         record.feature_names = feature_names
         record.metrics = metrics
@@ -216,6 +232,7 @@ class MLSignalModel:
             return {"promoted": False, "horizon": horizon_key, "provider": provider_key, "model_id": model_id, "blockers": ["signal_model_not_found"]}
         diagnostics = self.promotion_diagnostics(record)
         if not diagnostics["ready"]:
+            self._record_failed_promotion("ml_signal", provider_key, horizon_key, int(model_id), diagnostics["blockers"])
             return {"promoted": False, **diagnostics}
         for promoted in MLOfflineModel.query.filter_by(
             provider=provider_key,
@@ -227,8 +244,37 @@ class MLSignalModel:
                 promoted.status = "archived"
         record.status = "promoted"
         record.promoted_at = datetime.utcnow()
+        self._record_promotion(record, model_family="ml_signal", promotion_source="ml_signal.promote")
         db.session.commit()
         return {"promoted": True, **self._model_payload(record), "blockers": []}
+
+    def _record_promotion(self, record: MLOfflineModel, *, model_family: str, promotion_source: str) -> None:
+        if not has_app_context():
+            return
+        service = current_app.extensions.get("services", {}).get("model_registry")
+        if service is not None:
+            service.record_promotion(record, model_family=model_family, promotion_source=promotion_source)
+
+    def _record_failed_promotion(
+        self,
+        model_family: str,
+        provider: str,
+        horizon: str,
+        model_id: int | None,
+        blockers: list[str],
+    ) -> None:
+        if not has_app_context():
+            return
+        service = current_app.extensions.get("services", {}).get("model_registry")
+        if service is not None:
+            service.record_failed_promotion(
+                model_family=model_family,
+                provider=provider,
+                horizon=horizon,
+                model_id=model_id,
+                blockers=blockers,
+            )
+            db.session.commit()
 
     def readiness(self, horizon: str = "1h", *, require_promoted: bool = True, provider: str = "global") -> dict[str, Any]:
         horizon_key = str(horizon or "1h").lower()

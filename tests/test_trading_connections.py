@@ -9,7 +9,7 @@ from cryptography.fernet import Fernet
 from app.auth import decrypt_totp_secret, encrypt_totp_secret, password_hash
 from app.extensions import db
 from app.models import Order, Setting, TradingConnection, User
-from app.services.connection_health import parse_exchange_failure
+from app.services.connection_health import build_connection_health, parse_exchange_failure, store_connection_health
 from app.services.hyperliquid_client import ClientSnapshot, HyperliquidClient
 from app.services.live_provider_adapters import BinanceFuturesConnector, KucoinFuturesConnector, ProviderRequestError, UniswapDelegatedConnector
 from app.services.order_manager import OrderIntent, OrderManager
@@ -261,7 +261,7 @@ def test_uniswap_delegation_requires_caps_and_rejects_private_fields(app) -> Non
             "chain_id": "1",
             "delegation_status": "approved",
             "delegation_expires_at": "2099-01-01T00:00",
-            "max_notional_usd": "100",
+            "allocation_budget_usd": "100",
             "daily_loss_usd": "25",
             "allowed_tokens": "ETH,BTC",
             "session_topic": "wc-session",
@@ -270,7 +270,7 @@ def test_uniswap_delegation_requires_caps_and_rejects_private_fields(app) -> Non
     db.session.commit()
 
     assert connection.verification_status == "needs_verification"
-    assert connection.provider_metadata["max_notional_usd"] == "100"
+    assert connection.provider_metadata["allocation_budget_usd"] == "100"
 
 
 def test_new_provider_remains_inactive_until_verified(app) -> None:
@@ -368,6 +368,67 @@ def test_activate_verified_denies_unverified_providers(app) -> None:
 
     assert activated.is_active
     assert service.active_tradable_connection(user.id).id == hyperliquid.id
+
+
+def test_activate_verified_keeps_existing_enabled_providers_active(app) -> None:
+    user = _create_user("multiactive")
+    service = app.extensions["services"]["trading_connections"]
+    hyperliquid = _create_connection(app, user, provider="hyperliquid")
+    binance = _create_connection(app, user, provider="binance")
+    binance.verification_status = "verified"
+    binance.is_active = False
+    db.session.commit()
+
+    activated = service.activate_verified(user.id, binance.id)
+
+    db.session.refresh(hyperliquid)
+    db.session.refresh(binance)
+    enabled_ids = {connection.id for connection in service.enabled_tradable_connections(user.id)}
+    assert activated.id == binance.id
+    assert hyperliquid.is_active is True
+    assert binance.is_active is True
+    assert enabled_ids == {hyperliquid.id, binance.id}
+
+
+def test_settings_provider_cards_support_multi_enable_and_disable(app) -> None:
+    user = _create_user("settingscards")
+    secret = _enable_2fa(user)
+    service = app.extensions["services"]["trading_connections"]
+    hyperliquid = _create_connection(app, user, provider="hyperliquid")
+    binance = _create_connection(app, user, provider="binance")
+    binance.verification_status = "verified"
+    binance.is_active = True
+    store_connection_health(hyperliquid, build_connection_health(hyperliquid, can_trade=True))
+    db.session.commit()
+
+    client = app.test_client()
+    client.post("/login", data={"username": user.username, "password": "password123", "totp_code": pyotp.TOTP(secret).now()})
+
+    settings = client.get("/settings/")
+    connections = client.get("/settings/connections")
+
+    assert settings.status_code == 200
+    assert b"2 Enabled" in settings.data
+    assert b"Hyperliquid" in settings.data
+    assert b"Binance" in settings.data
+    assert b"Online" in settings.data
+    for removed_copy in [b"Wallet Preferences", b"Risk Notices", b"Address Mode", b"Live is disabled until"]:
+        assert removed_copy not in settings.data
+    assert connections.status_code == 200
+    assert b"Verify & Enable" in connections.data
+    assert b"Disable" in connections.data
+    assert b'role="switch"' in connections.data
+
+    disabled = client.post(f"/settings/connections/{binance.id}/disable")
+
+    assert disabled.status_code == 302
+    db.session.refresh(hyperliquid)
+    db.session.refresh(binance)
+    assert hyperliquid.is_active is True
+    assert binance.is_active is False
+    assert binance.verification_status == "verified"
+    assert binance.encrypted_api_key
+    assert {connection.id for connection in service.enabled_tradable_connections(user.id)} == {hyperliquid.id}
 
 
 def test_live_order_uses_authenticated_users_connection(app, monkeypatch) -> None:
@@ -821,12 +882,12 @@ def test_register_2fa_connection_onboarding_then_live_home(app, monkeypatch) -> 
     activated = client.post(f"/settings/connections/{connection.id}/activate")
 
     assert activated.status_code == 302
-    assert activated.location == "/"
+    assert "/settings/connections/hyperliquid" in activated.location
     assert db.session.get(TradingConnection, connection.id).is_active
 
     home = client.get("/")
     assert home.status_code == 200
-    assert b"Portfolio Value" in home.data
+    assert b"Portfolio Balance" in home.data
 
 
 def test_unsupported_provider_does_not_satisfy_live_onboarding(app) -> None:
@@ -856,11 +917,11 @@ def test_connection_wizard_pages_render_provider_specific_workflows(app) -> None
     dydx = client.get("/settings/connections/dydx")
 
     assert hyperliquid.status_code == 200
-    assert b"Easy Connect" in hyperliquid.data
-    assert b"Verify And Activate" in hyperliquid.data
-    assert b"Hyperliquid Setup" in hyperliquid.data
+    assert b"Providers" in hyperliquid.data
+    assert b"Verify & Enable" in hyperliquid.data
+    assert b"Hyperliquid" in hyperliquid.data
     assert binance.status_code == 200
-    assert b"Live USD-M futures" in binance.data
+    assert b"Binance" in binance.data
     assert b"Save Connection" in binance.data
     assert uniswap.status_code == 200
     assert b"Public Wallet Address" in uniswap.data

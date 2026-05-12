@@ -1,0 +1,6 @@
+# Optional exchange SDKs outside the default Hyperliquid runtime.
+# Install this separately for dYdX-specific work if you also use wallet extras:
+# dydx-v4-client pins httpx<0.28 while solana requires httpx>=0.28.
+-r requirements.txt
+
+dydx-v4-client==1.1.6

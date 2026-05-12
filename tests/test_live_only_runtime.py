@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 
 from sqlalchemy.exc import OperationalError
 
-from app import _create_all_tolerant
+from app import _create_all_tolerant, _table_columns
 from app.extensions import db
 from app.models import (
     BacktestRun,
@@ -53,6 +53,14 @@ def test_schema_create_tolerates_concurrent_existing_table(app, monkeypatch) -> 
     assert calls["count"] == 1
 
 
+def test_schema_column_lookup_handles_reserved_order_table(app) -> None:
+    columns = _table_columns("order")
+
+    assert "id" in columns
+    assert "vault_cycle_id" in columns
+    assert "vault_leg_id" in columns
+
+
 def test_live_only_order_manager_blocks_non_live_without_record(app) -> None:
     manager = app.extensions["services"]["order_manager"]
 
@@ -99,7 +107,6 @@ def test_wallet_balance_seed_is_live_only_and_does_not_read_simulated_portfolio(
     db.session.add(user)
     db.session.flush()
 
-    monkeypatch.setattr(consumer_routes, "_sync_connection_balances", lambda user: None)
     monkeypatch.setattr(consumer_routes, "_sync_real_wallet_balances", lambda user: None)
 
     balances = consumer_routes._wallet_balances(user)
@@ -170,6 +177,48 @@ def test_cycle_orders_filters_to_live_cycle_records(app) -> None:
     db.session.commit()
 
     assert consumer_routes._cycle_orders(cycle) == [matching]
+
+
+def test_cycle_orders_prefers_explicit_vault_cycle_column(app) -> None:
+    user = User(username="cyclecolumn", password_hash="hash", role="user")
+    db.session.add(user)
+    db.session.flush()
+    connection = TradingConnection(
+        user_id=user.id,
+        provider="hyperliquid",
+        connection_type="cex_api_key",
+        is_active=True,
+        verification_status="verified",
+    )
+    db.session.add(connection)
+    db.session.flush()
+    cycle = VaultCycle(
+        user_id=user.id,
+        trading_connection_id=connection.id,
+        deposit_asset="USDC",
+        deposit_amount=100.0,
+        settlement_asset="USDC",
+        lock_duration_hours=1,
+        execution_mode="live",
+        unlocks_at=datetime.utcnow() + timedelta(hours=1),
+    )
+    db.session.add(cycle)
+    db.session.flush()
+    order = Order(
+        user_id=user.id,
+        trading_connection_id=connection.id,
+        vault_cycle_id=cycle.id,
+        client_order_id="cycle-column-match",
+        mode="live",
+        symbol="BTC",
+        side="buy",
+        quantity=0.1,
+    )
+    order.details = {"vault_cycle_id": cycle.id + 999}
+    db.session.add(order)
+    db.session.commit()
+
+    assert consumer_routes._cycle_orders(cycle) == [order]
 
 
 def test_live_only_clean_slate_purges_non_live_records_and_preserves_live_data(app) -> None:

@@ -2,7 +2,7 @@
 
 Last reviewed: 2026-05-01.
 
-This repository is a local, live-only Flask application named **Algorithm Vault**. It combines a consumer crypto wallet/vault UI, admin trading controls, live exchange connections, strategy execution, backtesting, optimization, ML ranking, and safety/readiness tooling. The app is intentionally gated for real-money operation through 2FA, verified live trading connections, risk controls, wallet readiness, withdrawal approval, panic lock, daily loss limits, notional caps, slippage caps, leverage caps, stop-loss requirements, and explicit CLI confirmations.
+This repository is a local, live-only Flask application named **Algorithm Vault**. It combines a consumer crypto wallet/vault UI, admin monitoring and safety controls, live exchange connections, automated strategy execution, backtesting, optimization, ML ranking, and safety/readiness tooling. The app is intentionally gated for real-money operation through 2FA, verified live trading connections, risk controls, wallet readiness, withdrawal approval, panic lock, daily loss limits, notional caps, slippage caps, leverage caps, stop-loss requirements, and explicit CLI confirmations.
 
 Do not read, print, or summarize `.env` secret values. Use `.env.example` and `app/config.py` for config shape.
 
@@ -56,14 +56,11 @@ Settings and live connection routes live in `app/routes/settings.py`.
 - Activation is restricted to verified tradable connections and deactivates the user's other connections.
 - Additional POST routes reset live blocks, reset panic lock, confirm live settings, and set address mode.
 
-Admin routes live in `app/routes/admin.py`, `app/routes/dashboard.py`, `app/routes/orders.py`, `app/routes/panic.py`, and `app/routes/backtests.py`.
+Admin routes live in `app/routes/admin.py`, `app/routes/dashboard.py`, `app/routes/panic.py`, and `app/routes/backtests.py`.
 
 - `/admin/dashboard`: balances, positions, open orders, recent trades, PnL, risk status, strategy runs, rankings, feature snapshot, audits, risk events, market summary.
 - `/admin/api/dashboard-data`: JSON dashboard payload.
-- `/admin/strategies/start` and `/admin/strategies/<run_id>/stop`: manual strategy control.
-- `/admin/orders/`: local order history.
-- `/admin/orders/place`: manual order entry through `OrderManager` and `RiskEngine`.
-- `/admin/orders/<order_id>/cancel`: cancel local/live order.
+- Admin order-entry and manual strategy start/stop routes are intentionally not exposed; execution is vault/strategy/ML driven only.
 - `/admin/risk`: risk status, risk events, audit log.
 - `/admin/live-readiness`: live trading and wallet readiness view.
 - `/admin/strategies`: strategy runs, rankings, validations, shadow observations, vault cycles.
@@ -366,10 +363,15 @@ Setup:
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+python -m pip install --upgrade pip 'setuptools<82' wheel
+python -m pip install -r requirements.txt
 cp .env.example .env
 python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
+
+`requirements.txt` is the fast default runtime. Install `requirements-ml.txt`, `requirements-torch.txt`, `requirements-wallets.txt`, or `requirements-exchanges.txt` only for those optional workflows; use `requirements-full.txt`/`requirements-dev.txt` for the complete environment.
+
+If `.venv/bin/python3` is missing, run `deactivate 2>/dev/null || true`, move the broken `.venv` aside, then recreate it with `python3 -m venv --copies .venv`.
 
 Run:
 
@@ -380,6 +382,7 @@ flask run
 Test:
 
 ```bash
+python -m pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 

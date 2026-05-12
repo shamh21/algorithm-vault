@@ -9,19 +9,24 @@ import urllib.error
 import urllib.request
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from flask import current_app, has_app_context
 
 from ..extensions import db
-from ..models import DepositAddress, WalletAccount, WalletAddress, WalletAuditLog, WalletWithdrawal
+from ..models import DepositAddress, Setting, WalletAccount, WalletAddress, WalletAuditLog, WalletWithdrawal
+from .failures import WalletCustodyError
 from .wallet_addresses import use_real_addresses, validate_withdraw_address
 
 
 EVM_NETWORKS = {"ETHEREUM", "ARBITRUM", "OPTIMISM", "BASE", "POLYGON", "AVALANCHE", "BSC"}
 EVM_ASSETS = {"ETH", "USDC", "USDT"}
 logger = logging.getLogger(__name__)
+
+
+def _sum_withdrawal_amounts(query) -> float:
+    return sum(float(row.amount or 0.0) for row in query.all())
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,12 +302,26 @@ class SelfCustodyWalletService:
             idempotency_token=f"manual:{user_id}:{self._asset_key(asset)}:{uuid.uuid4().hex}",
         )
         withdrawal.details = {
-            "address_mode": "real" if use_real_addresses(self.config) else "test",
+            "address_mode": "real",
             "provider": self.config.get("WALLET_PROVIDER", "self_custody"),
             "approval_required": approval_required,
         }
         db.session.add(withdrawal)
         db.session.flush()
+        self._audit(
+            user_id=withdrawal.user_id,
+            wallet_withdrawal_id=withdrawal.id,
+            action="withdrawal_requested",
+            status=withdrawal.status,
+            message="Withdrawal request recorded for gated wallet workflow.",
+            metadata={
+                "asset": withdrawal.asset,
+                "network": withdrawal.network,
+                "amount": withdrawal.amount,
+                "approval_required": approval_required,
+            },
+        )
+        self._apply_treasury_safety(withdrawal, return_status=withdrawal.status)
         return withdrawal
 
     def approve_withdrawal(
@@ -341,7 +360,7 @@ class SelfCustodyWalletService:
     ) -> WalletWithdrawal:
         """Reject a pending withdrawal without broadcasting it."""
 
-        if withdrawal.status not in {"pending_approval", "pending_submission"}:
+        if withdrawal.status not in {"pending_approval", "pending_submission", "pending_gas_topup", "queued_treasury_solvency"}:
             raise RuntimeError("Only pending withdrawals can be rejected.")
         withdrawal.status = "rejected"
         withdrawal.failure_reason = reason or "Withdrawal rejected by admin."
@@ -380,14 +399,29 @@ class SelfCustodyWalletService:
             withdrawal.completed_at = datetime.utcnow()
             return withdrawal
 
-        if not use_real_addresses(self.config):
-            withdrawal.status = "failed"
-            withdrawal.failure_reason = "real wallet address mode is required for withdrawals"
-            withdrawal.completed_at = datetime.utcnow()
-            return withdrawal
-
         try:
             return self._submit_real_withdrawal(withdrawal, mode=mode)
+        except WalletCustodyError as exc:
+            logger.exception(
+                "Withdrawal custody failure for withdrawal %s.",
+                withdrawal.id,
+                extra={"withdrawal_id": withdrawal.id, "error_code": exc.code, "context": exc.context},
+            )
+            withdrawal.status = "failed"
+            withdrawal.failure_reason = exc.message
+            withdrawal.completed_at = datetime.utcnow()
+            details = withdrawal.details
+            details["exception"] = exc.code
+            withdrawal.details = details
+            self._audit(
+                user_id=withdrawal.user_id,
+                wallet_withdrawal_id=withdrawal.id,
+                action="withdrawal_failed",
+                status=withdrawal.status,
+                message=f"Withdrawal custody failure: {exc.message}",
+                metadata={"error_code": exc.code, "context": exc.context},
+            )
+            return withdrawal
         except Exception as exc:  # noqa: BLE001
             logger.exception("Withdrawal submission failed for withdrawal %s.", withdrawal.id)
             withdrawal.status = "failed"
@@ -408,11 +442,67 @@ class SelfCustodyWalletService:
 
     def _submit_real_withdrawal(self, withdrawal: WalletWithdrawal, *, mode: str) -> WalletWithdrawal:
         if not has_app_context():
-            raise RuntimeError("Real withdrawal submission requires an application context")
+            raise WalletCustodyError("Real withdrawal submission requires an application context", code="wallet_context_missing")
         if str(mode or "").lower() != "live":
-            raise RuntimeError("Real wallet withdrawals can only be broadcast in live mode")
+            raise WalletCustodyError("Real wallet withdrawals can only be broadcast in live mode", code="wallet_live_mode_required")
+        safety_blockers = self._withdrawal_safety_blockers(withdrawal)
+        if safety_blockers:
+            return self._block_withdrawal_by_safety_gate(withdrawal, safety_blockers)
         custody = current_app.extensions["services"]["wallet_custody"]
+        preflight = custody.withdrawal_preflight(withdrawal)
+        details = withdrawal.details
+        details["preflight"] = preflight
+        withdrawal.details = details
+        solvency = current_app.extensions["services"].get("treasury_solvency")
+        if solvency is not None:
+            safety = solvency.evaluate_withdrawal(
+                withdrawal,
+                projected_spend_eth=0.0,
+                estimated_gas_eth=float(preflight.get("estimated_gas_eth", 0.0) or 0.0),
+                persist=True,
+            )
+            if not safety.get("safe", True):
+                return withdrawal
+        if preflight.get("gas_topup_required"):
+            topup = current_app.extensions["services"]["platform_treasury"].top_up_withdrawal_gas(withdrawal)
+            if str(topup.get("status") or "") == "not_required":
+                preflight = custody.withdrawal_preflight(withdrawal)
+                details = withdrawal.details
+                details["preflight"] = preflight
+                details["gas_topup"] = topup
+                withdrawal.details = details
+            elif str(topup.get("status") or "") == "queued_treasury_solvency":
+                self._audit(
+                    user_id=withdrawal.user_id,
+                    wallet_withdrawal_id=withdrawal.id,
+                    action="withdrawal_queued_treasury_solvency",
+                    status=withdrawal.status,
+                    message="Withdrawal is queued until the platform treasury reserve recovers.",
+                    metadata={"preflight": preflight, "gas_topup": topup},
+                )
+                return withdrawal
+            elif str(topup.get("status") or "") in {"submitted", "pending", "complete"}:
+                self._audit(
+                    user_id=withdrawal.user_id,
+                    wallet_withdrawal_id=withdrawal.id,
+                    action="withdrawal_pending_gas_topup",
+                    status=withdrawal.status,
+                    message="Withdrawal is waiting for platform treasury gas top-up before token broadcast.",
+                    metadata={"preflight": preflight, "gas_topup": topup},
+                )
+                return withdrawal
+        blockers = [str(item) for item in preflight.get("blockers", []) if str(item)]
+        if blockers:
+            raise WalletCustodyError("; ".join(blockers), code="wallet_preflight_blocked", context={"blockers": blockers})
         result = custody.sign_and_broadcast(withdrawal, mode=mode)
+        self._audit(
+            user_id=withdrawal.user_id,
+            wallet_withdrawal_id=withdrawal.id,
+            action="withdrawal_signed",
+            status="signed",
+            message="Withdrawal signed by the configured custody adapter.",
+            metadata={"asset": withdrawal.asset, "network": withdrawal.network},
+        )
         withdrawal.status = str(result.status or "submitted")
         withdrawal.provider_reference = str(result.provider_reference or "")
         details = withdrawal.details
@@ -431,6 +521,121 @@ class SelfCustodyWalletService:
             status=withdrawal.status,
             message="Withdrawal submitted to the configured wallet custody adapter.",
             metadata=withdrawal.details,
+        )
+        self._audit(
+            user_id=withdrawal.user_id,
+            wallet_withdrawal_id=withdrawal.id,
+            action="withdrawal_broadcast",
+            status=withdrawal.status,
+            message="Withdrawal broadcast result recorded.",
+            metadata={"provider_reference_present": bool(withdrawal.provider_reference), "status": withdrawal.status},
+        )
+        if solvency is not None:
+            solvency.record_withdrawal_gas_usage(withdrawal, result.raw)
+        return withdrawal
+
+    def _withdrawal_safety_blockers(self, withdrawal: WalletWithdrawal) -> list[str]:
+        config = self.config
+        blockers: list[str] = []
+        if not bool(config.get("WALLET_WITHDRAWALS_ENABLED", False)) and not bool(config.get("TESTING", False)):
+            blockers.append("wallet withdrawals are disabled by configuration")
+        if bool(config.get("WALLET_EMERGENCY_STOP", False)):
+            blockers.append("wallet emergency stop is active")
+        try:
+            if Setting.get_json("panic_lock", False):
+                blockers.append("panic lock is active")
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to read panic lock before withdrawal %s.", withdrawal.id)
+            blockers.append("panic lock state could not be verified")
+
+        deployment_target = str(config.get("DEPLOYMENT_TARGET", "local") or "local").strip().lower()
+        production_like = deployment_target in {"vps", "production", "prod", "postgres", "staging", "vercel"}
+        custody_mode = str(config.get("WALLET_CUSTODY_MODE", "local_dev") or "local_dev").strip().lower()
+        if production_like:
+            if custody_mode not in {"kms", "hsm", "mpc"}:
+                blockers.append("production withdrawals require kms, hsm, or mpc custody mode")
+            if bool(config.get("WALLET_SIGNER_ISOLATION_REQUIRED", True)) and not bool(
+                config.get("WALLET_SIGNER_ISOLATION_CONFIRMED", False)
+            ):
+                blockers.append("production withdrawals require confirmed signer isolation")
+            if not bool(config.get("WALLET_SDK_CHECKS_PASSED", False)):
+                blockers.append("wallet SDK/integration checks are not marked passing")
+
+        blockers.extend(self._withdrawal_velocity_blockers(withdrawal, require_limits=production_like))
+        return blockers
+
+    def _withdrawal_velocity_blockers(self, withdrawal: WalletWithdrawal, *, require_limits: bool) -> list[str]:
+        since = datetime.utcnow() - timedelta(days=1)
+        amount = max(0.0, float(withdrawal.amount or 0.0))
+        asset = self._asset_key(withdrawal.asset)
+        active_statuses = {
+            "pending_approval",
+            "pending_submission",
+            "pending_gas_topup",
+            "queued_treasury_solvency",
+            "submitted",
+            "complete",
+        }
+        base_query = WalletWithdrawal.query.filter(WalletWithdrawal.created_at >= since).filter(
+            WalletWithdrawal.status.in_(active_statuses)
+        )
+        if withdrawal.id is not None:
+            base_query = base_query.filter(WalletWithdrawal.id != withdrawal.id)
+
+        blockers: list[str] = []
+        wallet_limit = max(0.0, float(self.config.get("WALLET_DAILY_WITHDRAWAL_LIMIT_BY_WALLET", 0.0) or 0.0))
+        if wallet_limit <= 0 and require_limits:
+            blockers.append("per-wallet daily withdrawal limit is not configured")
+        elif wallet_limit > 0:
+            used = _sum_withdrawal_amounts(base_query.filter(WalletWithdrawal.user_id == withdrawal.user_id))
+            if used + amount > wallet_limit + 1e-12:
+                blockers.append("per-wallet daily withdrawal limit exceeded")
+
+        asset_limits = self.config.get("WALLET_DAILY_WITHDRAWAL_LIMIT_BY_ASSET") or {}
+        asset_limit = 0.0
+        if isinstance(asset_limits, dict):
+            asset_limit = max(0.0, float(asset_limits.get(asset.lower(), asset_limits.get(asset, 0.0)) or 0.0))
+        if asset_limit <= 0 and require_limits:
+            blockers.append(f"daily withdrawal limit for {asset} is not configured")
+        elif asset_limit > 0:
+            used = _sum_withdrawal_amounts(base_query.filter(WalletWithdrawal.asset == asset))
+            if used + amount > asset_limit + 1e-12:
+                blockers.append(f"daily withdrawal limit for {asset} exceeded")
+
+        destination_limit = max(0.0, float(self.config.get("WALLET_DAILY_WITHDRAWAL_LIMIT_BY_DESTINATION", 0.0) or 0.0))
+        if destination_limit <= 0 and require_limits:
+            blockers.append("per-destination daily withdrawal limit is not configured")
+        elif destination_limit > 0:
+            used = _sum_withdrawal_amounts(
+                base_query.filter(WalletWithdrawal.destination_address == withdrawal.destination_address)
+            )
+            if used + amount > destination_limit + 1e-12:
+                blockers.append("per-destination daily withdrawal limit exceeded")
+
+        global_limit = max(0.0, float(self.config.get("WALLET_DAILY_GLOBAL_WITHDRAWAL_LIMIT", 0.0) or 0.0))
+        if global_limit <= 0 and require_limits:
+            blockers.append("global daily withdrawal limit is not configured")
+        elif global_limit > 0:
+            used = _sum_withdrawal_amounts(base_query)
+            if used + amount > global_limit + 1e-12:
+                blockers.append("global daily withdrawal limit exceeded")
+        return blockers
+
+    def _block_withdrawal_by_safety_gate(self, withdrawal: WalletWithdrawal, blockers: list[str]) -> WalletWithdrawal:
+        withdrawal.status = "failed_safety_gate"
+        withdrawal.failure_reason = "; ".join(blockers)
+        withdrawal.completed_at = datetime.utcnow()
+        details = withdrawal.details
+        details["safety_gate_blockers"] = blockers
+        details["custody_mode"] = str(self.config.get("WALLET_CUSTODY_MODE", "local_dev") or "local_dev")
+        withdrawal.details = details
+        self._audit(
+            user_id=withdrawal.user_id,
+            wallet_withdrawal_id=withdrawal.id,
+            action="withdrawal_blocked_by_safety_gate",
+            status=withdrawal.status,
+            message="Withdrawal blocked by production custody safety gate.",
+            metadata={"blockers": blockers, "custody_mode": details["custody_mode"]},
         )
         return withdrawal
 
@@ -541,6 +746,29 @@ class SelfCustodyWalletService:
         db.session.add(entry)
         db.session.flush()
         return entry
+
+    def _apply_treasury_safety(self, withdrawal: WalletWithdrawal, *, return_status: str) -> None:
+        if not has_app_context():
+            return
+        solvency = current_app.extensions.get("services", {}).get("treasury_solvency")
+        if solvency is None:
+            return
+        try:
+            safety = solvency.evaluate_withdrawal(withdrawal, projected_spend_eth=0.0, persist=True)
+        except Exception as exc:  # noqa: BLE001
+            safety = {
+                "safe": False,
+                "status": "queued_treasury_solvency",
+                "reason": str(exc),
+                "estimated_gas_eth": 0.0,
+                "reserve_ratio": 0.0,
+                "health_status": "emergency",
+            }
+            solvency.apply_withdrawal_safety(withdrawal, safety)
+        if not safety.get("safe", True):
+            details = withdrawal.details
+            details["return_status_after_solvency"] = return_status
+            withdrawal.details = details
 
     @staticmethod
     def _asset_key(asset: str) -> str:

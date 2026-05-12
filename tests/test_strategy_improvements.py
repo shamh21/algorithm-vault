@@ -154,16 +154,60 @@ def test_aggressive_signal_edge_below_cost_threshold_records_no_trade(app) -> No
     assert audit.details["edge_score"] < app.config["AGGRESSIVE_MIN_EDGE_BPS"]
 
 
-def test_strategy_entry_sizing_uses_live_caps_without_simulated_portfolio(app) -> None:
+def test_no_trade_audit_payload_is_compact_and_throttled(app) -> None:
+    manager = app.extensions["services"]["strategy_manager"]
+    manager._no_trade_audit_state.clear()
+    app.config["NO_TRADE_AUDIT_COMPACT_ENABLED"] = True
+    app.config["NO_TRADE_AUDIT_THROTTLE_SECONDS"] = 300
+    run = StrategyRun(
+        strategy_name="scalping",
+        symbol="BTC",
+        timeframe="1m",
+        mode="live",
+        status="running",
+    )
+    run.parameters = {"optimizer_profile": "aggressive_1h", "vault_cycle_id": 42}
+    db.session.add(run)
+    db.session.commit()
+
+    payload = {
+        "no_trade_reason": "low_edge_after_costs",
+        "edge_score": 1.5,
+        "cost_drag_bps": 2.0,
+        "quality_reasons": [f"reason-{index}" for index in range(20)],
+        "signal_quality_breakdown": {"large": "x" * 10_000},
+        "raw_market_snapshot": {"levels": [{"px": 100 + index, "sz": index} for index in range(100)]},
+    }
+
+    manager._record_no_trade(run, payload)
+    manager._record_no_trade(run, payload)
+
+    audits = AuditLog.query.filter_by(action="no_trade").order_by(AuditLog.id.asc()).all()
+    assert len(audits) == 1
+    assert audits[0].details["edge_score"] == 1.5
+    assert audits[0].details["quality_reasons"] == [f"reason-{index}" for index in range(8)]
+    assert "signal_quality_breakdown" not in audits[0].details
+    assert "raw_market_snapshot" not in audits[0].details
+
+    key = (run.id, "low_edge_after_costs", manager._no_trade_blocker_category(payload))
+    manager._no_trade_audit_state[key]["last_at"] -= 301
+    manager._record_no_trade(run, payload)
+
+    audits = AuditLog.query.filter_by(action="no_trade").order_by(AuditLog.id.asc()).all()
+    assert len(audits) == 2
+    assert audits[1].details["suppressed_since_last"] == 1
+
+
+def test_strategy_entry_sizing_uses_allocation_budget(app) -> None:
     manager = app.extensions["services"]["strategy_manager"]
     run = StrategyRun(strategy_name="scalping", symbol="BTC", timeframe="1m", mode="live")
     run.parameters = {"allocation_cap_usd": 250.0}
 
     assert manager._entry_sizing_base(run) == 250.0
-    run.parameters = {"allocation_cap_usd": app.config["MAX_POSITION_NOTIONAL"] * 2}
-    assert manager._entry_sizing_base(run) == app.config["MAX_POSITION_NOTIONAL"]
+    run.parameters = {"allocation_cap_usd": 20_000.0}
+    assert manager._entry_sizing_base(run) == 20_000.0
     run.parameters = {}
-    assert manager._entry_sizing_base(run) == app.config["MAX_POSITION_NOTIONAL"]
+    assert manager._entry_sizing_base(run) == app.config["FIXED_DOLLAR_SIZE"]
 
 
 def test_strategy_and_vault_fallbacks_are_live_only(app) -> None:
