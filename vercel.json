@@ -1,8 +1,33 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "version": 2,
-  "buildCommand": "bash scripts/prepare_vercel_static.sh",
+  "builds": [
+    {
+      "src": "static/**/*",
+      "use": "@vercel/static"
+    },
+    {
+      "src": "server.py",
+      "use": "@vercel/python",
+      "config": {
+        "excludeFiles": "{.coverage,.DS_Store,**/.DS_Store,.env,.env*,.github/**,.local-certs/**,.pre-commit-config.yaml,.vercelignore,CODEX_APP_SUMMARY.md,EFFICIENCY_WEAK_POINTS.md,pyproject.toml,pytest.ini,render.yaml,requirements-dev.txt,requirements-exchanges.txt,requirements-full.txt,requirements-ml.txt,requirements-torch.txt,requirements-wallets.txt,run.py,wsgi.py,uv.lock,instance/**,logs/**,tests/**,deploy/**,admin-pwa/**,docs/**,public/**,static/**,.venv/**,.venv.*/**,venv/**,env/**,.vercel/**,.pytest_cache/**,.mypy_cache/**,.ruff_cache/**,htmlcov/**,__pycache__/**,**/__pycache__/**,*.db,*.sqlite,*.sqlite3,*.db-*,*.sqlite-*,*.sqlite3-*,*.backup*}"
+      }
+    }
+  ],
   "headers": [
+    {
+      "source": "/sw.js",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=0, must-revalidate"
+        },
+        {
+          "key": "Service-Worker-Allowed",
+          "value": "/"
+        }
+      ]
+    },
     {
       "source": "/static/js/sw.js",
       "headers": [
@@ -26,6 +51,15 @@
       ]
     },
     {
+      "source": "/manifest.webmanifest",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=0, must-revalidate"
+        }
+      ]
+    },
+    {
       "source": "/static/manifest.webmanifest",
       "headers": [
         {
@@ -33,9 +67,38 @@
           "value": "public, max-age=0, must-revalidate"
         }
       ]
+    },
+    {
+      "source": "/icons/(.*)",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=31536000, immutable"
+        }
+      ]
     }
   ],
   "rewrites": [
+    {
+      "source": "/sw.js",
+      "destination": "/static/js/sw.js"
+    },
+    {
+      "source": "/static/(.*)",
+      "destination": "/static/$1"
+    },
+    {
+      "source": "/icons/(.*)",
+      "destination": "/static/icons/$1"
+    },
+    {
+      "source": "/manifest.json",
+      "destination": "/static/manifest.json"
+    },
+    {
+      "source": "/manifest.webmanifest",
+      "destination": "/static/manifest.webmanifest"
+    },
     {
       "source": "/(.*)",
       "destination": "/server.py"

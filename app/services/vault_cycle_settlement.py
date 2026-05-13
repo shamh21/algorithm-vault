@@ -18,6 +18,7 @@ from ..models import (
     WalletBalance,
     WalletTransaction,
 )
+from .invite_profit_share import InviteProfitShareError
 
 
 class VaultCycleSettlementService:
@@ -231,6 +232,21 @@ class VaultCycleSettlementService:
                 confirmed_total,
             )
             credit_amount = float(treasury_deductions.get("user_credit_amount", credit_amount) or 0.0)
+        invite_deductions: dict[str, Any] | None = None
+        if has_app_context():
+            invite_profit_share = current_app.extensions.get("services", {}).get("invite_profit_share")
+            if invite_profit_share is not None:
+                try:
+                    invite_deductions = invite_profit_share.process_cycle(
+                        cycle,
+                        settlement,
+                        available_credit_amount=credit_amount,
+                    )
+                except InviteProfitShareError as exc:
+                    self._pause_recovery(cycle, settlement, "invite_profit_share_failed", str(exc))
+                    return
+                if invite_deductions.get("applied"):
+                    credit_amount = max(0.0, credit_amount - float(invite_deductions.get("payout_amount", 0.0) or 0.0))
         deposit_balance = WalletBalance.query.filter_by(user_id=cycle.user_id, asset=cycle.deposit_asset).one_or_none()
         if deposit_balance is not None:
             deposit_balance.locked_balance = max(0.0, float(deposit_balance.locked_balance or 0.0) - float(cycle.deposit_amount or 0.0))
@@ -247,14 +263,24 @@ class VaultCycleSettlementService:
         cycle.settled_at = datetime.utcnow()
         settlement.final_amount = credit_amount
         settlement.final_value_usd = credit_amount if cycle.settlement_asset in {"USDC", "USDT"} else settlement.final_value_usd
-        if treasury_deductions is not None and cycle.settlement_asset in {"USDC", "USDT"}:
-            treasury_total = float(treasury_deductions.get("gas_reserve_asset", 0.0) or 0.0) + float(treasury_deductions.get("profit_share_asset", 0.0) or 0.0)
+        if cycle.settlement_asset in {"USDC", "USDT"}:
+            treasury_total = 0.0
+            if treasury_deductions is not None:
+                treasury_total += float(treasury_deductions.get("gas_reserve_asset", 0.0) or 0.0)
+                treasury_total += float(treasury_deductions.get("profit_share_asset", 0.0) or 0.0)
+            if invite_deductions is not None and invite_deductions.get("applied"):
+                treasury_total += float(invite_deductions.get("payout_amount", 0.0) or 0.0)
             settlement.fees_usd = float(settlement.fees_usd or 0.0) + treasury_total
             settlement.net_pnl_usd = float(settlement.gross_pnl_usd or 0.0) - float(settlement.fees_usd or 0.0)
         settlement.status = "complete"
         settlement.withdrawal_status = "confirmed"
         settlement.completed_at = cycle.settled_at
-        settlement.details = {**settlement.details, "credited_wallet": True, "credited_amount": credit_amount}
+        settlement.details = {
+            **settlement.details,
+            "credited_wallet": True,
+            "credited_amount": credit_amount,
+            "invite_profit_share": invite_deductions,
+        }
         db.session.add(
             WalletTransaction(
                 vault_cycle_id=cycle.id,

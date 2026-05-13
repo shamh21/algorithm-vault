@@ -5,13 +5,14 @@ from __future__ import annotations
 import base64
 import hashlib
 import io
+from collections.abc import Callable
 from functools import wraps
-from typing import Any, Callable
+from typing import Any
 
 import pyotp
 import qrcode
 from cryptography.fernet import Fernet
-from flask import Response, current_app, flash, redirect, request, session, url_for
+from flask import Response, current_app, flash, jsonify, redirect, request, session, url_for
 from qrcode.image.svg import SvgPathImage
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -87,12 +88,18 @@ def qr_code_data_uri(payload: str) -> str:
 def require_authenticated_user() -> Response | None:
     user = current_user()
     if user is None:
+        if _expects_json_guard_response():
+            return _json_guard_error("authentication_required", "Sign in to continue.", 401)
         flash("Sign in to continue.", "warning")
         return redirect(url_for("auth.login", next=request.full_path if request.query_string else request.path))
     if not user.two_factor_enabled:
+        if _expects_json_guard_response():
+            return _json_guard_error("two_factor_required", "Set up app-based 2FA before continuing.", 403)
         flash("Set up app-based 2FA before accessing your wallet.", "warning")
         return redirect(url_for("auth.setup_2fa"))
     if not two_factor_session_valid(user):
+        if _expects_json_guard_response():
+            return _json_guard_error("two_factor_required", "Enter your authenticator code to continue.", 401)
         flash("Enter your authenticator code to continue.", "warning")
         return redirect(url_for("auth.login", next=request.full_path if request.query_string else request.path))
     return None
@@ -126,9 +133,27 @@ def require_admin_user() -> Response | None:
         return guard
     user = current_user()
     if user is None or not user.is_admin:
+        if _expects_json_guard_response():
+            return _json_guard_error("admin_required", "Admin access is required.", 403)
         flash("Admin access is required for advanced controls.", "danger")
         return redirect(url_for("consumer.home"))
     return None
+
+
+def _json_guard_error(code: str, message: str, status_code: int) -> Response:
+    response = jsonify({"ok": False, "code": code, "error": message})
+    response.status_code = status_code
+    return response
+
+
+def _expects_json_guard_response() -> bool:
+    if request.path.startswith("/admin/api/"):
+        return True
+    if request.path.startswith("/api/vault-cycles/") and request.path.endswith("/process-profit-share"):
+        return True
+    if request.accept_mimetypes.best == "application/json":
+        return True
+    return bool(request.is_json)
 
 
 def _fernet() -> Fernet:

@@ -347,11 +347,8 @@ class PlatformTreasuryService:
         gross_profit = max(0.0, confirmed - float(cycle.deposit_amount or 0.0))
         remaining_profit = max(0.0, gross_profit - gas_reserve_asset)
         referral_code = self._user_referral_code(cycle.user_id)
-        referral_percent = self._bounded_percent(
-            referral_code.percent_profit if referral_code is not None else self.config.get("PLATFORM_TREASURY_DEFAULT_PROFIT_SHARE_PCT", 50.0)
-        )
-        profit_share_asset = min(confirmed - gas_reserve_asset, remaining_profit * (referral_percent / 100.0))
-        profit_share_asset = max(0.0, profit_share_asset)
+        referral_percent = 0.0
+        profit_share_asset = 0.0
         user_credit = max(0.0, confirmed - gas_reserve_asset - profit_share_asset)
         treasury = self.active_wallet(network=network)
         gas_job = self._get_or_create_job(
@@ -919,7 +916,7 @@ class PlatformTreasuryService:
             "data": b"",
         }
         signed = Account.sign_transaction(tx, private_key)
-        raw_tx = getattr(signed, "raw_transaction", None) or getattr(signed, "rawTransaction")
+        raw_tx = getattr(signed, "raw_transaction", None) or signed.rawTransaction
         raw_hex = raw_tx.hex()
         if not raw_hex.startswith("0x"):
             raw_hex = "0x" + raw_hex
@@ -1130,23 +1127,20 @@ class PlatformTreasuryService:
             return None
         try:
             return current_app.extensions["services"]["trading_connections"].connector_for_user(user_id, connection_id)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None
 
     def _asset_usd_price(self, asset: str) -> float:
         asset_key = str(asset or "").upper().strip()
         if asset_key in {"USDC", "USDT", "USD"}:
             return 1.0
-        if asset_key == "ETH":
-            fallback = max(0.0, float(self.config.get("PLATFORM_TREASURY_ETH_USD_FALLBACK", 3000.0) or 0.0))
-        else:
-            fallback = 1.0
+        fallback = max(0.0, float(self.config.get("PLATFORM_TREASURY_ETH_USD_FALLBACK", 3000.0) or 0.0)) if asset_key == "ETH" else 1.0
         if has_app_context():
             try:
                 price = float(current_app.extensions["services"]["market_data"].get_mid_price(asset_key, "live") or 0.0)
                 if price > 0:
                     return price
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
         return fallback
 
@@ -1184,7 +1178,7 @@ class PlatformTreasuryService:
         try:
             Fernet(str(self.config.get("TREASURY_ENCRYPTION_KEY", "") or "").encode("utf-8"))
             return True
-        except Exception:
+        except Exception:  # noqa: BLE001
             return False
 
     def _encrypt(self, value: str) -> str:

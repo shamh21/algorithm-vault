@@ -768,7 +768,7 @@ def test_vault_cycle_settlement_confirms_withdrawal_and_is_idempotent(app) -> No
     assert fake.withdrawals == 1
 
 
-def test_vault_settlement_deducts_gas_reserve_and_referral_profit_share(app, monkeypatch) -> None:
+def test_vault_settlement_deducts_gas_reserve_without_legacy_referral_profit_share(app, monkeypatch) -> None:
     app.config["PLATFORM_GAS_TREASURY_ENABLED"] = True
     app.config["TREASURY_ENCRYPTION_KEY"] = Fernet.generate_key().decode("utf-8")
     user, _ = _create_user("profit-share")
@@ -812,20 +812,18 @@ def test_vault_settlement_deducts_gas_reserve_and_referral_profit_share(app, mon
     payload = treasury.apply_vault_settlement_deductions(cycle, settlement, 200.0)
 
     assert payload["gas_reserve_asset"] == pytest.approx(0.002)
-    assert payload["profit_share_asset"] == pytest.approx(49.999)
-    assert payload["user_credit_amount"] == pytest.approx(149.999)
+    assert payload["profit_share_asset"] == pytest.approx(0.0)
+    assert payload["user_credit_amount"] == pytest.approx(199.998)
     assert payload["referral_invite_code"] == "HALFPROFIT"
     assert PlatformTreasuryReserveJob.query.filter_by(vault_cycle_id=cycle.id, job_type="vault_gas_reserve").one().status == "pending"
-    assert PlatformTreasuryReserveJob.query.filter_by(
-        vault_cycle_id=cycle.id, job_type="vault_profit_share"
-    ).one().conversion_amount == pytest.approx(49.999)
+    assert PlatformTreasuryReserveJob.query.filter_by(vault_cycle_id=cycle.id, job_type="vault_profit_share").one_or_none() is None
     assert len(fake_conversion.conversions) == 0
     treasury.process_reserve_jobs()
-    assert len(fake_conversion.conversions) == 2
+    assert len(fake_conversion.conversions) == 1
     assert PlatformTreasuryReserveJob.query.filter_by(vault_cycle_id=cycle.id, job_type="vault_gas_reserve").one().status == "complete"
 
 
-def test_vault_settlement_without_referral_uses_default_half_profit_share(app, monkeypatch) -> None:
+def test_vault_settlement_without_referral_has_no_default_profit_share(app, monkeypatch) -> None:
     app.config["PLATFORM_GAS_TREASURY_ENABLED"] = True
     app.config["TREASURY_ENCRYPTION_KEY"] = Fernet.generate_key().decode("utf-8")
     user, _ = _create_user("default-share")
@@ -863,10 +861,10 @@ def test_vault_settlement_without_referral_uses_default_half_profit_share(app, m
 
     payload = treasury.apply_vault_settlement_deductions(cycle, settlement, 200.0)
 
-    assert payload["referral_percent"] == pytest.approx(50.0)
+    assert payload["referral_percent"] == pytest.approx(0.0)
     assert payload["referral_invite_code"] == ""
-    assert payload["profit_share_asset"] == pytest.approx(50.0)
-    assert payload["user_credit_amount"] == pytest.approx(150.0)
+    assert payload["profit_share_asset"] == pytest.approx(0.0)
+    assert payload["user_credit_amount"] == pytest.approx(200.0)
 
 
 def test_vault_settlement_skips_profit_share_when_gas_deduction_removes_profit(app, monkeypatch) -> None:

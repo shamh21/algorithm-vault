@@ -2,30 +2,36 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 import secrets
+from datetime import datetime, timezone
+from typing import Any
 from urllib.parse import urlparse
 
 from flask import Blueprint, Response, current_app, flash, jsonify, redirect, render_template, request, stream_with_context, url_for
+from sqlalchemy import func, or_
 
-from ..auth import current_user
 from ..admin_auth import admin_required
+from ..auth import current_user
+from ..csrf import csrf_token
 from ..extensions import db
 from ..models import (
+    AdminAuditLog,
     AuditLog,
     DepositAddress,
+    InviteCodeUsage,
     LeveragedMarket,
     Order,
     PlatformTreasuryReserveJob,
+    ProfitSharePayout,
     ReferralInviteCode,
     RiskEvent,
     ShadowLiveObservation,
-    Setting,
     StrategyRanking,
     StrategyRun,
     StrategyValidation,
     User,
     VaultCycle,
+    VaultCycleSettlement,
     WalletAddress,
     WalletAuditLog,
     WalletTransaction,
@@ -35,10 +41,11 @@ from ..runtime import get_current_mode, get_service
 from ..services.audit_events import get_audit_events_page
 from ..services.connection_health import latest_connection_health
 from ..services.db_retry import commit_with_retry
+from ..services.invite_profit_share import DEFAULT_PROFIT_SHARE_WALLET, InviteProfitShareError
 from ..services.provider_assets import normalize_provider
 
-
 admin_bp = Blueprint("admin", __name__, url_prefix="/admin")
+profit_share_api_bp = Blueprint("profit_share_api", __name__)
 
 
 @admin_bp.get("/")
@@ -431,7 +438,7 @@ def deposit_addresses():
 def invite_codes():
     if request.method == "POST":
         invite_id = request.form.get("invite_id", "").strip()
-        code = request.form.get("code", "").strip() or secrets.token_urlsafe(9).replace("-", "").replace("_", "")[:12].upper()
+        code = request.form.get("code", "").strip().upper() or secrets.token_urlsafe(9).replace("-", "").replace("_", "")[:12].upper()
         label = request.form.get("label", "").strip()
         try:
             percent_profit = max(0.0, min(float(request.form.get("percent_profit", "50") or 50.0), 100.0))
@@ -460,6 +467,8 @@ def invite_codes():
         invite.code = code
         invite.label = label
         invite.percent_profit = percent_profit
+        invite.profit_share_percent = percent_profit
+        invite.profit_share_wallet = invite.profit_share_wallet or DEFAULT_PROFIT_SHARE_WALLET
         invite.max_uses = max_uses
         if invite.is_active and not is_active:
             invite.disabled_at = datetime.utcnow()
@@ -486,6 +495,225 @@ def invite_codes():
         invite_codes=ReferralInviteCode.query.order_by(ReferralInviteCode.created_at.desc()).limit(150).all(),
         users={user.id: user for user in User.query.all()},
     )
+
+
+@admin_bp.get("/api/session")
+@admin_required
+def invite_admin_session():
+    user = current_user()
+    return jsonify(
+        {
+            "ok": True,
+            "csrfToken": csrf_token(),
+            "admin": {"username": user.username if user else "", "role": user.role if user else ""},
+            "defaults": {"profitShareWallet": DEFAULT_PROFIT_SHARE_WALLET},
+        }
+    )
+
+
+@admin_bp.route("/api/invite-codes", methods=["GET", "POST"])
+@admin_required
+def invite_codes_api():
+    if request.method == "POST":
+        payload = _request_payload()
+        batch_count = _safe_int(payload.get("batchCount") or payload.get("batch_count") or 1, 1)
+        batch_count = max(1, min(batch_count, 100))
+        try:
+            normalized = _normalized_invite_payload(payload, require_code=batch_count == 1)
+        except ValueError as exc:
+            return _json_error(str(exc), 400)
+
+        created: list[ReferralInviteCode] = []
+        for index in range(batch_count):
+            code = normalized["code"] if batch_count == 1 and normalized.get("code") else _generate_invite_code(payload.get("codePrefix") or payload.get("code"))
+            if ReferralInviteCode.query.filter_by(code=code).one_or_none() is not None:
+                if batch_count == 1:
+                    return _json_error("Invite code must be unique.", 409, "duplicate_invite_code")
+                code = _unique_generated_invite_code(payload.get("codePrefix") or payload.get("code"))
+            invite = ReferralInviteCode(code=code, created_by_user_id=current_user().id if current_user() else None)
+            db.session.add(invite)
+            _apply_invite_payload(invite, {**normalized, "code": code}, creating=True)
+            db.session.flush()
+            _record_admin_audit("invite_code_created", "invite_code", invite.public_id, {}, _invite_snapshot(invite), {"batch_index": index})
+            created.append(invite)
+        commit_with_retry()
+        return jsonify({"ok": True, "inviteCodes": [_invite_payload(invite) for invite in created]}), 201
+
+    status_filter = str(request.args.get("status", "all") or "all").strip().lower()
+    search = str(request.args.get("search", "") or "").strip()
+    sort = str(request.args.get("sort", "created_desc") or "created_desc").strip()
+    query = ReferralInviteCode.query
+    if status_filter != "deleted":
+        query = query.filter(ReferralInviteCode.deleted_at.is_(None))
+    if search:
+        creator_ids = [row.id for row in User.query.filter(User.username.ilike(f"%{search}%")).limit(100).all()]
+        query = query.filter(
+            or_(
+                ReferralInviteCode.code.ilike(f"%{search}%"),
+                ReferralInviteCode.label.ilike(f"%{search}%"),
+                ReferralInviteCode.profit_share_wallet.ilike(f"%{search}%"),
+                ReferralInviteCode.created_by_user_id.in_(creator_ids) if creator_ids else False,
+            )
+        )
+    invites = query.order_by(ReferralInviteCode.created_at.desc()).limit(500).all()
+    if status_filter != "all":
+        invites = [invite for invite in invites if invite.lifecycle_status == status_filter]
+    rows = [_invite_payload(invite) for invite in invites]
+    rows = _sort_invite_payloads(rows, sort)
+    return jsonify({"ok": True, "inviteCodes": rows, "summary": _invite_summary(rows)})
+
+
+@admin_bp.get("/api/invite-codes/<public_id>")
+@admin_required
+def invite_code_detail_api(public_id: str):
+    invite = _invite_by_public_id(public_id)
+    if invite is None:
+        return _json_error("Invite code was not found.", 404, "invite_code_not_found")
+    return jsonify({"ok": True, "inviteCode": _invite_payload(invite, include_recent=True)})
+
+
+@admin_bp.patch("/api/invite-codes/<public_id>")
+@admin_required
+def update_invite_code_api(public_id: str):
+    invite = _invite_by_public_id(public_id)
+    if invite is None:
+        return _json_error("Invite code was not found.", 404, "invite_code_not_found")
+    payload = _request_payload()
+    old = _invite_snapshot(invite)
+    try:
+        normalized = _normalized_invite_payload(payload, require_code=False, current=invite)
+    except ValueError as exc:
+        return _json_error(str(exc), 400)
+    sensitive_changed = (
+        "profitSharePercent" in payload
+        or "profit_share_percent" in payload
+        or "profitShareWallet" in payload
+        or "profit_share_wallet" in payload
+    ) and (
+        float(normalized.get("profit_share_percent", invite.effective_profit_share_percent)) != float(invite.effective_profit_share_percent)
+        or str(normalized.get("profit_share_wallet", invite.profit_share_wallet)).lower() != str(invite.profit_share_wallet).lower()
+    )
+    if sensitive_changed and not bool(payload.get("confirmSensitiveChange")):
+        return _json_error(
+            "Changing this profit-share rule applies to future completed Vault Cycles for all users who joined with this code.",
+            409,
+            "confirmation_required",
+        )
+    if normalized.get("code") and normalized["code"] != invite.code:
+        existing = ReferralInviteCode.query.filter_by(code=normalized["code"]).one_or_none()
+        if existing is not None and existing.id != invite.id:
+            return _json_error("Invite code must be unique.", 409, "duplicate_invite_code")
+    _apply_invite_payload(invite, normalized, creating=False)
+    db.session.flush()
+    new = _invite_snapshot(invite)
+    _record_admin_audit(
+        "invite_code_updated",
+        "invite_code",
+        invite.public_id,
+        old,
+        new,
+        {"sensitive_changed": sensitive_changed, "confirmation_reason": payload.get("confirmationReason", "")},
+    )
+    commit_with_retry()
+    return jsonify({"ok": True, "inviteCode": _invite_payload(invite)})
+
+
+@admin_bp.post("/api/invite-codes/<public_id>/disable")
+@admin_required
+def disable_invite_code_api(public_id: str):
+    invite = _invite_by_public_id(public_id)
+    if invite is None:
+        return _json_error("Invite code was not found.", 404, "invite_code_not_found")
+    old = _invite_snapshot(invite)
+    invite.is_active = False
+    invite.disabled_at = invite.disabled_at or datetime.utcnow()
+    db.session.flush()
+    _record_admin_audit("invite_code_disabled", "invite_code", invite.public_id, old, _invite_snapshot(invite), _request_payload())
+    commit_with_retry()
+    return jsonify({"ok": True, "inviteCode": _invite_payload(invite)})
+
+
+@admin_bp.delete("/api/invite-codes/<public_id>")
+@admin_required
+def delete_invite_code_api(public_id: str):
+    invite = _invite_by_public_id(public_id)
+    if invite is None:
+        return _json_error("Invite code was not found.", 404, "invite_code_not_found")
+    old = _invite_snapshot(invite)
+    invite.deleted_at = invite.deleted_at or datetime.utcnow()
+    invite.is_active = False
+    invite.disabled_at = invite.disabled_at or datetime.utcnow()
+    db.session.flush()
+    _record_admin_audit("invite_code_deleted", "invite_code", invite.public_id, old, _invite_snapshot(invite), _request_payload())
+    commit_with_retry()
+    return jsonify({"ok": True, "inviteCode": _invite_payload(invite)})
+
+
+@admin_bp.get("/api/invite-codes/<public_id>/usages")
+@admin_required
+def invite_code_usages_api(public_id: str):
+    invite = _invite_by_public_id(public_id)
+    if invite is None:
+        return _json_error("Invite code was not found.", 404, "invite_code_not_found")
+    usages = InviteCodeUsage.query.filter_by(invite_code_id=invite.id).order_by(InviteCodeUsage.used_at.desc()).limit(250).all()
+    return jsonify({"ok": True, "usages": [_usage_payload(usage) for usage in usages]})
+
+
+@admin_bp.get("/api/invite-codes/<public_id>/profit-share-payouts")
+@admin_required
+def invite_code_profit_share_payouts_api(public_id: str):
+    invite = _invite_by_public_id(public_id)
+    if invite is None:
+        return _json_error("Invite code was not found.", 404, "invite_code_not_found")
+    payouts = ProfitSharePayout.query.filter_by(invite_code_id=invite.id).order_by(ProfitSharePayout.created_at.desc()).limit(250).all()
+    return jsonify({"ok": True, "payouts": [_payout_payload(payout) for payout in payouts]})
+
+
+@admin_bp.get("/api/profit-share-payouts")
+@admin_required
+def profit_share_payouts_api():
+    status_filter = str(request.args.get("status", "all") or "all").strip().lower()
+    query = ProfitSharePayout.query
+    if status_filter != "all":
+        query = query.filter_by(status=status_filter)
+    payouts = query.order_by(ProfitSharePayout.created_at.desc()).limit(500).all()
+    return jsonify({"ok": True, "payouts": [_payout_payload(payout) for payout in payouts]})
+
+
+@admin_bp.get("/api/audit-logs")
+@admin_required
+def admin_audit_logs_api():
+    entity_public_id = str(request.args.get("entityPublicId", "") or "").strip()
+    query = AdminAuditLog.query
+    if entity_public_id:
+        query = query.filter_by(entity_public_id=entity_public_id)
+    logs = query.order_by(AdminAuditLog.created_at.desc()).limit(500).all()
+    return jsonify({"ok": True, "auditLogs": [_admin_audit_payload(log) for log in logs]})
+
+
+@profit_share_api_bp.post("/api/vault-cycles/<public_id>/process-profit-share")
+@admin_required
+def process_vault_cycle_profit_share_api(public_id: str):
+    cycle = VaultCycle.query.filter_by(public_id=public_id).one_or_none()
+    if cycle is None:
+        return _json_error("Vault Cycle was not found.", 404, "vault_cycle_not_found")
+    settlement = VaultCycleSettlement.query.filter_by(vault_cycle_id=cycle.id).one_or_none()
+    if settlement is None or settlement.status != "complete":
+        return _json_error("Vault Cycle profit share can only be processed after completed settlement.", 409, "vault_cycle_not_complete")
+    try:
+        payload = get_service("invite_profit_share").process_cycle(
+            cycle,
+            settlement,
+            available_credit_amount=cycle.final_settlement_amount or settlement.final_amount,
+            debit_invitee_wallet=True,
+        )
+        if payload.get("applied"):
+            settlement.details = {**settlement.details, "invite_profit_share": payload}
+        commit_with_retry()
+    except InviteProfitShareError as exc:
+        db.session.rollback()
+        return _json_error(str(exc), 409, "profit_share_failed")
+    return jsonify({"ok": True, "profitShare": payload})
 
 
 @admin_bp.get("/wallet-withdrawals")
@@ -714,6 +942,349 @@ def top_up_withdrawal_gas(withdrawal_id: int):
         db.session.rollback()
         flash(str(exc), "danger")
     return redirect(url_for("admin.platform_treasury"))
+
+
+def _request_payload() -> dict[str, Any]:
+    if request.is_json:
+        payload = request.get_json(silent=True) or {}
+        return payload if isinstance(payload, dict) else {}
+    return request.form.to_dict()
+
+
+def _json_error(message: str, status: int = 400, code: str = "invalid_request"):
+    return jsonify({"ok": False, "error": message, "code": code}), status
+
+
+def _clean_invite_code(value: Any) -> str:
+    return "".join(ch for ch in str(value or "").strip().upper() if ch.isalnum() or ch in {"-", "_"})
+
+
+def _generate_invite_code(prefix: Any = "") -> str:
+    clean_prefix = _clean_invite_code(prefix)[:8]
+    token = secrets.token_urlsafe(8).replace("-", "").replace("_", "")[:10].upper()
+    return f"{clean_prefix}{token}"[:24] if clean_prefix else token[:12]
+
+
+def _unique_generated_invite_code(prefix: Any = "") -> str:
+    for _ in range(20):
+        code = _generate_invite_code(prefix)
+        if ReferralInviteCode.query.filter_by(code=code).one_or_none() is None:
+            return code
+    raise RuntimeError("Unable to generate a unique invite code.")
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"Invalid date value: {raw}") from exc
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)  # noqa: UP017
+    return parsed
+
+
+def _normalized_invite_payload(
+    payload: dict[str, Any],
+    *,
+    require_code: bool,
+    current: ReferralInviteCode | None = None,
+) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    if "code" in payload or require_code:
+        code = _clean_invite_code(payload.get("code"))
+        if require_code and not code:
+            code = _generate_invite_code()
+        if code and len(code) < 3:
+            raise ValueError("Invite code must be at least 3 characters.")
+        normalized["code"] = code
+    if "label" in payload:
+        normalized["label"] = str(payload.get("label") or "").strip()[:120]
+    if "expirationDate" in payload or "expiresAt" in payload or "expires_at" in payload:
+        expires_at = _parse_datetime(payload.get("expirationDate") or payload.get("expiresAt") or payload.get("expires_at"))
+        if expires_at is not None and expires_at <= datetime.utcnow():
+            raise ValueError("Expiration date cannot be in the past.")
+        normalized["expires_at"] = expires_at
+    if "maxUses" in payload or "max_uses" in payload:
+        raw_max_uses = payload.get("maxUses", payload.get("max_uses"))
+        if raw_max_uses in {None, ""}:
+            normalized["max_uses"] = 0
+        else:
+            max_uses = _safe_int(raw_max_uses, -1)
+            if max_uses <= 0:
+                raise ValueError("Max uses must be a positive integer when provided.")
+            normalized["max_uses"] = max_uses
+    if "assignedRole" in payload or "assigned_role" in payload:
+        role = str(payload.get("assignedRole", payload.get("assigned_role", "user")) or "user").strip().lower()
+        if role == "admin":
+            raise ValueError("Invite codes cannot assign admin access.")
+        normalized["assigned_role"] = role or "user"
+    if "profitSharePercent" in payload or "profit_share_percent" in payload or "percent_profit" in payload:
+        percent = _safe_float(payload.get("profitSharePercent", payload.get("profit_share_percent", payload.get("percent_profit"))), -1.0)
+        if percent < 0 or percent > 100:
+            raise ValueError("Profit-share percentage must be between 0 and 100.")
+        normalized["profit_share_percent"] = percent
+    if "profitShareWallet" in payload or "profit_share_wallet" in payload:
+        wallet = str(payload.get("profitShareWallet", payload.get("profit_share_wallet", DEFAULT_PROFIT_SHARE_WALLET)) or "").strip().lower()
+        normalized["profit_share_wallet"] = wallet or DEFAULT_PROFIT_SHARE_WALLET
+    if "profitShareStartsAt" in payload or "profit_share_starts_at" in payload:
+        normalized["profit_share_starts_at"] = _parse_datetime(payload.get("profitShareStartsAt") or payload.get("profit_share_starts_at"))
+    if "profitShareEndsAt" in payload or "profit_share_ends_at" in payload:
+        normalized["profit_share_ends_at"] = _parse_datetime(payload.get("profitShareEndsAt") or payload.get("profit_share_ends_at"))
+    if "profitShareActive" in payload or "profit_share_active" in payload:
+        normalized["profit_share_active"] = bool(payload.get("profitShareActive", payload.get("profit_share_active")))
+    if "appliesToVaultTypes" in payload or "applies_to_vault_types" in payload:
+        vault_types = payload.get("appliesToVaultTypes", payload.get("applies_to_vault_types")) or []
+        if isinstance(vault_types, str):
+            vault_types = [item.strip() for item in vault_types.split(",")]
+        normalized["applies_to_vault_types"] = [str(item).strip() for item in vault_types if str(item).strip()]
+    if "isActive" in payload or "is_active" in payload:
+        normalized["is_active"] = bool(payload.get("isActive", payload.get("is_active")))
+
+    percent = normalized.get("profit_share_percent", current.effective_profit_share_percent if current is not None else 0.0)
+    wallet = normalized.get("profit_share_wallet", current.profit_share_wallet if current is not None else DEFAULT_PROFIT_SHARE_WALLET)
+    if float(percent or 0.0) > 0:
+        if not wallet:
+            raise ValueError("Profit-share wallet is required when percentage is greater than 0.")
+        if User.query.filter_by(username=str(wallet).lower()).one_or_none() is None:
+            raise ValueError(f"Destination wallet user '{wallet}' was not found.")
+    starts_at = normalized.get("profit_share_starts_at", current.profit_share_starts_at if current is not None else None)
+    ends_at = normalized.get("profit_share_ends_at", current.profit_share_ends_at if current is not None else None)
+    if starts_at is not None and ends_at is not None and ends_at <= starts_at:
+        raise ValueError("Profit-share end date must be after the start date.")
+    return normalized
+
+
+def _apply_invite_payload(invite: ReferralInviteCode, payload: dict[str, Any], *, creating: bool) -> None:
+    if payload.get("code"):
+        invite.code = payload["code"]
+    if "label" in payload:
+        invite.label = payload["label"]
+    elif creating:
+        invite.label = ""
+    if "expires_at" in payload:
+        invite.expires_at = payload["expires_at"]
+    if "max_uses" in payload:
+        invite.max_uses = int(payload["max_uses"] or 0)
+    elif creating:
+        invite.max_uses = 0
+    if "assigned_role" in payload:
+        invite.assigned_role = payload["assigned_role"]
+    elif creating:
+        invite.assigned_role = "user"
+    if "profit_share_percent" in payload:
+        invite.profit_share_percent = float(payload["profit_share_percent"])
+        invite.percent_profit = float(payload["profit_share_percent"])
+    elif creating:
+        invite.profit_share_percent = 0.0
+        invite.percent_profit = 0.0
+    if "profit_share_wallet" in payload:
+        invite.profit_share_wallet = payload["profit_share_wallet"]
+    elif creating:
+        invite.profit_share_wallet = DEFAULT_PROFIT_SHARE_WALLET
+    if "profit_share_starts_at" in payload:
+        invite.profit_share_starts_at = payload["profit_share_starts_at"]
+    if "profit_share_ends_at" in payload:
+        invite.profit_share_ends_at = payload["profit_share_ends_at"]
+    if "profit_share_active" in payload:
+        invite.profit_share_active = bool(payload["profit_share_active"])
+    elif creating:
+        invite.profit_share_active = True
+    if "applies_to_vault_types" in payload:
+        invite.applies_to_vault_types = payload["applies_to_vault_types"]
+    elif creating:
+        invite.applies_to_vault_types = []
+    if "is_active" in payload:
+        if invite.is_active and not bool(payload["is_active"]):
+            invite.disabled_at = datetime.utcnow()
+        invite.is_active = bool(payload["is_active"])
+    elif creating:
+        invite.is_active = True
+    invite.details = {
+        **invite.details,
+        "last_updated_by_user_id": current_user().id if current_user() else None,
+        "last_updated_at": datetime.utcnow().isoformat(),
+    }
+
+
+def _invite_by_public_id(public_id: str) -> ReferralInviteCode | None:
+    return ReferralInviteCode.query.filter_by(public_id=str(public_id or "").strip()).one_or_none()
+
+
+def _invite_snapshot(invite: ReferralInviteCode) -> dict[str, Any]:
+    return {
+        "publicId": invite.public_id,
+        "code": invite.code,
+        "label": invite.label,
+        "expiresAt": _iso(invite.expires_at),
+        "maxUses": int(invite.max_uses or 0),
+        "currentUses": int(invite.usage_count or 0),
+        "status": invite.lifecycle_status,
+        "assignedRole": invite.assigned_role,
+        "profitSharePercent": invite.effective_profit_share_percent,
+        "profitShareWallet": invite.profit_share_wallet,
+        "profitShareStartsAt": _iso(invite.profit_share_starts_at),
+        "profitShareEndsAt": _iso(invite.profit_share_ends_at),
+        "profitShareActive": bool(invite.profit_share_active),
+        "appliesToVaultTypes": invite.applies_to_vault_types,
+        "isActive": bool(invite.is_active),
+    }
+
+
+def _invite_payload(invite: ReferralInviteCode, *, include_recent: bool = False) -> dict[str, Any]:
+    creator = db.session.get(User, invite.created_by_user_id) if invite.created_by_user_id else None
+    usage_count = InviteCodeUsage.query.filter_by(invite_code_id=invite.id).count() or int(invite.usage_count or 0)
+    total_profit = _sum_decimal(
+        db.session.query(func.coalesce(func.sum(ProfitSharePayout.source_profit_amount), 0)).filter_by(invite_code_id=invite.id).scalar()
+    )
+    total_payout = _sum_decimal(
+        db.session.query(func.coalesce(func.sum(ProfitSharePayout.payout_amount), 0))
+        .filter_by(invite_code_id=invite.id, status="completed")
+        .scalar()
+    )
+    payout_counts = {
+        status: ProfitSharePayout.query.filter_by(invite_code_id=invite.id, status=status).count()
+        for status in ("pending", "completed", "failed", "retryable")
+    }
+    payload = {
+        **_invite_snapshot(invite),
+        "createdBy": creator.username if creator else "",
+        "createdAt": _iso(invite.created_at),
+        "updatedAt": _iso(invite.updated_at),
+        "disabledAt": _iso(invite.disabled_at),
+        "deletedAt": _iso(invite.deleted_at),
+        "currentUses": usage_count,
+        "totalInviteeProfit": total_profit,
+        "totalPaidToWallet": total_payout,
+        "payoutCounts": payout_counts,
+    }
+    if include_recent:
+        payload["recentUsages"] = [_usage_payload(row) for row in InviteCodeUsage.query.filter_by(invite_code_id=invite.id).order_by(InviteCodeUsage.used_at.desc()).limit(10).all()]
+        payload["recentPayouts"] = [_payout_payload(row) for row in ProfitSharePayout.query.filter_by(invite_code_id=invite.id).order_by(ProfitSharePayout.created_at.desc()).limit(10).all()]
+    return payload
+
+
+def _usage_payload(usage: InviteCodeUsage) -> dict[str, Any]:
+    return {
+        "publicId": usage.public_id,
+        "invitee": usage.invitee_user.username if usage.invitee_user else "",
+        "usedAt": _iso(usage.used_at),
+        "status": usage.status,
+        "acceptedDisclosureVersion": usage.accepted_disclosure_version,
+    }
+
+
+def _payout_payload(payout: ProfitSharePayout) -> dict[str, Any]:
+    return {
+        "publicId": payout.public_id,
+        "inviteCodePublicId": payout.invite_code.public_id if payout.invite_code else "",
+        "inviteCode": payout.invite_code.code if payout.invite_code else "",
+        "invitee": payout.invitee_user.username if payout.invitee_user else "",
+        "vaultCyclePublicId": payout.vault_cycle.public_id if payout.vault_cycle else "",
+        "sourceProfitAmount": float(payout.source_profit_amount or 0),
+        "profitSharePercent": float(payout.profit_share_percent or 0),
+        "payoutAmount": float(payout.payout_amount or 0),
+        "asset": payout.asset,
+        "destinationWallet": payout.destination_wallet,
+        "status": payout.status,
+        "idempotencyKey": payout.idempotency_key,
+        "createdAt": _iso(payout.created_at),
+        "completedAt": _iso(payout.completed_at),
+        "failedReason": payout.failed_reason or "",
+    }
+
+
+def _admin_audit_payload(log: AdminAuditLog) -> dict[str, Any]:
+    return {
+        "publicId": log.public_id,
+        "admin": log.admin_user.username if log.admin_user else "",
+        "action": log.action,
+        "entityType": log.entity_type,
+        "entityPublicId": log.entity_public_id,
+        "oldValue": log.old_value,
+        "newValue": log.new_value,
+        "ipAddress": log.ip_address,
+        "createdAt": _iso(log.created_at),
+        "metadata": log.details,
+    }
+
+
+def _record_admin_audit(
+    action: str,
+    entity_type: str,
+    entity_public_id: str,
+    old_value: dict[str, Any],
+    new_value: dict[str, Any],
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    user = current_user()
+    log = AdminAuditLog(
+        admin_user_id=user.id if user else None,
+        action=action,
+        entity_type=entity_type,
+        entity_public_id=entity_public_id,
+        ip_address=_request_ip(),
+        user_agent=str(request.headers.get("User-Agent", ""))[:500],
+    )
+    log.old_value = old_value
+    log.new_value = new_value
+    log.details = metadata or {}
+    db.session.add(log)
+
+
+def _request_ip() -> str:
+    forwarded = str(request.headers.get("X-Forwarded-For", "") or "").split(",", maxsplit=1)[0].strip()
+    return forwarded or str(request.remote_addr or "")
+
+
+def _sort_invite_payloads(rows: list[dict[str, Any]], sort: str) -> list[dict[str, Any]]:
+    reverse = sort.endswith("_desc")
+    key = sort.removesuffix("_desc").removesuffix("_asc")
+    field_map = {
+        "created": "createdAt",
+        "creation": "createdAt",
+        "expiration": "expiresAt",
+        "expires": "expiresAt",
+        "usage": "currentUses",
+        "uses": "currentUses",
+        "profit": "totalInviteeProfit",
+        "payout": "totalPaidToWallet",
+    }
+    field = field_map.get(key, "createdAt")
+    return sorted(rows, key=lambda row: row.get(field) or "", reverse=reverse)
+
+
+def _invite_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "totalCodes": len(rows),
+        "activeCodes": sum(1 for row in rows if row.get("status") == "active"),
+        "totalUses": sum(int(row.get("currentUses") or 0) for row in rows),
+        "totalInviteeProfit": sum(float(row.get("totalInviteeProfit") or 0.0) for row in rows),
+        "totalPaidToWallet": sum(float(row.get("totalPaidToWallet") or 0.0) for row in rows),
+        "failedPayouts": sum(int((row.get("payoutCounts") or {}).get("failed") or 0) for row in rows),
+    }
+
+
+def _sum_decimal(value: Any) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _iso(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    return value.replace(microsecond=0).isoformat() + "Z"
 
 
 def _update_withdrawal_transaction(withdrawal: WalletWithdrawal, status: str, note: str) -> None:
