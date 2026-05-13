@@ -28,6 +28,7 @@ from app.models import (
 )
 from app.services.failures import ProviderConnectionError
 from app.services.hyperliquid_client import ClientSnapshot
+from app.services.wallet_custody import BroadcastResult, GeneratedWallet, RealWalletCustodyService, WalletBalanceSnapshot
 
 
 class _FakeVaultConnector:
@@ -129,6 +130,36 @@ class _FakeTreasuryConversionConnector:
             "provider_reference": f"treasury-withdraw-{client_reference}",
             "confirmed_amount": amount,
         }
+
+
+class _OnchainUsdtAdapter:
+    def __init__(self, amount: float = 50.0) -> None:
+        self.amount = amount
+
+    def supports(self, asset: str, network: str) -> bool:
+        return asset.upper() in {"ETH", "USDT"} and network == "Ethereum"
+
+    def generate_wallet(self, asset: str, network: str) -> GeneratedWallet:
+        return GeneratedWallet(
+            address="0x1234567890abcdef1234567890abcdef12345678",
+            private_key="11" * 32,
+            public_key="0x1234567890abcdef1234567890abcdef12345678",
+            key_type="secp256k1",
+            provider="fake_evm",
+        )
+
+    def get_balance(self, address: str, asset: str, network: str) -> WalletBalanceSnapshot:
+        amount = self.amount if asset.upper() == "USDT" else 0.01
+        return WalletBalanceSnapshot(amount=amount, asset=asset, checked=True, confirmations=12)
+
+    def estimate_fee(self, asset: str, network: str, destination: str, amount: float) -> float:
+        return 0.001
+
+    def sign_and_broadcast(self, withdrawal, private_key: str) -> BroadcastResult:
+        return BroadcastResult("submitted", "0xunused", {})
+
+    def confirm_transaction(self, provider_reference: str, asset: str, network: str) -> dict[str, Any]:
+        return {"confirmed": True}
 
 
 def _create_user(username: str = "vault-cycle") -> tuple[User, str]:
@@ -312,6 +343,59 @@ def test_vault_cycle_route_creates_allocations_and_confirmed_reserve_transfer(ap
     balance = WalletBalance.query.filter_by(user_id=user.id, asset="USDT").one()
     assert balance.available_balance == 30
     assert balance.locked_balance == 20
+
+
+def test_vault_cycle_materializes_onchain_surplus_before_allocation(app) -> None:
+    app.config.update(
+        {
+            "VAULT_CYCLE_ENGINE_ENABLED": True,
+            "VAULT_CYCLE_REAL_TRANSFERS_ENABLED": True,
+            "VAULT_CYCLE_PROVIDERS": ["kucoin"],
+            "VAULT_CYCLE_REQUIRE_EXCHANGE_RESERVE": True,
+            "WALLET_REAL_CUSTODY_ENABLED": True,
+            "WALLET_ALLOW_IN_APP_KEYGEN": True,
+            "TOTP_ENCRYPTION_KEY": Fernet.generate_key().decode("utf-8"),
+            "WALLET_EVM_RPC_URL": "https://evm.example.invalid",
+            "WALLET_EVM_TOKEN_CONTRACTS": {
+                "ETHEREUM": {
+                    "USDT": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+                    "USDT_DECIMALS": 6,
+                }
+            },
+        }
+    )
+    adapter = _OnchainUsdtAdapter(amount=50.0)
+    custody = RealWalletCustodyService(app.config, adapters=[adapter])
+    app.extensions["services"]["wallet_custody"] = custody
+    user, _ = _create_user("engine-onchain")
+    kucoin = _connection(user, "kucoin")
+    custody.get_or_create_address(user_id=user.id, asset="USDT", network="Ethereum")
+    _seed_market("kucoin", "USDT")
+    db.session.add(WalletBalance(user_id=user.id, asset="USDT", available_balance=40.0, estimated_usd_value=40.0))
+    db.session.commit()
+    trading = app.extensions["services"]["trading_connections"]
+    trading.account_snapshot = _snapshot_for({kucoin.id: "kucoin"})
+    trading.connector_for_user = lambda user_id, connection_id=None: _FakeVaultConnector("USDT")
+
+    result = app.extensions["services"]["vault_cycle_orchestrator"].start_cycle(
+        user=user,
+        amount=50.0,
+        deposit_asset="USDT",
+        settlement_asset="USDT",
+        duration_seconds=3600,
+        providers=["kucoin"],
+        allowed_symbols=["BTC"],
+        idempotency_key="engine-onchain-surplus",
+        start_strategy_runs=False,
+    )
+
+    balance = WalletBalance.query.filter_by(user_id=user.id, asset="USDT").one()
+    reconciliation = WalletTransaction.query.filter_by(user_id=user.id, transaction_type="onchain_reconciliation").one()
+    assert result["created"] is True
+    assert balance.available_balance == pytest.approx(0.0)
+    assert balance.locked_balance == pytest.approx(50.0)
+    assert reconciliation.amount == pytest.approx(10.0)
+    assert WalletTransaction.query.filter_by(user_id=user.id, transaction_type="allocation").one().amount == 50.0
 
 
 def test_vault_start_routes_share_vault_cycle_orchestrator(app) -> None:
@@ -768,7 +852,7 @@ def test_vault_cycle_settlement_confirms_withdrawal_and_is_idempotent(app) -> No
     assert fake.withdrawals == 1
 
 
-def test_vault_settlement_deducts_gas_reserve_and_referral_profit_share(app, monkeypatch) -> None:
+def test_vault_settlement_deducts_gas_reserve_without_legacy_referral_profit_share(app, monkeypatch) -> None:
     app.config["PLATFORM_GAS_TREASURY_ENABLED"] = True
     app.config["TREASURY_ENCRYPTION_KEY"] = Fernet.generate_key().decode("utf-8")
     user, _ = _create_user("profit-share")
@@ -812,20 +896,18 @@ def test_vault_settlement_deducts_gas_reserve_and_referral_profit_share(app, mon
     payload = treasury.apply_vault_settlement_deductions(cycle, settlement, 200.0)
 
     assert payload["gas_reserve_asset"] == pytest.approx(0.002)
-    assert payload["profit_share_asset"] == pytest.approx(49.999)
-    assert payload["user_credit_amount"] == pytest.approx(149.999)
+    assert payload["profit_share_asset"] == pytest.approx(0.0)
+    assert payload["user_credit_amount"] == pytest.approx(199.998)
     assert payload["referral_invite_code"] == "HALFPROFIT"
     assert PlatformTreasuryReserveJob.query.filter_by(vault_cycle_id=cycle.id, job_type="vault_gas_reserve").one().status == "pending"
-    assert PlatformTreasuryReserveJob.query.filter_by(
-        vault_cycle_id=cycle.id, job_type="vault_profit_share"
-    ).one().conversion_amount == pytest.approx(49.999)
+    assert PlatformTreasuryReserveJob.query.filter_by(vault_cycle_id=cycle.id, job_type="vault_profit_share").one_or_none() is None
     assert len(fake_conversion.conversions) == 0
     treasury.process_reserve_jobs()
-    assert len(fake_conversion.conversions) == 2
+    assert len(fake_conversion.conversions) == 1
     assert PlatformTreasuryReserveJob.query.filter_by(vault_cycle_id=cycle.id, job_type="vault_gas_reserve").one().status == "complete"
 
 
-def test_vault_settlement_without_referral_uses_default_half_profit_share(app, monkeypatch) -> None:
+def test_vault_settlement_without_referral_has_no_default_profit_share(app, monkeypatch) -> None:
     app.config["PLATFORM_GAS_TREASURY_ENABLED"] = True
     app.config["TREASURY_ENCRYPTION_KEY"] = Fernet.generate_key().decode("utf-8")
     user, _ = _create_user("default-share")
@@ -863,10 +945,10 @@ def test_vault_settlement_without_referral_uses_default_half_profit_share(app, m
 
     payload = treasury.apply_vault_settlement_deductions(cycle, settlement, 200.0)
 
-    assert payload["referral_percent"] == pytest.approx(50.0)
+    assert payload["referral_percent"] == pytest.approx(0.0)
     assert payload["referral_invite_code"] == ""
-    assert payload["profit_share_asset"] == pytest.approx(50.0)
-    assert payload["user_credit_amount"] == pytest.approx(150.0)
+    assert payload["profit_share_asset"] == pytest.approx(0.0)
+    assert payload["user_credit_amount"] == pytest.approx(200.0)
 
 
 def test_vault_settlement_skips_profit_share_when_gas_deduction_removes_profit(app, monkeypatch) -> None:

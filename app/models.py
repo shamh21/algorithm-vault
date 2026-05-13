@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 from datetime import datetime
 from typing import Any
 
@@ -15,6 +16,12 @@ def utcnow() -> datetime:
     """Return a UTC timestamp for SQLAlchemy defaults."""
 
     return datetime.utcnow()
+
+
+def public_token(prefix: str) -> str:
+    """Return an opaque, URL-safe public identifier."""
+
+    return f"{prefix}_{secrets.token_urlsafe(16).replace('-', '').replace('_', '')[:22]}"
 
 
 class Setting(db.Model):
@@ -36,7 +43,7 @@ class Setting(db.Model):
             return default
 
     @classmethod
-    def set_json(cls, key: str, value: Any) -> "Setting":
+    def set_json(cls, key: str, value: Any) -> Setting:
         record = cls.query.filter_by(key=key).one_or_none()
         serialized = json.dumps(value)
         if record is None:
@@ -137,9 +144,18 @@ class ReferralInviteCode(db.Model):
     """Admin-managed signup code that snapshots treasury profit-share policy."""
 
     id = db.Column(db.Integer, primary_key=True)
+    public_id = db.Column(db.String(40), unique=True, nullable=False, default=lambda: public_token("inv"), index=True)
     code = db.Column(db.String(80), unique=True, nullable=False, index=True)
     label = db.Column(db.String(120), nullable=False, default="")
     percent_profit = db.Column(db.Float, nullable=False, default=50.0)
+    profit_share_percent = db.Column(db.Float, nullable=False, default=0.0)
+    profit_share_wallet = db.Column(db.String(120), nullable=False, default="sufyanh", index=True)
+    profit_share_starts_at = db.Column(db.DateTime, nullable=True, index=True)
+    profit_share_ends_at = db.Column(db.DateTime, nullable=True, index=True)
+    profit_share_active = db.Column(db.Boolean, nullable=False, default=True, index=True)
+    applies_to_vault_types_json = db.Column(db.Text, nullable=False, default="[]")
+    expires_at = db.Column(db.DateTime, nullable=True, index=True)
+    assigned_role = db.Column(db.String(32), nullable=False, default="user", index=True)
     is_active = db.Column(db.Boolean, nullable=False, default=True, index=True)
     max_uses = db.Column(db.Integer, nullable=False, default=0)
     usage_count = db.Column(db.Integer, nullable=False, default=0)
@@ -147,6 +163,7 @@ class ReferralInviteCode(db.Model):
     created_at = db.Column(db.DateTime, nullable=False, default=utcnow, index=True)
     updated_at = db.Column(db.DateTime, nullable=False, default=utcnow, onupdate=utcnow)
     disabled_at = db.Column(db.DateTime, nullable=True)
+    deleted_at = db.Column(db.DateTime, nullable=True, index=True)
     metadata_json = db.Column(db.Text, nullable=False, default="{}")
 
     @property
@@ -162,10 +179,74 @@ class ReferralInviteCode(db.Model):
         self.metadata_json = json.dumps(value or {}, default=str)
 
     @property
-    def available(self) -> bool:
+    def applies_to_vault_types(self) -> list[str]:
+        try:
+            value = json.loads(self.applies_to_vault_types_json or "[]")
+        except json.JSONDecodeError:
+            return []
+        return [str(item).strip() for item in value if str(item).strip()] if isinstance(value, list) else []
+
+    @applies_to_vault_types.setter
+    def applies_to_vault_types(self, value: list[str]) -> None:
+        self.applies_to_vault_types_json = json.dumps([str(item).strip() for item in value or [] if str(item).strip()])
+
+    @property
+    def effective_profit_share_percent(self) -> float:
+        configured = self.profit_share_percent
+        if configured is None or (float(configured or 0.0) == 0.0 and float(self.percent_profit or 0.0) > 0.0):
+            configured = self.percent_profit
+        return max(0.0, min(float(configured or 0.0), 100.0))
+
+    @property
+    def lifecycle_status(self) -> str:
+        now = utcnow()
+        if self.deleted_at is not None:
+            return "deleted"
         if not self.is_active:
+            return "disabled"
+        if self.expires_at is not None and self.expires_at <= now:
+            return "expired"
+        if int(self.max_uses or 0) > 0 and int(self.usage_count or 0) >= int(self.max_uses or 0):
+            return "fully_used"
+        return "active"
+
+    @property
+    def available(self) -> bool:
+        if self.lifecycle_status != "active":
             return False
         return int(self.max_uses or 0) <= 0 or int(self.usage_count or 0) < int(self.max_uses or 0)
+
+
+class InviteCodeUsage(db.Model):
+    """Immutable record of a user accepting an invite code."""
+
+    id = db.Column(db.Integer, primary_key=True)
+    public_id = db.Column(db.String(40), unique=True, nullable=False, default=lambda: public_token("icu"), index=True)
+    invite_code_id = db.Column(db.Integer, db.ForeignKey("referral_invite_code.id"), nullable=False, index=True)
+    invitee_user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False, index=True)
+    used_at = db.Column(db.DateTime, nullable=False, default=utcnow, index=True)
+    status = db.Column(db.String(32), nullable=False, default="accepted", index=True)
+    accepted_disclosure_version = db.Column(db.String(64), nullable=False, default="invite-profit-share-v1")
+    metadata_json = db.Column(db.Text, nullable=False, default="{}")
+
+    invite_code = db.relationship("ReferralInviteCode", backref="usage_records")
+    invitee_user = db.relationship("User", backref="invite_code_usages")
+    __table_args__ = (
+        db.UniqueConstraint("invitee_user_id", name="uq_invite_code_usage_invitee"),
+        db.Index("ix_invite_code_usage_code_status_used", "invite_code_id", "status", "used_at"),
+    )
+
+    @property
+    def details(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.metadata_json or "{}")
+        except json.JSONDecodeError:
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    @details.setter
+    def details(self, value: dict[str, Any]) -> None:
+        self.metadata_json = json.dumps(value or {}, default=str)
 
 
 class StrategyRun(db.Model):
@@ -246,6 +327,7 @@ class VaultCycle(db.Model):
     """Consumer allocation cycle that owns a linked strategy run."""
 
     id = db.Column(db.Integer, primary_key=True)
+    public_id = db.Column(db.String(40), unique=True, nullable=False, default=lambda: public_token("vc"), index=True)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True, index=True)
     trading_connection_id = db.Column(db.Integer, db.ForeignKey("trading_connection.id"), nullable=True, index=True)
     strategy_run_id = db.Column(db.Integer, db.ForeignKey("strategy_run.id"), nullable=True, index=True)
@@ -833,6 +915,51 @@ class WalletLedgerEvent(db.Model):
         self.metadata_json = json.dumps(value or {})
 
 
+class ProfitSharePayout(db.Model):
+    """Append-only invite-code profit-share payout ledger."""
+
+    id = db.Column(db.Integer, primary_key=True)
+    public_id = db.Column(db.String(40), unique=True, nullable=False, default=lambda: public_token("psp"), index=True)
+    invite_code_id = db.Column(db.Integer, db.ForeignKey("referral_invite_code.id"), nullable=False, index=True)
+    invitee_user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False, index=True)
+    destination_user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True, index=True)
+    vault_cycle_id = db.Column(db.Integer, db.ForeignKey("vault_cycle.id"), nullable=False, index=True)
+    vault_cycle_settlement_id = db.Column(db.Integer, db.ForeignKey("vault_cycle_settlement.id"), nullable=True, index=True)
+    asset = db.Column(db.String(32), nullable=False, default="USDC", index=True)
+    source_profit_amount = db.Column(db.Numeric(18, 8), nullable=False, default=0)
+    profit_share_percent = db.Column(db.Numeric(8, 4), nullable=False, default=0)
+    payout_amount = db.Column(db.Numeric(18, 8), nullable=False, default=0)
+    destination_wallet = db.Column(db.String(120), nullable=False, default="sufyanh", index=True)
+    status = db.Column(db.String(32), nullable=False, default="pending", index=True)
+    idempotency_key = db.Column(db.String(240), nullable=False, unique=True, index=True)
+    failed_reason = db.Column(db.Text, nullable=True)
+    metadata_json = db.Column(db.Text, nullable=False, default="{}")
+    created_at = db.Column(db.DateTime, nullable=False, default=utcnow, index=True)
+    completed_at = db.Column(db.DateTime, nullable=True, index=True)
+
+    invite_code = db.relationship("ReferralInviteCode", backref="profit_share_payouts")
+    invitee_user = db.relationship("User", foreign_keys=[invitee_user_id], backref="invite_profit_share_payouts")
+    destination_user = db.relationship("User", foreign_keys=[destination_user_id], backref="received_invite_profit_share_payouts")
+    vault_cycle = db.relationship("VaultCycle", backref="invite_profit_share_payouts")
+    vault_cycle_settlement = db.relationship("VaultCycleSettlement", backref="invite_profit_share_payouts")
+    __table_args__ = (
+        db.UniqueConstraint("vault_cycle_id", "invite_code_id", name="uq_profit_share_payout_cycle_invite"),
+        db.Index("ix_profit_share_payout_invite_status_created", "invite_code_id", "status", "created_at"),
+    )
+
+    @property
+    def details(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.metadata_json or "{}")
+        except json.JSONDecodeError:
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    @details.setter
+    def details(self, value: dict[str, Any]) -> None:
+        self.metadata_json = json.dumps(value or {}, default=str)
+
+
 class TradingConnection(db.Model):
     """User-scoped exchange or wallet connection with encrypted credentials."""
 
@@ -935,6 +1062,12 @@ class WalletAddress(db.Model):
     rotation_index = db.Column(db.Integer, nullable=False, default=1)
     rotated_from_id = db.Column(db.Integer, db.ForeignKey("wallet_address.id"), nullable=True)
     deactivated_at = db.Column(db.DateTime, nullable=True)
+    onchain_balance = db.Column(db.Float, nullable=False, default=0.0)
+    onchain_checked_at = db.Column(db.DateTime, nullable=True)
+    onchain_status = db.Column(db.String(32), nullable=False, default="unknown", index=True)
+    onchain_reason = db.Column(db.Text, nullable=False, default="")
+    onchain_confirmations = db.Column(db.Integer, nullable=False, default=0)
+    onchain_provider_reference = db.Column(db.String(220), nullable=False, default="")
     encrypted_metadata_json = db.Column(db.Text, nullable=False, default="{}")
     created_at = db.Column(db.DateTime, nullable=False, default=utcnow, index=True)
     updated_at = db.Column(db.DateTime, nullable=False, default=utcnow, onupdate=utcnow)
@@ -2158,6 +2291,65 @@ class AuditLog(db.Model):
     @details.setter
     def details(self, value: dict[str, Any]) -> None:
         self.metadata_json = json.dumps(value or {})
+
+
+class AdminAuditLog(db.Model):
+    """Append-only admin action log for financial admin workflows."""
+
+    id = db.Column(db.Integer, primary_key=True)
+    public_id = db.Column(db.String(40), unique=True, nullable=False, default=lambda: public_token("aal"), index=True)
+    admin_user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True, index=True)
+    action = db.Column(db.String(120), nullable=False, index=True)
+    entity_type = db.Column(db.String(80), nullable=False, index=True)
+    entity_public_id = db.Column(db.String(80), nullable=False, default="", index=True)
+    old_value_json = db.Column(db.Text, nullable=False, default="{}")
+    new_value_json = db.Column(db.Text, nullable=False, default="{}")
+    ip_address = db.Column(db.String(120), nullable=False, default="")
+    user_agent = db.Column(db.Text, nullable=False, default="")
+    metadata_json = db.Column(db.Text, nullable=False, default="{}")
+    created_at = db.Column(db.DateTime, nullable=False, default=utcnow, index=True)
+
+    admin_user = db.relationship("User", backref="admin_audit_logs")
+    __table_args__ = (
+        db.Index("ix_admin_audit_entity_created", "entity_type", "entity_public_id", "created_at"),
+        db.Index("ix_admin_audit_user_action_created", "admin_user_id", "action", "created_at"),
+    )
+
+    @property
+    def old_value(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.old_value_json or "{}")
+        except json.JSONDecodeError:
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    @old_value.setter
+    def old_value(self, value: dict[str, Any]) -> None:
+        self.old_value_json = json.dumps(value or {}, default=str)
+
+    @property
+    def new_value(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.new_value_json or "{}")
+        except json.JSONDecodeError:
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    @new_value.setter
+    def new_value(self, value: dict[str, Any]) -> None:
+        self.new_value_json = json.dumps(value or {}, default=str)
+
+    @property
+    def details(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.metadata_json or "{}")
+        except json.JSONDecodeError:
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    @details.setter
+    def details(self, value: dict[str, Any]) -> None:
+        self.metadata_json = json.dumps(value or {}, default=str)
 
 
 class RiskEvent(db.Model):

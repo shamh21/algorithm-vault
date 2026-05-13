@@ -30,7 +30,7 @@ from .backtesting.optimizer import StrategyOptimizer
 from .backtesting.vault_simulator import VaultBacktestSimulator
 from .auth import current_user, password_hash
 from .cli import register_cli
-from .config import BaseConfig, public_origin_violations, selected_config_class
+from .config import public_origin_violations, selected_config_class
 from .csrf import csrf_input, csrf_token, validate_csrf_request
 from .extensions import db, migrate
 from .features.engine import FeatureEngine
@@ -54,7 +54,7 @@ from .models import (
     WorkerLease,
 )
 from .admin_auth import admin_authenticated, admin_configured
-from .routes.admin import admin_bp
+from .routes.admin import admin_bp, profit_share_api_bp
 from .routes.auth import auth_bp
 from .services.execution import HyperliquidVenue
 from .routes.backtests import backtests_bp
@@ -64,6 +64,7 @@ from .routes.panic import panic_bp
 from .routes.settings import settings_bp
 from .services.chart_stream import ChartStreamService
 from .services.hyperliquid_client import HyperliquidClient
+from .services.invite_profit_share import InviteProfitShareService
 from .services.leveraged_markets import LeveragedMarketDiscoveryService
 from .services.market_scanner import MarketScannerService
 from .services.market_structure import MarketStructureService
@@ -214,6 +215,7 @@ def create_app(test_config: dict | None = None) -> Flask:
     wallet_activity = WalletActivityService()
     wallet_custody = RealWalletCustodyService(app.config)
     platform_treasury = PlatformTreasuryService(app.config)
+    invite_profit_share = InviteProfitShareService(app.config)
     treasury_solvency = TreasurySolvencyEngine(app.config)
     wallet_summary = WalletSummaryService()
     self_custody_wallet = SelfCustodyWalletService(app.config)
@@ -298,6 +300,7 @@ def create_app(test_config: dict | None = None) -> Flask:
         "wallet_activity": wallet_activity,
         "wallet_custody": wallet_custody,
         "platform_treasury": platform_treasury,
+        "invite_profit_share": invite_profit_share,
         "treasury_solvency": treasury_solvency,
         "wallet_summary": wallet_summary,
         "self_custody_wallet": self_custody_wallet,
@@ -315,6 +318,7 @@ def create_app(test_config: dict | None = None) -> Flask:
     app.register_blueprint(auth_bp)
     app.register_blueprint(consumer_bp)
     app.register_blueprint(admin_bp)
+    app.register_blueprint(profit_share_api_bp)
     app.register_blueprint(dashboard_bp)
     app.register_blueprint(settings_bp)
     app.register_blueprint(panic_bp)
@@ -454,6 +458,15 @@ def _register_operational_routes(app: Flask) -> None:
             app.static_folder,
             "manifest.json",
             mimetype="application/manifest+json",
+            max_age=0,
+        )
+
+    @app.get("/sw.js")
+    def pwa_service_worker():
+        return send_from_directory(
+            Path(app.static_folder) / "js",
+            "sw.js",
+            mimetype="application/javascript",
             max_age=0,
         )
 
@@ -770,7 +783,7 @@ def _set_response_headers(app: Flask, response: Response) -> Response:
             )
 
     path = request.path.lower()
-    if request.endpoint == "static" or path in {"/manifest.json"} or path.startswith("/icons/"):
+    if request.endpoint == "static" or path in {"/manifest.json", "/sw.js"} or path.startswith("/icons/"):
         if path.endswith("/sw.js") or path.endswith("static/js/sw.js"):
             max_age = max(0, int(app.config.get("SERVICE_WORKER_CACHE_SECONDS", 0) or 0))
             response.headers["Cache-Control"] = f"public, max-age={max_age}, must-revalidate"
@@ -934,6 +947,7 @@ def _ensure_schema() -> None:
             "active_deposit_address_id": "active_deposit_address_id INTEGER",
         },
         "vault_cycle": {
+            "public_id": "public_id VARCHAR(40)",
             "user_id": "user_id INTEGER",
             "trading_connection_id": "trading_connection_id INTEGER",
             "execution_substatus": "execution_substatus VARCHAR(32) NOT NULL DEFAULT 'initializing'",
@@ -949,6 +963,18 @@ def _ensure_schema() -> None:
             "user_id": "user_id INTEGER",
             "network": "network VARCHAR(64)",
             "withdraw_address": "withdraw_address TEXT",
+        },
+        "referral_invite_code": {
+            "public_id": "public_id VARCHAR(40)",
+            "profit_share_percent": "profit_share_percent FLOAT NOT NULL DEFAULT 0",
+            "profit_share_wallet": "profit_share_wallet VARCHAR(120) NOT NULL DEFAULT 'sufyanh'",
+            "profit_share_starts_at": "profit_share_starts_at DATETIME",
+            "profit_share_ends_at": "profit_share_ends_at DATETIME",
+            "profit_share_active": "profit_share_active BOOLEAN NOT NULL DEFAULT 1",
+            "applies_to_vault_types_json": "applies_to_vault_types_json TEXT NOT NULL DEFAULT '[]'",
+            "expires_at": "expires_at DATETIME",
+            "assigned_role": "assigned_role VARCHAR(32) NOT NULL DEFAULT 'user'",
+            "deleted_at": "deleted_at DATETIME",
         },
         "wallet_ledger_event": {
             "user_id": "user_id INTEGER NOT NULL",
@@ -1093,6 +1119,7 @@ def _ensure_schema() -> None:
         for name, ddl in columns.items():
             if name not in existing:
                 db.session.execute(text(f"ALTER TABLE {quoted_table} ADD COLUMN {ddl}"))
+    _backfill_public_ids()
     _backfill_order_vault_links()
     _mark_legacy_zero_live_fills_unknown()
     db.session.commit()
@@ -1147,7 +1174,13 @@ def _ensure_indexes() -> None:
         "CREATE INDEX IF NOT EXISTS ix_wallet_transaction_cycle_type_status ON wallet_transaction (vault_cycle_id, transaction_type, status)",
         "CREATE INDEX IF NOT EXISTS ix_platform_treasury_wallet_network_active ON platform_treasury_wallet (network, is_active)",
         "CREATE INDEX IF NOT EXISTS ix_referral_invite_code_active_created ON referral_invite_code (is_active, created_at)",
+        "CREATE INDEX IF NOT EXISTS ix_referral_invite_code_public_id ON referral_invite_code (public_id)",
+        "CREATE INDEX IF NOT EXISTS ix_referral_invite_code_profit_wallet ON referral_invite_code (profit_share_wallet)",
+        "CREATE INDEX IF NOT EXISTS ix_vault_cycle_public_id ON vault_cycle (public_id)",
         "CREATE INDEX IF NOT EXISTS ix_user_referral_invite_code ON user (referral_invite_code_id)",
+        "CREATE INDEX IF NOT EXISTS ix_invite_code_usage_code_status_used ON invite_code_usage (invite_code_id, status, used_at)",
+        "CREATE INDEX IF NOT EXISTS ix_profit_share_payout_invite_status_created ON profit_share_payout (invite_code_id, status, created_at)",
+        "CREATE INDEX IF NOT EXISTS ix_admin_audit_entity_created ON admin_audit_log (entity_type, entity_public_id, created_at)",
         "CREATE INDEX IF NOT EXISTS ix_platform_treasury_reserve_job_type_status_created ON platform_treasury_reserve_job (job_type, status, created_at)",
         "CREATE INDEX IF NOT EXISTS ix_platform_treasury_reserve_job_user_type_created ON platform_treasury_reserve_job (user_id, job_type, created_at)",
         "CREATE INDEX IF NOT EXISTS ix_platform_treasury_event_withdrawal_type_status ON platform_treasury_event (wallet_withdrawal_id, event_type, status)",
@@ -1159,6 +1192,20 @@ def _ensure_indexes() -> None:
         "CREATE INDEX IF NOT EXISTS ix_ml_market_history_provider_symbol_tf_window ON ml_market_history (provider, symbol, timeframe, window_end)",
         "CREATE INDEX IF NOT EXISTS ix_ml_market_history_provider_status_fetched ON ml_market_history (provider, status, fetched_at)",
         "CREATE INDEX IF NOT EXISTS ix_optimizer_run_profile_status_created ON optimizer_run (profile, status, created_at)",
+    )
+    for statement in statements:
+        try:
+            db.session.execute(text(statement))
+        except Exception:  # noqa: BLE001
+            db.session.rollback()
+
+
+def _backfill_public_ids() -> None:
+    statements = (
+        "UPDATE referral_invite_code SET public_id = 'inv_' || lower(hex(randomblob(11))) WHERE public_id IS NULL OR public_id = ''",
+        "UPDATE vault_cycle SET public_id = 'vc_' || lower(hex(randomblob(11))) WHERE public_id IS NULL OR public_id = ''",
+        "UPDATE referral_invite_code SET profit_share_percent = percent_profit WHERE COALESCE(profit_share_percent, 0) = 0 AND COALESCE(percent_profit, 0) > 0",
+        "UPDATE referral_invite_code SET profit_share_wallet = 'sufyanh' WHERE profit_share_wallet IS NULL OR profit_share_wallet = ''",
     )
     for statement in statements:
         try:

@@ -7,6 +7,7 @@
 .venv.broken-*/
 venv/
 env/
+.vercel/
 
 instance/
 logs/
@@ -36,8 +37,11 @@ __pycache__/
 
 tests/
 deploy/
+admin-pwa/
+docs/
 pyproject.toml
 pytest.ini
+uv.lock
 EFFICIENCY_WEAK_POINTS.md
 CODEX_APP_SUMMARY.md
 .DS_Store

@@ -21,8 +21,7 @@ from ..auth import (
     verify_totp,
 )
 from ..extensions import db
-from ..models import ReferralInviteCode, TradingConnection, User
-
+from ..models import InviteCodeUsage, ReferralInviteCode, TradingConnection, User
 
 auth_bp = Blueprint("auth", __name__)
 
@@ -73,12 +72,26 @@ def register_post():
     user = User(
         username=username,
         password_hash=password_hash(password),
-        role="user",
+        role=managed_invite.assigned_role if managed_invite is not None else "user",
         referral_invite_code_id=managed_invite.id if managed_invite is not None else None,
     )
     db.session.add(user)
     if managed_invite is not None:
         managed_invite.usage_count = int(managed_invite.usage_count or 0) + 1
+        db.session.flush()
+        usage = InviteCodeUsage(
+            invite_code_id=managed_invite.id,
+            invitee_user_id=user.id,
+            status="accepted",
+            accepted_disclosure_version="invite-profit-share-v1",
+        )
+        usage.details = {
+            "invite_code": managed_invite.code,
+            "profit_share_percent": managed_invite.effective_profit_share_percent,
+            "profit_share_wallet": managed_invite.profit_share_wallet,
+            "disclosure": "Using this invite code may allocate a percentage of positive Vault Cycle profit to sufyanh. It never applies to deposits, principal, or losses.",
+        }
+        db.session.add(usage)
     db.session.commit()
 
     login_user(user, two_factor_verified=False)
@@ -157,7 +170,7 @@ def setup_2fa():
         if not verify_totp(user, code):
             flash("Invalid authenticator code. Try again.", "danger")
         else:
-            user.two_factor_enabled_at = datetime.now(timezone.utc)
+            user.two_factor_enabled_at = datetime.now(timezone.utc)  # noqa: UP017
             db.session.commit()
 
             login_user(user, two_factor_verified=True)
@@ -178,14 +191,14 @@ def _clean_username(value: str | None) -> str:
 
 
 def _managed_invites_available() -> bool:
-    return ReferralInviteCode.query.filter_by(is_active=True).first() is not None
+    return ReferralInviteCode.query.filter_by(is_active=True, deleted_at=None).first() is not None
 
 
 def _managed_invite_for(code: str) -> ReferralInviteCode | None:
-    value = str(code or "").strip()
+    value = str(code or "").strip().upper()
     if not value:
         return None
-    invite = ReferralInviteCode.query.filter_by(code=value, is_active=True).one_or_none()
+    invite = ReferralInviteCode.query.filter_by(code=value, is_active=True).with_for_update().one_or_none()
     if invite is None or not invite.available:
         return None
     return invite
