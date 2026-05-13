@@ -37,6 +37,10 @@
     <link rel="preload" as="style" href="{{ url_for('static', filename='css/app.css') }}?v={{ asset_v }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}?v={{ asset_v }}">
     {% block page_styles %}{% endblock %}
+    <script>
+      window.va = window.va || function () { (window.vaq = window.vaq || []).push(arguments); };
+    </script>
+    <script defer src="/_vercel/insights/script.js"></script>
   </head>
   <body class="app-body app-starting mode-{{ nav_mode|default('live') }}" data-safe-area>
     <svg class="app-icon-sprite" aria-hidden="true" focusable="false">
