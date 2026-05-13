@@ -16,7 +16,7 @@ from sqlalchemy.orm import joinedload
 from ...auth import current_user, qr_code_data_uri, require_authenticated_user, verify_totp
 from ...extensions import db
 from ...ml.online_ranker import ONE_H10_HORIZON, extract_features, horizon_from_context, horizon_from_duration, outcome_from_result
-from ...models import AuditLog, DepositAddress, Fill, LeveragedMarket, Order, Setting, StrategyRun, TradingConnection, VaultAllocationLeg, VaultCycle, WalletAddress, WalletBalance, WalletTransaction
+from ...models import AuditLog, DepositAddress, Fill, LeveragedMarket, Order, Setting, StrategyRanking, StrategyRun, TradingConnection, VaultAllocationLeg, VaultCycle, WalletAddress, WalletBalance, WalletTransaction
 from ...runtime import get_current_mode, get_service, market_mode_for
 from ...services.connection_health import build_connection_health, latest_connection_health, operator_connection_message, store_connection_health
 from ...services.db_retry import commit_with_retry, is_database_locked
@@ -57,10 +57,21 @@ _CYCLE_START_JOB_LOCK = threading.Lock()
 _CYCLE_START_JOB_KEY_PREFIX = "vault_start_job"
 _CYCLE_START_IDEMPOTENCY_KEY_PREFIX = "vault_start_idem"
 _CYCLE_START_SYNC_IDEMPOTENCY_KEY_PREFIX = "vault_start_cycle_idem"
+_LIVE_API_DELEGATED_ENDPOINTS = {
+    "consumer.vault_readiness",
+    "consumer.vault_preview_route",
+    "consumer.vault_routing_preview",
+    "consumer.start_cycle",
+    "consumer.create_vault_cycle",
+    "consumer.vault_cycle_status",
+    "consumer.cycle_start_status",
+}
 
 
 @consumer_bp.before_request
 def _protect_consumer():
+    if request.method == "OPTIONS":
+        return None
     if request.endpoint and request.endpoint.startswith("consumer.legacy_"):
         return None
     vault_diagnostic_endpoints = {
@@ -74,6 +85,15 @@ def _protect_consumer():
     guard = require_authenticated_user()
     if guard is not None:
         return guard
+    if request.endpoint in _LIVE_API_DELEGATED_ENDPOINTS and _vault_live_api_deferred_for_request():
+        return jsonify(
+            {
+                "ok": False,
+                "code": "live_api_origin_required",
+                "message": "Vault live exchange checks must be sent to the configured live API origin.",
+                "live_api_origin": _public_live_api_origin(),
+            }
+        ), 409
     user = current_user()
     if (
         user is not None
@@ -86,6 +106,36 @@ def _protect_consumer():
     return None
 
 
+def _origin_from_url(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(raw)
+    except Exception:  # noqa: BLE001
+        return raw.rstrip("/")
+    if not parsed.scheme or not parsed.netloc:
+        return raw.rstrip("/")
+    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}".rstrip("/")
+
+
+def _request_origin() -> str:
+    return _origin_from_url(request.host_url)
+
+
+def _public_live_api_origin() -> str:
+    return _origin_from_url(str(current_app.config.get("PUBLIC_LIVE_API_ORIGIN") or ""))
+
+
+def _vault_live_api_deferred_for_request() -> bool:
+    live_origin = _public_live_api_origin()
+    if not live_origin:
+        return False
+    return _request_origin() != live_origin
+
+
 @consumer_bp.get("/")
 def home():
     user = current_user()
@@ -93,10 +143,12 @@ def home():
     balances = _wallet_balances(user)
     wallet_summary = get_service("wallet_summary").summary_for_user(user, balances=balances)
     enabled_provider_states = _enabled_provider_states(user)
+    dashboard_payload = _home_command_center_payload(user, wallet_summary, balances, enabled_provider_states)
     return render_template(
         "home.html",
         portfolio_total=wallet_summary.portfolio_total_usd,
         enabled_provider_states=enabled_provider_states,
+        dashboard_payload=dashboard_payload,
     )
 
 
@@ -255,6 +307,14 @@ def withdraw(asset: str):
             if max_amount > 0 and amount > max_amount:
                 errors["amount"] = f"Withdrawal amount exceeds configured {asset} cap."
 
+        if not errors and real_wallet_mode:
+            try:
+                _materialize_onchain_surplus_for_operation(user, asset, network, amount)
+                db.session.flush()
+                db.session.refresh(balance)
+            except Exception as exc:  # noqa: BLE001
+                errors["amount"] = str(exc)
+
         if not errors:
             wallet_service = get_service("self_custody_wallet")
             connection = _active_trading_connection(user)
@@ -362,23 +422,39 @@ def withdraw(asset: str):
 @consumer_bp.get("/vault/", strict_slashes=False)
 def vault():
     user = current_user()
-    _sync_completed_cycles(user)
+    defer_live_api = _vault_live_api_deferred_for_request()
+    if not defer_live_api:
+        _sync_completed_cycles(user)
     balances = _wallet_balances(user)
     default_asset = _default_vault_asset(balances)
-    active_cycles = _active_cycles(user)
-    recovered_run_ids = _recover_active_one_h10_cycles(active_cycles)
+    active_cycles = _active_cycles(user, refresh=not defer_live_api)
+    recovered_run_ids = [] if defer_live_api else _recover_active_one_h10_cycles(active_cycles)
     for cycle in active_cycles:
-        cycle.cycle_summary = _cycle_summary(cycle)
+        cycle.cycle_summary = (
+            get_service("vault_cycle_reporting").status_payload(cycle)
+            if defer_live_api
+            else _cycle_summary(cycle)
+        )
     cycle_page = get_service("vault_activity").page_for_user(user.id, page=_vault_cycle_page_number())
-    initial_routing_preview = _vault_routing_preview_payload(
-        user=user,
-        amount=0.0,
-        deposit_asset=default_asset,
-        settlement_asset=default_asset,
-        providers=list(VAULT_UI_PROVIDERS),
+    initial_routing_preview = (
+        _deferred_live_api_routing_preview_payload(
+            amount=0.0,
+            deposit_asset=default_asset,
+            settlement_asset=default_asset,
+            providers=list(VAULT_UI_PROVIDERS),
+        )
+        if defer_live_api
+        else _vault_routing_preview_payload(
+            user=user,
+            amount=0.0,
+            deposit_asset=default_asset,
+            settlement_asset=default_asset,
+            providers=list(VAULT_UI_PROVIDERS),
+        )
     )
     commit_with_retry()
-    _start_strategy_runs(recovered_run_ids)
+    if not defer_live_api:
+        _start_strategy_runs(recovered_run_ids)
     return render_template(
         "vault.html",
         balances=balances,
@@ -502,6 +578,19 @@ def start_cycle():
 
     balances = _wallet_balances(user)
     balance = next((item for item in balances if item.asset == asset), None)
+    network = _asset_networks(asset)[0]
+    verified_spendable = _verified_spendable_amount(user, asset, network)
+    if verified_spendable is not None:
+        if verified_spendable + 1e-9 < amount:
+            flash("That allocation is higher than the verified on-chain wallet balance.", "danger")
+            return redirect(url_for("consumer.vault"))
+        try:
+            _materialize_onchain_surplus_for_operation(user, asset, network, amount)
+            db.session.flush()
+            balance = WalletBalance.query.filter_by(user_id=user.id, asset=asset).one_or_none()
+        except Exception as exc:  # noqa: BLE001
+            flash(str(exc), "danger")
+            return redirect(url_for("consumer.vault"))
     if balance is None or float(balance.available_balance) + 1e-9 < amount:
         flash("That allocation is higher than the available wallet balance.", "danger")
         return redirect(url_for("consumer.vault"))
@@ -1104,7 +1193,8 @@ def _vault_readiness_payload_from_request(*, source: str) -> dict[str, object]:
         use_max = str(_request_value("max", _request_value("use_max", ""))).lower() in {"1", "true", "yes", "on"}
     if use_max:
         balance = WalletBalance.query.filter_by(user_id=user.id, asset=deposit_asset).one_or_none()
-        amount = float(balance.available_balance or 0.0) if balance is not None else 0.0
+        verified = _verified_spendable_amount(user, deposit_asset, _asset_networks(deposit_asset)[0])
+        amount = verified if verified is not None else (float(balance.available_balance or 0.0) if balance is not None else 0.0)
     providers = _requested_provider_keys(source=source)
     cycle_value = (
         str(request.args.get("cycle") or request.args.get("cycle_type") or "1H10")
@@ -1226,12 +1316,15 @@ def cycle_detail(cycle_id: int):
         flash("Vault cycle was not found.", "danger")
         return redirect(url_for("consumer.activity"))
     performance = None
-    if cycle.status in {"active", "settling"}:
+    if cycle.status in {"active", "settling"} and not _vault_live_api_deferred_for_request():
         performance = _refresh_cycle_performance(cycle)
         recovered_run_ids = _recover_active_one_h10_cycles([cycle])
         commit_with_retry()
         _start_strategy_runs(recovered_run_ids)
-    summary = _cycle_summary(cycle, performance=performance) if cycle.status in {"active", "settling"} else cycle.cycle_summary or _cycle_summary(cycle)
+    if cycle.status in {"active", "settling"} and _vault_live_api_deferred_for_request():
+        summary = get_service("vault_cycle_reporting").status_payload(cycle)
+    else:
+        summary = _cycle_summary(cycle, performance=performance) if cycle.status in {"active", "settling"} else cycle.cycle_summary or _cycle_summary(cycle)
     return render_template(
         "cycle_detail.html",
         cycle=cycle,
@@ -1386,13 +1479,28 @@ def _max_withdrawal_amount(user, asset: str, network: str) -> float:
     app_balance = float(balance.available_balance or 0.0) if balance is not None else 0.0
     if not use_real_addresses(current_app.config):
         return app_balance
-    if asset not in {"USDT", "USDC", "ETH"} or network != "Ethereum":
+    verified = _verified_spendable_amount(user, asset, network)
+    if verified is None:
         return app_balance
+    return verified
+
+
+def _verified_spendable_amount(user, asset: str, network: str) -> float | None:
     try:
         custody = get_service("wallet_custody")
-        return custody.verified_withdrawable_amount(user.id, asset, network, app_balance)
-    except Exception:
-        return app_balance
+        if not getattr(custody, "enabled", False) or not custody.supports(asset, network):
+            return None
+        return float(custody.verified_spendable_amount(user.id, asset, network) or 0.0)
+    except Exception as exc:  # noqa: BLE001
+        current_app.logger.warning("Verified on-chain spendable check failed closed for %s/%s: %s", asset, network, exc)
+        return 0.0
+
+
+def _materialize_onchain_surplus_for_operation(user, asset: str, network: str, amount: float) -> dict[str, object] | None:
+    custody = get_service("wallet_custody")
+    if not getattr(custody, "enabled", False) or not custody.supports(asset, network):
+        return None
+    return custody.materialize_onchain_surplus(user.id, asset, network, amount)
 
 
 def _decimal_amount(value: float) -> str:
@@ -1426,6 +1534,289 @@ def _enabled_provider_states(user) -> list[dict[str, object]]:
         }
         for connection in connections
     ]
+
+
+def _home_command_center_payload(user, wallet_summary, balances: list[WalletBalance], enabled_provider_states: list[dict[str, object]]) -> dict[str, object]:
+    """Build the read-only mobile command center from existing product data."""
+
+    now = datetime.utcnow()
+    active_cycles = _active_cycles(user, refresh=False)
+    cycle_page = get_service("vault_activity").page_for_user(user.id, page=1)
+    activity_page = get_service("wallet_activity").page_for_user(user.id, page=1)
+    recent_cycles = _dedupe_cycles([*active_cycles, *list(cycle_page.items or [])])
+    strategy_runs = StrategyRun.query.order_by(StrategyRun.created_at.desc()).limit(8).all()
+    strategy_rankings = (
+        StrategyRanking.query.order_by(
+            StrategyRanking.score.desc(),
+            StrategyRanking.created_at.desc(),
+        )
+        .limit(8)
+        .all()
+    )
+    risk_status = _home_risk_status(user)
+    market_summary = _home_market_summary()
+    portfolio_total = float(getattr(wallet_summary, "portfolio_total_usd", 0.0) or 0.0)
+    active_value = sum(float(cycle.current_estimated_value_usd or cycle.starting_value_usd or 0.0) for cycle in active_cycles)
+    exposure_pct = (active_value / portfolio_total * 100.0) if portfolio_total > 0 else 0.0
+    blocked = bool(risk_status.get("panic_lock") or risk_status.get("live_trading_blocked"))
+
+    return {
+        "generated_at": now.isoformat(),
+        "mode": get_current_mode(),
+        "vault_pulse": {
+            "balance_usd": portfolio_total,
+            "active_cycles": len(active_cycles),
+            "enabled_providers": sum(1 for item in enabled_provider_states if item.get("is_active")),
+            "provider_total": len(enabled_provider_states),
+            "risk_state": "Blocked" if blocked else "Monitoring",
+            "risk_detail": _home_risk_detail(risk_status),
+            "market_exposure_pct": exposure_pct,
+            "active_value_usd": active_value,
+        },
+        "pnl": _home_pnl_cards(recent_cycles, now),
+        "performance": _home_performance_points(recent_cycles, portfolio_total),
+        "allocation": _home_allocation_items(balances, portfolio_total),
+        "bots": _home_strategy_cards(strategy_rankings, strategy_runs),
+        "bot_summary": _home_bot_summary(strategy_rankings, strategy_runs),
+        "markets": market_summary,
+        "insights": _home_insights(recent_cycles, active_cycles, risk_status, exposure_pct),
+        "activity": _home_activity_items(activity_page.items, cycle_page.items),
+    }
+
+
+def _dedupe_cycles(cycles: list[VaultCycle]) -> list[VaultCycle]:
+    seen: set[int] = set()
+    unique: list[VaultCycle] = []
+    for cycle in cycles:
+        if cycle.id in seen:
+            continue
+        seen.add(cycle.id)
+        unique.append(cycle)
+    return unique
+
+
+def _home_risk_status(user) -> dict[str, object]:
+    try:
+        mode = get_current_mode()
+        connection = _active_trading_connection(user)
+        status = get_service("risk_engine").status(
+            mode,
+            user_id=user.id if user else None,
+            trading_connection_id=connection.id if connection else None,
+        )
+        return dict(status or {})
+    except Exception as exc:  # noqa: BLE001
+        current_app.logger.warning("Home risk status unavailable: %s", exc)
+        return {"live_trading_blocked": True, "panic_lock": False, "reason": "Risk status unavailable"}
+
+
+def _home_risk_detail(risk_status: dict[str, object]) -> str:
+    if risk_status.get("panic_lock"):
+        return "Safety lock active"
+    if risk_status.get("live_trading_blocked"):
+        return "Live gates require review"
+    daily_pnl = _safe_float(risk_status.get("daily_realized_pnl"))
+    daily_limit = _safe_float(risk_status.get("daily_loss_limit"))
+    if daily_limit > 0:
+        return f"Daily P&L {daily_pnl:.2f} / limit {daily_limit:.2f}"
+    return "Risk gates nominal"
+
+
+def _home_market_summary() -> list[dict[str, object]]:
+    try:
+        config = current_app.config
+        symbols = config.get("ALLOWED_SYMBOLS", ["BTC", "ETH", "SOL", "XRP"])
+        timeframe = config.get("DEFAULT_TIMEFRAME", "15m")
+        market_mode = market_mode_for(get_current_mode())
+        rows = get_service("market_data").get_dashboard_market_summary(symbols, timeframe, market_mode)
+    except Exception as exc:  # noqa: BLE001
+        current_app.logger.warning("Home market summary unavailable: %s", exc)
+        rows = []
+    payload = []
+    for row in list(rows or [])[:8]:
+        payload.append(
+            {
+                "symbol": str(row.get("symbol") or "N/A"),
+                "price": _safe_float(row.get("mid")),
+                "change_pct": _safe_float(row.get("change_pct")),
+                "volume": _safe_float(row.get("volume")),
+                "status": str(row.get("status") or "live").replace("_", " ").title(),
+            }
+        )
+    return payload
+
+
+def _home_pnl_cards(cycles: list[VaultCycle], now: datetime) -> list[dict[str, object]]:
+    windows = [
+        ("Daily", timedelta(days=1)),
+        ("Weekly", timedelta(days=7)),
+        ("Monthly", timedelta(days=30)),
+    ]
+    cards = []
+    for label, delta in windows:
+        cutoff = now - delta
+        value = sum(_cycle_pnl_value(cycle) for cycle in cycles if (cycle.started_at or now) >= cutoff)
+        cards.append({"label": label, "value": value, "tone": _money_tone(value)})
+    return cards
+
+
+def _home_performance_points(cycles: list[VaultCycle], portfolio_total: float) -> list[dict[str, object]]:
+    sorted_cycles = sorted(cycles, key=lambda cycle: cycle.started_at or datetime.utcnow())[-12:]
+    points = []
+    running_value = max(0.0, float(portfolio_total or 0.0) - sum(_cycle_pnl_value(cycle) for cycle in sorted_cycles))
+    for cycle in sorted_cycles:
+        running_value += _cycle_pnl_value(cycle)
+        started_at = cycle.started_at or datetime.utcnow()
+        points.append(
+            {
+                "label": started_at.strftime("%b %d"),
+                "timestamp": started_at.isoformat(),
+                "value": running_value,
+                "pnl": _cycle_pnl_value(cycle),
+            }
+        )
+    return points
+
+
+def _home_allocation_items(balances: list[WalletBalance], portfolio_total: float) -> list[dict[str, object]]:
+    items = []
+    for balance in sorted(balances, key=lambda item: float(item.estimated_usd_value or 0.0), reverse=True)[:6]:
+        value = float(balance.estimated_usd_value or 0.0)
+        pct = (value / portfolio_total * 100.0) if portfolio_total > 0 else 0.0
+        items.append(
+            {
+                "asset": balance.asset,
+                "value_usd": value,
+                "available": float(balance.available_balance or 0.0),
+                "locked": float(balance.locked_balance or 0.0),
+                "allocation_pct": pct,
+            }
+        )
+    return items
+
+
+def _home_strategy_cards(rankings: list[StrategyRanking], strategy_runs: list[StrategyRun]) -> list[dict[str, object]]:
+    latest_runs: dict[tuple[str, str, str], StrategyRun] = {}
+    for run in strategy_runs:
+        key = (str(run.strategy_name), str(run.symbol), str(run.timeframe))
+        latest_runs.setdefault(key, run)
+    cards = []
+    for ranking in rankings:
+        key = (str(ranking.strategy_name), str(ranking.symbol), str(ranking.timeframe))
+        run = latest_runs.get(key)
+        last_signal = dict(run.last_signal or {}) if run is not None else {}
+        rejected = bool(ranking.rejected)
+        status = "Warning" if rejected else (str(run.status).replace("_", " ").title() if run is not None else "Monitoring")
+        cards.append(
+            {
+                "name": ranking.strategy_name.replace("_", " ").title(),
+                "status": status,
+                "status_tone": "warning" if rejected else _status_tone(status),
+                "pair": ranking.symbol,
+                "timeframe": ranking.timeframe,
+                "provider": ranking.provider.title(),
+                "pnl_pct": _safe_float(ranking.recent_performance_score) * 100.0,
+                "win_rate": _safe_float(ranking.win_rate) * 100.0,
+                "drawdown": _safe_float(ranking.max_drawdown) * 100.0,
+                "score": _safe_float(ranking.score),
+                "risk_mode": ranking.risk_label or ranking.profile.replace("_", " ").title(),
+                "last_action": str(last_signal.get("action") or ("Rejected" if rejected else "Monitoring")).replace("_", " ").title(),
+                "detail": ranking.rejection_reason or "; ".join(ranking.warnings[:2]) or "Read-only automation candidate.",
+            }
+        )
+    return cards
+
+
+def _home_bot_summary(rankings: list[StrategyRanking], strategy_runs: list[StrategyRun]) -> dict[str, int]:
+    running = sum(1 for run in strategy_runs if str(run.status).lower() in {"running", "active", "live", "monitoring"})
+    warning = sum(1 for ranking in rankings if ranking.rejected or ranking.warnings)
+    return {
+        "running": running,
+        "monitoring": max(0, len(rankings) - warning),
+        "warning": warning,
+        "paused": sum(1 for run in strategy_runs if str(run.status).lower() in {"paused", "disabled"}),
+    }
+
+
+def _home_insights(cycles: list[VaultCycle], active_cycles: list[VaultCycle], risk_status: dict[str, object], exposure_pct: float) -> dict[str, object]:
+    pnl_values = [_cycle_pnl_value(cycle) for cycle in cycles]
+    drawdown = min(pnl_values) if pnl_values else 0.0
+    wins = sum(1 for value in pnl_values if value > 0)
+    completed = len([cycle for cycle in cycles if cycle.status not in {"active", "settling"}])
+    confidence = 100.0
+    if risk_status.get("panic_lock") or risk_status.get("live_trading_blocked"):
+        confidence = 42.0
+    elif exposure_pct > 80:
+        confidence = 68.0
+    elif active_cycles:
+        confidence = 78.0
+    return {
+        "drawdown_usd": drawdown,
+        "active_exposure_pct": exposure_pct,
+        "automation_confidence": confidence,
+        "completed_cycles": completed,
+        "win_rate": (wins / len(pnl_values) * 100.0) if pnl_values else 0.0,
+    }
+
+
+def _home_activity_items(transactions: list[WalletTransaction], cycles: list[VaultCycle]) -> list[dict[str, object]]:
+    items: list[dict[str, object]] = []
+    for item in list(transactions or [])[:5]:
+        items.append(
+            {
+                "title": str(item.transaction_type or "wallet").replace("_", " ").title(),
+                "detail": f"{_safe_float(item.amount):.6f} {item.asset}",
+                "status": str(item.status or "recorded").replace("_", " ").title(),
+                "timestamp": item.created_at.isoformat() if item.created_at else "",
+                "label": item.created_at.strftime("%b %d, %H:%M") if item.created_at else "Recent",
+                "tone": "success" if _safe_float(item.amount) >= 0 else "neutral",
+            }
+        )
+    for cycle in list(cycles or [])[:5]:
+        items.append(
+            {
+                "title": f"Vault cycle {str(cycle.execution_substatus or cycle.status).replace('_', ' ')}",
+                "detail": f"{_safe_float(cycle.deposit_amount):.6f} {cycle.deposit_asset} · {_safe_float(cycle.current_estimated_value_usd):.2f} USD",
+                "status": str(cycle.status or "cycle").replace("_", " ").title(),
+                "timestamp": cycle.started_at.isoformat() if cycle.started_at else "",
+                "label": cycle.started_at.strftime("%b %d, %H:%M") if cycle.started_at else "Recent",
+                "tone": _money_tone(_cycle_pnl_value(cycle)),
+            }
+        )
+    items.sort(key=lambda row: str(row.get("timestamp") or ""), reverse=True)
+    return items[:6]
+
+
+def _cycle_pnl_value(cycle: VaultCycle) -> float:
+    metadata = cycle.selection_metadata
+    if "total_pnl_usd" in metadata:
+        return _safe_float(metadata.get("total_pnl_usd"))
+    return _safe_float(cycle.current_estimated_value_usd) - _safe_float(cycle.starting_value_usd)
+
+
+def _safe_float(value: object, default: float = 0.0) -> float:
+    try:
+        parsed = float(value or 0.0)
+    except (TypeError, ValueError):
+        return default
+    return parsed if math.isfinite(parsed) else default
+
+
+def _money_tone(value: float) -> str:
+    if value > 0:
+        return "success"
+    if value < 0:
+        return "danger"
+    return "neutral"
+
+
+def _status_tone(status: str) -> str:
+    normalized = str(status or "").lower()
+    if any(token in normalized for token in ("error", "blocked", "failed", "warning")):
+        return "danger" if "error" in normalized or "failed" in normalized else "warning"
+    if any(token in normalized for token in ("running", "active", "live", "ready")):
+        return "success"
+    return "neutral"
 
 
 def _vault_cycle_options() -> list[dict[str, object]]:
@@ -1508,6 +1899,89 @@ def _requested_provider_keys(source: str = "form") -> list[str]:
     if source == "form" and _request_value("providers_submitted", "") and not selected:
         return []
     return selected or list(VAULT_UI_PROVIDERS)
+
+
+def _deferred_live_api_routing_preview_payload(
+    *,
+    amount: float,
+    deposit_asset: str,
+    settlement_asset: str,
+    providers: list[str] | None = None,
+) -> dict[str, object]:
+    requested = [provider for provider in dict.fromkeys(providers or list(VAULT_UI_PROVIDERS)) if provider in VAULT_UI_PROVIDERS]
+    requested = requested or list(VAULT_UI_PROVIDERS)
+    amount = max(0.0, float(amount or 0.0))
+    provider_rows = [
+        {
+            "provider": option["provider"],
+            "label": option["label"],
+            "short_label": option["short_label"],
+            "enabled": option["provider"] in requested,
+            "connected": False,
+            "can_trade": False,
+            "collateral_asset": provider_collateral_asset(option["provider"]),
+            "available_margin_usd": 0.0,
+            "allocation_weight": 0.0,
+            "allocation_pct": 0.0,
+            "target_amount": 0.0,
+            "notional_usd": 0.0,
+            "routing_score": 0.0,
+            "score": 0.0,
+            "status": "checking" if option["provider"] in requested else "disabled",
+            "blockers": [],
+            "warnings": [],
+        }
+        for option in _vault_provider_options()
+    ]
+    active_blockers = [
+        {
+            "code": "amount_required",
+            "title": "Amount required",
+            "description": "Enter an amount greater than 0 before starting a 1H10 vault cycle.",
+            "severity": "blocker",
+            "fix_hint": "Use MAX or enter an amount within your available balance.",
+        }
+    ] if amount <= 0 else []
+    return {
+        "ok": False,
+        "ready": False,
+        "mode": "delegated_live_api",
+        "state_label": "Amount Required" if amount <= 0 else "Checking Live API",
+        "cycle": {
+            "type": "one_h10",
+            "label": "1H10",
+            "duration_seconds": 3600,
+            "duration_label": "1 hour",
+        },
+        "providers": provider_rows,
+        "summary": {
+            "amount": amount,
+            "deposit_asset": deposit_asset,
+            "settlement_asset": settlement_asset,
+            "allocation_engine": "1H10 Smart Router",
+            "selected_provider_count": len(requested),
+            "ready_provider_count": 0,
+            "allocated_total": 0.0,
+            "notional_usd": 0.0,
+            "total_free_margin_usd": 0.0,
+            "ml_readiness": {"display_status": "Live API check pending"},
+            "routing_summary": "Enter amount to generate route." if amount <= 0 else "Checking live API route.",
+        },
+        "blockers": active_blockers,
+        "active_blockers": active_blockers,
+        "exchange_blockers": [],
+        "warnings": [],
+        "exchange_status": {},
+        "routing_preview": {
+            "notional_usd": 0.0,
+            "routes": [],
+            "summary": "Enter amount to generate route." if amount <= 0 else "Checking live API route.",
+        },
+        "ready_exchange_count": 0,
+        "total_exchange_count": len(requested),
+        "live_api_origin": _public_live_api_origin(),
+        "live_api_deferred": True,
+    }
 
 
 def _vault_routing_preview_payload(
@@ -2930,6 +3404,8 @@ def _active_cycle(user) -> VaultCycle | None:
 
 
 def _active_cycles(user, *, refresh: bool = True) -> list[VaultCycle]:
+    if refresh and _vault_live_api_deferred_for_request():
+        refresh = False
     cycles = (
         VaultCycle.query.filter_by(user_id=user.id)
         .filter(VaultCycle.status.in_(["active", "settling"]))
@@ -3035,6 +3511,8 @@ def _symbol_exposure_usd(active_cycles: list[VaultCycle], symbols: set[str]) -> 
 
 
 def _sync_completed_cycles(user) -> None:
+    if _vault_live_api_deferred_for_request():
+        return
     now = datetime.utcnow()
     try:
         get_service("vault_cycle_trading_enforcer").enforce_active_cycles(user.id)
@@ -3946,6 +4424,8 @@ def _sanitize_cycle_reason(reason: object) -> str:
         return "Provider rate limited market data or account data; retrying after backoff."
     if "provider_market_data_unavailable" in lower:
         return "Provider-specific market data is unavailable for this symbol; waiting for a safe data source."
+    if "400302" in lower or "currently unavailable in the u.s" in lower or "current ip:" in lower:
+        return "KuCoin is unavailable from this runtime region; use a compliant non-restricted fixed-egress live API runtime."
     if "invalid request ip" in lower:
         return text
     if len(text) > 240:

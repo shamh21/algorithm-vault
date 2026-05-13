@@ -10,7 +10,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 
-from flask import current_app
+from flask import current_app, has_app_context
 
 from ..extensions import db
 from ..ml.online_ranker import ONE_H10_HORIZON
@@ -160,6 +160,10 @@ class VaultReadinessService:
 
         local_balance = self._wallet_balance(user.id if user else None, funding_asset)
         available_funding = float(local_balance.available_balance or 0.0) if local_balance is not None else 0.0
+        if user is not None:
+            verified_funding = self._verified_spendable_amount(user.id, funding_asset)
+            if verified_funding is not None:
+                available_funding = verified_funding
         price, price_warning = self._asset_usd_price(funding_asset)
         if price_warning is not None:
             warnings.append(price_warning)
@@ -371,16 +375,20 @@ class VaultReadinessService:
             else:
                 alerts = [str(alert) for alert in (getattr(snapshot, "alerts", []) or []) if str(alert).strip()]
                 if alerts:
-                    blockers.append(
-                        self._blocker(
-                            f"{exchange}_connection_failed",
-                            f"{label} connection failed",
-                            "; ".join(alerts[:2]),
-                            "blocker",
-                            f"Resolve the {label} connection alert, then verify the connection again.",
-                            exchange=exchange,
+                    region_blocker = self._provider_region_restricted_blocker(exchange, label, alerts)
+                    if region_blocker is not None:
+                        blockers.append(region_blocker)
+                    else:
+                        blockers.append(
+                            self._blocker(
+                                f"{exchange}_connection_failed",
+                                f"{label} connection failed",
+                                "; ".join(alerts[:2]),
+                                "blocker",
+                                f"Resolve the {label} connection alert, then verify the connection again.",
+                                exchange=exchange,
+                            )
                         )
-                    )
                 available_margin = self._snapshot_available_margin(snapshot, collateral_asset)
                 if available_margin <= 0:
                     blockers.append(
@@ -429,6 +437,35 @@ class VaultReadinessService:
             "warnings": warnings,
             "trading_connection_id": connection.id if connection is not None else None,
         }
+
+    def _provider_region_restricted_blocker(
+        self,
+        exchange: str,
+        label: str,
+        alerts: list[str],
+    ) -> dict[str, Any] | None:
+        if exchange != "kucoin":
+            return None
+        text = " ".join(str(alert or "") for alert in alerts).lower()
+        restricted_markers = (
+            "400302",
+            "region restricted",
+            "currently unavailable in the u.s",
+            "restricted country",
+            "restricted region",
+            "restricted country/region",
+            "current area: us",
+        )
+        if not any(marker in text for marker in restricted_markers):
+            return None
+        return self._blocker(
+            "kucoin_region_restricted",
+            "KuCoin region restricted",
+            "KuCoin is unavailable from this runtime region for live Vault routing.",
+            "blocker",
+            "Run KuCoin live checks only from a compliant non-restricted fixed-egress live API runtime, or disable KuCoin for this route.",
+            exchange=exchange,
+        )
 
     def _connection_for(self, user_id: int | None, exchange: str) -> TradingConnection | None:
         if user_id is None:
@@ -1043,6 +1080,30 @@ class VaultReadinessService:
         if docs_or_action_label:
             payload["docs_or_action_label"] = docs_or_action_label
         return payload
+
+    def _verified_spendable_amount(self, user_id: int, asset: str) -> float | None:
+        if not has_app_context():
+            return None
+        network = self._default_network(asset)
+        try:
+            custody = current_app.extensions.get("services", {}).get("wallet_custody")
+            if custody is None or not getattr(custody, "enabled", False) or not custody.supports(asset, network):
+                return None
+            return float(custody.verified_spendable_amount(user_id, asset, network) or 0.0)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Vault readiness on-chain spendable check failed closed for %s/%s: %s", asset, network, exc)
+            return 0.0
+
+    @staticmethod
+    def _default_network(asset: str) -> str:
+        asset_key = str(asset or "").upper().strip()
+        if asset_key == "BTC":
+            return "Bitcoin"
+        if asset_key == "SOL":
+            return "Solana"
+        if asset_key == "XRP":
+            return "XRP Ledger"
+        return "Ethereum"
 
     def _log_exchange_decisions(self, exchange_status: dict[str, dict[str, Any]]) -> None:
         for exchange, status in exchange_status.items():

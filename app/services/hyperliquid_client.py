@@ -2,18 +2,26 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import re
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
-from decimal import Decimal, InvalidOperation, ROUND_FLOOR
-from typing import Any, Callable
-
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal, InvalidOperation
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
+HYPERLIQUID_TESTNET_API_URL = "https://api.hyperliquid-testnet.xyz"
+HYPERLIQUID_MAINNET_API_URL = "https://api.hyperliquid.xyz"
+HYPERLIQUID_TEST_ACCOUNT = "sufyanh"
+LIVE_TEST_CLIENT_ORDER_PREFIX = "codex-hl-test-"
 VALID_MODES = {"testnet", "live"}
 VALID_SIDES = {"buy", "sell"}
 VALID_ORDER_TYPES = {"market", "limit"}
+VALID_TIME_IN_FORCE = {"alo": "Alo", "ioc": "Ioc", "gtc": "Gtc"}
+HYPERLIQUID_MIN_NOTIONAL_DEFAULT_USD = 10.0
 
 
 @dataclass(slots=True)
@@ -51,9 +59,13 @@ class HyperliquidClient:
         self._validate_mode(mode)
 
         if mode == "live":
-            return str(self.config["HL_MAINNET_BASE_URL"])
+            return self._normalize_base_url(self.config.get("HL_MAINNET_BASE_URL") or HYPERLIQUID_MAINNET_API_URL)
 
-        return str(self.config["HL_TESTNET_BASE_URL"])
+        return self._normalize_base_url(
+            self.config.get("HYPERLIQUID_BASE_URL")
+            or self.config.get("HL_TESTNET_BASE_URL")
+            or HYPERLIQUID_TESTNET_API_URL
+        )
 
     def has_account_address(self) -> bool:
         return bool(self.config.get("HL_ACCOUNT_ADDRESS"))
@@ -66,8 +78,57 @@ class HyperliquidClient:
 
         if mode == "live" and not self.config.get("ENABLE_LIVE_TRADING", False):
             return False
+        if mode == "testnet" and self.testnet_live_test_guard_errors():
+            return False
 
         return self.has_trading_credentials() and self.has_account_address()
+
+    def testnet_live_test_guard_errors(self) -> list[str]:
+        """Return fail-closed blockers for signed Hyperliquid testnet smoke tests."""
+
+        errors: list[str] = []
+        account = str(self.config.get("HYPERLIQUID_ACCOUNT") or "").strip()
+        environment = str(self.config.get("HYPERLIQUID_ENV") or "").strip().lower()
+        configured_base_url = self._normalize_base_url(self.config.get("HYPERLIQUID_BASE_URL") or "")
+
+        if account != HYPERLIQUID_TEST_ACCOUNT:
+            errors.append("HYPERLIQUID_ACCOUNT must be exactly sufyanh")
+        if environment != "testnet":
+            errors.append("HYPERLIQUID_ENV must be exactly testnet")
+        if configured_base_url != HYPERLIQUID_TESTNET_API_URL:
+            errors.append(f"HYPERLIQUID_BASE_URL must be exactly {HYPERLIQUID_TESTNET_API_URL}")
+        if self.base_url_for_mode("testnet") != HYPERLIQUID_TESTNET_API_URL:
+            errors.append("effective Hyperliquid testnet base URL is not the official testnet URL")
+        if not bool(self.config.get("RUN_HYPERLIQUID_LIVE_TESTS", False)):
+            errors.append("RUN_HYPERLIQUID_LIVE_TESTS=1 is required")
+        if not self.has_account_address():
+            errors.append("HL_ACCOUNT_ADDRESS is required for account queries")
+        if not self.has_trading_credentials():
+            errors.append("HL_SECRET_KEY is required for signed testnet trading")
+
+        return errors
+
+    def ensure_testnet_live_tests_enabled(self) -> None:
+        blockers = self.testnet_live_test_guard_errors()
+        if blockers:
+            raise RuntimeError("hyperliquid_testnet_guard_failed: " + "; ".join(blockers))
+
+    def ensure_testnet_account_funded(self, required_notional_usd: float) -> None:
+        required = max(0.0, self._safe_float(required_notional_usd))
+        balances = self.get_balances("testnet")
+        available = 0.0
+        account_value = 0.0
+        for row in balances:
+            if str(row.get("asset") or "").upper() != "USDC" or str(row.get("type") or "").lower() != "margin":
+                continue
+            available = max(available, self._safe_float(row.get("withdrawable")))
+            account_value = max(account_value, self._safe_float(row.get("value")))
+
+        if max(available, account_value) + 1e-9 < required:
+            raise RuntimeError(
+                "insufficient_testnet_funds: Hyperliquid testnet USDC margin is below "
+                f"the required tiny smoke-test notional ({max(available, account_value):.6f} < {required:.6f})."
+            )
 
     def account_snapshot(self, mode: str) -> ClientSnapshot:
         self._validate_mode(mode)
@@ -236,6 +297,120 @@ class HyperliquidClient:
             return meta, [dict(item) for item in contexts if isinstance(item, dict)]
         return {}, []
 
+    def get_perp_asset_metadata(self, mode: str, symbol: str) -> dict[str, Any]:
+        self._validate_symbol(symbol)
+        meta, contexts = self.get_perp_meta_and_asset_contexts(mode)
+        universe = meta.get("universe", []) if isinstance(meta, dict) else []
+        for index, asset in enumerate(universe):
+            if not isinstance(asset, dict) or asset.get("name") != symbol:
+                continue
+            payload = dict(asset)
+            payload["asset_id"] = index
+            if index < len(contexts) and isinstance(contexts[index], dict):
+                payload["asset_context"] = dict(contexts[index])
+            return payload
+        raise ValueError(f"Hyperliquid symbol is not in perp metadata: {symbol}")
+
+    def select_live_test_symbol(self, mode: str = "testnet", preferred: tuple[str, ...] = ("BTC", "ETH")) -> str:
+        meta, _contexts = self.get_perp_meta_and_asset_contexts(mode)
+        universe = meta.get("universe", []) if isinstance(meta, dict) else []
+        available = [
+            str(asset.get("name") or "")
+            for asset in universe
+            if isinstance(asset, dict) and str(asset.get("name") or "").strip() and not str(asset.get("name")).startswith(("#", "@"))
+        ]
+        mids = self.get_all_mids(mode)
+
+        for symbol in preferred:
+            if symbol in available and self._safe_float(mids.get(symbol)) > 0:
+                return symbol
+
+        for symbol in available:
+            if self._safe_float(mids.get(symbol)) > 0:
+                return symbol
+
+        raise RuntimeError("No liquid Hyperliquid test symbol with a positive mid price is available.")
+
+    def minimum_valid_order_size(self, mode: str, symbol: str, mid_price: float, *, min_notional_usd: float | None = None) -> float:
+        self._validate_symbol(symbol)
+        mid = self._require_positive_price(mid_price, symbol)
+        metadata = self.get_perp_asset_metadata(mode, symbol)
+        size_decimals = max(0, self._safe_int(metadata.get("szDecimals"), 0))
+        notional = max(
+            HYPERLIQUID_MIN_NOTIONAL_DEFAULT_USD,
+            self._safe_float(self.config.get("HYPERLIQUID_MIN_ORDER_VALUE_USD"), HYPERLIQUID_MIN_NOTIONAL_DEFAULT_USD),
+            self._safe_float(min_notional_usd, HYPERLIQUID_MIN_NOTIONAL_DEFAULT_USD),
+        )
+        step = Decimal("1").scaleb(-size_decimals)
+        try:
+            raw_size = Decimal(str(notional)) / Decimal(str(mid))
+            normalized = raw_size.quantize(step, rounding=ROUND_CEILING)
+        except (InvalidOperation, ValueError) as exc:
+            raise RuntimeError(f"Unable to compute a valid Hyperliquid order size for {symbol}") from exc
+        return self._safe_float(normalized)
+
+    def normalize_limit_price(self, mode: str, symbol: str, price: float, *, round_up: bool = False) -> float:
+        self._validate_symbol(symbol)
+        value = self._require_positive_price(price, symbol)
+        metadata = self.get_perp_asset_metadata(mode, symbol)
+        size_decimals = max(0, self._safe_int(metadata.get("szDecimals"), 0))
+        decimals = max(0, 6 - size_decimals)
+        significant = Decimal(str(float(f"{value:.5g}")))
+        step = Decimal("1").scaleb(-decimals)
+        rounding = ROUND_CEILING if round_up else ROUND_FLOOR
+        try:
+            normalized = significant.quantize(step, rounding=rounding)
+        except (InvalidOperation, ValueError) as exc:
+            raise RuntimeError(f"Unable to normalize Hyperliquid limit price for {symbol}") from exc
+        return self._require_positive_price(normalized, symbol)
+
+    def live_test_order_plan(self, mode: str = "testnet", *, side: str = "buy", require_funds: bool = True) -> dict[str, Any]:
+        if mode != "testnet":
+            raise RuntimeError("Hyperliquid live-test order planning is testnet-only.")
+        self.ensure_testnet_live_tests_enabled()
+        side = str(side or "").lower()
+        if side not in VALID_SIDES:
+            raise ValueError(f"Unsupported order side: {side}")
+
+        symbol = self.select_live_test_symbol(mode)
+        mids = self.get_all_mids(mode)
+        mid = self._require_positive_price(mids.get(symbol), symbol)
+        size = self.minimum_valid_order_size(mode, symbol, mid)
+        notional = size * mid
+        max_notional = self._safe_float(self.config.get("HYPERLIQUID_LIVE_TEST_MAX_NOTIONAL_USD"), 0.0)
+        min_notional = max(
+            HYPERLIQUID_MIN_NOTIONAL_DEFAULT_USD,
+            self._safe_float(self.config.get("HYPERLIQUID_MIN_ORDER_VALUE_USD"), HYPERLIQUID_MIN_NOTIONAL_DEFAULT_USD),
+        )
+        if max_notional > 0 and max_notional + 1e-9 < min_notional:
+            raise RuntimeError(
+                "hyperliquid_test_max_notional_too_small: "
+                f"HYPERLIQUID_LIVE_TEST_MAX_NOTIONAL_USD must be at least {min_notional:.6f}."
+            )
+        if max_notional > 0 and notional > max_notional + max(mid * 1e-12, 1e-9):
+            raise RuntimeError(
+                "hyperliquid_test_max_notional_exceeded: computed minimum order notional "
+                f"{notional:.6f} exceeds configured cap {max_notional:.6f}."
+            )
+
+        raw_price = mid * (0.90 if side == "buy" else 1.10)
+        price = self.normalize_limit_price(mode, symbol, raw_price, round_up=side == "sell")
+        required_notional = max(notional, min_notional)
+        if require_funds:
+            self.ensure_testnet_account_funded(required_notional)
+
+        return {
+            "mode": mode,
+            "symbol": symbol,
+            "side": side,
+            "mid_price": mid,
+            "limit_price": price,
+            "quantity": size,
+            "notional_usd": notional,
+            "min_notional_usd": min_notional,
+            "time_in_force": "Alo",
+        }
+
     def get_order_book(self, mode: str, symbol: str, *, retry: bool = True) -> dict[str, Any]:
         self._validate_symbol(symbol)
 
@@ -286,6 +461,9 @@ class HyperliquidClient:
         reduce_only: bool,
         leverage: float,
         slippage_pct: float,
+        *,
+        client_order_id: str | None = None,
+        time_in_force: str | None = None,
     ) -> dict[str, Any]:
         self._validate_mode(mode)
         self._validate_symbol(symbol)
@@ -323,11 +501,16 @@ class HyperliquidClient:
             )
 
         price = limit_price
-        tif = "Gtc"
+        tif = self._normalize_time_in_force(time_in_force) if time_in_force else "Gtc"
 
         if order_type == "market" or price is None:
             price = self._market_ioc_price(exchange, mode, symbol, is_buy, slippage_pct)
             tif = "Ioc"
+
+        cloid = self._cloid_from_client_order_id(client_order_id) if client_order_id else None
+        order_kwargs = {"reduce_only": reduce_only}
+        if cloid is not None:
+            order_kwargs["cloid"] = cloid
 
         response = self._retry(
             lambda: exchange.order(
@@ -336,12 +519,18 @@ class HyperliquidClient:
                 quantity,
                 price,
                 {"limit": {"tif": tif}},
-                reduce_only=reduce_only,
+                **order_kwargs,
             ),
             f"{mode} order {symbol}",
         )
 
-        return self._normalize_order_response(response, submitted_price=price, submitted_quantity=quantity)
+        return self._normalize_order_response(
+            response,
+            submitted_price=price,
+            submitted_quantity=quantity,
+            client_order_id=client_order_id,
+            exchange_client_order_id=cloid.to_raw() if cloid is not None and hasattr(cloid, "to_raw") else None,
+        )
 
     def _market_ioc_price(self, exchange: Any, mode: str, symbol: str, is_buy: bool, slippage_pct: float) -> float:
         if hasattr(exchange, "_slippage_price"):
@@ -395,19 +584,90 @@ class HyperliquidClient:
         except (TypeError, ValueError):
             return None
 
-    def cancel_order(self, mode: str, symbol: str, exchange_order_id: str) -> dict[str, Any]:
+    def get_order_status(
+        self,
+        mode: str,
+        *,
+        exchange_order_id: str | int | None = None,
+        client_order_id: str | None = None,
+        retry: bool = True,
+    ) -> dict[str, Any]:
+        self._validate_mode(mode)
+        if not exchange_order_id and not client_order_id:
+            raise ValueError("exchange_order_id or client_order_id is required")
+
+        info = self._get_public_info(mode)
+        address = self._account_address()
+        if client_order_id:
+            cloid = self._cloid_from_client_order_id(client_order_id)
+            if hasattr(info, "query_order_by_cloid"):
+                payload = self._retry(
+                    lambda: info.query_order_by_cloid(address, cloid),
+                    f"{mode} order_status cloid",
+                    attempts=self.retry_attempts if retry else 1,
+                    log_warnings=retry,
+                    wrap_error=retry,
+                )
+            else:
+                payload = self._retry(
+                    lambda: info.post("/info", {"type": "orderStatus", "user": address, "oid": cloid.to_raw()}),
+                    f"{mode} order_status cloid",
+                    attempts=self.retry_attempts if retry else 1,
+                    log_warnings=retry,
+                    wrap_error=retry,
+                )
+            return self._normalize_order_status_response(payload, client_order_id=client_order_id, exchange_client_order_id=cloid.to_raw())
+
+        oid = int(str(exchange_order_id))
+        if hasattr(info, "query_order_by_oid"):
+            payload = self._retry(
+                lambda: info.query_order_by_oid(address, oid),
+                f"{mode} order_status {oid}",
+                attempts=self.retry_attempts if retry else 1,
+                log_warnings=retry,
+                wrap_error=retry,
+            )
+        else:
+            payload = self._retry(
+                lambda: info.post("/info", {"type": "orderStatus", "user": address, "oid": oid}),
+                f"{mode} order_status {oid}",
+                attempts=self.retry_attempts if retry else 1,
+                log_warnings=retry,
+                wrap_error=retry,
+            )
+        return self._normalize_order_status_response(payload, exchange_order_id=str(oid))
+
+    def cancel_order(
+        self,
+        mode: str,
+        symbol: str,
+        exchange_order_id: str,
+        *,
+        client_order_id: str | None = None,
+    ) -> dict[str, Any]:
         self._validate_mode(mode)
         self._validate_symbol(symbol)
 
-        if not exchange_order_id:
-            raise ValueError("exchange_order_id is required")
+        if not exchange_order_id and not client_order_id:
+            raise ValueError("exchange_order_id or client_order_id is required")
 
         exchange = self._get_exchange(mode)
 
-        response = self._retry(
-            lambda: exchange.cancel(symbol, int(exchange_order_id)),
-            f"{mode} cancel {symbol}:{exchange_order_id}",
-        )
+        if client_order_id and hasattr(exchange, "cancel_by_cloid"):
+            cloid = self._cloid_from_client_order_id(client_order_id)
+            response = self._retry(
+                lambda: exchange.cancel_by_cloid(symbol, cloid),
+                f"{mode} cancel {symbol}:cloid",
+            )
+            return {
+                "status": "cancelled",
+                "exchange_order_id": str(exchange_order_id or ""),
+                "client_order_id": client_order_id,
+                "exchange_client_order_id": cloid.to_raw(),
+                "raw": response,
+            }
+
+        response = self._retry(lambda: exchange.cancel(symbol, int(exchange_order_id)), f"{mode} cancel {symbol}:{exchange_order_id}")
 
         return {"status": "cancelled", "exchange_order_id": str(exchange_order_id), "raw": response}
 
@@ -430,8 +690,9 @@ class HyperliquidClient:
                     }
                 )
             except Exception as exc:  # noqa: BLE001
-                logger.warning("Failed to cancel order %s:%s: %s", symbol, order_id, exc)
-                cancelled.append({"symbol": symbol, "order_id": order_id, "error": str(exc)})
+                error = self._sanitize_error_message(exc)
+                logger.warning("Failed to cancel order %s:%s: %s", symbol, order_id, error)
+                cancelled.append({"symbol": symbol, "order_id": order_id, "error": error})
 
         return cancelled
 
@@ -480,8 +741,9 @@ class HyperliquidClient:
                 )
                 results.append({"symbol": symbol, "quantity": quantity, "result": response})
             except Exception as exc:  # noqa: BLE001
-                logger.warning("Failed to flatten %s position: %s", symbol, exc)
-                results.append({"symbol": symbol, "quantity": quantity, "error": str(exc)})
+                error = self._sanitize_error_message(exc)
+                logger.warning("Failed to flatten %s position: %s", symbol, error)
+                results.append({"symbol": symbol, "quantity": quantity, "error": error})
 
         return results
 
@@ -508,7 +770,7 @@ class HyperliquidClient:
                         context,
                         attempt,
                         retry_attempts,
-                        exc,
+                        self._sanitize_error_message(exc),
                     )
 
                 if attempt < retry_attempts:
@@ -520,6 +782,8 @@ class HyperliquidClient:
 
     def _get_public_info(self, mode: str) -> Any:
         self._validate_mode(mode)
+        if mode == "testnet":
+            self._ensure_testnet_public_base_url()
 
         if mode not in self._public_info:
             info_cls = _load_info_class()
@@ -536,6 +800,8 @@ class HyperliquidClient:
 
         if mode == "live" and not self.config.get("ENABLE_LIVE_TRADING", False):
             raise RuntimeError("Live trading is disabled by configuration")
+        if mode == "testnet":
+            self.ensure_testnet_live_tests_enabled()
 
         if not self.has_trading_credentials():
             raise RuntimeError("Trading credentials are not configured")
@@ -563,12 +829,52 @@ class HyperliquidClient:
 
         return str(address)
 
+    def _ensure_testnet_public_base_url(self) -> None:
+        base_url = self.base_url_for_mode("testnet")
+        if base_url != HYPERLIQUID_TESTNET_API_URL:
+            raise RuntimeError(
+                "hyperliquid_testnet_base_url_invalid: refusing to use non-testnet Hyperliquid URL "
+                f"for testnet mode ({base_url})."
+            )
+
+    @staticmethod
+    def _normalize_base_url(value: Any) -> str:
+        return str(value or "").strip().rstrip("/")
+
+    @classmethod
+    def _normalize_time_in_force(cls, value: str | None) -> str:
+        if value is None:
+            return "Gtc"
+        key = str(value or "").strip().lower()
+        if key not in VALID_TIME_IN_FORCE:
+            supported = ", ".join(sorted(VALID_TIME_IN_FORCE.values()))
+            raise ValueError(f"Unsupported Hyperliquid time_in_force '{value}'. Supported values: {supported}")
+        return VALID_TIME_IN_FORCE[key]
+
+    @classmethod
+    def _cloid_from_client_order_id(cls, client_order_id: str | None) -> Any:
+        raw = str(client_order_id or "").strip()
+        if not raw:
+            return None
+        cloid_cls = _load_cloid_class()
+        if re.fullmatch(r"0x[0-9a-fA-F]{32}", raw):
+            return cloid_cls.from_str(raw.lower())
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+        return cloid_cls.from_str(f"0x{digest}")
+
+    @classmethod
+    def client_order_id_to_cloid(cls, client_order_id: str) -> str:
+        cloid = cls._cloid_from_client_order_id(client_order_id)
+        return cloid.to_raw() if cloid is not None and hasattr(cloid, "to_raw") else ""
+
     @staticmethod
     def _normalize_order_response(
         response: dict[str, Any],
         *,
         submitted_price: float,
         submitted_quantity: float | None = None,
+        client_order_id: str | None = None,
+        exchange_client_order_id: str | None = None,
     ) -> dict[str, Any]:
         response_payload = response.get("response", {})
         if not isinstance(response_payload, dict):
@@ -617,11 +923,76 @@ class HyperliquidClient:
             result["submitted_quantity"] = submitted_quantity
         if filled_quantity is not None:
             result["filled_quantity"] = filled_quantity
+        if client_order_id:
+            result["client_order_id"] = client_order_id
+        if exchange_client_order_id:
+            result["exchange_client_order_id"] = exchange_client_order_id
 
         if error:
-            result["error"] = error
+            result["error"] = HyperliquidClient._sanitize_error_message(error)
+            result["error_category"] = HyperliquidClient.classify_error(error)
 
         return result
+
+    @staticmethod
+    def _normalize_order_status_response(
+        response: Any,
+        *,
+        exchange_order_id: str | None = None,
+        client_order_id: str | None = None,
+        exchange_client_order_id: str | None = None,
+    ) -> dict[str, Any]:
+        payload = response if isinstance(response, dict) else {"raw": response}
+        status_payload = payload.get("order") if isinstance(payload.get("order"), dict) else payload
+        status_text = str(status_payload.get("status") or payload.get("status") or "").lower()
+        normalized_status = {
+            "open": "open",
+            "filled": "filled",
+            "canceled": "cancelled",
+            "cancelled": "cancelled",
+            "triggered": "triggered",
+            "rejected": "rejected",
+            "margincanceled": "cancelled",
+        }.get(status_text, status_text or "unknown")
+        result = {
+            "status": normalized_status,
+            "exchange_order_id": str(status_payload.get("oid") or exchange_order_id or ""),
+            "client_order_id": client_order_id,
+            "exchange_client_order_id": str(status_payload.get("cloid") or exchange_client_order_id or ""),
+            "raw": payload,
+        }
+        if status_payload.get("error"):
+            error = str(status_payload.get("error"))
+            result["error"] = HyperliquidClient._sanitize_error_message(error)
+            result["error_category"] = HyperliquidClient.classify_error(error)
+        return result
+
+    @staticmethod
+    def classify_error(value: Any) -> str:
+        text = str(value or "").lower()
+        if any(marker in text for marker in ("missing", "not configured", "required")):
+            return "missing_credentials"
+        if any(marker in text for marker in ("insufficient margin", "insufficient_testnet_funds", "mintrade", "minimum value")):
+            return "insufficient_funds"
+        if any(marker in text for marker in ("mainnet", "testnet", "base url", "guard")):
+            return "wrong_environment"
+        if any(marker in text for marker in ("tick", "precision", "divisible", "decimal")):
+            return "precision"
+        if any(marker in text for marker in ("signature", "agent", "wallet")):
+            return "signature"
+        if any(marker in text for marker in ("429", "rate limit", "too many requests")):
+            return "rate_limit"
+        if any(marker in text for marker in ("symbol", "coin", "asset")):
+            return "invalid_symbol"
+        return "provider_error"
+
+    @staticmethod
+    def _sanitize_error_message(value: Any) -> str:
+        text = str(value)
+        text = re.sub(r"0x[0-9a-fA-F]{64}", "0x[redacted-private-key]", text)
+        text = re.sub(r"0x[0-9a-fA-F]{40}", lambda match: f"{match.group(0)[:6]}...{match.group(0)[-4:]}", text)
+        text = re.sub(r"signature['\"]?\s*[:=]\s*[^,}\s]+", "signature=[redacted]", text, flags=re.IGNORECASE)
+        return text[:500]
 
     @staticmethod
     def _validate_mode(mode: str) -> None:
@@ -684,3 +1055,11 @@ def _load_exchange_class() -> Any:
     except Exception as exc:  # pragma: no cover
         raise RuntimeError("hyperliquid-python-sdk is not installed") from exc
     return Exchange
+
+
+def _load_cloid_class() -> Any:
+    try:
+        from hyperliquid.utils.types import Cloid
+    except Exception as exc:  # pragma: no cover
+        raise RuntimeError("hyperliquid-python-sdk is not installed") from exc
+    return Cloid

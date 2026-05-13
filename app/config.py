@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 
 try:
     from hyperliquid.utils import constants as hl_constants
-except Exception:  # pragma: no cover - import fallback for environments without the SDK
+except ImportError:  # pragma: no cover - import fallback for environments without the SDK
     class _FallbackConstants:
         TESTNET_API_URL = "https://api.hyperliquid-testnet.xyz"
         MAINNET_API_URL = "https://api.hyperliquid.xyz"
@@ -32,6 +32,18 @@ def _clean_public_origin(value: str | None, default: str = "") -> str:
     if not parsed.scheme or not parsed.netloc:
         return raw.rstrip("/")
     return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}".rstrip("/")
+
+
+def _parse_origin_list(value: str | None, defaults: list[str] | tuple[str, ...] = ()) -> list[str]:
+    origins: list[str] = []
+    for item in list(defaults) + [part for part in str(value or "").split(",")]:
+        origin = _clean_public_origin(str(item or "").strip(), "")
+        parsed = urlparse(origin)
+        if origin == "*" or parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            continue
+        if origin and origin not in origins:
+            origins.append(origin)
+    return origins
 
 
 def _normalize_database_url(value: str | None, default: str) -> str:
@@ -190,6 +202,11 @@ class BaseConfig:
     DEPLOYMENT_TARGET = os.getenv("DEPLOYMENT_TARGET", "local").strip().lower() or "local"
     PUBLIC_APP_ORIGIN = _clean_public_origin(os.getenv("PUBLIC_APP_ORIGIN"), "")
     PUBLIC_API_ORIGIN = _clean_public_origin(os.getenv("PUBLIC_API_ORIGIN"), PUBLIC_APP_ORIGIN)
+    PUBLIC_LIVE_API_ORIGIN = _clean_public_origin(os.getenv("PUBLIC_LIVE_API_ORIGIN"), "")
+    LIVE_API_CORS_ALLOWED_ORIGINS = _parse_origin_list(
+        os.getenv("LIVE_API_CORS_ALLOWED_ORIGINS"),
+        (PUBLIC_APP_ORIGIN, "https://algorithm-vault-chi.vercel.app"),
+    )
     WEB_CONCURRENCY = _as_int(os.getenv("WEB_CONCURRENCY") or os.getenv("GUNICORN_WORKERS"), 1)
     GUNICORN_THREADS = _as_int(os.getenv("GUNICORN_THREADS"), 4)
     WORKER_MODE = os.getenv("WORKER_MODE", "web").strip().lower() or "web"
@@ -225,6 +242,12 @@ class BaseConfig:
     HL_SECRET_KEY = os.getenv("HL_SECRET_KEY", "").strip()
     HL_VAULT_ADDRESS = os.getenv("HL_VAULT_ADDRESS", "").strip() or None
     HL_TIMEOUT_SECONDS = _as_float(os.getenv("HL_TIMEOUT_SECONDS"), 10.0)
+    HYPERLIQUID_ACCOUNT = os.getenv("HYPERLIQUID_ACCOUNT", "").strip()
+    HYPERLIQUID_ENV = os.getenv("HYPERLIQUID_ENV", "").strip().lower()
+    HYPERLIQUID_BASE_URL = os.getenv("HYPERLIQUID_BASE_URL", "").strip()
+    RUN_HYPERLIQUID_LIVE_TESTS = _as_bool(os.getenv("RUN_HYPERLIQUID_LIVE_TESTS"), default=False)
+    RUN_HYPERLIQUID_FILL_TEST = _as_bool(os.getenv("RUN_HYPERLIQUID_FILL_TEST"), default=False)
+    HYPERLIQUID_LIVE_TEST_MAX_NOTIONAL_USD = max(0.0, _as_float(os.getenv("HYPERLIQUID_LIVE_TEST_MAX_NOTIONAL_USD"), 0.0))
     HYPERLIQUID_MIN_ORDER_VALUE_USD = max(0.0, _as_float(os.getenv("HYPERLIQUID_MIN_ORDER_VALUE_USD"), 10.0))
     EXCHANGE_RETRY_ATTEMPTS = _as_int(os.getenv("EXCHANGE_RETRY_ATTEMPTS"), 3)
     EXCHANGE_RETRY_SLEEP_SECONDS = _as_float(os.getenv("EXCHANGE_RETRY_SLEEP_SECONDS"), 0.5)
@@ -236,20 +259,41 @@ class BaseConfig:
     BINANCE_SYMBOL_MAP_JSON = os.getenv("BINANCE_SYMBOL_MAP_JSON", "").strip()
     KUCOIN_FUTURES_BASE_URL = os.getenv("KUCOIN_FUTURES_BASE_URL", "https://api-futures.kucoin.com").strip()
     KUCOIN_SPOT_BASE_URL = os.getenv("KUCOIN_SPOT_BASE_URL", "https://api.kucoin.com").strip()
+    KUCOIN_API_KEY = os.getenv("KUCOIN_API_KEY", "").strip()
+    KUCOIN_API_SECRET = os.getenv("KUCOIN_API_SECRET", "").strip()
+    KUCOIN_API_PASSPHRASE = os.getenv("KUCOIN_API_PASSPHRASE", "").strip()
+    KUCOIN_DEFAULT_MARKET_TYPE = os.getenv("KUCOIN_DEFAULT_MARKET_TYPE", "futures").strip().lower() or "futures"
+    KUCOIN_DEFAULT_SPOT_QUOTE = os.getenv("KUCOIN_DEFAULT_SPOT_QUOTE", "USDT").strip().upper() or "USDT"
     KUCOIN_ACCOUNT_OVERVIEW_PATH = os.getenv("KUCOIN_ACCOUNT_OVERVIEW_PATH", "/api/v1/account-overview").strip()
     KUCOIN_ORDERS_PATH = os.getenv("KUCOIN_ORDERS_PATH", "/api/v1/orders").strip()
     KUCOIN_OPEN_ORDERS_PATH = os.getenv("KUCOIN_OPEN_ORDERS_PATH", "/api/v1/orders").strip()
     KUCOIN_POSITIONS_PATH = os.getenv("KUCOIN_POSITIONS_PATH", "/api/v1/positions").strip()
     KUCOIN_POSITION_MODE_PATH = os.getenv("KUCOIN_POSITION_MODE_PATH", "/api/v2/position/getPositionMode").strip()
     KUCOIN_FILLS_PATH = os.getenv("KUCOIN_FILLS_PATH", "/api/v1/recentDoneOrders").strip()
+    KUCOIN_SPOT_ACCOUNTS_PATH = os.getenv("KUCOIN_SPOT_ACCOUNTS_PATH", "/api/v1/accounts").strip()
+    KUCOIN_SUB_ACCOUNTS_PATH = os.getenv("KUCOIN_SUB_ACCOUNTS_PATH", "/api/v1/sub-accounts").strip()
+    KUCOIN_SPOT_SYMBOLS_PATH = os.getenv("KUCOIN_SPOT_SYMBOLS_PATH", "/api/v2/symbols").strip()
+    KUCOIN_SPOT_SYMBOL_PATH = os.getenv("KUCOIN_SPOT_SYMBOL_PATH", "/api/v2/symbols").strip()
+    KUCOIN_SPOT_TICKER_PATH = os.getenv("KUCOIN_SPOT_TICKER_PATH", "/api/v1/market/orderbook/level1").strip()
+    KUCOIN_SPOT_ORDERS_PATH = os.getenv("KUCOIN_SPOT_ORDERS_PATH", "/api/v1/hf/orders").strip()
+    KUCOIN_SPOT_TEST_ORDER_PATH = os.getenv("KUCOIN_SPOT_TEST_ORDER_PATH", "/api/v1/hf/orders/test").strip()
+    KUCOIN_SPOT_OPEN_ORDERS_PATH = os.getenv("KUCOIN_SPOT_OPEN_ORDERS_PATH", "/api/v1/hf/orders/active").strip()
+    KUCOIN_SPOT_CLIENT_ORDER_PATH = os.getenv("KUCOIN_SPOT_CLIENT_ORDER_PATH", "/api/v1/hf/orders/client-order").strip()
+    KUCOIN_SPOT_FILLS_PATH = os.getenv("KUCOIN_SPOT_FILLS_PATH", "/api/v1/hf/fills").strip()
     KUCOIN_ACTIVE_CONTRACTS_PATH = os.getenv("KUCOIN_ACTIVE_CONTRACTS_PATH", "/api/v1/contracts/active").strip()
     KUCOIN_DEPOSIT_ADDRESSES_PATH = os.getenv("KUCOIN_DEPOSIT_ADDRESSES_PATH", "/api/v3/deposit-addresses").strip()
     KUCOIN_WITHDRAWALS_PATH = os.getenv("KUCOIN_WITHDRAWALS_PATH", "/api/v3/withdrawals").strip()
     KUCOIN_UNIVERSAL_TRANSFER_PATH = os.getenv("KUCOIN_UNIVERSAL_TRANSFER_PATH", "/api/v3/accounts/universal-transfer").strip()
     KUCOIN_CONVERT_QUOTE_PATH = os.getenv("KUCOIN_CONVERT_QUOTE_PATH", "/api/v1/convert/quote").strip()
     KUCOIN_CONVERT_ORDER_PATH = os.getenv("KUCOIN_CONVERT_ORDER_PATH", "/api/v1/convert/order").strip()
+    KUCOIN_SPOT_SYMBOL_MAP_JSON = os.getenv("KUCOIN_SPOT_SYMBOL_MAP_JSON", "").strip()
     KUCOIN_SYMBOL_MAP_JSON = os.getenv("KUCOIN_SYMBOL_MAP_JSON", "").strip()
     KUCOIN_CONTRACT_SPECS_JSON = os.getenv("KUCOIN_CONTRACT_SPECS_JSON", "").strip()
+    KUCOIN_TEST_ACCOUNT = os.getenv("KUCOIN_TEST_ACCOUNT", "").strip()
+    KUCOIN_TEST_SYMBOL = os.getenv("KUCOIN_TEST_SYMBOL", "").strip().upper()
+    KUCOIN_MAX_TEST_NOTIONAL_USDT = _as_float(os.getenv("KUCOIN_MAX_TEST_NOTIONAL_USDT"), 0.0)
+    KUCOIN_ENABLE_LIVE_TEST_TRADES = _as_bool(os.getenv("KUCOIN_ENABLE_LIVE_TEST_TRADES"), default=False)
+    KUCOIN_ENABLE_FILL_TEST = _as_bool(os.getenv("KUCOIN_ENABLE_FILL_TEST"), default=False)
     KUCOIN_MARGIN_MODE = os.getenv("KUCOIN_MARGIN_MODE", "ISOLATED").strip().upper() or "ISOLATED"
     KUCOIN_POSITION_SIDE = os.getenv("KUCOIN_POSITION_SIDE", "BOTH").strip().upper() or "BOTH"
     KUCOIN_TIME_SYNC_ENABLED = os.getenv("KUCOIN_TIME_SYNC_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
@@ -935,6 +979,7 @@ class BaseConfig:
     SESSION_COOKIE_HTTPONLY = _as_bool(os.getenv("SESSION_COOKIE_HTTPONLY"), default=True)
     SESSION_COOKIE_SECURE = _as_bool(os.getenv("SESSION_COOKIE_SECURE"), default=False)
     SESSION_COOKIE_SAMESITE = os.getenv("SESSION_COOKIE_SAMESITE", "Lax").strip() or "Lax"
+    SESSION_COOKIE_DOMAIN = os.getenv("SESSION_COOKIE_DOMAIN", "").strip() or None
     PERMANENT_SESSION_LIFETIME_SECONDS = _as_int(os.getenv("PERMANENT_SESSION_LIFETIME_SECONDS"), 60 * 60 * 8)
     MAX_CONTENT_LENGTH = _as_int(os.getenv("MAX_CONTENT_LENGTH"), 2 * 1024 * 1024)
     PROXY_FIX_ENABLED = _as_bool(os.getenv("PROXY_FIX_ENABLED"), default=False)
@@ -966,6 +1011,8 @@ class BaseConfig:
             "DEPLOYMENT_TARGET": cls.DEPLOYMENT_TARGET,
             "PUBLIC_APP_ORIGIN": cls.PUBLIC_APP_ORIGIN,
             "PUBLIC_API_ORIGIN": cls.PUBLIC_API_ORIGIN,
+            "PUBLIC_LIVE_API_ORIGIN": cls.PUBLIC_LIVE_API_ORIGIN,
+            "LIVE_API_CORS_ALLOWED_ORIGINS": list(cls.LIVE_API_CORS_ALLOWED_ORIGINS),
             "WEB_CONCURRENCY": cls.WEB_CONCURRENCY,
             "GUNICORN_THREADS": cls.GUNICORN_THREADS,
             "WORKER_MODE": cls.WORKER_MODE,
@@ -1017,11 +1064,34 @@ class BaseConfig:
             "PROVIDER_TIMEOUT_SECONDS": cls.PROVIDER_TIMEOUT_SECONDS,
             "PROVIDER_RETRY_ATTEMPTS": cls.PROVIDER_RETRY_ATTEMPTS,
             "PROVIDER_RETRY_SLEEP_SECONDS": cls.PROVIDER_RETRY_SLEEP_SECONDS,
+            "HYPERLIQUID_ACCOUNT": cls.HYPERLIQUID_ACCOUNT,
+            "HYPERLIQUID_ENV": cls.HYPERLIQUID_ENV,
+            "HYPERLIQUID_BASE_URL": cls.HYPERLIQUID_BASE_URL,
+            "RUN_HYPERLIQUID_LIVE_TESTS": cls.RUN_HYPERLIQUID_LIVE_TESTS,
+            "RUN_HYPERLIQUID_FILL_TEST": cls.RUN_HYPERLIQUID_FILL_TEST,
+            "HYPERLIQUID_LIVE_TEST_MAX_NOTIONAL_USD": cls.HYPERLIQUID_LIVE_TEST_MAX_NOTIONAL_USD,
             "HYPERLIQUID_MIN_ORDER_VALUE_USD": cls.HYPERLIQUID_MIN_ORDER_VALUE_USD,
             "KUCOIN_CONTRACT_SPECS_JSON": cls.KUCOIN_CONTRACT_SPECS_JSON,
+            "KUCOIN_DEFAULT_MARKET_TYPE": cls.KUCOIN_DEFAULT_MARKET_TYPE,
+            "KUCOIN_DEFAULT_SPOT_QUOTE": cls.KUCOIN_DEFAULT_SPOT_QUOTE,
             "KUCOIN_SPOT_BASE_URL": cls.KUCOIN_SPOT_BASE_URL,
+            "KUCOIN_SPOT_SYMBOL_MAP_JSON": cls.KUCOIN_SPOT_SYMBOL_MAP_JSON,
+            "KUCOIN_TEST_ACCOUNT": cls.KUCOIN_TEST_ACCOUNT,
+            "KUCOIN_TEST_SYMBOL": cls.KUCOIN_TEST_SYMBOL,
+            "KUCOIN_MAX_TEST_NOTIONAL_USDT": cls.KUCOIN_MAX_TEST_NOTIONAL_USDT,
+            "KUCOIN_ENABLE_LIVE_TEST_TRADES": cls.KUCOIN_ENABLE_LIVE_TEST_TRADES,
+            "KUCOIN_ENABLE_FILL_TEST": cls.KUCOIN_ENABLE_FILL_TEST,
             "KUCOIN_MARGIN_MODE": cls.KUCOIN_MARGIN_MODE,
             "KUCOIN_POSITION_SIDE": cls.KUCOIN_POSITION_SIDE,
+            "KUCOIN_SPOT_ACCOUNTS_PATH": cls.KUCOIN_SPOT_ACCOUNTS_PATH,
+            "KUCOIN_SUB_ACCOUNTS_PATH": cls.KUCOIN_SUB_ACCOUNTS_PATH,
+            "KUCOIN_SPOT_SYMBOLS_PATH": cls.KUCOIN_SPOT_SYMBOLS_PATH,
+            "KUCOIN_SPOT_TICKER_PATH": cls.KUCOIN_SPOT_TICKER_PATH,
+            "KUCOIN_SPOT_ORDERS_PATH": cls.KUCOIN_SPOT_ORDERS_PATH,
+            "KUCOIN_SPOT_TEST_ORDER_PATH": cls.KUCOIN_SPOT_TEST_ORDER_PATH,
+            "KUCOIN_SPOT_OPEN_ORDERS_PATH": cls.KUCOIN_SPOT_OPEN_ORDERS_PATH,
+            "KUCOIN_SPOT_CLIENT_ORDER_PATH": cls.KUCOIN_SPOT_CLIENT_ORDER_PATH,
+            "KUCOIN_SPOT_FILLS_PATH": cls.KUCOIN_SPOT_FILLS_PATH,
             "KUCOIN_ACTIVE_CONTRACTS_PATH": cls.KUCOIN_ACTIVE_CONTRACTS_PATH,
             "KUCOIN_DEPOSIT_ADDRESSES_PATH": cls.KUCOIN_DEPOSIT_ADDRESSES_PATH,
             "KUCOIN_WITHDRAWALS_PATH": cls.KUCOIN_WITHDRAWALS_PATH,
@@ -1518,10 +1588,16 @@ class ProductionConfig(BaseConfig):
     DEPLOYMENT_TARGET = os.getenv("DEPLOYMENT_TARGET", "vps").strip().lower() or "vps"
     PUBLIC_APP_ORIGIN = _clean_public_origin(os.getenv("PUBLIC_APP_ORIGIN"), "https://app.algvault.com")
     PUBLIC_API_ORIGIN = _clean_public_origin(os.getenv("PUBLIC_API_ORIGIN"), PUBLIC_APP_ORIGIN)
+    PUBLIC_LIVE_API_ORIGIN = _clean_public_origin(os.getenv("PUBLIC_LIVE_API_ORIGIN"), "")
+    LIVE_API_CORS_ALLOWED_ORIGINS = _parse_origin_list(
+        os.getenv("LIVE_API_CORS_ALLOWED_ORIGINS"),
+        (PUBLIC_APP_ORIGIN, "https://algorithm-vault-chi.vercel.app"),
+    )
     PREFERRED_URL_SCHEME = os.getenv("PREFERRED_URL_SCHEME", "https").strip() or "https"
     SESSION_COOKIE_SECURE = _as_bool(os.getenv("SESSION_COOKIE_SECURE"), default=True)
     SESSION_COOKIE_HTTPONLY = _as_bool(os.getenv("SESSION_COOKIE_HTTPONLY"), default=True)
     SESSION_COOKIE_SAMESITE = os.getenv("SESSION_COOKIE_SAMESITE", "Lax").strip() or "Lax"
+    SESSION_COOKIE_DOMAIN = os.getenv("SESSION_COOKIE_DOMAIN", "").strip() or None
     PROXY_FIX_ENABLED = _as_bool(os.getenv("PROXY_FIX_ENABLED"), default=True)
     SECURE_HEADERS_HSTS_ENABLED = _as_bool(os.getenv("SECURE_HEADERS_HSTS_ENABLED"), default=True)
     LOG_FORMAT = os.getenv("LOG_FORMAT", "json").strip().lower() or "json"

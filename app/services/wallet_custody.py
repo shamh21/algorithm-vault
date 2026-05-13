@@ -22,7 +22,7 @@ from eth_account import Account
 from flask import current_app, has_app_context
 
 from ..extensions import db
-from ..models import DepositAddress, WalletAccount, WalletAddress, WalletAuditLog, WalletBalance, WalletLedgerEvent, WalletTransaction, WalletWithdrawal
+from ..models import WalletAccount, WalletAddress, WalletAuditLog, WalletBalance, WalletLedgerEvent, WalletTransaction, WalletWithdrawal
 from .failures import WalletBroadcastError, WalletCustodyError
 
 
@@ -32,6 +32,13 @@ ERC20_TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a
 BTC_NETWORKS = {"BITCOIN"}
 SOL_NETWORKS = {"SOLANA"}
 XRP_NETWORKS = {"XRPLEDGER"}
+ACTIVE_WITHDRAWAL_RESERVE_STATUSES = {
+    "pending_approval",
+    "pending_submission",
+    "pending_gas_topup",
+    "queued_treasury_solvency",
+    "submitted",
+}
 BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 XRP_BASE58_ALPHABET = "rpshnaf39wBUDNEGHJKLM4PQRST7VWXYZ2bcdeCg65jkm8oFqi1tuvAxyz"
 
@@ -106,7 +113,6 @@ class RealWalletCustodyService:
         return self._adapter_for(asset, network) is not None
 
     def readiness(self) -> dict[str, Any]:
-        assets = ("ETH", "USDC", "USDT", "BTC", "SOL", "XRP")
         networks = {
             "ETH": ["Ethereum"],
             "USDC": ["Ethereum"],
@@ -279,10 +285,7 @@ class RealWalletCustodyService:
     def sync_address(self, wallet_address: WalletAddress) -> dict[str, Any]:
         adapter = self._require_adapter(wallet_address.asset, wallet_address.network)
         snapshot = adapter.get_balance(wallet_address.address, wallet_address.asset, wallet_address.network)
-        metadata = wallet_address.encrypted_metadata
-        metadata["last_sync_status"] = "checked" if snapshot.checked else "failed"
-        metadata["last_sync_reason"] = snapshot.reason
-        wallet_address.encrypted_metadata = metadata
+        self._persist_onchain_snapshot(wallet_address, snapshot)
         if not snapshot.checked:
             self._audit(
                 user_id=wallet_address.user_id,
@@ -379,6 +382,220 @@ class RealWalletCustodyService:
                 )
         db.session.flush()
         return {"credited": delta, "checked": True}
+
+    def onchain_balance_for_user_asset(
+        self,
+        user_id: int,
+        asset: str,
+        network: str,
+        *,
+        refresh: bool = True,
+    ) -> dict[str, Any]:
+        """Return raw active-address on-chain balance for one user asset."""
+
+        asset_key = self._asset_key(asset)
+        network_name = str(network or "").strip() or self._default_network(asset_key)
+        addresses = (
+            WalletAddress.query.filter_by(user_id=user_id, asset=asset_key, network=network_name, status="active")
+            .order_by(WalletAddress.rotation_index.desc(), WalletAddress.created_at.desc(), WalletAddress.id.desc())
+            .all()
+        )
+        if not self.enabled:
+            return self._empty_onchain_payload(user_id, asset_key, network_name, "disabled", "Real wallet custody is disabled.")
+        adapter = self._adapter_for(asset_key, network_name)
+        if adapter is None:
+            return self._empty_onchain_payload(user_id, asset_key, network_name, "unsupported", "No custody adapter supports this asset/network.")
+        if not addresses:
+            return self._empty_onchain_payload(user_id, asset_key, network_name, "no_active_address", "No active wallet address is available.")
+
+        checked_at = datetime.utcnow()
+        rows: list[dict[str, Any]] = []
+        for source in addresses:
+            if refresh:
+                snapshot = adapter.get_balance(source.address, asset_key, network_name)
+                self._persist_onchain_snapshot(source, snapshot, checked_at=checked_at)
+            status = str(source.onchain_status or "unknown")
+            checked = status == "checked"
+            amount = max(0.0, float(source.onchain_balance or 0.0)) if checked else 0.0
+            rows.append(
+                {
+                    "wallet_address_id": source.id,
+                    "address": source.address,
+                    "amount": amount,
+                    "asset": asset_key,
+                    "network": network_name,
+                    "checked": checked,
+                    "status": status,
+                    "reason": str(source.onchain_reason or ""),
+                    "confirmations": int(source.onchain_confirmations or 0),
+                    "provider_reference": str(source.onchain_provider_reference or ""),
+                    "checked_at": source.onchain_checked_at.isoformat() if source.onchain_checked_at else None,
+                }
+            )
+        db.session.flush()
+
+        checked_rows = [row for row in rows if row["checked"]]
+        amount = sum(float(row["amount"] or 0.0) for row in checked_rows)
+        confirmations = max((int(row["confirmations"] or 0) for row in checked_rows), default=0)
+        latest_checked_at = max(
+            (source.onchain_checked_at for source in addresses if source.onchain_checked_at is not None),
+            default=None,
+        )
+        status = "checked" if checked_rows else "unavailable"
+        reasons = [str(row.get("reason") or row.get("status") or "") for row in rows if row.get("reason") or row.get("status")]
+        return {
+            "user_id": user_id,
+            "asset": asset_key,
+            "network": network_name,
+            "amount": amount,
+            "checked": bool(checked_rows),
+            "status": status,
+            "reason": "; ".join(dict.fromkeys(reasons)),
+            "confirmations": confirmations,
+            "checked_at": latest_checked_at.isoformat() if latest_checked_at else None,
+            "addresses": rows,
+        }
+
+    def verified_spendable_amount(self, user_id: int, asset: str, network: str) -> float:
+        """Return custody-verified spendable funds after active locks/reservations."""
+
+        asset_key = self._asset_key(asset)
+        network_name = str(network or "").strip() or self._default_network(asset_key)
+        network_key = self._network_key(network_name)
+        if not self.enabled or self._adapter_for(asset_key, network_name) is None:
+            return 0.0
+
+        payload = self.onchain_balance_for_user_asset(user_id, asset_key, network_name)
+        if not bool(payload.get("checked")):
+            return 0.0
+
+        adapter = self._require_adapter(asset_key, network_name)
+        gas_adapter = self._adapter_for("ETH", network_name)
+        required = int(self._duration_map_value("WALLET_REQUIRED_CONFIRMATIONS", network_name, 1))
+        treasury_ready = self._treasury_ready_for_token_gas()
+        max_source_amount = 0.0
+
+        for row in list(payload.get("addresses") or []):
+            if not bool(row.get("checked")) or int(row.get("confirmations") or 0) < required:
+                continue
+            amount = max(0.0, float(row.get("amount") or 0.0))
+            address = str(row.get("address") or "")
+            if network_key in EVM_NETWORKS and asset_key in EVM_ASSETS:
+                gas_fee = max(0.0, float(adapter.estimate_fee(asset_key, network_name, address, amount) or 0.0))
+                if asset_key == "ETH":
+                    amount = max(0.0, amount - gas_fee)
+                else:
+                    gas_snapshot = gas_adapter.get_balance(address, "ETH", network_name) if gas_adapter is not None else None
+                    gas_ok = bool(
+                        gas_snapshot is not None
+                        and gas_snapshot.checked
+                        and float(gas_snapshot.amount or 0.0) + 1e-18 >= gas_fee
+                    )
+                    if not gas_ok and not treasury_ready:
+                        amount = 0.0
+            max_source_amount = max(max_source_amount, amount)
+
+        reserved = self._reserved_amount(user_id, asset_key)
+        return max(0.0, max_source_amount - reserved)
+
+    def materialize_onchain_surplus(self, user_id: int, asset: str, network: str, required_amount: float) -> dict[str, Any]:
+        """Credit verified on-chain surplus into app accounting before spending it."""
+
+        asset_key = self._asset_key(asset)
+        network_name = str(network or "").strip() or self._default_network(asset_key)
+        required = max(0.0, float(required_amount or 0.0))
+        if required <= 0:
+            return {"credited": 0.0, "required_amount": required, "changed": False}
+        if not self.enabled or self._adapter_for(asset_key, network_name) is None:
+            return {"credited": 0.0, "required_amount": required, "changed": False, "skipped": "custody_unavailable"}
+
+        spendable = self.verified_spendable_amount(user_id, asset_key, network_name)
+        if spendable + 1e-9 < required:
+            raise WalletCustodyError(
+                f"Verified on-chain {asset_key} balance is {spendable:.6f}, below the requested {required:.6f}.",
+                code="onchain_balance_insufficient",
+                context={"asset": asset_key, "network": network_name, "spendable": spendable, "required_amount": required},
+            )
+
+        balance = WalletBalance.query.filter_by(user_id=user_id, asset=asset_key).one_or_none()
+        if balance is None:
+            balance = WalletBalance(user_id=user_id, asset=asset_key)
+            db.session.add(balance)
+            db.session.flush()
+
+        available_before = max(0.0, float(balance.available_balance or 0.0))
+        locked = max(0.0, float(balance.locked_balance or 0.0))
+        if available_before + 1e-9 >= required:
+            return {
+                "credited": 0.0,
+                "required_amount": required,
+                "available_before": available_before,
+                "available_after": available_before,
+                "spendable": spendable,
+                "changed": False,
+            }
+
+        onchain = self.onchain_balance_for_user_asset(user_id, asset_key, network_name, refresh=False)
+        onchain_amount = max(0.0, float(onchain.get("amount") or 0.0)) if bool(onchain.get("checked")) else 0.0
+        app_total = available_before + locked
+        surplus = max(0.0, onchain_amount - app_total)
+        needed = max(0.0, required - available_before)
+        credit = min(surplus, needed)
+        if credit <= 1e-12 or available_before + credit + 1e-9 < required:
+            raise WalletCustodyError(
+                "Verified on-chain funds exceed app available funds, but no unreserved surplus can be credited.",
+                code="onchain_surplus_unavailable",
+                context={
+                    "asset": asset_key,
+                    "network": network_name,
+                    "onchain_balance": onchain_amount,
+                    "available_balance": available_before,
+                    "locked_balance": locked,
+                    "required_amount": required,
+                    "spendable": spendable,
+                },
+            )
+
+        balance.available_balance = available_before + credit
+        if asset_key in {"USDC", "USDT", "USD"}:
+            balance.estimated_usd_value = float(balance.available_balance or 0.0) + float(balance.locked_balance or 0.0)
+        transaction = WalletTransaction(
+            user_id=user_id,
+            asset=asset_key,
+            amount=credit,
+            transaction_type="onchain_reconciliation",
+            status="complete",
+            network=network_name,
+            note="Credited verified on-chain surplus before wallet operation.",
+        )
+        db.session.add(transaction)
+        self._audit(
+            user_id=user_id,
+            action="onchain_surplus_materialized",
+            status="complete",
+            message=f"Credited {credit:.8f} {asset_key} from verified on-chain surplus.",
+            metadata={
+                "asset": asset_key,
+                "network": network_name,
+                "credited": credit,
+                "required_amount": required,
+                "available_before": available_before,
+                "available_after": balance.available_balance,
+                "locked_balance": locked,
+                "onchain_balance": onchain_amount,
+                "spendable": spendable,
+            },
+        )
+        db.session.flush()
+        return {
+            "credited": credit,
+            "required_amount": required,
+            "available_before": available_before,
+            "available_after": float(balance.available_balance or 0.0),
+            "spendable": spendable,
+            "onchain_balance": onchain_amount,
+            "changed": True,
+        }
 
     def recover_evm_token_deposit(
         self,
@@ -614,44 +831,11 @@ class RealWalletCustodyService:
 
     def verified_withdrawable_amount(self, user_id: int, asset: str, network: str, local_available: float) -> float:
         asset_key = self._asset_key(asset)
-        network_name = str(network or "").strip() or "native"
-        network_key = self._network_key(network_name)
+        network_name = str(network or "").strip() or self._default_network(asset_key)
         app_available = max(0.0, float(local_available or 0.0))
-        if network_key not in EVM_NETWORKS or asset_key not in EVM_ASSETS:
+        if not self.enabled or self._adapter_for(asset_key, network_name) is None:
             return app_available
-        adapter = self._require_adapter(asset_key, network_name)
-        gas_adapter = self._require_adapter("ETH", network_name)
-        max_amount = 0.0
-        treasury_ready = False
-        if has_app_context():
-            try:
-                treasury_status = current_app.extensions["services"]["platform_treasury"].status(include_events=False)
-                treasury_ready = bool(treasury_status.get("ready"))
-                solvency_state = ((treasury_status.get("solvency") or {}).get("state") or {})
-                if solvency_state and str(solvency_state.get("health_status") or "") in {"critical", "emergency"}:
-                    treasury_ready = False
-            except Exception:
-                treasury_ready = False
-        for source in (
-            WalletAddress.query.filter_by(user_id=user_id, asset=asset_key, network=network_name, status="active")
-            .order_by(WalletAddress.rotation_index.desc(), WalletAddress.created_at.desc())
-            .all()
-        ):
-            snapshot = adapter.get_balance(source.address, asset_key, network_name)
-            if not snapshot.checked:
-                continue
-            amount = max(0.0, float(snapshot.amount or 0.0))
-            if asset_key == "ETH":
-                gas_fee = max(0.0, float(adapter.estimate_fee(asset_key, network_name, source.address, amount) or 0.0))
-                amount = max(0.0, amount - gas_fee)
-            else:
-                gas_fee = max(0.0, float(adapter.estimate_fee(asset_key, network_name, source.address, amount) or 0.0))
-                gas = gas_adapter.get_balance(source.address, "ETH", network_name)
-                gas_ok = bool(gas.checked and float(gas.amount or 0.0) + 1e-18 >= gas_fee)
-                if not gas_ok and not treasury_ready:
-                    amount = 0.0
-            max_amount = max(max_amount, amount)
-        return min(app_available, max_amount)
+        return self.verified_spendable_amount(user_id, asset_key, network_name)
 
     def reconcile_withdrawal(self, withdrawal: WalletWithdrawal, *, commit: bool = False) -> dict[str, Any]:
         if withdrawal.status in {"complete", "failed", "rejected"}:
@@ -780,6 +964,73 @@ class RealWalletCustodyService:
             "completed_withdrawal_total": completed_withdrawal_total,
             "changed": not math.isclose(before, expected_available, rel_tol=1e-12, abs_tol=1e-12),
         }
+
+    @staticmethod
+    def _empty_onchain_payload(user_id: int, asset: str, network: str, status: str, reason: str) -> dict[str, Any]:
+        return {
+            "user_id": user_id,
+            "asset": asset,
+            "network": network,
+            "amount": 0.0,
+            "checked": False,
+            "status": status,
+            "reason": reason,
+            "confirmations": 0,
+            "checked_at": None,
+            "addresses": [],
+        }
+
+    def _persist_onchain_snapshot(
+        self,
+        wallet_address: WalletAddress,
+        snapshot: WalletBalanceSnapshot,
+        *,
+        checked_at: datetime | None = None,
+    ) -> None:
+        timestamp = checked_at or datetime.utcnow()
+        status = "checked" if snapshot.checked else "failed"
+        amount = max(0.0, float(snapshot.amount or 0.0)) if snapshot.checked else 0.0
+        wallet_address.onchain_balance = amount
+        wallet_address.onchain_checked_at = timestamp
+        wallet_address.onchain_status = status
+        wallet_address.onchain_reason = str(snapshot.reason or "")
+        wallet_address.onchain_confirmations = int(snapshot.confirmations or 0)
+        wallet_address.onchain_provider_reference = str(snapshot.provider_reference or "")[:220]
+        metadata = wallet_address.encrypted_metadata
+        metadata["last_sync_status"] = status
+        metadata["last_sync_reason"] = snapshot.reason
+        metadata["last_onchain_balance"] = amount
+        metadata["last_onchain_checked_at"] = timestamp.isoformat() + "Z"
+        metadata["last_onchain_confirmations"] = int(snapshot.confirmations or 0)
+        metadata["last_onchain_provider_reference"] = str(snapshot.provider_reference or "")
+        wallet_address.encrypted_metadata = metadata
+
+    def _reserved_amount(self, user_id: int, asset: str) -> float:
+        balance = WalletBalance.query.filter_by(user_id=user_id, asset=asset).one_or_none()
+        locked = max(0.0, float(balance.locked_balance or 0.0)) if balance is not None else 0.0
+        pending = sum(
+            float(withdrawal.amount or 0.0)
+            for withdrawal in WalletWithdrawal.query.filter(
+                WalletWithdrawal.user_id == user_id,
+                WalletWithdrawal.asset == asset,
+                WalletWithdrawal.status.in_(ACTIVE_WITHDRAWAL_RESERVE_STATUSES),
+            ).all()
+        )
+        return max(locked, pending)
+
+    @staticmethod
+    def _treasury_ready_for_token_gas() -> bool:
+        if not has_app_context():
+            return False
+        try:
+            treasury_status = current_app.extensions["services"]["platform_treasury"].status(include_events=False)
+            ready = bool(treasury_status.get("ready"))
+            solvency_state = ((treasury_status.get("solvency") or {}).get("state") or {})
+            if solvency_state and str(solvency_state.get("health_status") or "") in {"critical", "emergency"}:
+                return False
+            return ready
+        except Exception:
+            return False
 
     def _withdrawal_source(self, withdrawal: WalletWithdrawal) -> WalletAddress:
         candidates = self._withdrawal_source_candidates(withdrawal)

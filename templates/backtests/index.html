@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "components/crypto_icon.html" import crypto_icon %}
 
 {% block title %}Backtests · Algorithm Vault{% endblock %}
 
@@ -55,7 +56,7 @@
           <input id="backtest-symbol-search" type="search" placeholder="Search symbols, venues" autocomplete="off" inputmode="search" data-symbol-search>
         </div>
         <div class="backtest-selected-asset" data-selected-asset>
-          <span class="backtest-token-icon">B</span>
+          {{ crypto_icon("BTC", "backtest-token-icon") }}
           <span>
             <strong>BTC</strong>
             <small>Configured · USDT</small>
@@ -199,6 +200,5 @@
 {% endblock %}
 
 {% block page_scripts %}
-<script defer src="{{ url_for('static', filename='js/vendor/lightweight-charts.standalone.production.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}"></script>
 <script defer src="{{ url_for('static', filename='js/backtests.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}"></script>
 {% endblock %}

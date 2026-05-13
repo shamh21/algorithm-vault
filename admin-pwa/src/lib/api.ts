@@ -97,6 +97,27 @@ export type InviteFormPayload = {
   confirmationReason?: string;
 };
 
+export type AdminSession = {
+  ok: true;
+  authenticated: boolean;
+  authorized: boolean;
+  reason: "authorized" | "unauthenticated" | "access_denied" | "signed_out" | string;
+  csrfToken: string;
+  admin?: {
+    username: string;
+    role: string;
+  };
+  defaults?: {
+    profitShareWallet: string;
+  };
+};
+
+export type AdminSignInPayload = {
+  username: string;
+  password: string;
+  totpCode: string;
+};
+
 type ApiOptions = RequestInit & {
   csrfToken?: string;
 };
@@ -116,6 +137,9 @@ const apiBase = () => (process.env.NEXT_PUBLIC_API_BASE_URL || "").replace(/\/$/
 
 export async function apiFetch<T>(path: string, options: ApiOptions = {}): Promise<T> {
   const headers = new Headers(options.headers);
+  if (!headers.has("Accept")) {
+    headers.set("Accept", "application/json");
+  }
   if (options.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }

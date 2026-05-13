@@ -19,7 +19,6 @@ from ..models import (
     TreasuryGasUsage,
     TreasuryReserveForecast,
     TreasuryReserveState,
-    VaultCycle,
     VaultCycleSettlement,
     WalletAddress,
     WalletAuditLog,

@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "components/crypto_icon.html" import crypto_icon %}
 
 {% block title %}Vault · Algorithm Vault{% endblock %}
 
@@ -64,7 +65,7 @@
           {% for balance in balances %}
             <label class="asset-option vault-asset-option {% if balance.asset == default_asset %}is-selected{% endif %}" data-asset-option data-available-balance="{{ "%.6f"|format(balance.available_balance) }}">
               <input type="radio" name="deposit_asset" value="{{ balance.asset }}" {% if balance.asset == default_asset %}checked{% endif %}>
-              <span class="coin-icon" aria-hidden="true">{{ balance.asset[:1] }}</span>
+              {{ crypto_icon(balance.asset) }}
               <span>
                 <strong>{{ balance.asset }}</strong>
                 <small>{{ "%.6f"|format(balance.available_balance) }}</small>
@@ -318,5 +319,5 @@
 {% endblock %}
 
 {% block page_scripts %}
-<script src="{{ url_for('static', filename='js/vault.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}"></script>
+<script defer src="{{ url_for('static', filename='js/vault.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}"></script>
 {% endblock %}

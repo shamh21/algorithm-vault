@@ -56,7 +56,6 @@ class OneH10ForecastService:
         ml_decision = ml_suite.get("pytorch_fibonacci") or self._ml_decision(context, provider_key)
         fallback = self._deterministic_forecast(context)
         feature_blockers = self._feature_blockers(context)
-        raw = ml_decision.get("raw") if isinstance(ml_decision.get("raw"), dict) else {}
         ready = self._suite_has_ready_decision(ml_suite) or bool(ml_decision.get("ready", False))
         advisory_blockers: list[str] = []
         if self._feature_blockers_are_advisory():

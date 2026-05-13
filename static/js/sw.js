@@ -1,20 +1,15 @@
-const CACHE_VERSION = "algvault-v2";
+const CACHE_VERSION = "algvault-v8-command-center-dark";
 const SHELL_CACHE = `${CACHE_VERSION}-shell`;
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 
 const APP_SHELL = [
   "/static/css/app.css",
   "/static/js/app-shell.js",
-  "/static/js/dashboard.js",
-  "/static/js/dashboard-chart.js",
-  "/static/js/vault.js",
-  "/static/js/wallet.js",
-  "/static/js/backtests.js",
-  "/static/js/treasury.js",
-  "/static/js/vendor/chart.umd.min.js",
-  "/static/js/vendor/lightweight-charts.standalone.production.js",
   "/static/js/responsive-tables.js",
   "/manifest.json",
+  "/icons/algvault-ios-180.png",
+  "/icons/algvault-ios-192.png",
+  "/icons/algvault-ios-512.png",
   "/icons/icon-192.png",
   "/icons/icon-512.png",
   "/icons/apple-touch-icon.png",
@@ -25,17 +20,17 @@ const OFFLINE_HTML = `<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#050505">
+  <meta name="theme-color" content="#050607">
   <title>AlgVault Offline</title>
   <style>
-    html,body{margin:0;min-height:100%;background:#050505;color:#f5f5f5;font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
-    main{min-height:100svh;display:grid;place-items:center;padding:2rem}
-    section{max-width:28rem;border:1px solid rgba(255,255,255,.12);border-radius:16px;padding:1.25rem;background:#111}
-    span{color:#f0b90b;font-size:.74rem;font-weight:800;text-transform:uppercase}
-    h1{margin:.35rem 0;font-size:1.35rem} p{margin:0;color:#a8a8a8}
+    html,body{margin:0;min-height:100%;background:#050607;color:#f8fafc;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text",Inter,system-ui,sans-serif}
+    main{min-height:100svh;display:grid;place-items:center;padding:calc(2rem + env(safe-area-inset-top)) max(1.25rem,env(safe-area-inset-right)) calc(2rem + env(safe-area-inset-bottom)) max(1.25rem,env(safe-area-inset-left))}
+    section{max-width:28rem;border:1px solid rgba(148,163,184,.2);border-radius:16px;padding:1.25rem;background:#101826;box-shadow:0 22px 56px rgba(0,0,0,.46)}
+    span{color:#7dd3fc;font-size:.74rem;font-weight:800;text-transform:uppercase}
+    h1{margin:.35rem 0;font-size:1.35rem} p{margin:0;color:#aeb9ca}
   </style>
 </head>
-<body><main><section><span>Offline</span><h1>Dashboard unavailable</h1><p>Reconnect to refresh authenticated market data. Static app assets remain cached safely.</p></section></main></body>
+<body><main><section><span>Offline</span><h1>AlgVault is offline</h1><p>Reconnect to refresh wallet, vault, and market data. Static app assets remain cached safely.</p></section></main></body>
 </html>`;
 
 const isHtmlRequest = (request) => request.mode === "navigate" || Boolean(request.headers.get("accept")?.includes("text/html"));
@@ -43,7 +38,7 @@ const isStaticAsset = (url) => url.pathname.startsWith("/static/") || url.pathna
 const isApiRequest = (url) => url.pathname.startsWith("/api/") || url.pathname.startsWith("/admin/api/") || url.pathname.includes("/stream");
 const isAuthPath = (url) => ["/login", "/logout", "/register"].some((path) => url.pathname === path || url.pathname.startsWith(`${path}/`));
 const isDashboardHtml = (url) => url.pathname === "/admin/dashboard";
-const isServiceWorkerAsset = (url) => url.pathname === "/static/js/sw.js" || url.pathname === "/manifest.json" || url.pathname === "/static/manifest.webmanifest";
+const isServiceWorkerAsset = (url) => url.pathname === "/sw.js" || url.pathname === "/static/js/sw.js" || url.pathname === "/manifest.json" || url.pathname === "/static/manifest.webmanifest";
 const isCacheableStaticResponse = (response) => response && response.ok && response.type !== "opaqueredirect";
 
 const cacheFirstStatic = async (request) => {

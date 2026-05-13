@@ -161,6 +161,155 @@ def test_kucoin_ready_hyperliquid_blocked_allocates_kucoin_100(app, monkeypatch)
     assert payload["routing_preview"]["routes"][0]["exchange"] == "kucoin"
 
 
+def test_vault_page_delegates_initial_preview_when_live_api_origin_configured(app, monkeypatch) -> None:
+    _confirm_live(app)
+    app.config["PUBLIC_LIVE_API_ORIGIN"] = "https://api.algvault.com"
+    user = _user("delegatedpreview")
+    _kucoin_connection(app, user)
+    db.session.add(WalletBalance(user_id=user.id, asset="USDC", available_balance=30.0, estimated_usd_value=30.0))
+    db.session.commit()
+    service = app.extensions["services"]["trading_connections"]
+    monkeypatch.setattr(
+        service,
+        "account_snapshot",
+        lambda *args, **kwargs: pytest.fail("Vercel-side Vault render must not fetch exchange snapshots"),
+    )
+    client = app.test_client()
+    _login(client, user)
+
+    response = client.get("/vault")
+
+    assert response.status_code == 200
+    assert b"live_api_deferred" in response.data
+    assert b"https://api.algvault.com" in response.data
+
+
+def test_kucoin_region_restriction_is_structured_and_redacted(app, monkeypatch) -> None:
+    _confirm_live(app)
+    user = _user("kucoinrestricted")
+    connection = _kucoin_connection(app, user)
+    db.session.add(WalletBalance(user_id=user.id, asset="USDC", available_balance=30.0, estimated_usd_value=30.0))
+    db.session.commit()
+    raw_alert = (
+        'KuCoin unavailable: {"code": "400302", "msg": "Our services are currently unavailable in the U.S. '
+        'current ip: 3.86.110.165 and current area: US"}'
+    )
+    service = app.extensions["services"]["trading_connections"]
+    monkeypatch.setattr(service, "can_trade", lambda user_id, mode, connection_id=None: False)
+    monkeypatch.setattr(
+        service,
+        "account_snapshot",
+        lambda user_id, mode, connection_id=None: ClientSnapshot(mode, [], [], [], [], [raw_alert])
+        if connection_id == connection.id
+        else ClientSnapshot(mode, [], [], [], [], []),
+    )
+
+    payload = get_vault_cycle_readiness(
+        user.id,
+        amount=10,
+        live_acknowledged=True,
+        enabled_exchanges=["kucoin"],
+    )
+
+    assert "kucoin_region_restricted" in _codes(payload)
+    rendered = str(payload)
+    assert "3.86.110.165" not in rendered
+    assert '{"code": "400302"' not in rendered
+
+    client = app.test_client()
+    _login(client, user)
+    response = client.get(
+        "/api/vault/routing-preview?cycle_type=one_h10&amount=10&deposit_asset=USDC&settlement_asset=USDC&one_h10_live_ack=1&providers=kucoin",
+        headers={"Accept": "application/json"},
+    )
+    response_text = response.get_data(as_text=True)
+    assert response.status_code == 200
+    assert "kucoin_region_restricted" in response_text
+    assert "3.86.110.165" not in response_text
+    assert '{"code": "400302"' not in response_text
+    assert "currently unavailable in the U.S." not in response_text
+
+
+def test_live_api_cors_allows_configured_vault_origin(app) -> None:
+    app.config["PUBLIC_LIVE_API_ORIGIN"] = "https://api.algvault.com"
+    app.config["LIVE_API_CORS_ALLOWED_ORIGINS"] = ["https://app.algvault.com"]
+    client = app.test_client()
+
+    response = client.open(
+        "/vault/readiness",
+        method="OPTIONS",
+        headers={
+            "Origin": "https://app.algvault.com",
+            "Access-Control-Request-Headers": "X-CSRF-Token, Idempotency-Key",
+        },
+    )
+
+    assert response.headers["Access-Control-Allow-Origin"] == "https://app.algvault.com"
+    assert response.headers["Access-Control-Allow-Credentials"] == "true"
+    assert "X-CSRF-Token" in response.headers["Access-Control-Allow-Headers"]
+
+    actual = client.get(
+        "/vault/readiness",
+        base_url="https://api.algvault.com",
+        headers={"Origin": "https://app.algvault.com", "Accept": "application/json"},
+    )
+
+    assert actual.headers["Access-Control-Allow-Origin"] == "https://app.algvault.com"
+    assert actual.headers["Access-Control-Allow-Credentials"] == "true"
+
+
+def test_live_api_cors_rejects_disallowed_and_non_vault_origins(app) -> None:
+    app.config["PUBLIC_LIVE_API_ORIGIN"] = "https://api.algvault.com"
+    app.config["LIVE_API_CORS_ALLOWED_ORIGINS"] = ["*", "https://app.algvault.com"]
+    client = app.test_client()
+
+    disallowed = client.open(
+        "/vault/readiness",
+        method="OPTIONS",
+        headers={"Origin": "https://evil.example", "Access-Control-Request-Headers": "X-CSRF-Token"},
+    )
+    non_vault = client.open(
+        "/healthz",
+        method="OPTIONS",
+        headers={"Origin": "https://app.algvault.com", "Access-Control-Request-Headers": "X-CSRF-Token"},
+    )
+    wildcard_origin = client.open(
+        "/vault/readiness",
+        method="OPTIONS",
+        headers={"Origin": "*", "Access-Control-Request-Headers": "X-CSRF-Token"},
+    )
+
+    for response in (disallowed, non_vault, wildcard_origin):
+        assert "Access-Control-Allow-Origin" not in response.headers
+        assert "Access-Control-Allow-Credentials" not in response.headers
+
+
+def test_session_cookie_domain_is_explicit_only(app) -> None:
+    app.config["PUBLIC_APP_ORIGIN"] = "https://app.algvault.com"
+    app.config["PUBLIC_LIVE_API_ORIGIN"] = "https://api.algvault.com"
+    app.config["SESSION_COOKIE_DOMAIN"] = None
+
+    assert app.config.get("SESSION_COOKIE_DOMAIN") is None
+    assert app.session_interface.get_cookie_domain(app) is None
+
+    app.config["SESSION_COOKIE_DOMAIN"] = ".algvault.com"
+
+    assert app.session_interface.get_cookie_domain(app) == ".algvault.com"
+
+
+def test_csp_connect_src_allows_live_api_without_wildcard(app) -> None:
+    app.config["PUBLIC_LIVE_API_ORIGIN"] = "https://api.algvault.com"
+    app.config["SECURE_HEADERS_CSP_ENABLED"] = True
+
+    response = app.test_client().get("/login")
+    csp = response.headers["Content-Security-Policy"]
+    body = response.get_data(as_text=True)
+
+    assert "connect-src 'self' https://api.algvault.com" in csp
+    assert "*" not in csp
+    assert "https://api.algvault.com" not in body
+
+
 def test_no_exchange_ready_blocks_json_start(app) -> None:
     _confirm_live(app)
     user = _user("noexchange")
@@ -301,6 +450,7 @@ def test_duplicate_idempotency_key_returns_existing_cycle_without_creating_dupli
 def test_vault_mobile_html_css_contains_safe_area_and_sticky_actions() -> None:
     template = Path("templates/vault.html").read_text()
     css = Path("static/css/app.css").read_text()
+    js = Path("static/js/vault.js").read_text()
 
     assert "data-vault-top-blockers" in template
     assert "data-vault-result-sheet" in template
@@ -308,3 +458,5 @@ def test_vault_mobile_html_css_contains_safe_area_and_sticky_actions() -> None:
     assert "env(safe-area-inset-bottom)" in css
     assert ".vault-sticky-actions" in css
     assert "-webkit-overflow-scrolling: touch" in css
+    assert "vaultApiUrl" in js
+    assert 'credentials: "include"' in js

@@ -731,7 +731,6 @@ class VaultBacktestSimulator:
         total_return = (final_equity - request_input.allocation_usd) / max(request_input.allocation_usd, 1e-9)
         max_drawdown = min([self._safe_float(row.get("drawdown")) for row in drawdown_curve] or [0.0])
         wins = len([trade for trade in trades if self._safe_float(trade.get("pnl")) > 0])
-        losses = len([trade for trade in trades if self._safe_float(trade.get("pnl")) < 0])
         trade_count = len(trades)
         win_rate = wins / trade_count if trade_count else 0.0
         charts = self._charts_from_curves(equity_curve, drawdown_curve, request_input.allocation_usd, trades)

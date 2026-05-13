@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import secrets
 from datetime import datetime, timezone
-from typing import Any
+from functools import wraps
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 from flask import Blueprint, Response, current_app, flash, jsonify, redirect, render_template, request, stream_with_context, url_for
 from sqlalchemy import func, or_
 
 from ..admin_auth import admin_required
-from ..auth import current_user
+from ..auth import current_user, login_user, logout_user, password_matches, two_factor_session_valid, verify_totp
 from ..csrf import csrf_token
 from ..extensions import db
 from ..models import (
@@ -46,6 +47,59 @@ from ..services.provider_assets import normalize_provider
 
 admin_bp = Blueprint("admin", __name__, url_prefix="/admin")
 profit_share_api_bp = Blueprint("profit_share_api", __name__)
+
+ADMIN_SIGN_IN_FAILED = "Sign-in failed. Check your credentials and try again."
+
+
+def admin_api_required(fn: Callable[..., Any]) -> Callable[..., Any]:
+    @wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        user = current_user()
+        if user is None or not two_factor_session_valid(user):
+            return _admin_api_error("Authentication required.", 401, "authentication_required")
+        if not user.is_admin:
+            return _admin_api_error("Access denied.", 403, "access_denied")
+        return fn(*args, **kwargs)
+
+    return wrapper
+
+
+def _admin_api_error(message: str, status: int, code: str):
+    return jsonify({"ok": False, "error": message, "code": code}), status
+
+
+def _clean_auth_username(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _admin_session_payload() -> dict[str, Any]:
+    user = current_user()
+    if user is None or not two_factor_session_valid(user):
+        return {
+            "ok": True,
+            "authenticated": False,
+            "authorized": False,
+            "reason": "unauthenticated",
+            "csrfToken": csrf_token(),
+        }
+    if not user.is_admin:
+        return {
+            "ok": True,
+            "authenticated": True,
+            "authorized": False,
+            "reason": "access_denied",
+            "csrfToken": csrf_token(),
+            "admin": {"username": user.username, "role": user.role},
+        }
+    return {
+        "ok": True,
+        "authenticated": True,
+        "authorized": True,
+        "reason": "authorized",
+        "csrfToken": csrf_token(),
+        "admin": {"username": user.username, "role": user.role},
+        "defaults": {"profitShareWallet": DEFAULT_PROFIT_SHARE_WALLET},
+    }
 
 
 @admin_bp.get("/")
@@ -498,21 +552,60 @@ def invite_codes():
 
 
 @admin_bp.get("/api/session")
-@admin_required
 def invite_admin_session():
-    user = current_user()
+    return jsonify(_admin_session_payload())
+
+
+@admin_bp.post("/api/sign-in")
+def invite_admin_sign_in():
+    payload = _request_payload()
+    username = _clean_auth_username(payload.get("username"))
+    password = str(payload.get("password") or "")
+    totp_code = str(payload.get("totpCode", payload.get("totp_code", "")) or "").strip()
+
+    user = User.query.filter_by(username=username).one_or_none() if username else None
+    if (
+        user is None
+        or not password
+        or not password_matches(user, password)
+        or not user.two_factor_enabled
+        or not totp_code
+        or not verify_totp(user, totp_code)
+    ):
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": ADMIN_SIGN_IN_FAILED,
+                    "code": "admin_sign_in_failed",
+                    "authenticated": False,
+                    "authorized": False,
+                    "csrfToken": csrf_token(),
+                }
+            ),
+            401,
+        )
+
+    login_user(user, two_factor_verified=True)
+    return jsonify(_admin_session_payload())
+
+
+@admin_bp.post("/api/sign-out")
+def invite_admin_sign_out():
+    logout_user()
     return jsonify(
         {
             "ok": True,
+            "authenticated": False,
+            "authorized": False,
+            "reason": "signed_out",
             "csrfToken": csrf_token(),
-            "admin": {"username": user.username if user else "", "role": user.role if user else ""},
-            "defaults": {"profitShareWallet": DEFAULT_PROFIT_SHARE_WALLET},
         }
     )
 
 
 @admin_bp.route("/api/invite-codes", methods=["GET", "POST"])
-@admin_required
+@admin_api_required
 def invite_codes_api():
     if request.method == "POST":
         payload = _request_payload()
@@ -564,7 +657,7 @@ def invite_codes_api():
 
 
 @admin_bp.get("/api/invite-codes/<public_id>")
-@admin_required
+@admin_api_required
 def invite_code_detail_api(public_id: str):
     invite = _invite_by_public_id(public_id)
     if invite is None:
@@ -573,7 +666,7 @@ def invite_code_detail_api(public_id: str):
 
 
 @admin_bp.patch("/api/invite-codes/<public_id>")
-@admin_required
+@admin_api_required
 def update_invite_code_api(public_id: str):
     invite = _invite_by_public_id(public_id)
     if invite is None:
@@ -619,7 +712,7 @@ def update_invite_code_api(public_id: str):
 
 
 @admin_bp.post("/api/invite-codes/<public_id>/disable")
-@admin_required
+@admin_api_required
 def disable_invite_code_api(public_id: str):
     invite = _invite_by_public_id(public_id)
     if invite is None:
@@ -634,7 +727,7 @@ def disable_invite_code_api(public_id: str):
 
 
 @admin_bp.delete("/api/invite-codes/<public_id>")
-@admin_required
+@admin_api_required
 def delete_invite_code_api(public_id: str):
     invite = _invite_by_public_id(public_id)
     if invite is None:
@@ -650,7 +743,7 @@ def delete_invite_code_api(public_id: str):
 
 
 @admin_bp.get("/api/invite-codes/<public_id>/usages")
-@admin_required
+@admin_api_required
 def invite_code_usages_api(public_id: str):
     invite = _invite_by_public_id(public_id)
     if invite is None:
@@ -660,7 +753,7 @@ def invite_code_usages_api(public_id: str):
 
 
 @admin_bp.get("/api/invite-codes/<public_id>/profit-share-payouts")
-@admin_required
+@admin_api_required
 def invite_code_profit_share_payouts_api(public_id: str):
     invite = _invite_by_public_id(public_id)
     if invite is None:
@@ -670,7 +763,7 @@ def invite_code_profit_share_payouts_api(public_id: str):
 
 
 @admin_bp.get("/api/profit-share-payouts")
-@admin_required
+@admin_api_required
 def profit_share_payouts_api():
     status_filter = str(request.args.get("status", "all") or "all").strip().lower()
     query = ProfitSharePayout.query
@@ -681,7 +774,7 @@ def profit_share_payouts_api():
 
 
 @admin_bp.get("/api/audit-logs")
-@admin_required
+@admin_api_required
 def admin_audit_logs_api():
     entity_public_id = str(request.args.get("entityPublicId", "") or "").strip()
     query = AdminAuditLog.query
@@ -692,7 +785,7 @@ def admin_audit_logs_api():
 
 
 @profit_share_api_bp.post("/api/vault-cycles/<public_id>/process-profit-share")
-@admin_required
+@admin_api_required
 def process_vault_cycle_profit_share_api(public_id: str):
     cycle = VaultCycle.query.filter_by(public_id=public_id).one_or_none()
     if cycle is None:

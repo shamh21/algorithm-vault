@@ -1,5 +1,6 @@
-<div class="intro-loader" data-intro-loader role="status" data-component="AlgVaultIntro" aria-live="polite" aria-busy="true">
+<div class="intro-loader" data-intro-loader data-component="AlgVaultLaunchAnimation" aria-hidden="true" aria-busy="true">
   <div class="intro-loader__ambient" aria-hidden="true"></div>
+  <div class="intro-loader__glow" aria-hidden="true"></div>
   <section class="intro-loader__panel" aria-label="AlgVault startup">
     <div class="intro-loader__mark-wrap" aria-hidden="true">
       <span class="intro-loader__ring"></span>
@@ -7,14 +8,16 @@
       <span class="intro-loader__vault">
         <span class="intro-loader__vault-door"></span>
         <span class="intro-loader__vault-dial"></span>
+        <span class="intro-loader__monogram">AV</span>
       </span>
     </div>
     <div class="intro-loader__copy">
       <span class="intro-loader__eyebrow">AlgVault</span>
-      <strong data-intro-loader-title>Securing vault session...</strong>
-      <small data-intro-loader-detail>Verifying the app shell.</small>
+      <strong data-intro-loader-title>Opening your vault</strong>
+      <small data-intro-loader-detail>Preparing a secure session.</small>
     </div>
     <div class="intro-loader__bar" aria-hidden="true"><span></span></div>
+    <div class="intro-loader__ticks" aria-hidden="true"><span></span><span></span><span></span></div>
     <button class="intro-loader__retry" type="button" data-intro-loader-retry hidden>Retry</button>
   </section>
 </div>

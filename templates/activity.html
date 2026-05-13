@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "components/crypto_icon.html" import crypto_icon %}
 
 {% block title %}Activity · Algorithm Vault{% endblock %}
 
@@ -30,7 +31,7 @@
           {% set flow_class = "is-outflow" if tx_type in ["allocation", "withdraw", "withdrawal", "fee"] or item.amount < 0 else "is-inflow" %}
           <article class="activity-card wallet-activity-item {{ flow_class }}">
             <div class="activity-card-main">
-              <div class="activity-icon" aria-hidden="true">{{ item.asset[:1] }}</div>
+              {{ crypto_icon(item.asset, "activity-icon") }}
               <div class="activity-copy">
                 <div class="activity-title-row">
                   <strong>{{ tx_label }}</strong>

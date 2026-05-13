@@ -8,7 +8,6 @@ from typing import Any, Protocol, runtime_checkable
 from .hyperliquid_client import HyperliquidClient
 from .market_data import MarketDataService
 
-
 VALID_ORDER_SIDES = {"buy", "sell"}
 VALID_ORDER_TYPES = {"market", "limit"}
 
@@ -26,6 +25,8 @@ class VenueOrderRequest:
     reduce_only: bool = False
     leverage: float = 1.0
     slippage_pct: float = 0.0
+    client_order_id: str | None = None
+    time_in_force: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -174,6 +175,8 @@ class HyperliquidVenue:
             request.reduce_only,
             request.leverage,
             request.slippage_pct,
+            client_order_id=request.client_order_id or request.metadata.get("client_order_id"),
+            time_in_force=request.time_in_force or request.metadata.get("time_in_force"),
         )
 
         raw = response.get("raw", response)

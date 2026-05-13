@@ -6,6 +6,7 @@
   const previewTimers = new WeakMap();
   const lastPreview = new WeakMap();
   const apiUrl = (path) => window.AlgVaultConfig?.apiUrl?.(path) || path;
+  const vaultApiUrl = (path) => window.AlgVaultConfig?.vaultApiUrl?.(path) || apiUrl(path);
   let timerId = null;
   let cycleStatusTimerId = null;
 
@@ -135,7 +136,10 @@
     const url = card.dataset.cycleStatusUrl;
     if (!url || document.hidden) return;
     try {
-      const response = await window.fetch(apiUrl(url), { headers: { Accept: "application/json" } });
+      const response = await window.fetch(vaultApiUrl(url), {
+        credentials: "include",
+        headers: { Accept: "application/json" },
+      });
       if (!response.ok) throw new Error(`Cycle status failed: ${response.status}`);
       updateCycleCard(card, await response.json());
     } catch (error) {
@@ -517,7 +521,7 @@
       renderRoutingPreview(form, payload);
       return payload;
     }
-    const url = new URL(apiUrl(previewUrl), window.location.origin);
+    const url = new URL(vaultApiUrl(previewUrl), window.location.origin);
     url.searchParams.set("cycle_type", "one_h10");
     url.searchParams.set("amount", String(state.amount));
     url.searchParams.set("deposit_asset", state.depositAsset);
@@ -527,6 +531,7 @@
     form.classList.add("is-routing-loading");
     try {
       const response = await window.fetch(url, {
+        credentials: "include",
         headers: { Accept: "application/json" },
         signal: controller.signal,
       });
@@ -588,8 +593,9 @@
 
     setSubmitting(form, true);
     try {
-      const response = await window.fetch(apiUrl(form.dataset.startCycleUrl || form.action), {
+      const response = await window.fetch(vaultApiUrl(form.dataset.startCycleUrl || form.action), {
         method: "POST",
+        credentials: "include",
         headers: {
           Accept: "application/json",
           "X-Requested-With": "fetch",

@@ -15,7 +15,6 @@ from app.models import (
     PlatformTreasuryEvent,
     PlatformTreasuryReserveJob,
     PlatformTreasuryWallet,
-    ReferralInviteCode,
     Setting,
     User,
     WalletAccount,
@@ -332,6 +331,63 @@ def test_reconcile_custody_balance_restores_completed_deposits_idempotently(app)
     assert balance.available_balance == 8.0
     assert balance.locked_balance == 2.0
     assert WalletAuditLog.query.filter_by(user_id=user.id, action="wallet_balance_reconciled").count() == 2
+
+
+def test_sync_persists_onchain_snapshot_when_completed_ledger_exceeds_chain(app) -> None:
+    _enable_generated_wallets(app)
+    fake = _FakeAdapter(amount=110.0)
+    custody = RealWalletCustodyService(app.config, adapters=[fake])
+    app.extensions["services"]["wallet_custody"] = custody
+    user, _ = _create_user("snapusdt")
+    wallet_address = custody.get_or_create_address(user_id=user.id, asset="USDT", network="Ethereum")
+    db.session.add(WalletBalance(user_id=user.id, asset="USDT", available_balance=100.9972689688))
+    db.session.add(
+        WalletLedgerEvent(
+            user_id=user.id,
+            wallet_address_id=wallet_address.id,
+            asset="USDT",
+            network="Ethereum",
+            address=wallet_address.address,
+            event_type="deposit",
+            provider_reference="historical-120",
+            idempotency_key="deposit:historical-120",
+            amount=120.0,
+            confirmations=12,
+            status="complete",
+        )
+    )
+    db.session.commit()
+
+    result = custody.sync_address(wallet_address)
+    db.session.flush()
+    db.session.refresh(wallet_address)
+    balance = WalletBalance.query.filter_by(user_id=user.id, asset="USDT").one()
+
+    assert result["credited"] == 0.0
+    assert wallet_address.onchain_status == "checked"
+    assert wallet_address.onchain_balance == pytest.approx(110.0)
+    assert wallet_address.onchain_confirmations == 12
+    assert wallet_address.onchain_checked_at is not None
+    assert balance.available_balance == pytest.approx(100.9972689688)
+    assert WalletTransaction.query.filter_by(user_id=user.id, transaction_type="deposit").count() == 0
+
+
+def test_verified_spendable_amount_deficit_uses_onchain_balance(app) -> None:
+    _enable_generated_wallets(app)
+    fake = _FakeAdapter(amount=0.0)
+    custody = RealWalletCustodyService(app.config, adapters=[fake])
+    app.extensions["services"]["wallet_custody"] = custody
+    user, _ = _create_user("deficitusdc")
+    custody.get_or_create_address(user_id=user.id, asset="USDC", network="Ethereum")
+    db.session.add(WalletBalance(user_id=user.id, asset="USDC", available_balance=27.80265766, estimated_usd_value=27.80265766))
+    db.session.commit()
+
+    spendable = custody.verified_spendable_amount(user.id, "USDC", "Ethereum")
+    snapshot = custody.onchain_balance_for_user_asset(user.id, "USDC", "Ethereum", refresh=False)
+
+    assert spendable == 0.0
+    assert snapshot["checked"] is True
+    assert snapshot["amount"] == 0.0
 
 
 def test_evm_balance_uses_lowercase_required_confirmation_key(monkeypatch) -> None:

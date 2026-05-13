@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "components/crypto_icon.html" import crypto_icon %}
 
 {% block title %}Wallet · Algorithm Vault{% endblock %}
 
@@ -27,7 +28,7 @@
     {% set wallet_address = balance.active_deposit_address.address if balance.active_deposit_address else "" %}
     <article class="wallet-card balance-card wallet-asset-card">
       <div class="wallet-asset-head">
-        <span class="coin-icon wallet-coin" aria-hidden="true">{{ balance.asset[:1] }}</span>
+        {{ crypto_icon(balance.asset, "wallet-coin") }}
         <div>
           <h2>{{ balance.asset }}</h2>
           <span>Wallet Balance</span>
@@ -49,7 +50,29 @@
           <dt>Locked</dt>
           <dd>{{ "%.6f"|format(balance.locked_balance) }}</dd>
         </div>
+        <div>
+          <dt>On-chain</dt>
+          <dd>
+            {% if balance.onchain_status == "checked" %}
+              {{ "%.6f"|format(balance.onchain_balance) }}
+            {% else %}
+              Unavailable
+            {% endif %}
+          </dd>
+        </div>
       </dl>
+
+      <div class="wallet-onchain-row">
+        {% if balance.onchain_status == "checked" %}
+          <span class="status-pill wallet-onchain-status {{ balance.onchain_mismatch_status }}">
+            {{ balance.onchain_mismatch_status|replace("_", " ")|title }}
+          </span>
+          <span>{{ "%+.6f"|format(balance.onchain_delta) }} {{ balance.asset }}</span>
+        {% else %}
+          <span class="status-pill wallet-onchain-status unavailable">On-chain Unavailable</span>
+          {% if balance.onchain_reason %}<span>{{ balance.onchain_reason }}</span>{% endif %}
+        {% endif %}
+      </div>
 
       <div class="wallet-card-actions wallet-action-row">
         <a href="{{ url_for('consumer.deposit', asset=balance.asset) }}" class="button-link primary">Deposit</a>

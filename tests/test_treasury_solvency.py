@@ -10,7 +10,6 @@ from app.extensions import db
 from app.models import (
     PlatformTreasuryReserveJob,
     TreasuryAlert,
-    TreasuryReserveState,
     User,
     VaultCycle,
     VaultCycleSettlement,

@@ -32,6 +32,7 @@ def test_static_cache_headers_distinguish_assets_from_pwa_control_files(app) -> 
     css = client.get("/static/css/app.css")
     manifest = client.get("/manifest.json")
     worker = client.get("/static/js/sw.js")
+    root_worker = client.get("/sw.js")
     icon = client.get("/icons/icon-192.png")
 
     assert css.status_code == 200
@@ -41,6 +42,9 @@ def test_static_cache_headers_distinguish_assets_from_pwa_control_files(app) -> 
     assert worker.status_code == 200
     assert "must-revalidate" in worker.headers["Cache-Control"]
     assert worker.headers["Service-Worker-Allowed"] == "/"
+    assert root_worker.status_code == 200
+    assert "must-revalidate" in root_worker.headers["Cache-Control"]
+    assert root_worker.headers["Service-Worker-Allowed"] == "/"
     assert icon.status_code == 200
     assert "immutable" in icon.headers["Cache-Control"]
 
@@ -54,6 +58,7 @@ def test_service_worker_registers_with_root_scope(app) -> None:
     assert 'window.AV_SW_SCOPE = "/"' in shell
     assert "window.AlgVaultConfig" in shell
     assert "PUBLIC_API_ORIGIN" not in shell
+    assert 'window.AV_SW_URL = "/sw.js?' in shell
     assert "isPrivateIP" in app_shell
     assert (
         "AlgVault is running from a private IP HTTPS origin. iOS Safari may show a certificate warning. Use a stable trusted HTTPS hostname instead."
@@ -66,9 +71,9 @@ def test_intro_loader_replaces_any_in_app_connection_warning_copy(app) -> None:
     shell = app.test_client().get("/login").get_data(as_text=True)
 
     assert 'class="app-body app-starting' in shell
-    assert 'data-component="AlgVaultIntro"' in shell
-    assert 'data-intro-loader role="status"' in shell
-    assert "Securing vault session" in shell
+    assert 'data-component="AlgVaultLaunchAnimation"' in shell
+    assert 'data-intro-loader data-component="AlgVaultLaunchAnimation" aria-hidden="true"' in shell
+    assert "Opening your vault" in shell
     assert "This connection is not private" not in shell
     assert "connection is not private" not in shell.lower()
     assert "not private" not in shell.lower()
@@ -152,7 +157,7 @@ def test_database_url_uses_psycopg_driver_for_hosted_postgres(monkeypatch, raw_u
         scoped.setenv("DATABASE_URL", raw_url)
         reloaded = importlib.reload(config_module)
 
-        assert reloaded.BaseConfig.SQLALCHEMY_DATABASE_URI == normalized
+        assert normalized == reloaded.BaseConfig.SQLALCHEMY_DATABASE_URI
     importlib.reload(config_module)
 
 
@@ -231,6 +236,32 @@ def test_rate_limit_can_protect_login_when_enabled(tmp_path) -> None:
         db.drop_all()
 
 
+def test_rate_limit_can_protect_admin_pwa_sign_in_when_enabled(tmp_path) -> None:
+    app = create_app(
+        {
+            "TESTING": True,
+            "SQLALCHEMY_DATABASE_URI": f"sqlite:///{tmp_path / 'admin-rate-limit.db'}",
+            "SECRET_KEY": "test-secret-key-12345678901234567890",
+            "WTF_CSRF_ENABLED": False,
+            "RATELIMIT_FORCE_ENABLED": True,
+            "RATELIMIT_LOGIN_PER_WINDOW": 1,
+            "RATELIMIT_WINDOW_SECONDS": 60,
+        }
+    )
+    with app.app_context():
+        client = app.test_client()
+
+        first = client.post("/admin/api/sign-in", json={"username": "missing", "password": "bad", "totpCode": "000000"})
+        second = client.post("/admin/api/sign-in", json={"username": "missing", "password": "bad", "totpCode": "000000"})
+
+        assert first.status_code == 401
+        assert second.status_code == 429
+        assert second.headers["Retry-After"]
+        assert second.get_json()["error"] == "rate_limited"
+        db.session.remove()
+        db.drop_all()
+
+
 def test_auth_protected_route_categories_fail_closed_without_session(app) -> None:
     client = app.test_client()
 
@@ -257,12 +288,12 @@ def test_pwa_manifest_has_ios_install_shape(app) -> None:
     assert payload["id"] == "/"
     assert payload["start_url"] == "/"
     assert payload["scope"] == "/"
-    assert payload["background_color"] == "#05070d"
-    assert payload["theme_color"] == "#05070d"
+    assert payload["background_color"] == "#050607"
+    assert payload["theme_color"] == "#050607"
     assert {icon["src"] for icon in payload["icons"]} >= {
-        "/icons/icon-192.png",
-        "/icons/icon-512.png",
-        "/icons/apple-touch-icon.png",
+        "/icons/algvault-ios-192.png",
+        "/icons/algvault-ios-512.png",
+        "/icons/algvault-ios-180.png",
     }
     assert any("maskable" in icon["purpose"] and icon["sizes"] == "192x192" for icon in payload["icons"])
     assert any("maskable" in icon["purpose"] and icon["sizes"] == "512x512" for icon in payload["icons"])
@@ -275,20 +306,22 @@ def test_ios_pwa_head_tags_target_algvault(app) -> None:
     assert '<meta name="apple-mobile-web-app-capable" content="yes">' in shell
     assert '<meta name="apple-mobile-web-app-title" content="AlgVault">' in shell
     assert '<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">' in shell
-    assert '<meta name="theme-color" content="#05070d">' in shell
+    assert '<meta name="theme-color" content="#050607">' in shell
+    assert '<meta name="color-scheme" content="dark">' in shell
     assert '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">' in shell
-    assert '<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">' in shell
+    assert '<link rel="apple-touch-icon" href="/icons/algvault-ios-180.png">' in shell
+    assert "data-theme-toggle" in shell
     assert '<link rel="manifest" href="/manifest.json">' in shell
 
 
 def test_service_worker_clears_old_algvault_and_tradingbot_caches(app) -> None:
     worker = app.test_client().get("/static/js/sw.js").get_data(as_text=True)
 
-    assert 'const CACHE_VERSION = "algvault-v2"' in worker
+    assert 'const CACHE_VERSION = "algvault-v8-command-center-dark"' in worker
     assert 'name.startsWith("algvault-") || name.startsWith("tradingbot-")' in worker
     assert "self.clients.claim()" in worker
     assert "/manifest.json" in worker
-    assert "/icons/icon-192.png" in worker
+    assert "/icons/algvault-ios-192.png" in worker
 
 
 def test_service_worker_offline_fallback_does_not_cache_trading_state(app) -> None:
@@ -296,7 +329,7 @@ def test_service_worker_offline_fallback_does_not_cache_trading_state(app) -> No
 
     assert 'fetch(request, { cache: "no-store", credentials: "same-origin" })' in worker
     assert "Static app assets remain cached safely." in worker
-    assert "Dashboard unavailable" in worker
+    assert "AlgVault is offline" in worker
     assert "isApiRequest(url) || isAuthPath(url) || isServiceWorkerAsset(url)" in worker
 
 

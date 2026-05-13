@@ -213,9 +213,9 @@ scripts/stop_local_production.sh
 
 The Nginx and systemd commands below are for an Ubuntu VPS, not macOS.
 
-## Vercel Web + Render Worker Runtime
+## Vercel Web + Dedicated Live API + Render Worker Runtime
 
-Vercel serves the Flask web/API surface through `server.py`; the always-on trading worker runs separately on Render through `render.yaml`. Both services must point at the same PostgreSQL database and use the same production secrets.
+Vercel serves the operator console through `server.py`. Vault live readiness, routing preview, start-cycle, and cycle-status JSON calls can be delegated to a fixed-egress live API service through `PUBLIC_LIVE_API_ORIGIN`; the always-on trading worker runs separately on Render through `render.yaml`. The Vercel app, live API, and worker must point at the same PostgreSQL database and use matching session/encryption secrets.
 
 Prepare static assets for Vercel locally:
 
@@ -223,7 +223,7 @@ Prepare static assets for Vercel locally:
 scripts/prepare_vercel_static.sh
 ```
 
-Before first production traffic, provision a Vercel Marketplace Postgres database, set the Vercel env vars from `deploy/env.vercel.example`, set the Render worker env vars from `deploy/env.render-worker.example`, then run migrations against that database:
+Before first production traffic, provision a Vercel Marketplace Postgres database, set the Vercel env vars from `deploy/env.vercel.example`, set the live API env vars from `deploy/env.live-api.example`, set the Render worker env vars from `deploy/env.render-worker.example`, then run migrations against that database:
 
 ```bash
 SKIP_SCHEMA_BOOTSTRAP=1 python -m flask --app wsgi:app db upgrade
@@ -244,7 +244,27 @@ SCHEMA_BOOTSTRAP_ENABLED=false
 
 Render worker defaults should match the same database and secrets, with `WORKER_MODE=worker` and start command `python -m app.workers.runner`.
 
-For live exchange access, configure Vercel Static IPs or Secure Compute for web/API egress and fixed Render worker egress IPs, then allowlist those addresses with each exchange. Keep `WALLET_WITHDRAWALS_ENABLED=false` unless KMS/HSM/MPC custody, signer isolation, SDK checks, and withdrawal caps are fully configured.
+Set `PUBLIC_LIVE_API_ORIGIN` on Vercel only when Vault live JSON calls should leave the Vercel runtime. Set `LIVE_API_CORS_ALLOWED_ORIGINS` on the live API to the exact operator-console origin. `SESSION_COOKIE_DOMAIN` is never derived automatically; set it explicitly to `.algvault.com` only when the console and API are on sibling subdomains such as `app.algvault.com` and `api.algvault.com`. A `vercel.app` console cannot share that cookie domain with `api.algvault.com`, so use a custom app domain before relying on shared session cookies.
+
+For 1H10 live execution, configure the live API and worker in the same compliant non-restricted region with fixed outbound IPs or documented outbound ranges, then allowlist those addresses with each exchange. `PUBLIC_LIVE_API_ORIGIN` should point the browser's Vault calls at that live API; Vercel page rendering will not perform exchange probes when this origin is configured. KuCoin must remain disabled unless the account, operators, and runtime location are eligible under KuCoin terms. Keep `WALLET_WITHDRAWALS_ENABLED=false` unless KMS/HSM/MPC custody, signer isolation, SDK checks, and withdrawal caps are fully configured.
+
+Deployment split checklist:
+
+- Vercel/operator console: keep `PUBLIC_APP_ORIGIN` and `PUBLIC_API_ORIGIN` on the console origin for existing non-Vault browser calls, and set `PUBLIC_LIVE_API_ORIGIN=https://api.example.com` only for delegated Vault JSON calls.
+- Render/live API: set `PUBLIC_APP_ORIGIN=https://app.example.com`, `PUBLIC_API_ORIGIN=https://api.example.com`, `PUBLIC_LIVE_API_ORIGIN=https://api.example.com`, and `LIVE_API_CORS_ALLOWED_ORIGINS=https://app.example.com`. Use the same database, `FLASK_SECRET_KEY`, and `TOTP_ENCRYPTION_KEY` as the console. Set `SESSION_COOKIE_DOMAIN=.example.com` only for sibling subdomains such as `app.example.com` and `api.example.com`.
+- Live gates and secrets belong on the live API/worker only: `ENABLE_LIVE_TRADING=true`, `APP_MODE=live`, `ONE_H10_LIVE_ENABLED=true`, explicit/secondary live confirmations, promoted 1H10 ML readiness, verified exchange credentials, usable collateral, and fresh market metadata. Keep secret values out of docs and git.
+- Do not use wildcard CORS with credentials. Do not rely on `SESSION_COOKIE_DOMAIN` for `*.vercel.app` preview domains. KuCoin region/account restrictions require an eligible account/operator and a compliant fixed-egress runtime region.
+
+After deployment, run the no-secrets live API smoke from an operator machine:
+
+```bash
+export LIVE_API_BASE_URL=https://api.example.com
+export FRONTEND_ORIGIN=https://app.example.com
+export DISALLOWED_ORIGIN=https://evil.example
+.venv/bin/python scripts/live_api_smoke.py
+```
+
+The smoke checks credentialed CORS on `/api/vault/routing-preview`, rejects wildcard/disallowed-origin CORS, accepts unauthenticated auth failures, and fails if the response body exposes raw KuCoin restricted-region text, backend IP text, provider JSON, or stack traces. It does not send cookies, tokens, API keys, or order requests.
 
 ## VPS/Postgres Runtime
 
@@ -297,14 +317,16 @@ DEPLOYMENT_TARGET=vps
 PREFERRED_URL_SCHEME=https
 PUBLIC_APP_ORIGIN=https://app.algvault.com
 PUBLIC_API_ORIGIN=https://app.algvault.com
+PUBLIC_LIVE_API_ORIGIN=https://api.algvault.com
 PROXY_FIX_ENABLED=true
 SESSION_COOKIE_SECURE=true
 SESSION_COOKIE_HTTPONLY=true
 SESSION_COOKIE_SAMESITE=Lax
+SESSION_COOKIE_DOMAIN=.algvault.com
 SECURE_HEADERS_HSTS_ENABLED=true
 ```
 
-Browser API calls, auth redirects, manifest URLs, service-worker registration, and EventSource streams resolve through `PUBLIC_APP_ORIGIN` and `PUBLIC_API_ORIGIN`. The default production topology keeps both on `https://app.algvault.com`, so no CORS allowlist is required. If a future deployment uses `https://api.algvault.com`, add the corresponding CORS, CSRF, cookie-domain, and `connect-src` policy changes before switching browser traffic. Fill `/etc/algorithm-vault/algorithm-vault.env` with real values, then run:
+Browser API calls, auth redirects, manifest URLs, service-worker registration, and EventSource streams resolve through `PUBLIC_APP_ORIGIN` and `PUBLIC_API_ORIGIN`. Vault live JSON calls resolve through `PUBLIC_LIVE_API_ORIGIN` when set. For a split `app.algvault.com` / `api.algvault.com` topology, set `LIVE_API_CORS_ALLOWED_ORIGINS`, preserve CSRF/session secrets across both services, and explicitly set `SESSION_COOKIE_DOMAIN=.algvault.com` on both web/API services. Fill `/etc/algorithm-vault/algorithm-vault.env` with real values, then run:
 
 ```bash
 scripts/production_bootstrap.sh
@@ -373,7 +395,62 @@ KuCoin and other IP-restricted exchange API keys must whitelist the machine's cu
 
 KuCoin futures order size is contract count, not the app's asset quantity. Keep `KUCOIN_SYMBOL_MAP_JSON` and `KUCOIN_CONTRACT_SPECS_JSON` configured for every KuCoin symbol you allow; missing or misaligned contract metadata fails closed before any order is submitted. The safe validation order is mocked tests first, then `flask production-readiness --strict`, then read-only connection verification/account snapshot. Only use `flask live-canary-trade ... --submit --confirm LIVE-CANARY-TRADE` after that staged validation and after lowering live caps to match the small test balance.
 
+### KuCoin Spot Smoke Tests
+
+Normal tests never trade and do not require KuCoin credentials. The KuCoin spot smoke tests use environment variables only and are skipped unless the guard values are present. Do not put API keys, passphrases, account IDs, or `.env` files in git. Use a key with General permission for read-only checks and add Spot permission only for test-order/create/cancel validation; do not enable Withdrawal permission.
+
+```bash
+export KUCOIN_API_KEY=...
+export KUCOIN_API_SECRET=...
+export KUCOIN_API_PASSPHRASE=...
+export KUCOIN_TEST_ACCOUNT=sufyanh
+export KUCOIN_TEST_SYMBOL=BTC-USDT
+export KUCOIN_MAX_TEST_NOTIONAL_USDT=5
+export KUCOIN_ENABLE_LIVE_TEST_TRADES=false
+export KUCOIN_ENABLE_FILL_TEST=false
+```
+
+Run deterministic KuCoin coverage without credentials:
+
+```bash
+.venv/bin/python -m pytest tests/test_kucoin_spot_provider.py tests/test_kucoin_time_sync.py
+```
+
+Run the gated live smoke tests only after reviewing the printed preflight summary:
+
+```bash
+.venv/bin/python -m pytest tests/test_kucoin_spot_live_smoke.py -m "integration and live" -s
+```
+
+The live smoke prints account `sufyanh`, symbol, max notional, live-trading flag, fill-test flag, and redacted credential presence. The first live test reads server/account state and confirms available quote balance for `KUCOIN_TEST_SYMBOL`. The second uses KuCoin Spot `POST /api/v1/hf/orders/test`; this verifies auth, signature, and payload shape but does not enter the matching system and must not be queried afterward. The third places a tiny off-market post-only spot limit order and cancels it immediately, and it only runs with `KUCOIN_ENABLE_LIVE_TEST_TRADES=true`. The fourth performs a minimal market buy/sell round trip only when both `KUCOIN_ENABLE_LIVE_TEST_TRADES=true` and `KUCOIN_ENABLE_FILL_TEST=true`; it stays under `KUCOIN_MAX_TEST_NOTIONAL_USDT` and stops on unsupported minimums or unexpected fill state.
+
 Hyperliquid remains routed through the official Python SDK and requires an API wallet/agent private key, not a recovery phrase or main wallet seed. Rejected SDK order responses are stored on the local order and audit details so the operator can see the provider-side reason.
+
+### Hyperliquid Testnet Smoke Tests
+
+Hyperliquid provider smoke tests use the saved `sufyanh` trading connection as the credential source, but signed tests are testnet-only and fail closed unless every guard is set:
+
+```bash
+export HYPERLIQUID_ACCOUNT=sufyanh
+export HYPERLIQUID_ENV=testnet
+export HYPERLIQUID_BASE_URL=https://api.hyperliquid-testnet.xyz
+export RUN_HYPERLIQUID_LIVE_TESTS=1
+# Optional, stronger IOC/fill/flatten test:
+export RUN_HYPERLIQUID_FILL_TEST=1
+# Optional cap. Leave unset or 0 to use the smallest practical valid notional:
+export HYPERLIQUID_LIVE_TEST_MAX_NOTIONAL_USD=0
+```
+
+Run the normal suite first, then the Hyperliquid-specific tests:
+
+```bash
+.venv/bin/python -m pytest
+.venv/bin/python -m pytest tests/test_hyperliquid_client.py tests/test_trading_connections.py tests/test_hyperliquid_testnet_smoke.py
+```
+
+The read-only smoke checks testnet metadata, mids, order book, account state, balances, positions, open orders, and recent fills. The signed smoke computes a tiny valid BTC/ETH perp size from Hyperliquid metadata, submits an ALO/post-only limit with a `codex-hl-test-` local client order id, verifies it is open, cancels it, and verifies it is gone. Cleanup uses `finally` blocks to cancel created orders and flatten any resulting position. The optional fill smoke places the smallest practical IOC order, verifies fills/status, refreshes balances/positions, then immediately flattens reduce-only through the SDK.
+
+Current local probing of the saved `sufyanh` testnet address shows it is queryable but has no positive testnet margin/withdrawable balance. Until testnet funds are available, signed smoke tests stop before order placement with an `insufficient_testnet_funds` message.
 
 For the first real funds test, keep the command path CLI-only:
 

@@ -60,5 +60,5 @@
 {% endblock %}
 
 {% block page_scripts %}
-<script src="{{ url_for('static', filename='js/wallet.js') }}"></script>
+<script defer src="{{ url_for('static', filename='js/wallet.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}"></script>
 {% endblock %}

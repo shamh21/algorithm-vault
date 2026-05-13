@@ -194,7 +194,7 @@
     const badges = Array.isArray(row.compatibility_badges) ? row.compatibility_badges.slice(0, 2) : [];
     return `
       <button type="button" class="backtest-symbol-row ${selected ? "is-active" : ""}" role="option" aria-selected="${selected ? "true" : "false"}" data-symbol-row data-key="${escapeHtml(symbolKey(row))}">
-        <span class="backtest-token-icon">${escapeHtml(row.token_icon || String(row.symbol || "?").slice(0, 1))}</span>
+        ${cryptoIconMarkup(row.symbol)}
         <span class="backtest-symbol-copy">
           <strong>${escapeHtml(row.symbol || "--")}</strong>
           <small>${escapeHtml(row.provider_label || row.provider || "Configured")} · ${escapeHtml(row.venue_symbol || row.symbol || "")}</small>
@@ -213,7 +213,7 @@
     if (refs.venueInput) refs.venueInput.value = row.venue_symbol || row.symbol || "";
     if (refs.selectedAsset) {
       refs.selectedAsset.innerHTML = `
-        <span class="backtest-token-icon">${escapeHtml(row.token_icon || String(row.symbol || "?").slice(0, 1))}</span>
+        ${cryptoIconMarkup(row.symbol)}
         <span>
           <strong>${escapeHtml(row.symbol || "--")}</strong>
           <small>${escapeHtml(row.provider_label || row.provider || "Configured")} · ${escapeHtml(row.settlement_asset || "USDT")}</small>
@@ -468,6 +468,23 @@
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;");
+  }
+
+  function cryptoIconMarkup(symbol) {
+    const symbolKey = String(symbol || "GEN").toUpperCase();
+    const classKey = symbolKey.toLowerCase().replace(/[^a-z0-9-]/g, "") || "gen";
+    const fallback = escapeHtml(symbolKey.slice(0, 2));
+    const paths = {
+      BTC: '<path d="M10 5.2v13.6M14 5.2v13.6"></path><path d="M8.4 8h5.3c1.7 0 2.8.8 2.8 2s-1.1 2-2.8 2H8.4"></path><path d="M8.4 12h5.9c1.8 0 3 .9 3 2.2s-1.2 2.2-3 2.2H8.4"></path>',
+      ETH: '<path d="m12 3.8-5 8.3 5 2.9 5-2.9-5-8.3Z"></path><path d="m7 13.3 5 6.9 5-6.9"></path><path d="m7 12.1 5-2.1 5 2.1"></path>',
+      ALGO: '<path d="m7 17 5.4-10.5 4.6 10.5"></path><path d="M9.5 12.3h5.4"></path><path d="m14 7.6 3.2-1.2"></path>',
+      USDT: '<circle cx="12" cy="12" r="7.4"></circle><path d="M8.4 9.2h7.2"></path><path d="M12 9.2v6.9"></path><path d="M8.9 11.4c1.9.8 4.3.8 6.2 0"></path>',
+      USDC: '<circle cx="12" cy="12" r="7.4"></circle><path d="M8.4 9.2h7.2"></path><path d="M12 9.2v6.9"></path><path d="M15 7.2a5 5 0 1 0 0 9.6"></path>',
+      SOL: '<path d="M7.2 7.2h9.6l-1.8 2H5.4l1.8-2Z"></path><path d="M8.9 11h9.4l-1.8 2H7.1l1.8-2Z"></path><path d="M7.5 14.8h9.6l-1.8 2H5.7l1.8-2Z"></path>',
+      XRP: '<path d="M6.2 7.2c1.8 2 3.7 3 5.8 3s4-1 5.8-3"></path><path d="M6.2 16.8c1.8-2 3.7-3 5.8-3s4 1 5.8 3"></path>',
+    };
+    const mark = paths[symbolKey] || `<circle cx="12" cy="12" r="7"></circle><text x="12" y="14.7" text-anchor="middle">${fallback}</text>`;
+    return `<span class="coin-icon backtest-token-icon coin-icon-${classKey}" aria-hidden="true" data-asset-symbol="${escapeHtml(symbolKey)}"><svg viewBox="0 0 24 24" focusable="false">${mark}</svg></span>`;
   }
 
   class BacktestChart {

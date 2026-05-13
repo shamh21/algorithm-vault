@@ -10,7 +10,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import joinedload
 
 from ..extensions import db
-from ..models import Order, Setting, TradingConnection, User, VaultCycle, WalletBalance, WalletTransaction
+from ..models import Order, Setting, TradingConnection, User, VaultCycle, WalletAddress, WalletBalance, WalletTransaction
 
 
 DEFAULT_WALLET_ASSETS = ("BTC", "ETH", "SOL", "USDC", "USDT", "XRP")
@@ -26,6 +26,12 @@ class WalletBalanceView:
     locked_balance: float = 0.0
     estimated_usd_value: float = 0.0
     active_deposit_address: Any | None = None
+    onchain_balance: float = 0.0
+    onchain_checked_at: Any | None = None
+    onchain_status: str = "unavailable"
+    onchain_reason: str = ""
+    onchain_delta: float = 0.0
+    onchain_mismatch_status: str = "unavailable"
 
     @property
     def total_balance(self) -> float:
@@ -38,6 +44,12 @@ class WalletBalanceView:
             "locked_balance": float(self.locked_balance or 0.0),
             "total_balance": self.total_balance,
             "estimated_usd_value": float(self.estimated_usd_value or 0.0),
+            "onchain_balance": float(self.onchain_balance or 0.0),
+            "onchain_checked_at": _iso(self.onchain_checked_at),
+            "onchain_status": self.onchain_status,
+            "onchain_reason": self.onchain_reason,
+            "onchain_delta": float(self.onchain_delta or 0.0),
+            "onchain_mismatch_status": self.onchain_mismatch_status,
         }
 
 
@@ -224,20 +236,75 @@ class WalletSummaryService:
                 .all()
             )
         by_asset = {record.asset.upper(): record for record in records}
+        onchain_by_asset = self._onchain_snapshots(user_id)
         assets = sorted(set(DEFAULT_WALLET_ASSETS) | set(by_asset))
         views: list[WalletBalanceView] = []
         for asset in assets:
             record = by_asset.get(asset)
+            onchain = onchain_by_asset.get(asset, {})
+            available = float(record.available_balance or 0.0) if record is not None else 0.0
+            locked = float(record.locked_balance or 0.0) if record is not None else 0.0
+            total = available + locked
+            onchain_status = str(onchain.get("status") or "unavailable")
+            onchain_balance = float(onchain.get("balance", 0.0) or 0.0) if onchain_status == "checked" else 0.0
+            onchain_delta = onchain_balance - total if onchain_status == "checked" else 0.0
             views.append(
                 WalletBalanceView(
                     asset=asset,
-                    available_balance=float(record.available_balance or 0.0) if record is not None else 0.0,
-                    locked_balance=float(record.locked_balance or 0.0) if record is not None else 0.0,
+                    available_balance=available,
+                    locked_balance=locked,
                     estimated_usd_value=float(record.estimated_usd_value or 0.0) if record is not None else 0.0,
                     active_deposit_address=record.active_deposit_address if record is not None else None,
+                    onchain_balance=onchain_balance,
+                    onchain_checked_at=onchain.get("checked_at"),
+                    onchain_status=onchain_status,
+                    onchain_reason=str(onchain.get("reason") or ""),
+                    onchain_delta=onchain_delta,
+                    onchain_mismatch_status=_onchain_mismatch_status(onchain_status, onchain_delta),
                 )
             )
         return views
+
+    def _onchain_snapshots(self, user_id: int) -> dict[str, dict[str, Any]]:
+        records = (
+            WalletAddress.query.filter_by(user_id=user_id, status="active")
+            .order_by(WalletAddress.asset.asc(), WalletAddress.rotation_index.desc(), WalletAddress.created_at.desc())
+            .all()
+        )
+        by_asset: dict[str, dict[str, Any]] = {}
+        for record in records:
+            asset = str(record.asset or "").upper()
+            if not asset:
+                continue
+            row = by_asset.setdefault(
+                asset,
+                {
+                    "balance": 0.0,
+                    "status": "unavailable",
+                    "checked_at": None,
+                    "reason": "",
+                    "checked_count": 0,
+                    "reasons": [],
+                },
+            )
+            if str(record.onchain_status or "") == "checked":
+                row["balance"] = float(row["balance"] or 0.0) + max(0.0, float(record.onchain_balance or 0.0))
+                row["status"] = "checked"
+                row["checked_count"] = int(row["checked_count"] or 0) + 1
+                if record.onchain_checked_at is not None and (
+                    row["checked_at"] is None or record.onchain_checked_at > row["checked_at"]
+                ):
+                    row["checked_at"] = record.onchain_checked_at
+            else:
+                reason = str(record.onchain_reason or record.onchain_status or "unavailable")
+                if reason:
+                    row["reasons"].append(reason)
+        for row in by_asset.values():
+            if row["status"] != "checked":
+                row["reason"] = "; ".join(dict.fromkeys(row["reasons"]))
+            row.pop("reasons", None)
+            row.pop("checked_count", None)
+        return by_asset
 
     def _active_cycles_count(self, user_id: int) -> int:
         return VaultCycle.query.filter(
@@ -283,6 +350,18 @@ def _estimated_usd_value(asset: str, value: float, item: dict[str, Any]) -> floa
 
 def _iso(value: Any) -> str | None:
     return value.isoformat() if value is not None and hasattr(value, "isoformat") else None
+
+
+def _onchain_mismatch_status(onchain_status: str, delta: float) -> str:
+    if onchain_status != "checked":
+        return "unavailable"
+    if math_isclose(float(delta or 0.0), 0.0):
+        return "matched"
+    return "surplus_onchain" if delta > 0 else "deficit_onchain"
+
+
+def math_isclose(left: float, right: float) -> bool:
+    return abs(left - right) <= 1e-8
 
 
 def _redact_error(value: str | None) -> str:

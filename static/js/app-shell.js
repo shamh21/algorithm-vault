@@ -3,9 +3,10 @@
   let startupFailed = false;
   let startupComplete = false;
   const startupStartedAt = window.performance?.now?.() || Date.now();
-  const STARTUP_MIN_VISIBLE_MS = 520;
-  const STARTUP_TIMEOUT_MS = 9000;
+  const STARTUP_MIN_VISIBLE_MS = 720;
+  const STARTUP_TIMEOUT_MS = 4500;
   const BOTTOM_NAV_SWITCH_KEY = "av-bottom-nav-switch";
+  const THEME_STORAGE_KEY = "av-color-theme";
 
   const startupNodes = () => {
     const loader = document.querySelector("[data-intro-loader]");
@@ -44,6 +45,9 @@
     const { loader, title, detail, retry } = startupNodes();
     document.body.classList.add("app-startup-failed");
     loader?.setAttribute("aria-busy", "false");
+    loader?.setAttribute("aria-hidden", "false");
+    loader?.setAttribute("role", "status");
+    loader?.setAttribute("aria-live", "polite");
     if (title) title.textContent = "Startup needs attention";
     if (detail) detail.textContent = "The app shell did not finish initializing. Retry when your connection is available.";
     if (retry) retry.hidden = false;
@@ -55,11 +59,16 @@
   }, STARTUP_TIMEOUT_MS);
 
   const finishStartupAfterRouteReady = (skipDelay = false) => {
-    if (document.readyState === "complete") {
+    if (skipDelay) {
       finishStartupLoader(skipDelay);
       return;
     }
-    window.addEventListener("load", () => finishStartupLoader(skipDelay), { once: true });
+    const finishAfterPaint = () => window.setTimeout(() => finishStartupLoader(false), 0);
+    if (window.requestAnimationFrame) {
+      window.requestAnimationFrame(() => window.requestAnimationFrame(finishAfterPaint));
+      return;
+    }
+    finishAfterPaint();
   };
 
   const initShell = () => {
@@ -82,8 +91,33 @@
     const nav = document.querySelector("[data-primary-nav]");
     const backdrop = document.querySelector("[data-nav-backdrop]");
     const topbar = document.querySelector("[data-app-topbar]");
+    const themeToggle = document.querySelector("[data-theme-toggle]");
+    const themeToggleLabel = themeToggle?.querySelector("[data-theme-toggle-label]");
+    const themeMeta = document.querySelector('meta[name="theme-color"]:not([media])');
 
     document.body.classList.toggle("reduced-motion", prefersReducedMotion);
+
+    const applyTheme = () => {
+      const nextTheme = "dark";
+      document.documentElement.dataset.theme = nextTheme;
+      themeToggle?.setAttribute("aria-pressed", String(nextTheme === "dark"));
+      if (themeToggleLabel) {
+        themeToggleLabel.textContent = "Dark mode";
+      }
+      if (themeToggle) {
+        themeToggle.title = "Dark mode";
+      }
+      themeMeta?.setAttribute("content", "#050607");
+    };
+
+    applyTheme(document.documentElement.dataset.theme || "dark");
+
+    themeToggle?.addEventListener("click", () => {
+      applyTheme("dark");
+      try {
+        window.localStorage.setItem(THEME_STORAGE_KEY, "dark");
+      } catch {}
+    });
 
     const closeNav = () => {
       if (!toggle || !nav) return;
@@ -148,7 +182,28 @@
       window.addEventListener("scroll", updateTopbar, { passive: true });
     }
 
-    document.querySelectorAll(".bottom-nav .bottom-nav-item").forEach((link) => {
+    const bottomNavLinks = Array.from(document.querySelectorAll(".bottom-nav .bottom-nav-item"));
+    const setBottomNavActive = () => {
+      if (!bottomNavLinks.length) return;
+      const pathname = window.location.pathname.replace(/\/+$/, "") || "/";
+      const section = (window.location.hash || "#dashboard").slice(1) || "dashboard";
+      bottomNavLinks.forEach((link) => {
+        const linkUrl = new URL(link.getAttribute("href") || "/", window.location.href);
+        const linkPath = linkUrl.pathname.replace(/\/+$/, "") || "/";
+        const linkSection = link.dataset.bottomNavSection || (linkUrl.hash || "#dashboard").slice(1);
+        const isRouteMatch = pathname === linkPath && (!linkUrl.hash || linkSection === section);
+        const isHomeHashMatch = pathname === "/" && linkPath === "/" && linkSection === section;
+        const isActive = isRouteMatch || isHomeHashMatch;
+        link.classList.toggle("active", isActive);
+        if (isActive) {
+          link.setAttribute("aria-current", "page");
+        } else {
+          link.removeAttribute("aria-current");
+        }
+      });
+    };
+
+    bottomNavLinks.forEach((link) => {
       link.addEventListener("click", (event) => {
         if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
         if (link.target && link.target !== "_self") return;
@@ -158,8 +213,11 @@
             window.sessionStorage.setItem(BOTTOM_NAV_SWITCH_KEY, "true");
           }
         } catch {}
+        window.setTimeout(setBottomNavActive, 0);
       });
     });
+    setBottomNavActive();
+    window.addEventListener("hashchange", setBottomNavActive, { passive: true });
 
     document.querySelectorAll("[data-row-cap]").forEach((container) => {
       const cap = Math.max(1, Number.parseInt(container.getAttribute("data-row-cap") || "150", 10));
@@ -188,9 +246,10 @@
       });
     });
 
-    if (!prefersReducedMotion && !switchedFromBottomNav) {
+    const desktopFinePointer = window.matchMedia("(hover: hover) and (pointer: fine)").matches;
+    if (!prefersReducedMotion && !switchedFromBottomNav && desktopFinePointer) {
       const revealTargets = Array.from(
-        document.querySelectorAll(".card, .wallet-card, .vault-card, .banner, [data-flash-message]")
+        document.querySelectorAll(".card, .wallet-card, .vault-card, .av-panel, .banner, [data-flash-message]")
       ).slice(0, 18);
 
       if (window.IntersectionObserver) {

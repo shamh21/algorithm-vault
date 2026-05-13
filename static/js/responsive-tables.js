@@ -1,6 +1,7 @@
 (() => {
   const TABLE_BREAKPOINT = 760;
   const STACK_CLASS = "is-stacked";
+  const WIDE_CLASS = "is-wide-table";
   const tableSelectors = Array.from(document.querySelectorAll("table")).filter((table) => {
     return !table.classList.contains("no-responsive-table");
   });
@@ -19,6 +20,9 @@
   const markRows = (table) => {
     const headerCells = Array.from(table.tHead?.querySelectorAll("th") ?? []);
     const rows = Array.from(table.tBodies?.[0]?.querySelectorAll("tr") ?? []);
+    const isWideTable = headerCells.length > 5 || table.dataset.tableMode === "scroll";
+
+    table.classList.toggle(WIDE_CLASS, isWideTable);
 
     rows.forEach((row) => {
       Array.from(row.children).forEach((cell, index) => {
@@ -38,8 +42,8 @@
     const shouldStack = window.matchMedia(`(max-width: ${TABLE_BREAKPOINT}px)`).matches;
 
     tableSelectors.forEach((table) => {
-      table.classList.toggle(STACK_CLASS, shouldStack);
       markRows(table);
+      table.classList.toggle(STACK_CLASS, shouldStack && !table.classList.contains(WIDE_CLASS));
     });
   };
 

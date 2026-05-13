@@ -390,6 +390,11 @@ def test_consumer_pages_render_wallet_and_vault_experience(app) -> None:
     assert home.status_code == 200
     assert b"Algorithm Vault" in home.data
     assert b"Portfolio Balance" in home.data
+    assert b"Vault Pulse" in home.data
+    assert b"Automated Strategies" in home.data
+    assert b"Market Monitor" in home.data
+    assert b"Automation Activity" in home.data
+    assert b"static/js/command-center.js" in home.data
     for removed_copy in [
         b"Risk Notice",
         b"Start a Cycle",
@@ -1520,6 +1525,52 @@ def test_usdt_withdraw_max_uses_on_chain_token_balance(app) -> None:
     assert tx.status == "pending_withdrawal"
 
 
+def test_withdrawal_materializes_verified_onchain_surplus_before_locking(app) -> None:
+    _patch_market_data(app)
+    fake, custody = _enable_live_usdt_wallets(app)
+    user, secret = _create_user(username="usdtmaterialize")
+    wallet_address = custody.get_or_create_address(user_id=user.id, asset="USDT", network="Ethereum")
+    db.session.add(WalletBalance(user_id=user.id, asset="USDT", available_balance=7.0, locked_balance=0.0, estimated_usd_value=7.0))
+    db.session.add(
+        WalletLedgerEvent(
+            user_id=user.id,
+            wallet_address_id=wallet_address.id,
+            asset="USDT",
+            network="Ethereum",
+            address=wallet_address.address,
+            event_type="deposit",
+            provider_reference="historical-10",
+            idempotency_key="deposit:historical-10",
+            amount=10.0,
+            confirmations=12,
+            status="complete",
+        )
+    )
+    db.session.commit()
+
+    client = app.test_client()
+    _login(client, user.username, secret)
+    response = client.post(
+        "/wallet/withdraw/USDT",
+        data={
+            "withdraw_address": "0x0eA336f8CFD67Ee22EeaF8198BB287A953c04761",
+            "amount": "10",
+            "network": "Ethereum",
+            "totp_code": pyotp.TOTP(secret).now(),
+        },
+    )
+
+    assert response.status_code == 302
+    assert fake.broadcasts == 1
+    withdrawal = WalletWithdrawal.query.filter_by(user_id=user.id).one()
+    assert withdrawal.amount == 10.0
+    balance = WalletBalance.query.filter_by(user_id=user.id, asset="USDT").one()
+    assert balance.available_balance == pytest.approx(0.0)
+    assert balance.locked_balance == pytest.approx(10.0)
+    reconciliation = WalletTransaction.query.filter_by(user_id=user.id, transaction_type="onchain_reconciliation").one()
+    assert reconciliation.amount == pytest.approx(3.0)
+
+
 def test_admin_platform_treasury_page_renders(app) -> None:
     _patch_market_data(app)
     admin, secret = _create_user(username="treasuryadmin", role="admin")
@@ -1609,6 +1660,43 @@ def test_one_hour_vault_cycle_uses_short_horizon_strategy(app, monkeypatch) -> N
     monkeypatch.setitem(app.extensions["services"], "one_h10_forecast", _PassingOneH10Forecast())
     app.extensions["services"]["strategy_manager"].start = lambda run_id: None
     user, secret = _create_user(username="onehour")
+    db.session.add_all(
+        [
+            LeveragedMarket(
+                provider="hyperliquid",
+                venue_symbol="BTC",
+                symbol="BTC",
+                status="active",
+                settlement_asset="USDC",
+                max_leverage=50,
+                liquidity_usd=250_000,
+                spread_bps=2.0,
+                fee_bps=5.0,
+            ),
+            LeveragedMarket(
+                provider="hyperliquid",
+                venue_symbol="ETH",
+                symbol="ETH",
+                status="active",
+                settlement_asset="USDC",
+                max_leverage=25,
+                liquidity_usd=200_000,
+                spread_bps=2.0,
+                fee_bps=5.0,
+            ),
+            LeveragedMarket(
+                provider="hyperliquid",
+                venue_symbol="SOL",
+                symbol="SOL",
+                status="active",
+                settlement_asset="USDC",
+                max_leverage=20,
+                liquidity_usd=150_000,
+                spread_bps=2.0,
+                fee_bps=5.0,
+            ),
+        ]
+    )
     db.session.add(WalletBalance(user_id=user.id, asset="USDC", available_balance=1000.0, estimated_usd_value=1000.0))
     db.session.commit()
     client = app.test_client()

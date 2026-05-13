@@ -218,7 +218,7 @@ def test_leveraged_market_discovery_prefers_exact_venue_symbol_for_duplicate_bas
 def test_leveraged_market_discovery_scopes_feature_snapshots_to_allowed_symbols(app, monkeypatch) -> None:
     app.config["ONE_H10_FEATURE_TIMEFRAMES"] = ["15m"]
     user, _ = _create_user("scopedfeatures")
-    hyperliquid = _connection(app, user, "hyperliquid", active=True)
+    _connection(app, user, "hyperliquid", active=True)
     service = app.extensions["services"]["trading_connections"]
     markets = app.extensions["services"]["leveraged_markets"]
     market_data = app.extensions["services"]["market_data"]
@@ -1210,7 +1210,7 @@ def test_vault_routing_preview_reports_provider_allocations_without_creating_cyc
     app.config["ONE_H10_REQUIRE_PROMOTED_ML"] = False
     user, secret = _create_user("routingpreview")
     hyperliquid = _connection(app, user, "hyperliquid", active=True)
-    kucoin = _connection(app, user, "kucoin", active=False)
+    _connection(app, user, "kucoin", active=False)
     service = app.extensions["services"]["trading_connections"]
     monkeypatch.setattr(service, "can_trade", lambda user_id, mode, connection_id=None: True)
 
@@ -1420,7 +1420,7 @@ def test_one_h10_live_context_reports_bootstrap_ready_without_promoted_ml_blocki
     app.config["ONE_H10_REQUIRE_PROMOTED_ML"] = False
     user, _ = _create_user("livecontext")
     hyperliquid = _connection(app, user, "hyperliquid", active=True)
-    kucoin = _connection(app, user, "kucoin", active=False)
+    _connection(app, user, "kucoin", active=False)
     service = app.extensions["services"]["trading_connections"]
     monkeypatch.setattr(service, "can_trade", lambda user_id, mode, connection_id=None: connection_id == hyperliquid.id)
 

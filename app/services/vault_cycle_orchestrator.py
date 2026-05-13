@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Any
 
+from flask import current_app, has_app_context
+
 from ..extensions import db
 from ..models import (
     AuditLog,
@@ -80,6 +82,12 @@ class VaultCycleOrchestrator:
             raise ValueError("Vault Cycle duration must be positive.")
 
         wallet_balance = WalletBalance.query.filter_by(user_id=user.id, asset=deposit).one_or_none()
+        verified_spendable = self._verified_spendable_amount(user.id, deposit)
+        if verified_spendable is not None:
+            if verified_spendable + 1e-9 < amount:
+                raise ValueError("Vault Cycle amount exceeds verified on-chain wallet balance.")
+            self._materialize_onchain_surplus(user.id, deposit, amount)
+            wallet_balance = WalletBalance.query.filter_by(user_id=user.id, asset=deposit).one_or_none()
         if wallet_balance is None or float(wallet_balance.available_balance or 0.0) + 1e-9 < amount:
             raise ValueError("Vault Cycle amount exceeds available wallet balance.")
 
@@ -381,6 +389,39 @@ class VaultCycleOrchestrator:
             return "No exchange allocation passed Vault Cycle screening."
         reasons = [str(item.get("reason") or item) for item in blockers[:3]]
         return "No exchange allocation passed Vault Cycle screening: " + "; ".join(reasons)
+
+    def _verified_spendable_amount(self, user_id: int, asset: str) -> float | None:
+        if not has_app_context():
+            return None
+        network = self._default_network(asset)
+        try:
+            custody = current_app.extensions.get("services", {}).get("wallet_custody")
+            if custody is None or not getattr(custody, "enabled", False) or not custody.supports(asset, network):
+                return None
+            return float(custody.verified_spendable_amount(user_id, asset, network) or 0.0)
+        except Exception as exc:  # noqa: BLE001
+            current_app.logger.warning("Vault Cycle on-chain spendable check failed closed for %s/%s: %s", asset, network, exc)
+            return 0.0
+
+    def _materialize_onchain_surplus(self, user_id: int, asset: str, amount: float) -> None:
+        if not has_app_context():
+            return
+        network = self._default_network(asset)
+        custody = current_app.extensions.get("services", {}).get("wallet_custody")
+        if custody is None or not getattr(custody, "enabled", False) or not custody.supports(asset, network):
+            return
+        custody.materialize_onchain_surplus(user_id, asset, network, amount)
+
+    @staticmethod
+    def _default_network(asset: str) -> str:
+        asset_key = str(asset or "").upper().strip()
+        if asset_key == "BTC":
+            return "Bitcoin"
+        if asset_key == "SOL":
+            return "Solana"
+        if asset_key == "XRP":
+            return "XRP Ledger"
+        return "Ethereum"
 
     def _audit(self, cycle: VaultCycle, action: str, message: str) -> None:
         entry = AuditLog(

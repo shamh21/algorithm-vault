@@ -44,3 +44,4 @@ build/
 public/
 .vercel
 .env*.local
+uv.lock

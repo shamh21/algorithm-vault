@@ -79,19 +79,19 @@ PROVIDER_SPECS: dict[str, dict[str, Any]] = {
         "connection_type": "cex_api_key",
         "tradable": True,
         "verification_supported": True,
-        "summary": "Live KuCoin futures connection for balances, positions, orders, and vault execution.",
-        "setup_hint": "Create a KuCoin futures API key with futures trading permission. Enable transfer/withdrawal permissions only for capped Vault Cycle automation with IP restrictions and address allowlisting.",
+        "summary": "Live KuCoin connection for spot balances, spot order testing, and guarded spot/futures execution where explicitly configured.",
+        "setup_hint": "Create a KuCoin API key with General permission for read-only checks and Spot permission for spot order placement/cancellation. Keep Withdrawal disabled.",
         "help_steps": [
-            "Create a futures-capable API key from KuCoin.",
+            "Create a KuCoin API key with General permission; add Spot permission only when spot order placement is required.",
             "Enter the key, secret, and API passphrase exactly as created.",
-            "For standard trading keep withdrawals disabled; for Vault Cycle automation use a restricted key with transfer/withdrawal permissions and favorite-address controls.",
+            "Keep Withdrawal disabled. Do not enable futures, margin, transfer, copy-trading, or earn permissions for spot-only validation.",
         ],
         "fields": [
             {"name": "api_key", "label": "API Key", "type": "text", "required": True, "placeholder": "KuCoin API key"},
             {"name": "api_secret", "label": "API Secret", "type": "password", "required": True, "placeholder": "Encrypted at rest"},
             {"name": "passphrase", "label": "Passphrase", "type": "password", "required": True, "placeholder": "KuCoin API passphrase"},
         ],
-        "capabilities": ["Futures orders", "Balances", "Positions", "Open orders", "Panic flatten", "Vault Cycle transfers", "Stablecoin conversion", "Allowlisted withdrawals"],
+        "capabilities": ["Spot balances", "Spot market metadata", "Spot test orders", "Spot order create/cancel", "Futures execution only when explicitly configured"],
     },
     "uniswap": {
         "key": "uniswap",
@@ -191,10 +191,20 @@ class TradingConnector(Protocol):
         reduce_only: bool,
         leverage: float,
         slippage_pct: float,
+        *,
+        client_order_id: str | None = None,
+        time_in_force: str | None = None,
     ) -> dict[str, Any]:
         ...
 
-    def cancel_order(self, mode: str, symbol: str, exchange_order_id: str) -> dict[str, Any]:
+    def cancel_order(
+        self,
+        mode: str,
+        symbol: str,
+        exchange_order_id: str,
+        *,
+        client_order_id: str | None = None,
+    ) -> dict[str, Any]:
         ...
 
     def cancel_all_orders(self, mode: str) -> list[dict[str, Any]]:
@@ -204,6 +214,9 @@ class TradingConnector(Protocol):
         ...
 
     def get_positions(self, mode: str) -> list[dict[str, Any]]:
+        ...
+
+    def get_recent_fills(self, mode: str) -> list[dict[str, Any]]:
         ...
 
     def discover_leveraged_markets(self, mode: str) -> list[dict[str, Any]]:
@@ -276,6 +289,9 @@ class HyperliquidTradingConnector:
         reduce_only: bool,
         leverage: float,
         slippage_pct: float,
+        *,
+        client_order_id: str | None = None,
+        time_in_force: str | None = None,
     ) -> dict[str, Any]:
         return self.client.place_order(
             mode,
@@ -287,10 +303,19 @@ class HyperliquidTradingConnector:
             reduce_only,
             leverage,
             slippage_pct,
+            client_order_id=client_order_id,
+            time_in_force=time_in_force,
         )
 
-    def cancel_order(self, mode: str, symbol: str, exchange_order_id: str) -> dict[str, Any]:
-        return self.client.cancel_order(mode, symbol, exchange_order_id)
+    def cancel_order(
+        self,
+        mode: str,
+        symbol: str,
+        exchange_order_id: str,
+        *,
+        client_order_id: str | None = None,
+    ) -> dict[str, Any]:
+        return self.client.cancel_order(mode, symbol, exchange_order_id, client_order_id=client_order_id)
 
     def cancel_all_orders(self, mode: str) -> list[dict[str, Any]]:
         return self.client.cancel_all_orders(mode)
@@ -300,6 +325,27 @@ class HyperliquidTradingConnector:
 
     def get_positions(self, mode: str) -> list[dict[str, Any]]:
         return self.client.get_positions(mode)
+
+    def get_recent_fills(self, mode: str) -> list[dict[str, Any]]:
+        return self.client.get_recent_fills(mode)
+
+    def get_open_orders(self, mode: str) -> list[dict[str, Any]]:
+        return self.client.get_open_orders(mode)
+
+    def get_balances(self, mode: str) -> list[dict[str, Any]]:
+        return self.client.get_balances(mode)
+
+    def get_order_status(
+        self,
+        mode: str,
+        *,
+        exchange_order_id: str | int | None = None,
+        client_order_id: str | None = None,
+    ) -> dict[str, Any]:
+        return self.client.get_order_status(mode, exchange_order_id=exchange_order_id, client_order_id=client_order_id)
+
+    def live_test_order_plan(self, mode: str = "testnet", *, side: str = "buy", require_funds: bool = True) -> dict[str, Any]:
+        return self.client.live_test_order_plan(mode, side=side, require_funds=require_funds)
 
     def discover_leveraged_markets(self, mode: str) -> list[dict[str, Any]]:
         if mode != "live":
@@ -603,7 +649,7 @@ class TradingConnectionService:
             if connection is None or (requires_active and not connection.is_active) or not self._is_verified_tradable(connection):
                 return False
             return self._connector_for_connection(connection).can_trade(mode)
-        except Exception:
+        except Exception:  # noqa: BLE001 - connection checks fail closed on any provider/config error.
             return False
 
     def account_snapshot(self, user_id: int | None, mode: str, connection_id: int | None = None) -> ClientSnapshot:

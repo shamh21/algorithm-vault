@@ -4,10 +4,11 @@ import json
 from datetime import datetime, timedelta
 
 import pyotp
+import pytest
 
 from app.auth import encrypt_totp_secret, password_hash
 from app.extensions import db
-from app.models import TradingConnection, User, VaultCycle, WalletBalance, WalletTransaction
+from app.models import DepositAddress, TradingConnection, User, VaultCycle, WalletAccount, WalletAddress, WalletBalance, WalletTransaction
 
 
 def _create_user(username: str = "sufyanh", *, role: str = "admin") -> User:
@@ -148,3 +149,127 @@ def test_wallet_exchange_snapshot_refresh_param_no_longer_renders_margin(app) ->
     assert response.status_code == 200
     assert b"Exchange Margin" not in response.data
     assert b"Refresh Snapshot" not in response.data
+
+
+def test_wallet_summary_and_page_show_onchain_surplus_mismatch(app) -> None:
+    user = _create_user("onchainsurplus")
+    _create_verified_connection(user)
+    checked_at = datetime.utcnow()
+    deposit_address = DepositAddress(
+        user_id=user.id,
+        asset="USDT",
+        network="Ethereum",
+        address="0x1111111111111111111111111111111111111111",
+        version=1,
+        is_active=True,
+    )
+    db.session.add(deposit_address)
+    db.session.flush()
+    account = WalletAccount(user_id=user.id, provider="in_app_custody", asset="USDT", network="Ethereum", status="active")
+    db.session.add(account)
+    db.session.flush()
+    db.session.add(
+        WalletAddress(
+            wallet_account_id=account.id,
+            user_id=user.id,
+            deposit_address_id=deposit_address.id,
+            asset="USDT",
+            network="Ethereum",
+            address=deposit_address.address,
+            status="active",
+            onchain_balance=110.0,
+            onchain_checked_at=checked_at,
+            onchain_status="checked",
+            onchain_confirmations=12,
+            onchain_provider_reference="test-snapshot",
+        )
+    )
+    db.session.add(
+        WalletBalance(
+            user_id=user.id,
+            active_deposit_address_id=deposit_address.id,
+            asset="USDT",
+            available_balance=100.9972689688,
+            estimated_usd_value=100.9972689688,
+        )
+    )
+    db.session.commit()
+
+    result = app.test_cli_runner().invoke(args=["profile-wallet-check", "--username", "onchainsurplus"])
+    payload = json.loads(result.output)
+    usdt = next(item for item in payload["wallet"]["balances"] if item["asset"] == "USDT")
+
+    assert result.exit_code == 0
+    assert usdt["onchain_balance"] == 110.0
+    assert usdt["onchain_delta"] == pytest.approx(9.0027310312)
+    assert usdt["onchain_mismatch_status"] == "surplus_onchain"
+
+    client = app.test_client()
+    _login(client, user)
+    response = client.get("/wallet")
+
+    assert response.status_code == 200
+    assert b"On-chain" in response.data
+    assert b"Surplus Onchain" in response.data
+    assert b"+9.002731" in response.data
+
+
+def test_wallet_summary_and_page_show_onchain_deficit_mismatch(app) -> None:
+    user = _create_user("onchaindeficit")
+    _create_verified_connection(user)
+    checked_at = datetime.utcnow()
+    deposit_address = DepositAddress(
+        user_id=user.id,
+        asset="USDC",
+        network="Ethereum",
+        address="0x2222222222222222222222222222222222222222",
+        version=1,
+        is_active=True,
+    )
+    db.session.add(deposit_address)
+    db.session.flush()
+    account = WalletAccount(user_id=user.id, provider="in_app_custody", asset="USDC", network="Ethereum", status="active")
+    db.session.add(account)
+    db.session.flush()
+    db.session.add(
+        WalletAddress(
+            wallet_account_id=account.id,
+            user_id=user.id,
+            deposit_address_id=deposit_address.id,
+            asset="USDC",
+            network="Ethereum",
+            address=deposit_address.address,
+            status="active",
+            onchain_balance=0.0,
+            onchain_checked_at=checked_at,
+            onchain_status="checked",
+            onchain_confirmations=12,
+        )
+    )
+    db.session.add(
+        WalletBalance(
+            user_id=user.id,
+            active_deposit_address_id=deposit_address.id,
+            asset="USDC",
+            available_balance=27.80265766,
+            estimated_usd_value=27.80265766,
+        )
+    )
+    db.session.commit()
+
+    result = app.test_cli_runner().invoke(args=["profile-wallet-check", "--username", "onchaindeficit"])
+    payload = json.loads(result.output)
+    usdc = next(item for item in payload["wallet"]["balances"] if item["asset"] == "USDC")
+
+    assert result.exit_code == 0
+    assert usdc["onchain_balance"] == 0.0
+    assert usdc["onchain_delta"] == pytest.approx(-27.80265766)
+    assert usdc["onchain_mismatch_status"] == "deficit_onchain"
+
+    client = app.test_client()
+    _login(client, user)
+    response = client.get("/wallet")
+
+    assert response.status_code == 200
+    assert b"Deficit Onchain" in response.data
+    assert b"-27.802658" in response.data

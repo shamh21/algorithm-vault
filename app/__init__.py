@@ -420,8 +420,10 @@ def _validate_public_origins(app: Flask) -> None:
         return
 
     errors: list[str] = []
-    for key in ("PUBLIC_APP_ORIGIN", "PUBLIC_API_ORIGIN"):
+    for key in ("PUBLIC_APP_ORIGIN", "PUBLIC_API_ORIGIN", "PUBLIC_LIVE_API_ORIGIN"):
         origin = str(app.config.get(key, "") or "").strip()
+        if key == "PUBLIC_LIVE_API_ORIGIN" and not origin:
+            continue
         violations = public_origin_violations(origin, require_public_https=True)
         if violations:
             errors.append(f"{key} {', '.join(violations)}")
@@ -751,7 +753,7 @@ def _rate_limit_request(app: Flask) -> Response | None:
 def _rate_limit_bucket(app: Flask) -> tuple[str, int]:
     path = request.path.rstrip("/") or "/"
     unsafe = request.method in {"POST", "PUT", "PATCH", "DELETE"}
-    if request.method == "POST" and path == "/login":
+    if request.method == "POST" and path in {"/login", "/admin/api/sign-in"}:
         return "login", int(app.config.get("RATELIMIT_LOGIN_PER_WINDOW", 12) or 12)
     if path == "/setup-2fa":
         return "auth_setup", int(app.config.get("RATELIMIT_AUTH_SETUP_PER_WINDOW", 20) or 20)
@@ -767,7 +769,60 @@ def _client_rate_key() -> str:
     return forwarded or request.remote_addr or "unknown"
 
 
+_LIVE_API_CORS_PATHS = {
+    "/vault/readiness",
+    "/api/vault/readiness",
+    "/vault/preview-route",
+    "/api/vault/routing-preview",
+    "/vault/start-cycle",
+    "/vault/cycles",
+}
+_LIVE_API_CORS_PATH_PREFIXES = (
+    "/api/vault/cycles/",
+    "/vault/start-status/",
+    "/consumer/start-status/",
+)
+
+
+def _is_live_api_cors_request() -> bool:
+    path = request.path.rstrip("/") or "/"
+    return path in _LIVE_API_CORS_PATHS or any(request.path.startswith(prefix) for prefix in _LIVE_API_CORS_PATH_PREFIXES)
+
+
+def _allowed_cors_origin(app: Flask) -> str:
+    if not str(app.config.get("PUBLIC_LIVE_API_ORIGIN") or "").strip():
+        return ""
+    if not _is_live_api_cors_request():
+        return ""
+    origin = str(request.headers.get("Origin") or "").strip().rstrip("/")
+    if not origin:
+        return ""
+    allowed = {
+        str(item or "").strip().rstrip("/")
+        for item in list(app.config.get("LIVE_API_CORS_ALLOWED_ORIGINS") or [])
+        if str(item or "").strip() and str(item or "").strip() != "*"
+    }
+    public_app_origin = str(app.config.get("PUBLIC_APP_ORIGIN") or "").strip().rstrip("/")
+    if public_app_origin and public_app_origin != "*":
+        allowed.add(public_app_origin)
+    return origin if origin in allowed else ""
+
+
 def _set_response_headers(app: Flask, response: Response) -> Response:
+    cors_origin = _allowed_cors_origin(app)
+    if cors_origin:
+        response.headers["Access-Control-Allow-Origin"] = cors_origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = request.headers.get(
+            "Access-Control-Request-Headers",
+            "Accept, Content-Type, X-CSRF-Token, X-Requested-With, Idempotency-Key",
+        )
+        response.headers["Access-Control-Max-Age"] = "600"
+        vary = response.headers.get("Vary", "")
+        if "Origin" not in {item.strip() for item in vary.split(",") if item.strip()}:
+            response.headers["Vary"] = f"{vary}, Origin".strip(", ")
+
     if bool(app.config.get("SECURE_HEADERS_ENABLED", True)):
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("X-Frame-Options", "DENY")
@@ -776,13 +831,17 @@ def _set_response_headers(app: Flask, response: Response) -> Response:
         if bool(app.config.get("SECURE_HEADERS_HSTS_ENABLED", False)):
             response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
         if bool(app.config.get("SECURE_HEADERS_CSP_ENABLED", False)):
+            live_api_origin = str(app.config.get("PUBLIC_LIVE_API_ORIGIN") or "").strip()
+            connect_src = "'self'" + (f" {live_api_origin}" if live_api_origin else "")
             response.headers.setdefault(
                 "Content-Security-Policy",
                 "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "
-                "img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'",
+                f"img-src 'self' data:; connect-src {connect_src}; frame-ancestors 'none'",
             )
 
     path = request.path.lower()
+    if path.startswith("/admin/api/") or (path.startswith("/api/vault-cycles/") and path.endswith("/process-profit-share")):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     if request.endpoint == "static" or path in {"/manifest.json", "/sw.js"} or path.startswith("/icons/"):
         if path.endswith("/sw.js") or path.endswith("static/js/sw.js"):
             max_age = max(0, int(app.config.get("SERVICE_WORKER_CACHE_SECONDS", 0) or 0))

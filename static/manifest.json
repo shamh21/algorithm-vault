@@ -1,7 +1,7 @@
 {
   "name": "AlgVault",
   "short_name": "AlgVault",
-  "description": "Secure mobile vault trading workspace.",
+  "description": "Secure mobile command center for automated portfolio allocation, strategy monitoring, and vault activity.",
   "id": "/",
   "start_url": "/",
   "scope": "/",
@@ -9,26 +9,26 @@
   "dir": "ltr",
   "display": "standalone",
   "display_override": ["standalone", "minimal-ui"],
-  "background_color": "#05070d",
-  "theme_color": "#05070d",
+  "background_color": "#050607",
+  "theme_color": "#050607",
   "orientation": "portrait",
   "categories": ["finance", "productivity"],
   "prefer_related_applications": false,
   "icons": [
     {
-      "src": "/icons/icon-192.png",
+      "src": "/icons/algvault-ios-192.png",
       "sizes": "192x192",
       "type": "image/png",
       "purpose": "any maskable"
     },
     {
-      "src": "/icons/icon-512.png",
+      "src": "/icons/algvault-ios-512.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any maskable"
     },
     {
-      "src": "/icons/apple-touch-icon.png",
+      "src": "/icons/algvault-ios-180.png",
       "sizes": "180x180",
       "type": "image/png",
       "purpose": "any"
@@ -39,19 +39,13 @@
       "name": "Wallet",
       "short_name": "Wallet",
       "url": "/wallet/",
-      "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+      "icons": [{ "src": "/icons/algvault-ios-192.png", "sizes": "192x192", "type": "image/png" }]
     },
     {
       "name": "Vault",
       "short_name": "Vault",
       "url": "/vault/",
-      "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" }]
-    },
-    {
-      "name": "Risk",
-      "short_name": "Risk",
-      "url": "/admin/risk",
-      "icons": [{ "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png" }]
+      "icons": [{ "src": "/icons/algvault-ios-192.png", "sizes": "192x192", "type": "image/png" }]
     }
   ]
 }

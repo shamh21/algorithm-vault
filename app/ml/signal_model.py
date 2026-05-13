@@ -762,12 +762,10 @@ class MLSignalModel:
             side = "buy"
             action_probability = buy_probability
             opposite_probability = sell_probability
-            signed_direction = 1.0
         else:
             side = "sell"
             action_probability = sell_probability
             opposite_probability = buy_probability
-            signed_direction = -1.0
         directional_margin = abs(action_probability - opposite_probability)
         directional_confidence = action_probability / max(action_mass, 1e-12)
         blockers: list[str] = []

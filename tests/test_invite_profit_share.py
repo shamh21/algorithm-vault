@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+import pyotp
 import pytest
 
 from app.auth import encrypt_totp_secret, password_hash
@@ -18,6 +19,8 @@ from app.models import (
 )
 from app.services.vault_cycle_settlement import VaultCycleSettlementService
 
+TOTP_SECRET = "JBSWY3DPEHPK3PXP"
+
 
 class _AuditTransfer:
     def audit(self, *args, **kwargs) -> None:
@@ -29,7 +32,7 @@ def _user(username: str, *, role: str = "user") -> User:
         username=username,
         password_hash=password_hash("password123"),
         role=role,
-        totp_secret_encrypted=encrypt_totp_secret("JBSWY3DPEHPK3PXP"),
+        totp_secret_encrypted=encrypt_totp_secret(TOTP_SECRET),
         two_factor_enabled_at=datetime.utcnow(),
     )
     db.session.add(user)
@@ -45,6 +48,92 @@ def _admin_client(app):
         session["user_id"] = admin.id
         session["two_factor_verified"] = True
     return client
+
+
+def _totp_code() -> str:
+    return pyotp.TOTP(TOTP_SECRET).now()
+
+
+def test_invite_admin_pwa_session_is_unauthenticated_safe_and_omits_data(app) -> None:
+    client = app.test_client()
+
+    response = client.get("/admin/api/session")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["ok"] is True
+    assert payload["authenticated"] is False
+    assert payload["authorized"] is False
+    assert payload["reason"] == "unauthenticated"
+    assert payload["csrfToken"]
+    assert "inviteCodes" not in payload
+    assert "summary" not in payload
+
+
+def test_invite_admin_pwa_rejects_unauthenticated_and_non_admin_api_access(app) -> None:
+    _user("regular-user", role="user")
+    db.session.commit()
+    client = app.test_client()
+
+    unauthenticated = client.get("/admin/api/invite-codes")
+    assert unauthenticated.status_code == 401
+    assert unauthenticated.get_json()["code"] == "authentication_required"
+
+    signed_in = client.post(
+        "/admin/api/sign-in",
+        json={"username": "regular-user", "password": "password123", "totpCode": _totp_code()},
+    )
+    assert signed_in.status_code == 200
+    payload = signed_in.get_json()
+    assert payload["authenticated"] is True
+    assert payload["authorized"] is False
+    assert payload["reason"] == "access_denied"
+
+    denied = client.get("/admin/api/invite-codes")
+    assert denied.status_code == 403
+    assert denied.get_json()["code"] == "access_denied"
+
+
+def test_invite_admin_pwa_sign_in_sign_out_and_generic_failures(app) -> None:
+    _user("sufyanh")
+    _user("invite-admin-pwa", role="admin")
+    db.session.commit()
+    client = app.test_client()
+
+    failed = client.post(
+        "/admin/api/sign-in",
+        json={"username": "invite-admin-pwa", "password": "wrong-password", "totpCode": _totp_code()},
+    )
+    assert failed.status_code == 401
+    assert failed.get_json()["error"] == "Sign-in failed. Check your credentials and try again."
+
+    invalid_totp = client.post(
+        "/admin/api/sign-in",
+        json={"username": "invite-admin-pwa", "password": "password123", "totpCode": "000000"},
+    )
+    assert invalid_totp.status_code == 401
+    assert invalid_totp.get_json()["error"] == "Sign-in failed. Check your credentials and try again."
+
+    signed_in = client.post(
+        "/admin/api/sign-in",
+        json={"username": "invite-admin-pwa", "password": "password123", "totpCode": _totp_code()},
+    )
+    assert signed_in.status_code == 200
+    payload = signed_in.get_json()
+    assert payload["authenticated"] is True
+    assert payload["authorized"] is True
+    assert payload["admin"] == {"username": "invite-admin-pwa", "role": "admin"}
+
+    listed = client.get("/admin/api/invite-codes")
+    assert listed.status_code == 200
+    assert "inviteCodes" in listed.get_json()
+
+    signed_out = client.post("/admin/api/sign-out")
+    assert signed_out.status_code == 200
+    assert signed_out.get_json()["authenticated"] is False
+
+    blocked = client.get("/admin/api/invite-codes")
+    assert blocked.status_code == 401
 
 
 def test_admin_invite_code_api_create_search_update_and_disable(app) -> None:

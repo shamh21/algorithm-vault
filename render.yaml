@@ -1,8 +1,82 @@
 services:
+  - type: web
+    name: algorithm-vault-live-api
+    runtime: python
+    plan: starter
+    region: frankfurt
+    autoDeploy: true
+    buildCommand: python -m pip install --upgrade pip wheel setuptools && python -m pip install -r requirements.txt
+    startCommand: "GUNICORN_BIND=0.0.0.0:${PORT:-8000} gunicorn -c deploy/gunicorn.conf.py wsgi:app"
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12"
+      - key: APP_ENV
+        value: production
+      - key: DEPLOYMENT_TARGET
+        value: vercel
+      - key: FLASK_APP
+        value: wsgi:app
+      - key: WORKER_MODE
+        value: web
+      - key: ENABLE_IN_PROCESS_WORKERS
+        value: "false"
+      - key: WORKER_PROCESS_CONFIGURED
+        value: "true"
+      - key: SCHEMA_BOOTSTRAP_ENABLED
+        value: "false"
+      - key: ENABLE_LIVE_TRADING
+        value: "true"
+      - key: APP_MODE
+        value: live
+      - key: ONE_H10_LIVE_ENABLED
+        value: "true"
+      - key: VAULT_START_ASYNC_ENABLED
+        value: "false"
+      - key: SESSION_COOKIE_SECURE
+        value: "true"
+      - key: SESSION_COOKIE_HTTPONLY
+        value: "true"
+      - key: SESSION_COOKIE_SAMESITE
+        value: Lax
+      - key: LOG_FORMAT
+        value: json
+      - key: DATABASE_URL
+        sync: false
+      - key: PUBLIC_APP_ORIGIN
+        sync: false
+      - key: PUBLIC_API_ORIGIN
+        sync: false
+      - key: PUBLIC_LIVE_API_ORIGIN
+        sync: false
+      - key: LIVE_API_CORS_ALLOWED_ORIGINS
+        sync: false
+      - key: SESSION_COOKIE_DOMAIN
+        sync: false
+      - key: FLASK_SECRET_KEY
+        sync: false
+      - key: TOTP_ENCRYPTION_KEY
+        sync: false
+      - key: ADMIN_USERNAME
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: SIGNUP_INVITE_CODE
+        sync: false
+      - key: HL_ACCOUNT_ADDRESS
+        sync: false
+      - key: HL_SECRET_KEY
+        sync: false
+      - key: KUCOIN_API_KEY
+        sync: false
+      - key: KUCOIN_API_SECRET
+        sync: false
+      - key: KUCOIN_API_PASSPHRASE
+        sync: false
   - type: worker
     name: algorithm-vault-worker
     runtime: python
     plan: starter
+    region: frankfurt
     autoDeploy: true
     buildCommand: python -m pip install --upgrade pip wheel setuptools && python -m pip install -r requirements.txt
     startCommand: python -m app.workers.runner
@@ -27,6 +101,8 @@ services:
         value: "true"
       - key: APP_MODE
         value: live
+      - key: ONE_H10_LIVE_ENABLED
+        value: "true"
       - key: SESSION_COOKIE_SECURE
         value: "true"
       - key: LOG_FORMAT
@@ -36,6 +112,12 @@ services:
       - key: PUBLIC_APP_ORIGIN
         sync: false
       - key: PUBLIC_API_ORIGIN
+        sync: false
+      - key: PUBLIC_LIVE_API_ORIGIN
+        sync: false
+      - key: LIVE_API_CORS_ALLOWED_ORIGINS
+        sync: false
+      - key: SESSION_COOKIE_DOMAIN
         sync: false
       - key: FLASK_SECRET_KEY
         sync: false
@@ -50,4 +132,10 @@ services:
       - key: HL_ACCOUNT_ADDRESS
         sync: false
       - key: HL_SECRET_KEY
+        sync: false
+      - key: KUCOIN_API_KEY
+        sync: false
+      - key: KUCOIN_API_SECRET
+        sync: false
+      - key: KUCOIN_API_PASSPHRASE
         sync: false

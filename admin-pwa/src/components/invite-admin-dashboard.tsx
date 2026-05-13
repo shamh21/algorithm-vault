@@ -9,7 +9,9 @@ import {
   Copy,
   Download,
   Edit3,
+  LogOut,
   Loader2,
+  LockKeyhole,
   MoreHorizontal,
   Plus,
   RefreshCw,
@@ -21,6 +23,8 @@ import {
 } from "lucide-react";
 import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useState } from "react";
 import {
+  AdminSession,
+  AdminSignInPayload,
   ApiError,
   AuditLog,
   InviteCode,
@@ -55,6 +59,8 @@ const sortOptions = [
 
 const vaultTypeOptions = ["VaultCycle", "1H10", "Balanced", "Aggressive"];
 
+type AuthState = "checking" | "unauthenticated" | "authorized" | "access-denied" | "session-error";
+
 const emptySummary: InviteSummary = {
   totalCodes: 0,
   activeCodes: 0,
@@ -82,6 +88,12 @@ const defaultForm = (): InviteFormPayload => ({
 });
 
 export function InviteAdminDashboard() {
+  const [authState, setAuthState] = useState<AuthState>("checking");
+  const [adminSession, setAdminSession] = useState<AdminSession | null>(null);
+  const [signInValues, setSignInValues] = useState<AdminSignInPayload>({ username: "", password: "", totpCode: "" });
+  const [signingIn, setSigningIn] = useState(false);
+  const [signInError, setSignInError] = useState("");
+  const [sessionError, setSessionError] = useState("");
   const [csrfToken, setCsrfToken] = useState("");
   const [codes, setCodes] = useState<InviteCode[]>([]);
   const [summary, setSummary] = useState<InviteSummary>(emptySummary);
@@ -124,21 +136,104 @@ export function InviteAdminDashboard() {
     };
   }, []);
 
-  async function bootstrap() {
-    setLoading(true);
-    setError("");
-    try {
-      const session = await apiFetch<{ ok: true; csrfToken: string }>("/admin/api/session");
-      setCsrfToken(session.csrfToken);
-    } catch (err) {
-      setError(errorMessage(err));
-      setLoading(false);
+  const applySession = useCallback((session: AdminSession) => {
+    setAdminSession(session);
+    setCsrfToken(session.csrfToken || "");
+    setSessionError("");
+    if (session.authorized) {
+      setLoading(true);
+      setAuthState("authorized");
+      return;
     }
-  }
+    setCodes([]);
+    setSummary(emptySummary);
+    setLoading(false);
+    setSheet("closed");
+    setDetails(null);
+    setAuthState(session.authenticated ? "access-denied" : "unauthenticated");
+  }, []);
+
+  const bootstrap = useCallback(async () => {
+    setAuthState("checking");
+    setLoading(false);
+    setError("");
+    setSignInError("");
+    setSessionError("");
+    try {
+      const session = await apiFetch<AdminSession>("/admin/api/session");
+      applySession(session);
+    } catch (err) {
+      setSessionError(errorMessage(err));
+      setAuthState("session-error");
+    }
+  }, [applySession]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void bootstrap();
+  }, [bootstrap]);
+
+  async function submitAdminSignIn(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!csrfToken || signingIn) return;
+    setSigningIn(true);
+    setSignInError("");
+    setSessionError("");
+    try {
+      const session = await apiFetch<AdminSession>("/admin/api/sign-in", {
+        method: "POST",
+        body: JSON.stringify(signInValues),
+        csrfToken
+      });
+      setSignInValues((values) => ({ ...values, password: "", totpCode: "" }));
+      applySession(session);
+    } catch (err) {
+      setSignInValues((values) => ({ ...values, password: "", totpCode: "" }));
+      setSignInError(errorMessage(err));
+    } finally {
+      setSigningIn(false);
+    }
+  }
+
+  async function signOutAdmin() {
+    if (!csrfToken) {
+      void bootstrap();
+      return;
+    }
+    setSaving(true);
+    setError("");
+    setSignInError("");
+    try {
+      const session = await apiFetch<AdminSession>("/admin/api/sign-out", { method: "POST", csrfToken });
+      setSignInValues({ username: "", password: "", totpCode: "" });
+      applySession(session);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const handleAdminApiAuthError = useCallback((err: unknown) => {
+    if (err instanceof ApiError && err.status === 401) {
+      setAuthState("unauthenticated");
+      setCsrfToken("");
+      setCodes([]);
+      setSummary(emptySummary);
+      setSheet("closed");
+      setDetails(null);
+      setSignInError("Session expired. Sign in again.");
+      return true;
+    }
+    if (err instanceof ApiError && err.status === 403) {
+      setAuthState("access-denied");
+      setCodes([]);
+      setSummary(emptySummary);
+      setSheet("closed");
+      setDetails(null);
+      return true;
+    }
+    return false;
   }, []);
 
   const loadInviteCodes = useCallback(async () => {
@@ -149,17 +244,18 @@ export function InviteAdminDashboard() {
       setCodes(response.inviteCodes);
       setSummary(response.summary || emptySummary);
     } catch (err) {
+      if (handleAdminApiAuthError(err)) return;
       setError(errorMessage(err));
     } finally {
       setLoading(false);
     }
-  }, [queryPath]);
+  }, [handleAdminApiAuthError, queryPath]);
 
   useEffect(() => {
-    if (!csrfToken) return;
+    if (authState !== "authorized" || !csrfToken) return;
     const timer = window.setTimeout(() => void loadInviteCodes(), 220);
     return () => window.clearTimeout(timer);
-  }, [csrfToken, loadInviteCodes]);
+  }, [authState, csrfToken, loadInviteCodes]);
 
   async function openDetails(invite: InviteCode) {
     setDetails(invite);
@@ -173,6 +269,7 @@ export function InviteAdminDashboard() {
       ]);
       setDetailData({ usages: usages.usages, payouts: payouts.payouts, auditLogs: audits.auditLogs });
     } catch (err) {
+      if (handleAdminApiAuthError(err)) return;
       setNotice(errorMessage(err));
     }
   }
@@ -239,6 +336,7 @@ export function InviteAdminDashboard() {
       setSheet("closed");
       await loadInviteCodes();
     } catch (err) {
+      if (handleAdminApiAuthError(err)) return;
       setError(errorMessage(err));
     } finally {
       setSaving(false);
@@ -264,6 +362,7 @@ export function InviteAdminDashboard() {
       setNotice(success);
       await loadInviteCodes();
     } catch (err) {
+      if (handleAdminApiAuthError(err)) return;
       setError(errorMessage(err));
     } finally {
       setSaving(false);
@@ -302,6 +401,46 @@ export function InviteAdminDashboard() {
     URL.revokeObjectURL(url);
   }
 
+  if (authState === "checking") {
+    return (
+      <AdminAuthShell>
+        <CheckingState />
+      </AdminAuthShell>
+    );
+  }
+
+  if (authState === "session-error") {
+    return (
+      <AdminAuthShell>
+        <SessionErrorState message={sessionError} onRetry={() => void bootstrap()} />
+      </AdminAuthShell>
+    );
+  }
+
+  if (authState === "access-denied") {
+    return (
+      <AdminAuthShell>
+        <AccessDeniedState username={adminSession?.admin?.username || ""} signingOut={saving} onSignOut={() => void signOutAdmin()} />
+      </AdminAuthShell>
+    );
+  }
+
+  if (authState !== "authorized") {
+    return (
+      <AdminAuthShell>
+        <AdminSignIn
+          values={signInValues}
+          error={signInError || error}
+          submitting={signingIn}
+          disabled={!csrfToken}
+          onChange={setSignInValues}
+          onSubmit={submitAdminSignIn}
+          onRetrySession={() => void bootstrap()}
+        />
+      </AdminAuthShell>
+    );
+  }
+
   return (
     <main className="ios-safe-page mx-auto min-h-screen w-full max-w-7xl">
       <header className="sticky top-0 z-20 -mx-4 border-b border-white/10 bg-[#070807]/90 px-4 py-3 backdrop-blur md:static md:mx-0 md:border-0 md:bg-transparent md:px-0">
@@ -310,15 +449,27 @@ export function InviteAdminDashboard() {
             <p className="text-xs font-semibold uppercase text-amber-300">Admin</p>
             <h1 className="text-2xl font-semibold text-white md:text-4xl">Invite Codes</h1>
           </div>
-          <button
-            className="tap-target inline-flex items-center justify-center rounded-full border border-white/10 bg-white/5 px-3 text-sm font-semibold text-white"
-            onClick={() => void loadInviteCodes()}
-            disabled={loading}
-            type="button"
-            aria-label="Refresh invite codes"
-          >
-            <RefreshCw className={`h-5 w-5 ${loading ? "animate-spin" : ""}`} />
-          </button>
+          <div className="flex items-center gap-2">
+            {adminSession?.admin?.username && <span className="hidden text-sm text-white/55 sm:inline">{adminSession.admin.username}</span>}
+            <button
+              className="tap-target inline-flex items-center justify-center rounded-full border border-white/10 bg-white/5 px-3 text-sm font-semibold text-white"
+              onClick={() => void loadInviteCodes()}
+              disabled={loading}
+              type="button"
+              aria-label="Refresh invite codes"
+            >
+              <RefreshCw className={`h-5 w-5 ${loading ? "animate-spin" : ""}`} />
+            </button>
+            <button
+              className="tap-target inline-flex items-center justify-center rounded-full border border-white/10 bg-white/5 px-3 text-sm font-semibold text-white"
+              onClick={() => void signOutAdmin()}
+              disabled={saving}
+              type="button"
+              aria-label="Sign out of admin"
+            >
+              <LogOut className="h-5 w-5" />
+            </button>
+          </div>
         </div>
       </header>
 
@@ -462,6 +613,150 @@ export function InviteAdminDashboard() {
         />
       )}
     </main>
+  );
+}
+
+function AdminAuthShell({ children }: { children: ReactNode }) {
+  return (
+    <main className="ios-safe-page mx-auto flex min-h-[100svh] w-full max-w-md items-center justify-center">
+      <section className="w-full rounded-2xl border border-white/10 bg-white/[0.06] p-5 shadow-2xl shadow-black/30 backdrop-blur md:p-6">
+        {children}
+      </section>
+    </main>
+  );
+}
+
+function CheckingState() {
+  return (
+    <div className="flex min-h-72 flex-col items-center justify-center text-center">
+      <Loader2 className="h-8 w-8 animate-spin text-amber-300" aria-hidden="true" />
+      <h1 className="mt-5 text-2xl font-semibold text-white">Admin sign in</h1>
+      <p className="mt-2 text-sm text-white/60">Checking your admin session.</p>
+    </div>
+  );
+}
+
+function SessionErrorState({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return (
+    <div className="text-center">
+      <AlertTriangle className="mx-auto h-10 w-10 text-amber-300" aria-hidden="true" />
+      <h1 className="mt-5 text-2xl font-semibold text-white">Admin sign in</h1>
+      <p className="mt-2 text-sm text-white/60">The admin session could not be checked.</p>
+      <p className="mt-4 rounded-xl border border-amber-300/30 bg-amber-300/10 p-3 text-sm text-amber-100" role="alert" aria-live="polite">
+        {message || "Network error. Check your connection and try again."}
+      </p>
+      <button className="tap-target mt-5 w-full rounded-2xl bg-amber-300 px-4 font-bold text-black" type="button" onClick={onRetry}>
+        Retry
+      </button>
+    </div>
+  );
+}
+
+function AdminSignIn({
+  values,
+  error,
+  submitting,
+  disabled,
+  onChange,
+  onSubmit,
+  onRetrySession
+}: {
+  values: AdminSignInPayload;
+  error: string;
+  submitting: boolean;
+  disabled: boolean;
+  onChange: (values: AdminSignInPayload) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onRetrySession: () => void;
+}) {
+  const totpCode = values.totpCode.trim();
+  const canSubmit = Boolean(values.username.trim() && values.password && /^\d{6}$/.test(totpCode) && !submitting && !disabled);
+  return (
+    <>
+      <div className="flex items-start gap-3">
+        <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border border-amber-300/25 bg-amber-300/10 text-amber-200">
+          <LockKeyhole className="h-6 w-6" aria-hidden="true" />
+        </div>
+        <div>
+          <p className="text-xs font-semibold uppercase text-amber-300">AlgVault Admin</p>
+          <h1 className="mt-1 text-2xl font-semibold text-white">Admin sign in</h1>
+          <p className="mt-2 text-sm leading-6 text-white/60">Enter your admin credentials and verification code to continue.</p>
+        </div>
+      </div>
+
+      <form className="mt-6 grid gap-4" onSubmit={onSubmit}>
+        <Field label="Username">
+          <input
+            className="Input text-base"
+            type="text"
+            value={values.username}
+            autoCapitalize="none"
+            autoComplete="username"
+            autoCorrect="off"
+            required
+            onChange={(event) => onChange({ ...values, username: event.target.value })}
+          />
+        </Field>
+        <Field label="Password">
+          <input
+            className="Input text-base"
+            type="password"
+            value={values.password}
+            autoComplete="current-password"
+            required
+            onChange={(event) => onChange({ ...values, password: event.target.value })}
+          />
+        </Field>
+        <Field label="TOTP code">
+          <input
+            className="Input text-base tabular-nums"
+            type="text"
+            value={values.totpCode}
+            inputMode="numeric"
+            autoComplete="one-time-code"
+            pattern="[0-9]*"
+            maxLength={6}
+            required
+            onChange={(event) => onChange({ ...values, totpCode: event.target.value.replace(/\D/g, "").slice(0, 6) })}
+          />
+        </Field>
+
+        {error && (
+          <p className="rounded-xl border border-red-400/30 bg-red-400/10 p-3 text-sm text-red-100" role="alert" aria-live="assertive">
+            {error}
+          </p>
+        )}
+
+        <button className="tap-target w-full rounded-2xl bg-amber-300 px-4 font-bold text-black disabled:opacity-60" type="submit" disabled={!canSubmit}>
+          {submitting ? "Signing in..." : "Sign in"}
+        </button>
+        {disabled && (
+          <button className="tap-target w-full rounded-2xl border border-white/10 bg-white/5 px-4 font-semibold text-white" type="button" onClick={onRetrySession}>
+            Retry session check
+          </button>
+        )}
+      </form>
+    </>
+  );
+}
+
+function AccessDeniedState({ username, signingOut, onSignOut }: { username: string; signingOut: boolean; onSignOut: () => void }) {
+  return (
+    <div className="text-center">
+      <AlertTriangle className="mx-auto h-10 w-10 text-red-300" aria-hidden="true" />
+      <h1 className="mt-5 text-2xl font-semibold text-white">Access denied</h1>
+      <p className="mx-auto mt-3 max-w-sm text-sm leading-6 text-white/65">You do not have permission to access the AlgVault admin area.</p>
+      {username && <p className="mt-4 text-sm text-white/45">Signed in as {username}.</p>}
+      <button
+        className="tap-target mt-6 inline-flex w-full items-center justify-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-4 font-semibold text-white"
+        type="button"
+        disabled={signingOut}
+        onClick={onSignOut}
+      >
+        {signingOut ? <Loader2 className="h-5 w-5 animate-spin" aria-hidden="true" /> : <LogOut className="h-5 w-5" aria-hidden="true" />}
+        Sign out
+      </button>
+    </div>
   );
 }
 
@@ -933,7 +1228,10 @@ function toDateTimeInput(value: string | null) {
 }
 
 function errorMessage(err: unknown) {
-  if (err instanceof ApiError) return err.message;
+  if (err instanceof ApiError) {
+    if (err.status === 429) return "Too many attempts. Try again shortly.";
+    return err.message;
+  }
   if (err instanceof Error) return err.message;
   return "The request could not be completed.";
 }

@@ -4,8 +4,6 @@ import time
 from datetime import datetime, timedelta
 from typing import Any
 
-import pytest
-
 from app.auth import password_hash
 from app.extensions import db
 from app.models import LeveragedMarket, LeveragedMarketFeature, MarketForecast, User
