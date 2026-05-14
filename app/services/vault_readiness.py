@@ -6,7 +6,10 @@ exchange-specific blockers separate from blockers that stop the whole cycle.
 
 from __future__ import annotations
 
+import json
 import logging
+import os
+import re
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -16,7 +19,6 @@ from ..extensions import db
 from ..ml.online_ranker import ONE_H10_HORIZON
 from ..models import LeveragedMarket, RiskEvent, Setting, TradingConnection, User, WalletBalance
 from .provider_assets import normalize_provider, provider_collateral_asset
-
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +36,21 @@ REQUIRED_ML_FAMILIES = (
     "pytorch_execution_policy",
     "pytorch_roi_target",
 )
+EXCHANGE_READINESS_STATES = {
+    "disabled",
+    "ready",
+    "ready_auto_funded",
+    "needs_wallet",
+    "needs_api_credentials",
+    "needs_verification",
+    "geo_restricted",
+    "provider_unavailable",
+    "credential_error",
+    "transfer_failed",
+    "blocked",
+}
+
+
 PLACEHOLDER_MARKERS = {
     "",
     "...",
@@ -249,7 +266,7 @@ class VaultReadinessService:
                 self._blocker(
                     "no_exchange_ready",
                     "No exchange ready",
-                    "No enabled exchange has a verified live connection, usable collateral, market metadata, and trading access.",
+                    "No enabled exchange has a verified live connection, provider verification, market metadata, and trading access.",
                     "blocker",
                     "Verify at least one enabled exchange connection and retry.",
                 )
@@ -374,33 +391,44 @@ class VaultReadinessService:
                 )
             else:
                 alerts = [str(alert) for alert in (getattr(snapshot, "alerts", []) or []) if str(alert).strip()]
-                if alerts:
-                    region_blocker = self._provider_region_restricted_blocker(exchange, label, alerts)
-                    if region_blocker is not None:
-                        blockers.append(region_blocker)
-                    else:
-                        blockers.append(
-                            self._blocker(
-                                f"{exchange}_connection_failed",
-                                f"{label} connection failed",
-                                "; ".join(alerts[:2]),
-                                "blocker",
-                                f"Resolve the {label} connection alert, then verify the connection again.",
-                                exchange=exchange,
-                            )
-                        )
-                available_margin = self._snapshot_available_margin(snapshot, collateral_asset)
-                if available_margin <= 0:
+                geo_restriction = self._kucoin_geo_restriction(alerts if exchange == "kucoin" else [])
+                if geo_restriction is not None:
+                    blockers.append(geo_restriction)
+                elif alerts:
                     blockers.append(
                         self._blocker(
-                            f"{exchange}_settlement_balance_unavailable",
-                            f"{label} collateral unavailable",
-                            f"{label} has no usable {collateral_asset} collateral for live Vault execution.",
+                            f"{exchange}_connection_failed",
+                            f"{label} connection failed",
+                            self._sanitize_provider_message("; ".join(alerts[:2])),
                             "blocker",
-                            f"Fund the {label} futures account with {collateral_asset} or reduce the route.",
+                            f"Resolve the {label} connection alert, then verify the connection again.",
                             exchange=exchange,
                         )
                     )
+                available_margin = self._snapshot_available_margin(snapshot, collateral_asset)
+                if available_margin <= 0:
+                    if exchange == "hyperliquid":
+                        warnings.append(
+                            self._blocker(
+                                "hyperliquid_auto_funding_pending",
+                                "Auto-funded during cycle",
+                                "Collateral is transferred at cycle start and withdrawn after cycle completion.",
+                                "warning",
+                                "Keep Hyperliquid enabled; funding is handled by the Vault Cycle transfer step.",
+                                exchange=exchange,
+                            )
+                        )
+                    else:
+                        blockers.append(
+                            self._blocker(
+                                f"{exchange}_settlement_balance_unavailable",
+                                f"{label} collateral unavailable",
+                                f"{label} has no usable {collateral_asset} collateral for live Vault execution.",
+                                "blocker",
+                                f"Fund the {label} futures account with {collateral_asset} or reduce the route.",
+                                exchange=exchange,
+                            )
+                        )
 
         if exchange == "hyperliquid":
             market_warnings, market_blockers = self._hyperliquid_specific_blockers(connection, settlement_asset, markets, require_market_metadata)
@@ -416,10 +444,20 @@ class VaultReadinessService:
             warnings.append(market_warning)
 
         blocking = [item for item in blockers if item.get("severity") in {"blocker", "critical"}]
-        ready = enabled and not blocking and available_margin > 0
+        auto_funded = exchange == "hyperliquid" and available_margin <= 0 and not blocking
+        ready = enabled and not blocking and (available_margin > 0 or auto_funded)
+        status = self._exchange_readiness_state(
+            exchange=exchange,
+            enabled=enabled,
+            ready=ready,
+            auto_funded=auto_funded,
+            blockers=blockers,
+            connection=connection,
+        )
         score = self._exchange_score(ready=ready, available_margin=available_margin, markets=markets, exchange=exchange)
         return {
             "enabled": enabled,
+            "eligible": ready,
             "ready": ready,
             "score": score,
             "allocation_pct": 0,
@@ -431,41 +469,120 @@ class VaultReadinessService:
             "connected": connection is not None,
             "verified": bool(connection and connection.verification_status == "verified"),
             "can_trade": ready,
-            "status": "ready" if ready else "disabled" if not enabled else "blocked",
+            "status": status,
+            "readiness_state": status,
+            "funding_status": "auto_funded" if auto_funded else "available" if available_margin > 0 else "unavailable",
+            "funding_label": "Auto-funded during vault cycle" if auto_funded else f"{collateral_asset} collateral available" if available_margin > 0 else f"{collateral_asset} collateral unavailable",
+            "funding_detail": "Collateral is transferred at cycle start and withdrawn after cycle completion." if auto_funded else "",
             "label": label,
             "blockers": blockers,
             "warnings": warnings,
             "trading_connection_id": connection.id if connection is not None else None,
         }
 
-    def _provider_region_restricted_blocker(
+    def _exchange_readiness_state(
         self,
+        *,
         exchange: str,
-        label: str,
-        alerts: list[str],
-    ) -> dict[str, Any] | None:
-        if exchange != "kucoin":
+        enabled: bool,
+        ready: bool,
+        auto_funded: bool,
+        blockers: list[dict[str, Any]],
+        connection: TradingConnection | None,
+    ) -> str:
+        if not enabled:
+            return "disabled"
+        if ready and auto_funded:
+            return "ready_auto_funded"
+        if ready:
+            return "ready"
+        codes = {str(item.get("code") or "") for item in blockers}
+        if f"{exchange}_geo_restricted" in codes:
+            return "geo_restricted"
+        if any("wallet" in code for code in codes):
+            return "needs_wallet"
+        if any("credentials_missing" in code for code in codes):
+            return "needs_api_credentials"
+        if any("credentials" in code for code in codes):
+            return "credential_error"
+        if any("not_verified" in code for code in codes) or (connection is not None and connection.verification_status != "verified"):
+            return "needs_verification"
+        if any("transfer" in code for code in codes):
+            return "transfer_failed"
+        if any("unavailable" in code or "connection_failed" in code for code in codes):
+            return "provider_unavailable"
+        return "blocked"
+
+    def _kucoin_geo_restriction(self, messages: list[Any], metadata: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        metadata = metadata or {}
+        diagnostics = metadata.get("provider_diagnostics") if isinstance(metadata, dict) else None
+        if isinstance(diagnostics, dict) and str(diagnostics.get("providerCode") or diagnostics.get("provider_code") or "") == "400302":
+            detected = str(diagnostics.get("detectedArea") or "restricted region").upper()
+            return self._geo_restricted_blocker(detected, diagnostics)
+        combined = " ".join(str(message or "") for message in messages if str(message or "").strip())
+        if not combined:
             return None
-        text = " ".join(str(alert or "") for alert in alerts).lower()
-        restricted_markers = (
-            "400302",
-            "region restricted",
-            "currently unavailable in the u.s",
-            "restricted country",
-            "restricted region",
-            "restricted country/region",
-            "current area: us",
-        )
-        if not any(marker in text for marker in restricted_markers):
+        lowered = combined.lower()
+        if "400302" not in combined and not any(phrase in lowered for phrase in ("unavailable in your current area", "unavailable in the detected region", "restricted region", "current area")):
             return None
-        return self._blocker(
-            "kucoin_region_restricted",
-            "KuCoin region restricted",
-            "KuCoin is unavailable from this runtime region for live Vault routing.",
+        detected = self._detected_area_from_text(combined) or "US" if " us" in f" {lowered}" or "united states" in lowered else self._detected_area_from_text(combined) or "restricted region"
+        diagnostics = {
+            "providerCode": "400302" if "400302" in combined else "",
+            "detectedArea": str(detected).upper() if len(str(detected)) <= 3 else str(detected),
+            "egressRegion": os.environ.get("VERCEL_REGION") or os.environ.get("AWS_REGION") or "unknown",
+            "maskedIp": self._mask_ip(combined),
+        }
+        return self._geo_restricted_blocker(str(diagnostics["detectedArea"]), diagnostics)
+
+    def _geo_restricted_blocker(self, detected_area: str, diagnostics: dict[str, Any] | None = None) -> dict[str, Any]:
+        area = str(detected_area or "restricted region").upper()
+        blocker = self._blocker(
+            "kucoin_geo_restricted",
+            "Provider restricted",
+            f"KuCoin rejected verification from detected region: {area}.",
             "blocker",
-            "Run KuCoin live checks only from a compliant non-restricted fixed-egress live API runtime, or disable KuCoin for this route.",
-            exchange=exchange,
+            "Recheck provider after server-region update or use another supported exchange.",
+            exchange="kucoin",
+            docs_or_action_label="Recheck provider",
         )
+        if diagnostics:
+            blocker["diagnostics"] = {
+                key: value
+                for key, value in {
+                    "providerCode": diagnostics.get("providerCode"),
+                    "detectedArea": diagnostics.get("detectedArea"),
+                    "egressRegion": diagnostics.get("egressRegion"),
+                    "maskedIp": diagnostics.get("maskedIp"),
+                }.items()
+                if value
+            }
+        return blocker
+
+    @staticmethod
+    def _sanitize_provider_message(message: str) -> str:
+        return re.sub(r"\b(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}\b", r"\1.\2.xxx.xxx", str(message or ""))[:500]
+
+    @staticmethod
+    def _mask_ip(message: str) -> str:
+        match = re.search(r"\b(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\b", str(message or ""))
+        return f"{match.group(1)}.{match.group(2)}.xxx.xxx" if match else ""
+
+    @staticmethod
+    def _detected_area_from_text(message: str) -> str:
+        text = str(message or "")
+        for pattern in (r'"(?:detectedArea|detected_area|area|country|region)"\s*:\s*"?([A-Za-z]{2,32})', r"detected region[:= ]+([A-Za-z]{2,32})", r"current area[:= ]+([A-Za-z]{2,32})"):
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if match:
+                return match.group(1)
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return ""
+        if isinstance(payload, dict):
+            for key in ("detectedArea", "detected_area", "area", "country", "region"):
+                if payload.get(key):
+                    return str(payload[key])
+        return ""
 
     def _connection_for(self, user_id: int | None, exchange: str) -> TradingConnection | None:
         if user_id is None:
@@ -499,6 +616,11 @@ class VaultReadinessService:
                     exchange=exchange,
                 )
             )
+        if exchange == "kucoin":
+            geo_restriction = self._kucoin_geo_restriction([connection.last_verification_error or ""], connection.provider_metadata)
+            if geo_restriction is not None:
+                blockers.append(geo_restriction)
+                return warnings, blockers
         if connection.verification_status != "verified":
             blockers.append(
                 self._blocker(
@@ -540,7 +662,7 @@ class VaultReadinessService:
 
         try:
             credentials = self._trading_connections().credentials_for_execution(connection.user_id, connection.id)
-        except Exception:
+        except Exception:  # noqa: BLE001
             warnings.append(
                 self._blocker(
                     f"{exchange}_credentials_decrypt_unverified",
@@ -575,7 +697,7 @@ class VaultReadinessService:
     def _has_trading_permission(self, connection: TradingConnection, exchange: str) -> bool:
         try:
             return bool(self._trading_connections().can_trade(connection.user_id, "live", connection.id))
-        except Exception:
+        except Exception:  # noqa: BLE001
             logger.warning("%s readiness can_trade failed for connection_id=%s", exchange, connection.id)
             return False
 
@@ -584,7 +706,7 @@ class VaultReadinessService:
             return None
         try:
             return self._trading_connections().account_snapshot(user_id, "live", connection.id)
-        except Exception:
+        except Exception:  # noqa: BLE001
             logger.warning("Vault readiness balance fetch failed for provider=%s connection_id=%s", connection.provider, connection.id)
             return None
 
@@ -988,7 +1110,7 @@ class VaultReadinessService:
             if market_data is None:
                 raise RuntimeError("market data service unavailable")
             price = float(market_data.get_mid_price(asset_key, "live") or 0.0)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return 0.0, self._blocker(
                 "price_unavailable",
                 "Price unavailable",

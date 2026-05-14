@@ -11,8 +11,8 @@ from ..ml.decision_engine import MLDecisionEngine
 from ..ml.offline_ranker import OfflineRanker
 from ..ml.signal_model import MLSignalModel
 from ..models import AuditLog, Fill, LeveragedMarket, Order, PositionSnapshot, RiskEvent, Setting, StrategyValidation
+from .one_h10_quality import first_one_h10_reason_code, one_h10_forecast_live_blockers
 from .provider_assets import normalize_provider
-
 
 VALID_MODES = {"live"}
 
@@ -215,6 +215,10 @@ class RiskEngine:
                 f"Hyperliquid requires minimum order value of ${min_notional:g}.",
                 {"notional": notional, "min_notional": min_notional, "provider": provider_key},
             )
+        if mode == "live" and is_one_h10 and not reduce_only:
+            one_h10_quality_decision = self._evaluate_one_h10_forecast_quality(metadata)
+            if not one_h10_quality_decision.approved:
+                return one_h10_quality_decision
         if ml_policy_active:
             safety_envelope = self._safety_envelope(
                 intent,
@@ -587,6 +591,21 @@ class RiskEngine:
                 and bool(Setting.get_json("explicit_live_confirmed", False)),
                 "secondary_confirmation": bool(self.config.get("SECONDARY_CONFIRMATION", False))
                 and bool(Setting.get_json("secondary_confirmation", False)),
+            },
+        )
+
+    def _evaluate_one_h10_forecast_quality(self, metadata: dict[str, Any]) -> RiskDecision:
+        forecast = metadata.get("one_h10_forecast") if isinstance(metadata.get("one_h10_forecast"), dict) else {}
+        blockers = one_h10_forecast_live_blockers(forecast, self.config)
+        if not blockers:
+            return RiskDecision(approved=True, details={"one_h10_signal_quality": "passed"})
+        return self._reject(
+            "one_h10_signal_quality_blocked",
+            "1H10 opening orders require a forecast that passes cost, confidence, liquidity, staleness, and risk/reward gates.",
+            {
+                "blockers": blockers,
+                "decision_reason_code": first_one_h10_reason_code(blockers),
+                "forecast": forecast,
             },
         )
 

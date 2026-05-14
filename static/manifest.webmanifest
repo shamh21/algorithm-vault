@@ -1,18 +1,24 @@
 {
   "name": "AlgVault",
   "short_name": "AlgVault",
-  "description": "Secure mobile command center for automated portfolio allocation, strategy monitoring, and vault activity.",
+  "description": "Secure iOS-first AlgVault command center for automated portfolio allocation, strategy monitoring, provider status, and vault activity.",
   "id": "/",
   "start_url": "/",
   "scope": "/",
   "lang": "en-US",
   "dir": "ltr",
   "display": "standalone",
-  "display_override": ["standalone", "minimal-ui"],
+  "display_override": [
+    "standalone",
+    "minimal-ui"
+  ],
   "background_color": "#050607",
   "theme_color": "#050607",
   "orientation": "portrait",
-  "categories": ["finance", "productivity"],
+  "categories": [
+    "finance",
+    "productivity"
+  ],
   "prefer_related_applications": false,
   "icons": [
     {
@@ -36,16 +42,52 @@
   ],
   "shortcuts": [
     {
+      "name": "Portfolio overview",
+      "short_name": "Portfolio",
+      "url": "/",
+      "icons": [
+        {
+          "src": "/icons/icon-192.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
+    },
+    {
       "name": "Wallet",
       "short_name": "Wallet",
       "url": "/wallet/",
-      "icons": [{ "src": "/icons/algvault-ios-192.png", "sizes": "192x192", "type": "image/png" }]
+      "icons": [
+        {
+          "src": "/icons/icon-192.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
     },
     {
       "name": "Vault",
       "short_name": "Vault",
       "url": "/vault/",
-      "icons": [{ "src": "/icons/algvault-ios-192.png", "sizes": "192x192", "type": "image/png" }]
+      "icons": [
+        {
+          "src": "/icons/icon-192.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
+    },
+    {
+      "name": "Emergency controls",
+      "short_name": "Panic",
+      "url": "/admin/panic/",
+      "icons": [
+        {
+          "src": "/icons/icon-192.png",
+          "sizes": "192x192",
+          "type": "image/png"
+        }
+      ]
     }
   ]
 }

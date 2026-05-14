@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict, deque
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 import json
 import logging
 import os
@@ -102,6 +102,7 @@ from .services.wallet_custody import RealWalletCustodyService
 from .services.wallet_summary import WalletSummaryService
 from .services.worker_lease import WorkerLeaseService
 from .settings_validation import RuntimeConfigError, validate_runtime_config
+from .services.withdrawal_config import wallet_withdrawals_enabled
 from .strategies.registry import StrategyRegistry
 from .utils import format_duration_seconds
 
@@ -568,7 +569,7 @@ def _operational_status(app: Flask) -> dict[str, Any]:
             "blockers": list(getattr(validation, "blockers", ())),
             "database_backend": getattr(validation, "database_backend", _database_backend(app)),
             "custody_mode": app.config.get("WALLET_CUSTODY_MODE", "local_dev"),
-            "withdrawals_enabled": bool(app.config.get("WALLET_WITHDRAWALS_ENABLED", False)),
+            "withdrawals_enabled": wallet_withdrawals_enabled(app.config),
             "in_process_workers_enabled": bool(app.config.get("ENABLE_IN_PROCESS_WORKERS", False)),
         },
     }
@@ -579,7 +580,7 @@ def _operational_status(app: Flask) -> dict[str, Any]:
     payload["treasury"] = _treasury_status(app)
     payload["observability"] = {
         "provider_failure_count_24h": _audit_count("provider", "failed"),
-        "order_rejection_count_24h": Order.query.filter(Order.status.in_(["rejected", "failed"])).count(),
+        "order_rejection_count_24h": _order_rejection_count(),
         "chart_refresh_lag_seconds": _chart_refresh_lag(app, now),
     }
     return payload
@@ -604,75 +605,112 @@ def _safe_setting_json(key: str, default: Any) -> Any:
 def _worker_status(now: datetime) -> dict[str, Any]:
     try:
         leases = WorkerLease.query.order_by(WorkerLease.lease_name.asc()).all()
+        rows: list[dict[str, Any]] = []
+        max_lag = 0.0
+        for lease in leases:
+            lag = _elapsed_seconds(now, lease.heartbeat_at) if lease.heartbeat_at else None
+            if lag is not None:
+                max_lag = max(max_lag, lag)
+            rows.append(
+                {
+                    "lease_name": lease.lease_name,
+                    "status": lease.status,
+                    "heartbeat_lag_seconds": lag,
+                    "expires_at": lease.expires_at.isoformat() if lease.expires_at else None,
+                }
+            )
+        return {"available": True, "leases": rows, "max_lease_lag_seconds": max_lag}
     except Exception:  # noqa: BLE001
         db.session.rollback()
         return {"available": False, "leases": [], "max_lease_lag_seconds": None}
-    rows: list[dict[str, Any]] = []
-    max_lag = 0.0
-    for lease in leases:
-        lag = (now - lease.heartbeat_at).total_seconds() if lease.heartbeat_at else None
-        if lag is not None:
-            max_lag = max(max_lag, lag)
-        rows.append(
-            {
-                "lease_name": lease.lease_name,
-                "status": lease.status,
-                "heartbeat_lag_seconds": lag,
-                "expires_at": lease.expires_at.isoformat() if lease.expires_at else None,
-            }
-        )
-    return {"available": True, "leases": rows, "max_lease_lag_seconds": max_lag}
+
+
+def _elapsed_seconds(now: datetime, then: datetime) -> float:
+    if now.tzinfo is None and then.tzinfo is not None:
+        now = now.replace(tzinfo=UTC)
+    elif now.tzinfo is not None and then.tzinfo is None:
+        then = then.replace(tzinfo=UTC)
+    return max(0.0, (now - then).total_seconds())
 
 
 def _trading_status(now: datetime, app: Flask) -> dict[str, Any]:
     stale_after = max(60, int(app.config.get("STRATEGY_HEARTBEAT_PERSIST_SECONDS", 30) or 30) * 4)
     threshold = now - timedelta(seconds=stale_after)
-    return {
-        "running_strategy_count": StrategyRun.query.filter_by(status="running").count(),
-        "queued_strategy_count": StrategyRun.query.filter_by(status="queued").count(),
-        "stale_strategy_count": StrategyRun.query.filter(
-            StrategyRun.status == "running",
-            StrategyRun.updated_at < threshold,
-        ).count(),
-        "stale_after_seconds": stale_after,
-        "active_vault_cycle_count": VaultCycle.query.filter_by(status="active").count(),
-    }
+    try:
+        return {
+            "available": True,
+            "running_strategy_count": StrategyRun.query.filter_by(status="running").count(),
+            "queued_strategy_count": StrategyRun.query.filter_by(status="queued").count(),
+            "stale_strategy_count": StrategyRun.query.filter(
+                StrategyRun.status == "running",
+                StrategyRun.updated_at < threshold,
+            ).count(),
+            "stale_after_seconds": stale_after,
+            "active_vault_cycle_count": VaultCycle.query.filter_by(status="active").count(),
+        }
+    except Exception:  # noqa: BLE001
+        db.session.rollback()
+        return {
+            "available": False,
+            "running_strategy_count": None,
+            "queued_strategy_count": None,
+            "stale_strategy_count": None,
+            "stale_after_seconds": stale_after,
+            "active_vault_cycle_count": None,
+        }
 
 
 def _wallet_status() -> dict[str, Any]:
-    return {
-        "withdrawal_failures_24h": _wallet_audit_count("withdrawal_failed"),
-        "withdrawal_safety_blocks_24h": _wallet_audit_count("withdrawal_blocked_by_safety_gate"),
-        "wallet_sync_failures_24h": _wallet_audit_count("wallet_sync_failed"),
-        "reconciliation_mismatches_24h": _wallet_audit_count("withdrawal_reconciled_failed"),
-    }
+    try:
+        return {
+            "available": True,
+            "withdrawal_failures_24h": _wallet_audit_count("withdrawal_failed"),
+            "withdrawal_safety_blocks_24h": _wallet_audit_count("withdrawal_blocked_by_safety_gate"),
+            "wallet_sync_failures_24h": _wallet_audit_count("wallet_sync_failed"),
+            "reconciliation_mismatches_24h": _wallet_audit_count("withdrawal_reconciled_failed"),
+        }
+    except Exception:  # noqa: BLE001
+        db.session.rollback()
+        return {
+            "available": False,
+            "withdrawal_failures_24h": None,
+            "withdrawal_safety_blocks_24h": None,
+            "wallet_sync_failures_24h": None,
+            "reconciliation_mismatches_24h": None,
+        }
 
 
 def _model_status() -> dict[str, Any]:
-    promoted = MLModelRegistry.query.filter_by(status="promoted").order_by(MLModelRegistry.promoted_at.desc()).limit(25).all()
-    if not promoted:
-        promoted_models = MLOfflineModel.query.filter_by(status="promoted").order_by(MLOfflineModel.promoted_at.desc()).limit(25).all()
-        return {
-            "promoted_count": len(promoted_models),
-            "drift_watch_count": sum(1 for record in promoted_models if float(record.drift or 0.0) > 0),
-            "registry": [],
-        }
-    return {
-        "promoted_count": len(promoted),
-        "drift_watch_count": sum(1 for record in promoted if record.drift_status in {"watch", "blocked"}),
-        "registry": [
-            {
-                "model_family": record.model_family,
-                "model_version": record.model_version,
-                "provider": record.provider,
-                "horizon": record.horizon,
-                "mode": record.mode,
-                "drift_status": record.drift_status,
-                "promoted_at": record.promoted_at.isoformat() if record.promoted_at else None,
+    try:
+        promoted = MLModelRegistry.query.filter_by(status="promoted").order_by(MLModelRegistry.promoted_at.desc()).limit(25).all()
+        if not promoted:
+            promoted_models = MLOfflineModel.query.filter_by(status="promoted").order_by(MLOfflineModel.promoted_at.desc()).limit(25).all()
+            return {
+                "available": True,
+                "promoted_count": len(promoted_models),
+                "drift_watch_count": sum(1 for record in promoted_models if float(record.drift or 0.0) > 0),
+                "registry": [],
             }
-            for record in promoted
-        ],
-    }
+        return {
+            "available": True,
+            "promoted_count": len(promoted),
+            "drift_watch_count": sum(1 for record in promoted if record.drift_status in {"watch", "blocked"}),
+            "registry": [
+                {
+                    "model_family": record.model_family,
+                    "model_version": record.model_version,
+                    "provider": record.provider,
+                    "horizon": record.horizon,
+                    "mode": record.mode,
+                    "drift_status": record.drift_status,
+                    "promoted_at": record.promoted_at.isoformat() if record.promoted_at else None,
+                }
+                for record in promoted
+            ],
+        }
+    except Exception:  # noqa: BLE001
+        db.session.rollback()
+        return {"available": False, "promoted_count": None, "drift_watch_count": None, "registry": []}
 
 
 def _treasury_status(app: Flask) -> dict[str, Any]:
@@ -698,18 +736,34 @@ def _chart_refresh_lag(app: Flask, now: datetime) -> float | None:
         return None
 
 
-def _audit_count(category: str, action_fragment: str) -> int:
-    since = datetime.utcnow() - timedelta(days=1)
-    return AuditLog.query.filter(
-        AuditLog.created_at >= since,
-        AuditLog.category == category,
-        AuditLog.action.contains(action_fragment),
-    ).count()
+def _order_rejection_count() -> int | None:
+    try:
+        return Order.query.filter(Order.status.in_(["rejected", "failed"])).count()
+    except Exception:  # noqa: BLE001
+        db.session.rollback()
+        return None
 
 
-def _wallet_audit_count(action: str) -> int:
-    since = datetime.utcnow() - timedelta(days=1)
-    return WalletAuditLog.query.filter(WalletAuditLog.created_at >= since, WalletAuditLog.action == action).count()
+def _audit_count(category: str, action_fragment: str) -> int | None:
+    try:
+        since = datetime.utcnow() - timedelta(days=1)
+        return AuditLog.query.filter(
+            AuditLog.created_at >= since,
+            AuditLog.category == category,
+            AuditLog.action.contains(action_fragment),
+        ).count()
+    except Exception:  # noqa: BLE001
+        db.session.rollback()
+        return None
+
+
+def _wallet_audit_count(action: str) -> int | None:
+    try:
+        since = datetime.utcnow() - timedelta(days=1)
+        return WalletAuditLog.query.filter(WalletAuditLog.created_at >= since, WalletAuditLog.action == action).count()
+    except Exception:  # noqa: BLE001
+        db.session.rollback()
+        return None
 
 
 def _prefers_json_response() -> bool:
@@ -842,7 +896,8 @@ def _set_response_headers(app: Flask, response: Response) -> Response:
     path = request.path.lower()
     if path.startswith("/admin/api/") or (path.startswith("/api/vault-cycles/") and path.endswith("/process-profit-share")):
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-    if request.endpoint == "static" or path in {"/manifest.json", "/sw.js"} or path.startswith("/icons/"):
+    cacheable_static_response = request.endpoint == "static" or path in {"/manifest.json", "/sw.js"} or path.startswith("/icons/")
+    if cacheable_static_response:
         if path.endswith("/sw.js") or path.endswith("static/js/sw.js"):
             max_age = max(0, int(app.config.get("SERVICE_WORKER_CACHE_SECONDS", 0) or 0))
             response.headers["Cache-Control"] = f"public, max-age={max_age}, must-revalidate"
@@ -853,6 +908,10 @@ def _set_response_headers(app: Flask, response: Response) -> Response:
         elif any(path.endswith(ext) for ext in (".css", ".js", ".png", ".jpg", ".jpeg", ".webp", ".svg", ".ico", ".woff2")):
             max_age = max(0, int(app.config.get("STATIC_CACHE_SECONDS", 31_536_000) or 31_536_000))
             response.headers["Cache-Control"] = f"public, max-age={max_age}, immutable"
+    else:
+        response.headers.setdefault("Cache-Control", "private, no-store, no-cache, must-revalidate, max-age=0")
+        response.headers.setdefault("Pragma", "no-cache")
+        response.headers.setdefault("Expires", "0")
     return response
 
 

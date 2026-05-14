@@ -214,10 +214,11 @@ def _post_auth_redirect(user: User) -> str:
             is_active=True,
             verification_status="verified",
             provider="hyperliquid",
-        ).first() is None
+        ).first()
+        is None
     ):
         return url_for("settings.connections")
-    return url_for("dashboard.index") if user.is_admin else url_for("consumer.home")
+    return url_for("consumer.home")
 
 
 def _safe_next_url(next_url: str | None) -> str:

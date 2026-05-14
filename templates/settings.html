@@ -1,63 +1,143 @@
 {% extends "base.html" %}
+{% from "partials/_ui.html" import page_header, empty_state %}
 
 {% block title %}Settings · Algorithm Vault{% endblock %}
 
 {% block content %}
 <section class="settings-shell">
-  <header class="settings-compact-header">
-    <span class="card-kicker">Settings</span>
-    <h1>Settings</h1>
-  </header>
+  {{ page_header('Settings', 'Mode and providers', 'Security posture, app mode, provider availability, and live-operation guardrails.', 'Protected', 'success') }}
 
-  <section class="settings-overview-grid" aria-label="Settings overview">
-    <article class="settings-panel app-mode-card">
-      <div class="settings-panel-head">
-        <div>
-          <span class="settings-label">App Mode</span>
-          <strong>{{ current_mode|replace('_', ' ')|upper }}</strong>
-        </div>
-        <span class="exchange-status-dot {{ 'status-live' if current_mode == 'live' else 'status-offline' }}" aria-hidden="true"></span>
-      </div>
-      <div class="settings-stat-row">
-        <span>Environment</span>
-        <span class="settings-mode-pill">{{ current_mode|replace('_', ' ')|upper }}</span>
-      </div>
-    </article>
+  <aside class="settings-state-banner" data-settings-offline hidden>
+    <strong>Offline mode</strong>
+    <span>Provider status may be out of date while offline.</span>
+  </aside>
 
-    <article class="settings-panel provider-overview-card">
-      <div class="settings-panel-head">
-        <div>
-          <span class="settings-label">Providers</span>
-          <strong>{{ enabled_provider_count }} Enabled</strong>
-        </div>
-        <a class="settings-icon-link" href="{{ url_for('settings.connections') }}" aria-label="Manage providers">Manage</a>
+  <section class="settings-section" aria-labelledby="trading-environment-heading">
+    <div class="section-heading compact-heading">
+      <div>
+        <span class="card-kicker">Live Trading</span>
+        <h2 id="trading-environment-heading">Trading Environment</h2>
       </div>
-      <div class="settings-stat-row">
-        <span>Saved</span>
-        <span>{{ trading_connections|length }} / {{ providers|length }}</span>
-      </div>
-    </article>
+      <a class="settings-icon-link" href="{{ url_for('settings.connections') }}" aria-label="Manage provider connections">Manage</a>
+    </div>
+
+    <div class="settings-overview-grid" aria-label="Settings overview">
+      <article class="settings-panel settings-summary-card">
+        <span class="settings-label">App Mode</span>
+        <strong>{{ current_mode|replace('_', ' ')|upper }}</strong>
+        <span class="settings-mode-pill is-live">LIVE state</span>
+      </article>
+
+      <article class="settings-panel settings-summary-card">
+        <span class="settings-label">Environment</span>
+        <strong>{{ current_mode|replace('_', ' ')|upper }}</strong>
+        <span class="settings-mode-pill is-live">Execution context</span>
+      </article>
+
+      <article class="settings-panel settings-summary-card">
+        <span class="settings-label">Providers Enabled</span>
+        <strong>{{ enabled_provider_count }} Enabled</strong>
+        <span class="settings-mode-pill {{ 'positive' if enabled_provider_count else 'muted' }}">{{ providers|length }} available</span>
+      </article>
+
+      <article class="settings-panel settings-summary-card">
+        <span class="settings-label">Credentials Saved</span>
+        <strong>{{ credential_saved_count }} / {{ providers|length }}</strong>
+        <span class="settings-mode-pill muted">Masked in app</span>
+      </article>
+    </div>
   </section>
 
-  <section class="settings-provider-grid" aria-label="Provider status">
-    {% for card in provider_cards %}
-      <article class="provider-status-card {% if card.enabled %}is-enabled{% endif %}">
-        <div class="provider-status-main">
-          <span class="provider-mark" aria-hidden="true">{{ card.label[:1] }}</span>
-          <div>
-            <h2>{{ card.label }}</h2>
-            <span>{{ card.wallet_preview }}</span>
-          </div>
-        </div>
-        <div class="provider-status-meta">
-          <span class="connection-status status-{{ card.status }}">{{ card.status_label }}</span>
-          <span class="provider-health {{ card.health_class }}">{{ card.health_label }}</span>
-          <span class="provider-toggle-readout {{ 'positive' if card.enabled else 'muted' }}">
-            {{ "Enabled" if card.enabled else "Disabled" }}
-          </span>
-        </div>
+  <section class="settings-section" aria-labelledby="provider-connections-heading">
+    <div class="section-heading compact-heading">
+      <div>
+        <span class="card-kicker">Providers</span>
+        <h2 id="provider-connections-heading">Provider Connections</h2>
+      </div>
+    </div>
+
+    {% if provider_cards %}
+      <div class="settings-provider-grid" aria-label="Provider connection status" aria-busy="false">
+        {% for card in provider_cards %}
+          <article class="provider-status-card {% if card.enabled %}is-enabled{% endif %} {% if card.status_tone %}tone-{{ card.status_tone }}{% endif %}">
+            <div class="provider-status-main">
+              <span class="provider-mark" aria-hidden="true">{{ card.label[:1] }}</span>
+              <div>
+                <h3>{{ card.label }}</h3>
+                <span>{{ card.credential_label }}</span>
+              </div>
+            </div>
+
+            <dl class="provider-status-list" aria-label="{{ card.label }} connection details">
+              <div>
+                <dt>Status</dt>
+                <dd><span class="provider-health {{ card.status_class }}">{{ card.status_label }}</span></dd>
+              </div>
+              <div>
+                <dt>Connection</dt>
+                <dd><span class="provider-health {{ card.connection_class }}">{{ card.connection_label }}</span></dd>
+              </div>
+              <div>
+                <dt>Trading</dt>
+                <dd><span class="provider-toggle-readout {{ 'positive' if card.enabled else 'muted' }}">{{ card.trading_label }}</span></dd>
+              </div>
+            </dl>
+
+            {% if card.detail_note %}
+              <p class="provider-card-note">{{ card.detail_note }}</p>
+            {% endif %}
+
+            <div class="provider-card-actions">
+              <a class="button-link secondary" href="{{ url_for('settings.connection_provider', provider=card.key) }}" aria-label="{{ card.action_label }} {{ card.label }} connection">
+                {{ card.action_label }}
+              </a>
+            </div>
+          </article>
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="provider-empty-state" role="status">
+        <strong>No provider connections available</strong>
+        <span>Provider status could not be loaded. Refresh or return to Settings later.</span>
+      </div>
+    {% endif %}
+  </section>
+
+
+  <section class="av-security-section" id="security" aria-labelledby="security-title">
+    <div class="av-section-head">
+      <div>
+        <span class="card-kicker">Security</span>
+        <h2 id="security-title">Account and credential posture</h2>
+      </div>
+      <span class="av-status-chip av-status-success"><span aria-hidden="true"></span>Secrets masked</span>
+    </div>
+    <div class="av-security-grid">
+      <article class="av-security-card">
+        <strong>Provider credentials</strong>
+        <p>API keys, secrets, passphrases, and wallet-sensitive values are handled server-side and are never rendered back to this page.</p>
       </article>
-    {% endfor %}
+      <article class="av-security-card">
+        <strong>Live safeguards</strong>
+        <p>Panic lock, secondary confirmation, and live-trading blocks remain visible so mode changes are easy to audit.</p>
+      </article>
+    </div>
   </section>
 </section>
+{% endblock %}
+
+{% block page_scripts %}
+  {{ super() }}
+  <script>
+    (() => {
+      const banner = document.querySelector("[data-settings-offline]");
+      if (!banner || !("onLine" in navigator)) return;
+      const update = () => {
+        banner.hidden = navigator.onLine;
+      };
+      window.addEventListener("online", update, { passive: true });
+      window.addEventListener("offline", update, { passive: true });
+      update();
+    })();
+  </script>
 {% endblock %}

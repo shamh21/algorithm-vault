@@ -20,8 +20,19 @@
     chartLoading: root.querySelector("[data-chart-loading]"),
     timeframeTabs: Array.from(root.querySelectorAll("[data-timeframe]")),
     refreshButtons: Array.from(root.querySelectorAll("[data-refresh-opportunities]")),
+    filterButtons: Array.from(root.querySelectorAll("[data-opportunity-filter]")),
     quickActions: Array.from(root.querySelectorAll("[data-quick-action]")),
     activity: root.querySelector("[data-activity-feed]"),
+    neutral: root.querySelector("[data-opportunity-neutral]"),
+    setupHelper: root.querySelector("[data-setup-helper]"),
+    vaultPulse: root.querySelector("[data-vault-pulse]"),
+    vaultWalletValue: root.querySelector("[data-vault-wallet-value]"),
+    vaultWalletStatus: root.querySelector("[data-vault-wallet-status]"),
+    vaultPerformanceValue: root.querySelector("[data-vault-performance-value]"),
+    vaultPerformanceSparkline: root.querySelector("[data-vault-performance-sparkline]"),
+    vaultPerformancePath: root.querySelector("[data-vault-performance-path]"),
+    vaultPerformanceEmpty: root.querySelector("[data-vault-performance-empty]"),
+    vaultPulseError: root.querySelector("[data-vault-pulse-error]"),
     sheet: root.querySelector("[data-preview-sheet]"),
     sheetTitle: root.querySelector("[data-sheet-title]"),
     sheetBody: root.querySelector("[data-sheet-body]"),
@@ -51,16 +62,27 @@
     chart: root.dataset.chartUrl,
     stream: root.dataset.streamUrl,
     activity: root.dataset.activityUrl,
+    dashboardData: root.dataset.dashboardDataUrl,
     chartModule: root.dataset.chartModuleSrc,
     chartLib: root.dataset.chartLibSrc,
   };
   const apiUrl = (path) => window.AlgVaultConfig?.apiUrl?.(path) || path;
   const defaultSheetHref = refs.sheetAction?.href || "";
+  const initialPayload = (() => {
+    const node = document.getElementById("dashboard-initial-payload");
+    if (!node?.textContent) return {};
+    try {
+      return JSON.parse(node.textContent) || {};
+    } catch (error) {
+      return {};
+    }
+  })();
 
   const state = {
     opportunities: [],
     activity: [],
     active: null,
+    filter: "all",
     timeframe: "live",
     chart: null,
     chartPayload: null,
@@ -77,6 +99,7 @@
       opportunities: { id: 0, controller: null },
       chart: { id: 0, controller: null },
       activity: { id: 0, controller: null },
+      dashboard: { id: 0, controller: null },
     },
   };
 
@@ -84,16 +107,44 @@
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : fallback;
   };
-  const percent = (value, digits = 0) => `${(number(value) * 100).toFixed(digits)}%`;
-  const roi = (value) => `${number(value).toFixed(2)}%`;
+  const hasNumber = (value) => value !== null && value !== undefined && value !== "" && Number.isFinite(Number(value));
+  const dash = "—";
+  const percent = (value, digits = 0) => (hasNumber(value) ? `${(Number(value) * 100).toFixed(digits)}%` : dash);
+  const roi = (value) => (hasNumber(value) ? `${Number(value).toFixed(2)}%` : dash);
+  const currency = (value) => number(value).toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 2 });
   const price = (value) => {
-    const parsed = number(value);
-    if (!parsed) return "--";
+    if (!hasNumber(value)) return dash;
+    const parsed = Number(value);
+    if (!parsed) return dash;
     if (Math.abs(parsed) >= 1000) return parsed.toLocaleString(undefined, { maximumFractionDigits: 2 });
     if (Math.abs(parsed) >= 1) return parsed.toFixed(4);
     return parsed.toPrecision(5);
   };
-  const label = (value) => String(value || "--").replace(/_/g, " ");
+  const label = (value) => String(value || dash).replace(/_/g, " ");
+  const isHold = (row) => String(row?.direction || row?.action || "").toLowerCase() === "hold";
+  const hasExecutableSetup = (row) => {
+    if (!row || isHold(row)) return false;
+    const prices = [row.entry, row.exit, row.stop_loss];
+    if (!prices.every(hasNumber)) return false;
+    if (prices.every((value) => Number(value) === 1)) return false;
+    return true;
+  };
+  const fieldValue = (row, key, formatter) => (hasExecutableSetup(row) || !["entry", "exit", "stop_loss"].includes(key) ? formatter(row?.[key]) : dash);
+  const formatTime = (value) => {
+    if (!value) return "";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  };
+  const summarizeDetail = (detail = "", title = "") => {
+    const text = String(detail || "").trim();
+    const titleText = String(title || "").trim();
+    if (!text) return "";
+    const provider = /kucoin/i.test(text + titleText) ? "KuCoin" : /hyperliquid/i.test(text + titleText) ? "Hyperliquid" : "Provider";
+    if (/connection|timeout|unavailable|request failed|invalid request ip|network/i.test(text)) return `${provider} unavailable`;
+    if (text.length > 120) return `${text.slice(0, 117)}…`;
+    return text;
+  };
 
   const schedule = (key, fn) => {
     if (state.raf[key]) return;
@@ -133,6 +184,7 @@
       updateSelectionText(state.active);
       if (state.chartInView) fetchChart(state.active);
     }
+    refs.neutral?.toggleAttribute("hidden", !state.opportunities.length || state.opportunities.some((row) => hasExecutableSetup(row)));
     schedule("opportunities", renderOpportunities);
   };
 
@@ -162,8 +214,14 @@
     container.replaceChildren(fragment);
   };
 
+  const filteredOpportunities = () => {
+    if (state.filter === "all") return state.opportunities;
+    return state.opportunities.filter((row) => String(row.direction || row.action || "").toLowerCase() === state.filter);
+  };
+
   const renderOpportunities = () => {
-    renderVirtual(refs.list, state.opportunities, ROW_HEIGHT, (row, index) => {
+    const rows = filteredOpportunities();
+    renderVirtual(refs.list, rows, ROW_HEIGHT, (row, index) => {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "opportunity-card";
@@ -185,15 +243,17 @@
       title.textContent = row.symbol || "--";
       const sub = document.createElement("small");
       sub.textContent = `${label(row.provider).toUpperCase()} · ${label(row.direction).toUpperCase()}`;
-      main.append(title, sub);
+      const conf = document.createElement("small");
+      conf.textContent = `Confidence ${percent(row.confidence, 0)}`;
+      main.append(title, sub, conf);
 
       const meta = document.createElement("span");
       meta.className = "opportunity-score";
-      meta.textContent = number(row.score).toFixed(2);
+      meta.innerHTML = `<small>Score</small>${hasNumber(row.score) ? number(row.score).toFixed(2) : dash}`;
 
       const roiNode = document.createElement("span");
       roiNode.className = number(row.predicted_roi) >= 0 ? "opportunity-roi positive" : "opportunity-roi negative";
-      roiNode.textContent = roi(row.predicted_roi);
+      roiNode.innerHTML = `<small>ROI</small>${roi(row.predicted_roi)}`;
 
       button.append(rank, main, meta, roiNode);
       button.addEventListener("click", () => selectOpportunity(row));
@@ -201,7 +261,123 @@
       button.addEventListener("touchend", cancelLongPress, { passive: true });
       button.addEventListener("touchmove", cancelLongPress, { passive: true });
       return button;
-    }, "Waiting for ranked markets.");
+    }, state.filter === "all" ? "Waiting for ranked markets." : `No ${state.filter.toUpperCase()} setups in the current scanner window.`);
+  };
+
+
+  const getBalanceAmount = (balances) => {
+    const rows = Array.isArray(balances) ? balances : [];
+    return rows.reduce((total, row) => {
+      const estimated = Number(row?.estimated_usd_value);
+      if (Number.isFinite(estimated) && estimated > 0) return total + estimated;
+      const asset = String(row?.asset || "").toUpperCase();
+      const value = Number(row?.value ?? row?.total_balance ?? row?.available_balance);
+      if (!Number.isFinite(value)) return total;
+      return total + (["USD", "USDC", "USDT"].includes(asset) ? value : 0);
+    }, 0);
+  };
+
+  const performancePoints = (curve) => (Array.isArray(curve) ? curve : [])
+    .map((point, index) => ({
+      x: number(point?.timestamp ?? point?.time ?? point?.x ?? index, index),
+      y: number(point?.equity ?? point?.balance ?? point?.value ?? point?.y, NaN),
+    }))
+    .filter((point) => Number.isFinite(point.y));
+
+  const formatSyncStatus = (syncedAt, hasBalance, loading = false) => {
+    if (loading) return hasBalance ? "Refreshing account data…" : "Syncing account data…";
+    if (!hasBalance) return "Connect or sync an account to view balance.";
+    if (!syncedAt) return "Updated just now";
+    const date = new Date(syncedAt);
+    if (Number.isNaN(date.getTime())) return "Updated just now";
+    const deltaSeconds = Math.max(0, Math.round((Date.now() - date.getTime()) / 1000));
+    if (deltaSeconds < 60) return "Updated just now";
+    return `Last synced ${date.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`;
+  };
+
+  const renderSparkline = (points, changePercent) => {
+    if (!refs.vaultPerformanceSparkline || !refs.vaultPerformancePath) return;
+    if (points.length < 2) {
+      refs.vaultPerformancePath.setAttribute("d", "");
+      refs.vaultPerformanceSparkline.setAttribute("aria-label", "Past account performance trend unavailable");
+      return;
+    }
+    const width = 120;
+    const height = 38;
+    const pad = 3;
+    const values = points.map((point) => point.y);
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    const span = max - min || 1;
+    const step = (width - pad * 2) / Math.max(points.length - 1, 1);
+    const path = points.map((point, index) => {
+      const x = pad + step * index;
+      const y = height - pad - ((point.y - min) / span) * (height - pad * 2);
+      return `${index === 0 ? "M" : "L"}${x.toFixed(2)} ${y.toFixed(2)}`;
+    }).join(" ");
+    refs.vaultPerformancePath.setAttribute("d", path);
+    const direction = changePercent > 0 ? "up" : changePercent < 0 ? "down" : "flat";
+    refs.vaultPerformanceSparkline.setAttribute(
+      "aria-label",
+      `Past account performance trend ${direction} ${Math.abs(changePercent).toFixed(2)} percent over available history`,
+    );
+  };
+
+  const renderVaultPulse = (payload = {}, { loading = false, error = false } = {}) => {
+    if (!refs.vaultPulse) return;
+    const balances = Array.isArray(payload.balances) ? payload.balances : [];
+    const balance = getBalanceAmount(balances);
+    const hasBalance = balances.length > 0 && balance > 0;
+    refs.vaultPulse.setAttribute("aria-busy", loading ? "true" : "false");
+    refs.vaultPulse.classList.toggle("is-loading", loading);
+    refs.vaultPulse.classList.toggle("has-error", error);
+    if (refs.vaultPulseError) refs.vaultPulseError.hidden = !error;
+
+    if (refs.vaultWalletValue) {
+      refs.vaultWalletValue.classList.toggle("dashboard-skeleton", loading && !hasBalance);
+      refs.vaultWalletValue.textContent = hasBalance ? currency(balance) : loading ? "Loading balance" : "Wallet balance unavailable";
+    }
+    if (refs.vaultWalletStatus) {
+      refs.vaultWalletStatus.textContent = formatSyncStatus(payload.account_synced_at, hasBalance, loading);
+    }
+
+    const points = performancePoints(payload.paper_equity_curve);
+    const hasPerformance = points.length >= 2;
+    const first = hasPerformance ? points[0].y : 0;
+    const last = hasPerformance ? points[points.length - 1].y : 0;
+    const change = last - first;
+    const changePercent = first ? (change / Math.abs(first)) * 100 : 0;
+
+    if (refs.vaultPerformanceValue) {
+      refs.vaultPerformanceValue.classList.toggle("dashboard-skeleton", loading && !hasPerformance);
+      refs.vaultPerformanceValue.classList.toggle("positive", hasPerformance && change > 0);
+      refs.vaultPerformanceValue.classList.toggle("negative", hasPerformance && change < 0);
+      refs.vaultPerformanceValue.textContent = hasPerformance
+        ? `${change >= 0 ? "+" : "−"}${Math.abs(changePercent).toFixed(2)}% (${change >= 0 ? "+" : "−"}${currency(Math.abs(change))}) historical`
+        : loading ? "Loading history" : "No history yet";
+      refs.vaultPerformanceValue.setAttribute(
+        "aria-label",
+        hasPerformance
+          ? `Past account performance ${change >= 0 ? "up" : "down"} ${Math.abs(changePercent).toFixed(2)} percent, ${currency(Math.abs(change))} historical change`
+          : "Performance history will appear once account data is available.",
+      );
+    }
+    if (refs.vaultPerformanceEmpty) refs.vaultPerformanceEmpty.hidden = hasPerformance || loading;
+    renderSparkline(hasPerformance ? points : [], changePercent);
+  };
+
+  const fetchVaultPulse = async () => {
+    renderVaultPulse(initialPayload, { loading: true });
+    if (!urls.dashboardData) {
+      renderVaultPulse(initialPayload, { loading: false });
+      return;
+    }
+    try {
+      const payload = await requestJson("dashboard", urls.dashboardData);
+      if (payload) renderVaultPulse(payload, { loading: false });
+    } catch (error) {
+      if (error.name !== "AbortError") renderVaultPulse(initialPayload, { loading: false, error: true });
+    }
   };
 
   const renderActivity = () => {
@@ -215,9 +391,28 @@
       copy.className = "activity-copy";
       const title = document.createElement("strong");
       title.textContent = row.title || label(row.kind);
+      const meta = document.createElement("small");
+      const severity = label(row.severity || "info");
+      const badge = document.createElement("span");
+      badge.className = "activity-badge";
+      badge.textContent = severity;
+      const timestamp = document.createElement("time");
+      timestamp.textContent = formatTime(row.created_at);
+      meta.append(badge, timestamp);
       const detail = document.createElement("small");
-      detail.textContent = row.detail || row.created_at || "";
-      copy.append(title, detail);
+      const rawDetail = row.detail || "";
+      detail.textContent = summarizeDetail(rawDetail, row.title);
+      copy.append(title, meta, detail);
+      if (String(rawDetail).length > 120 || /exception|traceback|request failed|invalid request ip/i.test(String(rawDetail))) {
+        const details = document.createElement("details");
+        details.className = "activity-technical-details";
+        const summary = document.createElement("summary");
+        summary.textContent = "View technical details";
+        const pre = document.createElement("pre");
+        pre.textContent = String(rawDetail);
+        details.append(summary, pre);
+        copy.append(details);
+      }
       item.append(marker, copy);
       return item;
     }, "Waiting for live activity.");
@@ -314,24 +509,26 @@
 
   const updateIntelligence = (row) => {
     if (!row) return;
+    const executable = hasExecutableSetup(row);
     const mapping = {
-      pair: row.symbol,
+      pair: row.symbol || dash,
       provider: label(row.provider).toUpperCase(),
-      entry: price(row.entry),
-      exit: price(row.exit),
-      stop: price(row.stop_loss),
+      entry: fieldValue(row, "entry", price),
+      exit: fieldValue(row, "exit", price),
+      stop: fieldValue(row, "stop_loss", price),
       liquidity: percent(row.liquidity_score, 0),
-      slippage: `${number(row.slippage_bps).toFixed(2)} bps`,
+      slippage: hasNumber(row.slippage_bps) ? `${number(row.slippage_bps).toFixed(2)} bps` : dash,
       ml: percent(row.ml_model_agreement, 0),
       fib: percent(row.fibonacci_alignment, 0),
     };
     Object.entries(mapping).forEach(([key, value]) => {
       if (refs.intel[key]) refs.intel[key].textContent = value;
     });
-    if (refs.forecastDirection) refs.forecastDirection.textContent = label(row.direction).toUpperCase();
-    if (refs.forecastRoi) refs.forecastRoi.textContent = roi(row.predicted_roi);
-    if (refs.forecastConfidence) refs.forecastConfidence.textContent = percent(row.confidence, 0);
-    if (refs.forecastRisk) refs.forecastRisk.textContent = number(row.risk_reward).toFixed(2);
+    if (refs.forecastDirection) refs.forecastDirection.textContent = executable ? label(row.direction).toUpperCase() : "No active setup";
+    if (refs.forecastRoi) refs.forecastRoi.textContent = executable ? roi(row.predicted_roi) : dash;
+    if (refs.forecastConfidence) refs.forecastConfidence.textContent = executable ? percent(row.confidence, 0) : dash;
+    if (refs.forecastRisk) refs.forecastRisk.textContent = executable && hasNumber(row.risk_reward) ? number(row.risk_reward).toFixed(2) : dash;
+    refs.setupHelper?.toggleAttribute("hidden", executable);
   };
 
   const startLongPress = (row) => {
@@ -353,12 +550,12 @@
     const setup = [
       ["Pair", row.symbol || "--"],
       ["Exchange", label(row.provider).toUpperCase()],
-      ["Predicted ROI", roi(row.predicted_roi)],
-      ["Confidence", percent(row.confidence, 0)],
-      ["Entry", price(row.entry)],
-      ["Exit", price(row.exit)],
-      ["Stop", price(row.stop_loss)],
-      ["Risk/Reward", number(row.risk_reward).toFixed(2)],
+      ["Predicted ROI", hasExecutableSetup(row) ? roi(row.predicted_roi) : dash],
+      ["Confidence", hasExecutableSetup(row) ? percent(row.confidence, 0) : dash],
+      ["Entry", fieldValue(row, "entry", price)],
+      ["Exit", fieldValue(row, "exit", price)],
+      ["Stop", fieldValue(row, "stop_loss", price)],
+      ["Risk/Reward", hasExecutableSetup(row) && hasNumber(row.risk_reward) ? number(row.risk_reward).toFixed(2) : dash],
     ];
     const actions = {
       allocate: { title: "Allocate Capital", action: "Open Vault Flow", rows: setup },
@@ -496,6 +693,14 @@
 
   const initEvents = () => {
     refs.refreshButtons.forEach((button) => button.addEventListener("click", () => fetchOpportunities(true)));
+    refs.filterButtons.forEach((button) => {
+      button.addEventListener("click", () => {
+        state.filter = button.dataset.opportunityFilter || "all";
+        refs.filterButtons.forEach((item) => item.classList.toggle("is-active", item === button));
+        if (refs.list) refs.list.scrollTop = 0;
+        schedule("opportunities", renderOpportunities);
+      });
+    });
     refs.quickActions.forEach((button) => {
       button.addEventListener("click", () => {
         const action = button.dataset.quickAction || "setup";
@@ -506,6 +711,12 @@
         if (action === "fullscreen") {
           toggleFullscreenChart();
           return;
+        }
+        if (["panic", "allocate"].includes(action)) {
+          const copy = action === "panic"
+            ? "Open emergency stop controls? This will not submit an emergency stop from the dashboard."
+            : "Open allocation preview? Review the vault flow before any live-impacting action.";
+          if (!window.confirm(copy)) return;
         }
         openPreview(action, button.dataset.actionHref || "");
       });
@@ -545,6 +756,7 @@
   }
 
   initEvents();
+  fetchVaultPulse();
   fetchOpportunities(false);
   fetchActivity();
   connectStream();

@@ -129,7 +129,7 @@
       <a class="brand-lockup" href="{% if admin_authenticated %}{{ url_for('dashboard.index') }}{% else %}{{ url_for('consumer.home') }}{% endif %}" aria-label="Go to home">
         <span class="brand-mark" aria-hidden="true">AV</span>
         <span class="brand-copy">
-          <span class="eyebrow">Algorithm Vault</span>
+          <span class="eyebrow">AlgVault</span>
           {% if admin_authenticated %}
             <strong>Ops Console</strong>
             <small>Automated trading controls</small>
@@ -167,7 +167,7 @@
             <strong>AlgVault</strong>
           </div>
           <div class="nav-section">
-            <span class="nav-section-title">Portfolio</span>
+            <span class="nav-section-title">AlgVault</span>
             <a href="{{ url_for('consumer.home') }}" class="nav-link {% if request.endpoint == 'consumer.home' %}active{% endif %}" {% if request.endpoint == 'consumer.home' %}aria-current="page"{% endif %}>
               <svg class="topnav-icon" aria-hidden="true"><use href="#icon-home"></use></svg>
               <span class="nav-link-copy"><strong>Dashboard</strong><small>Vault pulse</small></span>
@@ -190,7 +190,7 @@
               <span class="nav-section-title">Trading Ops</span>
               <a href="{{ url_for('dashboard.index') }}" class="nav-link advanced-only {% if request.endpoint and request.endpoint.startswith('dashboard') %}active{% endif %}" {% if request.endpoint and request.endpoint.startswith('dashboard') %}aria-current="page"{% endif %}>
                 <svg class="topnav-icon" aria-hidden="true"><use href="#icon-dashboard"></use></svg>
-                <span class="nav-link-copy"><strong>Dashboard</strong><small>Live operations</small></span>
+                <span class="nav-link-copy"><strong>Trading Ops</strong><small>Dashboard · Live operations</small></span>
               </a>
               <a href="{{ url_for('backtests.index') }}" class="nav-link advanced-only {% if request.endpoint and request.endpoint.startswith('backtests') %}active{% endif %}" {% if request.endpoint and request.endpoint.startswith('backtests') %}aria-current="page"{% endif %}>
                 <svg class="topnav-icon" aria-hidden="true"><use href="#icon-lab"></use></svg>
@@ -210,7 +210,7 @@
             <span class="nav-section-title">Security</span>
             <a href="{{ url_for('settings.index') }}" class="nav-link {% if request.endpoint and request.endpoint.startswith('settings') %}active{% endif %}" {% if request.endpoint and request.endpoint.startswith('settings') %}aria-current="page"{% endif %}>
               <svg class="topnav-icon" aria-hidden="true"><use href="#icon-settings"></use></svg>
-              <span class="nav-link-copy"><strong>Settings</strong><small>Mode and providers</small></span>
+              <span class="nav-link-copy"><strong>Settings</strong><small>Security · Mode and providers</small></span>
             </a>
             <form method="post" action="{{ url_for('auth.logout') }}" class="nav-form">
               {{ csrf_input()|safe }}
@@ -223,7 +223,7 @@
         {% else %}
           <div class="nav-panel-head">
             <span class="card-kicker">Account</span>
-            <strong>Algorithm Vault</strong>
+            <strong>AlgVault</strong>
           </div>
           <div class="nav-section">
             <a href="{{ url_for('auth.login') }}" class="nav-link {% if request.endpoint == 'auth.login' %}active{% endif %}" {% if request.endpoint == 'auth.login' %}aria-current="page"{% endif %}>

@@ -19,17 +19,17 @@ maintenance without altering the external API or core functionality.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from math import inf, sqrt
 from statistics import mean
-import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..features.engine import FeatureEngine
-from ..ml.features import MLFeatureFactory, ML_FEATURE_SCHEMA_VERSION
-from ..ml.online_ranker import horizon_from_duration
+from ..ml.features import ML_FEATURE_SCHEMA_VERSION, MLFeatureFactory
+from ..ml.online_ranker import ONE_H10_HORIZON, horizon_from_duration
 from ..services.market_data import MarketDataService
 from ..strategies.base import Signal
 from ..strategies.registry import StrategyRegistry
@@ -765,7 +765,14 @@ class BacktestEngine:
         if not bool(self.config.get("ML_FIRST_STRATEGIES_ENABLED", False)):
             return signal
         metadata = dict(getattr(signal, "metadata", {}) or {})
-        horizon = horizon_from_duration((backtest.parameters or {}).get("lock_duration_hours") or 1)
+        parameters = dict(backtest.parameters or {})
+        explicit_horizon = str(parameters.get("ml_horizon") or parameters.get("horizon") or "").strip().lower()
+        if explicit_horizon:
+            horizon = explicit_horizon
+        elif bool(parameters.get("one_h10_vault")) or str(parameters.get("vault_cycle_duration") or "").lower() == ONE_H10_HORIZON:
+            horizon = ONE_H10_HORIZON
+        else:
+            horizon = horizon_from_duration(parameters.get("lock_duration_hours") or 1)
         if self.ml_decision_engine is None:
             metadata.update(
                 {

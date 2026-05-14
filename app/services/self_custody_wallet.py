@@ -18,6 +18,7 @@ from ..extensions import db
 from ..models import DepositAddress, Setting, WalletAccount, WalletAddress, WalletAuditLog, WalletWithdrawal
 from .failures import WalletCustodyError
 from .wallet_addresses import use_real_addresses, validate_withdraw_address
+from .withdrawal_config import wallet_withdrawals_enabled
 
 
 EVM_NETWORKS = {"ETHEREUM", "ARBITRUM", "OPTIMISM", "BASE", "POLYGON", "AVALANCHE", "BSC"}
@@ -537,7 +538,7 @@ class SelfCustodyWalletService:
     def _withdrawal_safety_blockers(self, withdrawal: WalletWithdrawal) -> list[str]:
         config = self.config
         blockers: list[str] = []
-        if not bool(config.get("WALLET_WITHDRAWALS_ENABLED", False)) and not bool(config.get("TESTING", False)):
+        if not wallet_withdrawals_enabled(config) and not bool(config.get("TESTING", False)):
             blockers.append("wallet withdrawals are disabled by configuration")
         if bool(config.get("WALLET_EMERGENCY_STOP", False)):
             blockers.append("wallet emergency stop is active")

@@ -16,7 +16,6 @@ from ..extensions import db
 from ..models import BacktestRun
 from ..runtime import get_service
 
-
 backtests_bp = Blueprint("backtests", __name__, url_prefix="/admin/backtests")
 
 _TIMEFRAME_SECONDS = {
@@ -87,7 +86,7 @@ def run():
     wants_json = _wants_json_response()
 
     try:
-        request_input = simulator.parse_input(request.form)
+        request_input = simulator.parse_input(request.form, user=current_user())
     except ValueError as exc:
         if wants_json:
             return jsonify({"ok": False, "error": str(exc)}), 400
@@ -372,9 +371,7 @@ def _growth_series(result: dict[str, Any], initial_balance: float) -> list[dict[
 def _drawdown_series(result: dict[str, Any]) -> list[dict[str, float]]:
     points = result.get("drawdown_curve") if isinstance(result.get("drawdown_curve"), list) else []
     series = [
-        {"x": _safe_float(point.get("timestamp")), "y": _safe_float(point.get("drawdown"))}
-        for point in points
-        if isinstance(point, dict)
+        {"x": _safe_float(point.get("timestamp")), "y": _safe_float(point.get("drawdown"))} for point in points if isinstance(point, dict)
     ]
     return _downsample_series(series)
 
@@ -454,9 +451,7 @@ def _symbols() -> list[str]:
 
 
 def _timeframes() -> list[str]:
-    values = request.form.getlist("timeframes") or [
-        request.form.get("timeframe", current_app.config.get("DEFAULT_TIMEFRAME", "15m"))
-    ]
+    values = request.form.getlist("timeframes") or [request.form.get("timeframe", current_app.config.get("DEFAULT_TIMEFRAME", "15m"))]
     return [str(timeframe).strip() for timeframe in values if str(timeframe).strip()]
 
 

@@ -355,6 +355,18 @@ flask profile-wallet-check --username sufyanh
 
 This command is read-only. It reports the local app wallet balance source, locked funds, order count, verified trading connections, cached exchange snapshot metadata, and reconciliation warnings such as duplicate completed settlement transactions. Normal wallet and dashboard pages render from local/cached data first; use `/wallet?refresh_exchange=1` or `/admin/dashboard?refresh_exchange=1` only when you want an explicit read-only provider snapshot refresh.
 
+Before cutting over production traffic, export the local protected account wallet snapshot and verify it on the production database/host:
+
+```bash
+flask profile-wallet-check --username sufyanh > /secure-transfer/sufyanh-wallet-snapshot.json
+flask production-account-readiness \
+  --username sufyanh \
+  --expected-origin https://app.algvault.com \
+  --expected-wallet-snapshot /secure-transfer/sufyanh-wallet-snapshot.json
+```
+
+`production-account-readiness` is read-only. It fails closed unless `PUBLIC_APP_ORIGIN` and `PUBLIC_API_ORIGIN` both resolve to the expected public HTTPS production origin, the `sufyanh` profile exists, the in-app wallet has funds, and each asset total is at least the exported local wallet snapshot. Use `--allow-no-snapshot` only for a weaker existence/nonzero-funds smoke check when no local snapshot is available.
+
 Run high-upside research diagnostics:
 
 ```bash
@@ -602,3 +614,25 @@ flask run
 ```
 
 Use the browser to smoke-test registration, 2FA setup, settings/connections, wallet deposit readiness, admin live readiness, and admin withdrawal approval. Do not place orders or approve withdrawals unless real credentials and operator intent are confirmed.
+
+## Deploying every change to `algorithm-vault-chi.vercel.app`
+
+The repository includes a production Vercel deploy workflow for `https://algorithm-vault-chi.vercel.app` at `.github/workflows/vercel-production.yml`. It runs on every pushed branch so local pushes and Codex Cloud branch updates both promote the latest pushed commit to the Vercel production project, and it can also be started manually from GitHub Actions with **Deploy Vercel Production**.
+
+To make local pushes and Codex Cloud commits update that production URL, configure these GitHub Actions secrets with values from the matching Vercel project:
+
+```bash
+VERCEL_TOKEN=...
+VERCEL_ORG_ID=...
+VERCEL_PROJECT_ID=...
+# Optional, only if the project belongs to a team scope:
+VERCEL_SCOPE=...
+```
+
+For local production deployment from any checked-out commit, export the same values and run:
+
+```bash
+scripts/deploy_vercel_production.sh
+```
+
+The script uses the Vercel CLI to pull the production project configuration, run the configured Vercel production build, and deploy the prebuilt output with `--prod`. Keep the Vercel project environment variables aligned with `deploy/env.vercel.example`, including `PUBLIC_APP_ORIGIN=https://algorithm-vault-chi.vercel.app` and `PUBLIC_API_ORIGIN=https://algorithm-vault-chi.vercel.app`.

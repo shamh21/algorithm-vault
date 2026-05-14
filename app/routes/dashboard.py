@@ -6,10 +6,9 @@ from typing import Any
 
 from flask import Blueprint, Response, current_app, jsonify, render_template, request, stream_with_context
 
-from ..auth import current_user
 from ..admin_auth import require_admin
+from ..auth import current_user
 from ..runtime import get_current_mode, get_service, market_mode_for
-
 
 dashboard_bp = Blueprint("dashboard", __name__, url_prefix="/admin")
 
@@ -47,6 +46,7 @@ def dashboard_data():
         {
             "mode": payload["mode"],
             "balances": payload["balances"],
+            "account_synced_at": payload.get("account_synced_at"),
             "positions": positions["rows"],
             "open_orders": open_orders["rows"],
             "recent_trades": recent_trades["rows"],

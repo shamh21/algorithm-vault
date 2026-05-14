@@ -1,16 +1,12 @@
 {% extends "base.html" %}
 {% from "components/crypto_icon.html" import crypto_icon %}
+{% from "partials/_ui.html" import page_header, empty_state %}
 
 {% block title %}Activity · Algorithm Vault{% endblock %}
 
 {% block content %}
 <section class="activity-page-shell" aria-labelledby="activity-title">
-  <div class="activity-compact-heading">
-    <div>
-      <span class="card-kicker">Activity</span>
-      <h1 id="activity-title">Activity</h1>
-    </div>
-  </div>
+  {{ page_header('Activity', 'Wallet and cycle feed', 'A chronological operational timeline for funding, vault cycles, provider syncs, and recoverable errors.', 'Live feed', 'success') }}
 
   <div class="activity-feed-grid">
     <article class="activity-panel" aria-labelledby="wallet-activity-title">
@@ -58,7 +54,7 @@
             {% endif %}
           </article>
         {% else %}
-          <div class="activity-empty-state">No wallet transactions yet.</div>
+          {{ empty_state('No wallet transactions yet', 'Deposits, withdrawals, allocations, provider syncs, and recoveries will appear here.') }}
         {% endfor %}
       </div>
 
@@ -135,7 +131,7 @@
             </div>
           </article>
         {% else %}
-          <div class="activity-empty-state">No vault cycles yet.</div>
+          {{ empty_state('No vault cycles yet', 'Start a vault cycle when funding and provider readiness checks are complete.', url_for('consumer.vault'), 'Open vault') }}
         {% endfor %}
       </div>
 

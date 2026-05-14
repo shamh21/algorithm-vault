@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from flask import Flask, current_app
@@ -75,15 +76,20 @@ class DashboardPayloadService:
         positions = self._limit_rows(account_payload.get("positions"), 30)
         recent_trades = self._limit_rows(account_payload.get("recent_trades"), 30)
         open_orders = self._limit_rows(account_payload.get("open_orders"), 30)
-        strategy_rankings = StrategyRanking.query.order_by(
-            StrategyRanking.score.desc(),
-            StrategyRanking.created_at.desc(),
-        ).limit(6).all()
+        strategy_rankings = (
+            StrategyRanking.query.order_by(
+                StrategyRanking.score.desc(),
+                StrategyRanking.created_at.desc(),
+            )
+            .limit(6)
+            .all()
+        )
         strategy_runs = StrategyRun.query.order_by(StrategyRun.created_at.desc()).limit(6).all()
         payload = {
             "mode": mode,
             "modes": ["live", "paper", "shadow_live", "paper_shadow"],
             "balances": self._limit_rows(account_payload.get("balances"), 30),
+            "account_synced_at": account_payload.get("synced_at"),
             "positions": positions,
             "open_orders": open_orders,
             "recent_trades": recent_trades,
@@ -101,6 +107,7 @@ class DashboardPayloadService:
             "local_orders": [],
             "audits": [],
             "alerts": self._limit_rows(account_payload.get("alerts"), 3),
+            "account_snapshot": dict(account_payload.get("account_snapshot") or {"status": "unavailable"}),
             "recent_risk": [],
             "market_summary": [],
             "shell": True,
@@ -161,6 +168,7 @@ class DashboardPayloadService:
             "mode": mode,
             "modes": static_payload["modes"],
             "balances": self._limit_rows(account_payload["balances"], 150),
+            "account_synced_at": account_payload.get("synced_at"),
             "positions": self._limit_rows(trade_payload["positions"], 150),
             "open_orders": self._limit_rows(trade_payload["open_orders"], 150),
             "recent_trades": self._limit_rows(trade_payload["recent_trades"], 150),
@@ -178,6 +186,7 @@ class DashboardPayloadService:
             "local_orders": static_payload["local_orders"],
             "audits": static_payload["audits"],
             "alerts": account_payload["alerts"],
+            "account_snapshot": dict(account_payload.get("account_snapshot") or {"status": "unavailable"}),
             "recent_risk": static_payload["recent_risk"],
             "market_summary": static_payload["market_summary"],
         }
@@ -381,32 +390,46 @@ class DashboardPayloadService:
                 "recent_trades": [],
                 "open_orders": [],
                 "alerts": [],
+                "synced_at": None,
+                "account_snapshot": {"status": "unavailable"},
             }
 
         alerts: list[str] = []
+        active_connection = trading_connections.active_tradable_connection(user.id)
+        active_provider = getattr(active_connection, "provider", None) if active_connection is not None else None
         if refresh_exchange:
             try:
                 snapshot = trading_connections.account_snapshot(user.id, "live")
-                wallet_summary.refresh_exchange_snapshot(user, trading_connections, mode="live", snapshot=snapshot)
+                refreshed = wallet_summary.refresh_exchange_snapshot(user, trading_connections, mode="live", snapshot=snapshot)
+                synced_at = refreshed.get("synced_at") if isinstance(refreshed, dict) else None
+                synced_at = synced_at or datetime.utcnow().isoformat() + "Z"
                 return {
                     "balances": snapshot.balances,
                     "positions": snapshot.positions,
                     "recent_trades": snapshot.recent_fills,
                     "open_orders": snapshot.open_orders,
                     "alerts": [str(item) for item in snapshot.alerts],
+                    "synced_at": synced_at,
+                    "account_snapshot": {
+                        "status": "live" if active_provider else "unavailable",
+                        "provider": active_provider,
+                        "synced_at": synced_at,
+                    },
                 }
             except Exception as exc:  # noqa: BLE001
                 alerts.append(f"Live exchange snapshot refresh failed: {exc}")
 
         cached = wallet_summary.cached_exchange_snapshot(user.id)
         if not cached:
-            alerts.append("Exchange account snapshot is cached on demand; use refresh_exchange=1 for a read-only live refresh.")
+            alerts.append("Account data is cached to reduce exchange requests. Use refresh for a read-only live update.")
             return {
                 "balances": [],
                 "positions": [],
                 "recent_trades": [],
                 "open_orders": [],
                 "alerts": alerts,
+                "synced_at": None,
+                "account_snapshot": {"status": "unavailable"},
             }
 
         if int(cached.get("positions_count", 0) or 0) > 0:
@@ -417,10 +440,16 @@ class DashboardPayloadService:
 
         return {
             "balances": self._limit_rows(cached.get("balances"), 150),
+            "synced_at": cached.get("synced_at"),
             "positions": self._limit_rows(cached.get("positions"), 150),
             "recent_trades": self._limit_rows(cached.get("recent_fills"), 150),
             "open_orders": self._limit_rows(cached.get("open_orders"), 150),
             "alerts": self._limit_rows(alerts, 150),
+            "account_snapshot": {
+                "status": "cached",
+                "provider": cached.get("provider"),
+                "synced_at": cached.get("synced_at"),
+            },
         }
 
     def _cached_trade_payload(self, account_payload: dict[str, Any]) -> dict[str, Any]:
@@ -440,10 +469,14 @@ class DashboardPayloadService:
         feature_engine: Any,
     ) -> dict[str, Any]:
         strategy_runs = StrategyRun.query.order_by(StrategyRun.created_at.desc()).limit(10).all()
-        strategy_rankings = StrategyRanking.query.order_by(
-            StrategyRanking.score.desc(),
-            StrategyRanking.created_at.desc(),
-        ).limit(10).all()
+        strategy_rankings = (
+            StrategyRanking.query.order_by(
+                StrategyRanking.score.desc(),
+                StrategyRanking.created_at.desc(),
+            )
+            .limit(10)
+            .all()
+        )
         shadow_observations = ShadowLiveObservation.query.order_by(ShadowLiveObservation.created_at.desc()).limit(10).all()
         validations = StrategyValidation.query.order_by(StrategyValidation.started_at.desc()).limit(10).all()
         local_orders = Order.query.order_by(Order.created_at.desc()).limit(10).all()

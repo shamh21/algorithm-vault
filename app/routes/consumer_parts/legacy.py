@@ -16,16 +16,37 @@ from sqlalchemy.orm import joinedload
 from ...auth import current_user, qr_code_data_uri, require_authenticated_user, verify_totp
 from ...extensions import db
 from ...ml.online_ranker import ONE_H10_HORIZON, extract_features, horizon_from_context, horizon_from_duration, outcome_from_result
-from ...models import AuditLog, DepositAddress, Fill, LeveragedMarket, Order, Setting, StrategyRanking, StrategyRun, TradingConnection, VaultAllocationLeg, VaultCycle, WalletAddress, WalletBalance, WalletTransaction
+from ...models import (
+    AuditLog,
+    DepositAddress,
+    LeveragedMarket,
+    Order,
+    Setting,
+    StrategyRanking,
+    StrategyRun,
+    TradingConnection,
+    VaultAllocationLeg,
+    VaultCycle,
+    WalletAddress,
+    WalletBalance,
+    WalletTransaction,
+)
 from ...runtime import get_current_mode, get_service, market_mode_for
-from ...services.connection_health import build_connection_health, latest_connection_health, operator_connection_message, store_connection_health
+from ...services.connection_health import (
+    build_connection_health,
+    latest_connection_health,
+    operator_connection_message,
+    store_connection_health,
+)
 from ...services.db_retry import commit_with_retry, is_database_locked
 from ...services.market_scanner import ScoredCandidate
+from ...services.one_h10_quality import one_h10_forecast_live_blockers
 from ...services.provider_assets import normalize_provider, provider_collateral_asset, provider_feature_context
 from ...services.response_envelope import action_envelope, exception_envelope, readiness_envelope
 from ...services.vault_coherence import cycle_coherence_payload_from_forecasts, extract_cycle_coherence_payload
 from ...services.vault_readiness import get_vault_cycle_readiness
 from ...services.wallet_addresses import generate_deposit_address, use_real_addresses, validate_withdraw_address
+from ...services.withdrawal_config import wallet_withdrawals_enabled
 from ...services.worker_lease import in_process_workers_enabled
 from ...utils import format_duration_seconds
 
@@ -267,8 +288,8 @@ def withdraw(asset: str):
     }
 
     if request.method == "POST":
-        if not bool(current_app.config.get("WALLET_WITHDRAWALS_ENABLED", False)):
-            flash("Withdrawals are disabled until explicitly enabled by configuration.", "danger")
+        if not wallet_withdrawals_enabled(current_app.config):
+            flash("Withdrawals are disabled until the explicit or automatic safety gates are ready.", "danger")
             return redirect(url_for("consumer.withdraw", asset=asset))
         if Setting.get_json("panic_lock", False):
             flash("Withdrawals are paused while the safety lock is active.", "danger")
@@ -2024,7 +2045,10 @@ def _vault_routing_preview_payload(
                 "label": option["label"],
                 "short_label": option["short_label"],
                 "enabled": enabled,
+                "eligible": bool(state.get("eligible", state.get("ready", False))),
+                "ready": bool(state.get("ready", False)),
                 "connected": connected,
+                "verified": bool(state.get("verified", False)),
                 "can_trade": bool(state.get("can_trade", state.get("ready", False))),
                 "collateral_asset": state.get("collateral_asset") or provider_collateral_asset(provider),
                 "available_margin_usd": _one_h10_float(state.get("available_margin_usd"), 0.0),
@@ -2035,6 +2059,10 @@ def _vault_routing_preview_payload(
                 "routing_score": _one_h10_float(state.get("score"), 0.0) / 100.0,
                 "score": _one_h10_float(state.get("score"), 0.0),
                 "status": status,
+                "readiness_state": str(state.get("readiness_state") or status),
+                "funding_status": str(state.get("funding_status") or ""),
+                "funding_label": str(state.get("funding_label") or ""),
+                "funding_detail": str(state.get("funding_detail") or ""),
                 "blockers": blockers if blockers else ([] if connected else ["connection_not_verified"]),
                 "warnings": list(state.get("warnings") or []),
             }
@@ -3297,25 +3325,7 @@ def _one_h10_provider_legs(
 
 
 def _one_h10_forecast_live_blockers(forecast: dict[str, object] | None) -> list[str]:
-    if not isinstance(forecast, dict) or not forecast:
-        return ["forecast_unavailable"]
-    blockers = {str(item) for item in (forecast.get("blockers", []) or []) if str(item)}
-    blockers.update(str(item) for item in (forecast.get("advisory_blockers", []) or []) if str(item))
-    hard = {
-        "cost_drag_above_threshold",
-        "low_edge_after_costs",
-        "low_liquidity_capacity",
-        "stale_market_data",
-        "features_stale",
-    }
-    selected = sorted(blockers.intersection(hard))
-    if forecast.get("expected_net_edge_passed") is False and "low_edge_after_costs" not in selected:
-        selected.append("low_edge_after_costs")
-    if str(forecast.get("predicted_side") or forecast.get("action") or "hold").lower() not in {"buy", "sell"}:
-        selected.append("forecast_hold")
-    if _one_h10_float(forecast.get("suggested_notional_usd")) <= 0:
-        selected.append("forecast_zero_sizing")
-    return list(dict.fromkeys(selected))
+    return one_h10_forecast_live_blockers(forecast, current_app.config)
 
 
 def _one_h10_float(value: object, default: float = 0.0) -> float:
