@@ -355,6 +355,18 @@ flask profile-wallet-check --username sufyanh
 
 This command is read-only. It reports the local app wallet balance source, locked funds, order count, verified trading connections, cached exchange snapshot metadata, and reconciliation warnings such as duplicate completed settlement transactions. Normal wallet and dashboard pages render from local/cached data first; use `/wallet?refresh_exchange=1` or `/admin/dashboard?refresh_exchange=1` only when you want an explicit read-only provider snapshot refresh.
 
+Before cutting over production traffic, export the local protected account wallet snapshot and verify it on the production database/host:
+
+```bash
+flask profile-wallet-check --username sufyanh > /secure-transfer/sufyanh-wallet-snapshot.json
+flask production-account-readiness \
+  --username sufyanh \
+  --expected-origin https://app.algvault.com \
+  --expected-wallet-snapshot /secure-transfer/sufyanh-wallet-snapshot.json
+```
+
+`production-account-readiness` is read-only. It fails closed unless `PUBLIC_APP_ORIGIN` and `PUBLIC_API_ORIGIN` both resolve to the expected public HTTPS production origin, the `sufyanh` profile exists, the in-app wallet has funds, and each asset total is at least the exported local wallet snapshot. Use `--allow-no-snapshot` only for a weaker existence/nonzero-funds smoke check when no local snapshot is available.
+
 Run high-upside research diagnostics:
 
 ```bash
@@ -602,3 +614,14 @@ flask run
 ```
 
 Use the browser to smoke-test registration, 2FA setup, settings/connections, wallet deposit readiness, admin live readiness, and admin withdrawal approval. Do not place orders or approve withdrawals unless real credentials and operator intent are confirmed.
+
+## Vercel Deployment Status
+
+AlgVault uses Vercel's native GitHub integration, not a GitHub Actions deploy workflow. Local and Codex Cloud changes must be committed and pushed to `https://github.com/shamh21/algorithm-vault` before Vercel can build them.
+
+- Main app: `https://algorithm-vault-chi.vercel.app/`
+- Admin app: `https://admin-pwa-alpha.vercel.app/`
+- Production branch: `main`, unless the Vercel dashboard is intentionally configured otherwise
+- Preview behavior: non-production branches and pull requests should create Vercel Preview Deployments
+
+See `DEPLOYMENT.md` for the exact root directories, build commands, environment checklist, and stale PWA cache troubleshooting.

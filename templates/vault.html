@@ -9,8 +9,8 @@
   <article class="vault-card vault-start-card vault-command-card">
     <div class="vault-title-row vault-command-head">
       <div>
-        <span class="card-kicker">Algorithm Vault</span>
-        <h1>Vault Cycle</h1>
+        <span class="card-kicker">Vault</span>
+        <h1>Automated allocation</h1>
       </div>
       <span class="status-badge vault-cycle-live-badge">1H10</span>
     </div>
@@ -32,7 +32,7 @@
       <section class="vault-form-section vault-cycle-module">
         <div class="vault-section-label">
           <span>01</span>
-          <strong>Select Vault Cycle</strong>
+          <strong>Cycle status</strong>
         </div>
         <div class="asset-selector duration-selector vault-cycle-selector" role="radiogroup" aria-label="Vault cycle">
           {% for cycle in vault_cycle_options %}
@@ -94,20 +94,40 @@
           <strong>Enabled Exchanges</strong>
         </div>
         <div class="vault-exchange-grid" data-provider-grid>
+          {% set preview_providers = initial_routing_preview.providers if initial_routing_preview is defined and initial_routing_preview.providers is defined else [] %}
           {% for provider in vault_provider_options %}
-            <label class="vault-exchange-card is-enabled" data-provider-card data-provider="{{ provider.provider }}">
+            {% set preview = namespace(state={}) %}
+            {% for row in preview_providers %}
+              {% if row.provider == provider.provider %}
+                {% set preview.state = row %}
+              {% endif %}
+            {% endfor %}
+            {% set provider_status = preview.state.status|default(preview.state.readiness_state|default('checking')) %}
+            {% set funding_status = preview.state.funding_status|default('') %}
+            {% set is_ready = provider_status in ['ready', 'ready_auto_funded'] %}
+            {% set is_auto_funded = provider_status == 'ready_auto_funded' or funding_status == 'auto_funded' %}
+            {% set is_restricted = provider_status == 'geo_restricted' %}
+            {% set is_blocked = provider_status in ['blocked', 'not_connected', 'provider_unavailable', 'credential_error', 'transfer_failed'] %}
+            {% set status_label = 'Ready' if is_ready else 'Provider restricted' if is_restricted else 'Wallet needed' if provider_status == 'needs_wallet' else 'Credentials needed' if provider_status == 'needs_api_credentials' else 'Verify' if provider_status == 'needs_verification' else 'Provider unavailable' if provider_status == 'provider_unavailable' else 'Credential error' if provider_status == 'credential_error' else 'Transfer failed' if provider_status == 'transfer_failed' else 'Disabled' if provider_status == 'disabled' else 'Connect' if provider_status == 'not_connected' else 'Action needed' if provider_status == 'blocked' else 'Checking' %}
+            {% set metric_label = 'Auto-funded' if is_auto_funded else 'Recheck provider' if is_restricted else 'Verify' if provider_status == 'needs_verification' else 'Action needed' if provider_status in ['needs_wallet', 'needs_api_credentials', 'credential_error'] else ((preview.state.score|default(0)|round|int) ~ ' score') if provider_status == 'ready' else status_label %}
+            {% set allocation_pct = preview.state.allocation_pct|default(0)|float %}
+            {% set allocation_weight = preview.state.allocation_weight|default(0)|float %}
+            {% set allocation_label = ('%.0f%%'|format(allocation_pct)) if allocation_pct > 0 else ('%.0f%%'|format(allocation_weight * 100)) %}
+            {% set blocker = (preview.state.blockers|default([])|first) %}
+            {% set blocker_text = blocker.title|default(blocker.description|default(blocker.code|default(blocker|string))) if blocker else preview.state.funding_detail|default(preview.state.funding_label|default('')) %}
+            <label class="vault-exchange-card is-enabled{% if is_ready %} is-ready{% endif %}{% if is_auto_funded %} is-auto-funded{% endif %}{% if is_restricted %} is-restricted{% endif %}{% if is_blocked %} is-blocked{% endif %}" data-provider-card data-provider="{{ provider.provider }}">
               <input type="checkbox" name="providers" value="{{ provider.provider }}" checked data-provider-toggle>
               <span class="vault-provider-mark" aria-hidden="true">{{ provider.short_label }}</span>
               <span class="vault-provider-copy">
                 <strong>{{ provider.label }}</strong>
-                <small data-provider-status>Checking</small>
+                <small data-provider-status>{{ status_label }}</small>
               </span>
               <span class="vault-provider-toggle-ui" aria-hidden="true"></span>
               <span class="vault-provider-metrics">
-                <span data-provider-score>--</span>
-                <strong data-provider-allocation>$0.00</strong>
+                <span data-provider-score>{{ metric_label }}</span>
+                <strong data-provider-allocation>{{ allocation_label }}</strong>
               </span>
-              <span class="vault-provider-blocker" data-provider-blocker hidden></span>
+              <span class="vault-provider-blocker" data-provider-blocker{% if not blocker_text or provider_status == 'ready' %} hidden{% endif %}>{{ blocker_text }}</span>
             </label>
           {% endfor %}
         </div>
@@ -319,5 +339,5 @@
 {% endblock %}
 
 {% block page_scripts %}
-<script defer src="{{ url_for('static', filename='js/vault.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}"></script>
+<script defer src="{{ url_for('static', filename='js/vault.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}-vault-readiness-3"></script>
 {% endblock %}

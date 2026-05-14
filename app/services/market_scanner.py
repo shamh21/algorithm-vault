@@ -6,6 +6,7 @@ import time
 from dataclasses import dataclass
 from statistics import mean
 from typing import Any
+
 from flask import has_app_context
 
 from ..extensions import db
@@ -632,8 +633,8 @@ class MarketScannerService:
         configured_cost = self._float(features.get("cost_drag_bps"), -1.0)
         drag = max(configured_cost, implied_cost) if configured_cost >= 0 else implied_cost
         net_expected = gross_expected - drag
-        min_edge = max(0.0, self._float(self.config.get("NET_ROI_MIN_EDGE_BPS"), 4.0))
-        max_cost = max(1.0, self._float(self.config.get("AGGRESSIVE_1H_MAX_COST_DRAG_BPS"), 18.0))
+        min_edge = max(0.0, self._float(self.config.get("ONE_H10_MIN_EDGE_AFTER_COST_BPS"), self._float(self.config.get("NET_ROI_MIN_EDGE_BPS"), 4.0)))
+        max_cost = max(1.0, self._float(self.config.get("ONE_H10_MAX_COST_DRAG_BPS"), self._float(self.config.get("AGGRESSIVE_1H_MAX_COST_DRAG_BPS"), 18.0)))
         min_liquidity = max(1.0, self._float(self.config.get("ONE_H10_MIN_LIQUIDITY_USD"), self._float(self.config.get("VAULT_MIN_LIQUIDITY_USD"), 1_000.0)))
         max_spread = max(1.0, self._float(self.config.get("ONE_H10_MAX_SLIPPAGE_BPS"), self._float(self.config.get("VAULT_MAX_SLIPPAGE_BPS"), 20.0)))
         capacity_multiple = max(liquidity, 0.0) / min_liquidity
@@ -648,6 +649,10 @@ class MarketScannerService:
             "net_expected_return_bps": net_expected,
             "edge_after_cost_bps": net_expected,
             "cost_drag_bps": drag,
+            "estimated_fee_bps": self._float(self.config.get("FEE_BPS"), 5.0),
+            "estimated_slippage_bps": self._float(self.config.get("SIM_SLIPPAGE_BPS"), 8.0),
+            "min_expected_edge_after_cost_bps": min_edge,
+            "max_cost_drag_bps": max_cost,
             "expected_execution_quality": execution_quality,
             "capital_efficiency_score": capital_efficiency,
             "capacity_multiple": capacity_multiple,

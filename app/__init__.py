@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict, deque
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 import json
 import logging
 import os
@@ -102,8 +102,13 @@ from .services.wallet_custody import RealWalletCustodyService
 from .services.wallet_summary import WalletSummaryService
 from .services.worker_lease import WorkerLeaseService
 from .settings_validation import RuntimeConfigError, validate_runtime_config
+from .services.withdrawal_config import wallet_withdrawals_enabled
 from .strategies.registry import StrategyRegistry
 from .utils import format_duration_seconds
+
+
+class DatabaseStartupError(RuntimeError):
+    """Raised when startup database checks cannot reach the configured database."""
 
 
 def create_app(test_config: dict | None = None) -> Flask:
@@ -327,6 +332,7 @@ def create_app(test_config: dict | None = None) -> Flask:
 
     _register_operational_routes(app)
     _register_error_handlers(app)
+    app.before_request(lambda: _block_when_database_startup_failed(app))
     app.before_request(lambda: _rate_limit_request(app))
     app.before_request(validate_csrf_request)
     app.after_request(lambda response: _set_response_headers(app, response))
@@ -349,20 +355,12 @@ def create_app(test_config: dict | None = None) -> Flask:
         }
 
     with app.app_context():
-        _configure_sqlite_pragmas(app)
-        if _skip_schema_bootstrap_requested():
-            return app
-        if _schema_bootstrap_allowed(app):
-            _create_all_tolerant()
-            _ensure_schema()
-        else:
-            _verify_migrated_schema()
-        db.session.commit()
-        _seed_default_settings(app)
-        admin_user = _seed_admin_user(app)
-        db.session.commit()
-        _migrate_legacy_wallet_rows(admin_user)
-        _reset_stale_strategy_runs()
+        try:
+            _run_database_startup(app)
+        except Exception as exc:
+            if not _should_defer_database_startup_error(app, exc):
+                raise
+            _record_database_startup_error(app, exc)
 
     return app
 
@@ -488,13 +486,19 @@ def _register_operational_routes(app: Flask) -> None:
             "config": True,
         }
         status = 200
-        try:
-            db.session.execute(text("SELECT 1"))
-            checks["database"] = True
-        except Exception as exc:  # noqa: BLE001
-            current_error = str(exc.__class__.__name__)
-            checks["database_error"] = current_error
+        startup_error = app.config.get("DATABASE_STARTUP_ERROR")
+        if startup_error:
+            checks["database_error"] = app.config.get("DATABASE_STARTUP_ERROR_CLASS", "DatabaseStartupError")
+            checks["database_startup_blocked"] = True
             status = 503
+        else:
+            try:
+                db.session.execute(text("SELECT 1"))
+                checks["database"] = True
+            except Exception as exc:  # noqa: BLE001
+                current_error = str(exc.__class__.__name__)
+                checks["database_error"] = current_error
+                status = 503
 
         required_services = {"market_data", "risk_engine", "trading_connections", "strategy_manager"}
         registered = set(app.extensions.get("services", {}).keys())
@@ -568,7 +572,7 @@ def _operational_status(app: Flask) -> dict[str, Any]:
             "blockers": list(getattr(validation, "blockers", ())),
             "database_backend": getattr(validation, "database_backend", _database_backend(app)),
             "custody_mode": app.config.get("WALLET_CUSTODY_MODE", "local_dev"),
-            "withdrawals_enabled": bool(app.config.get("WALLET_WITHDRAWALS_ENABLED", False)),
+            "withdrawals_enabled": wallet_withdrawals_enabled(app.config),
             "in_process_workers_enabled": bool(app.config.get("ENABLE_IN_PROCESS_WORKERS", False)),
         },
     }
@@ -579,7 +583,7 @@ def _operational_status(app: Flask) -> dict[str, Any]:
     payload["treasury"] = _treasury_status(app)
     payload["observability"] = {
         "provider_failure_count_24h": _audit_count("provider", "failed"),
-        "order_rejection_count_24h": Order.query.filter(Order.status.in_(["rejected", "failed"])).count(),
+        "order_rejection_count_24h": _order_rejection_count(),
         "chart_refresh_lag_seconds": _chart_refresh_lag(app, now),
     }
     return payload
@@ -604,75 +608,112 @@ def _safe_setting_json(key: str, default: Any) -> Any:
 def _worker_status(now: datetime) -> dict[str, Any]:
     try:
         leases = WorkerLease.query.order_by(WorkerLease.lease_name.asc()).all()
+        rows: list[dict[str, Any]] = []
+        max_lag = 0.0
+        for lease in leases:
+            lag = _elapsed_seconds(now, lease.heartbeat_at) if lease.heartbeat_at else None
+            if lag is not None:
+                max_lag = max(max_lag, lag)
+            rows.append(
+                {
+                    "lease_name": lease.lease_name,
+                    "status": lease.status,
+                    "heartbeat_lag_seconds": lag,
+                    "expires_at": lease.expires_at.isoformat() if lease.expires_at else None,
+                }
+            )
+        return {"available": True, "leases": rows, "max_lease_lag_seconds": max_lag}
     except Exception:  # noqa: BLE001
         db.session.rollback()
         return {"available": False, "leases": [], "max_lease_lag_seconds": None}
-    rows: list[dict[str, Any]] = []
-    max_lag = 0.0
-    for lease in leases:
-        lag = (now - lease.heartbeat_at).total_seconds() if lease.heartbeat_at else None
-        if lag is not None:
-            max_lag = max(max_lag, lag)
-        rows.append(
-            {
-                "lease_name": lease.lease_name,
-                "status": lease.status,
-                "heartbeat_lag_seconds": lag,
-                "expires_at": lease.expires_at.isoformat() if lease.expires_at else None,
-            }
-        )
-    return {"available": True, "leases": rows, "max_lease_lag_seconds": max_lag}
+
+
+def _elapsed_seconds(now: datetime, then: datetime) -> float:
+    if now.tzinfo is None and then.tzinfo is not None:
+        now = now.replace(tzinfo=UTC)
+    elif now.tzinfo is not None and then.tzinfo is None:
+        then = then.replace(tzinfo=UTC)
+    return max(0.0, (now - then).total_seconds())
 
 
 def _trading_status(now: datetime, app: Flask) -> dict[str, Any]:
     stale_after = max(60, int(app.config.get("STRATEGY_HEARTBEAT_PERSIST_SECONDS", 30) or 30) * 4)
     threshold = now - timedelta(seconds=stale_after)
-    return {
-        "running_strategy_count": StrategyRun.query.filter_by(status="running").count(),
-        "queued_strategy_count": StrategyRun.query.filter_by(status="queued").count(),
-        "stale_strategy_count": StrategyRun.query.filter(
-            StrategyRun.status == "running",
-            StrategyRun.updated_at < threshold,
-        ).count(),
-        "stale_after_seconds": stale_after,
-        "active_vault_cycle_count": VaultCycle.query.filter_by(status="active").count(),
-    }
+    try:
+        return {
+            "available": True,
+            "running_strategy_count": StrategyRun.query.filter_by(status="running").count(),
+            "queued_strategy_count": StrategyRun.query.filter_by(status="queued").count(),
+            "stale_strategy_count": StrategyRun.query.filter(
+                StrategyRun.status == "running",
+                StrategyRun.updated_at < threshold,
+            ).count(),
+            "stale_after_seconds": stale_after,
+            "active_vault_cycle_count": VaultCycle.query.filter_by(status="active").count(),
+        }
+    except Exception:  # noqa: BLE001
+        db.session.rollback()
+        return {
+            "available": False,
+            "running_strategy_count": None,
+            "queued_strategy_count": None,
+            "stale_strategy_count": None,
+            "stale_after_seconds": stale_after,
+            "active_vault_cycle_count": None,
+        }
 
 
 def _wallet_status() -> dict[str, Any]:
-    return {
-        "withdrawal_failures_24h": _wallet_audit_count("withdrawal_failed"),
-        "withdrawal_safety_blocks_24h": _wallet_audit_count("withdrawal_blocked_by_safety_gate"),
-        "wallet_sync_failures_24h": _wallet_audit_count("wallet_sync_failed"),
-        "reconciliation_mismatches_24h": _wallet_audit_count("withdrawal_reconciled_failed"),
-    }
+    try:
+        return {
+            "available": True,
+            "withdrawal_failures_24h": _wallet_audit_count("withdrawal_failed"),
+            "withdrawal_safety_blocks_24h": _wallet_audit_count("withdrawal_blocked_by_safety_gate"),
+            "wallet_sync_failures_24h": _wallet_audit_count("wallet_sync_failed"),
+            "reconciliation_mismatches_24h": _wallet_audit_count("withdrawal_reconciled_failed"),
+        }
+    except Exception:  # noqa: BLE001
+        db.session.rollback()
+        return {
+            "available": False,
+            "withdrawal_failures_24h": None,
+            "withdrawal_safety_blocks_24h": None,
+            "wallet_sync_failures_24h": None,
+            "reconciliation_mismatches_24h": None,
+        }
 
 
 def _model_status() -> dict[str, Any]:
-    promoted = MLModelRegistry.query.filter_by(status="promoted").order_by(MLModelRegistry.promoted_at.desc()).limit(25).all()
-    if not promoted:
-        promoted_models = MLOfflineModel.query.filter_by(status="promoted").order_by(MLOfflineModel.promoted_at.desc()).limit(25).all()
-        return {
-            "promoted_count": len(promoted_models),
-            "drift_watch_count": sum(1 for record in promoted_models if float(record.drift or 0.0) > 0),
-            "registry": [],
-        }
-    return {
-        "promoted_count": len(promoted),
-        "drift_watch_count": sum(1 for record in promoted if record.drift_status in {"watch", "blocked"}),
-        "registry": [
-            {
-                "model_family": record.model_family,
-                "model_version": record.model_version,
-                "provider": record.provider,
-                "horizon": record.horizon,
-                "mode": record.mode,
-                "drift_status": record.drift_status,
-                "promoted_at": record.promoted_at.isoformat() if record.promoted_at else None,
+    try:
+        promoted = MLModelRegistry.query.filter_by(status="promoted").order_by(MLModelRegistry.promoted_at.desc()).limit(25).all()
+        if not promoted:
+            promoted_models = MLOfflineModel.query.filter_by(status="promoted").order_by(MLOfflineModel.promoted_at.desc()).limit(25).all()
+            return {
+                "available": True,
+                "promoted_count": len(promoted_models),
+                "drift_watch_count": sum(1 for record in promoted_models if float(record.drift or 0.0) > 0),
+                "registry": [],
             }
-            for record in promoted
-        ],
-    }
+        return {
+            "available": True,
+            "promoted_count": len(promoted),
+            "drift_watch_count": sum(1 for record in promoted if record.drift_status in {"watch", "blocked"}),
+            "registry": [
+                {
+                    "model_family": record.model_family,
+                    "model_version": record.model_version,
+                    "provider": record.provider,
+                    "horizon": record.horizon,
+                    "mode": record.mode,
+                    "drift_status": record.drift_status,
+                    "promoted_at": record.promoted_at.isoformat() if record.promoted_at else None,
+                }
+                for record in promoted
+            ],
+        }
+    except Exception:  # noqa: BLE001
+        db.session.rollback()
+        return {"available": False, "promoted_count": None, "drift_watch_count": None, "registry": []}
 
 
 def _treasury_status(app: Flask) -> dict[str, Any]:
@@ -698,18 +739,34 @@ def _chart_refresh_lag(app: Flask, now: datetime) -> float | None:
         return None
 
 
-def _audit_count(category: str, action_fragment: str) -> int:
-    since = datetime.utcnow() - timedelta(days=1)
-    return AuditLog.query.filter(
-        AuditLog.created_at >= since,
-        AuditLog.category == category,
-        AuditLog.action.contains(action_fragment),
-    ).count()
+def _order_rejection_count() -> int | None:
+    try:
+        return Order.query.filter(Order.status.in_(["rejected", "failed"])).count()
+    except Exception:  # noqa: BLE001
+        db.session.rollback()
+        return None
 
 
-def _wallet_audit_count(action: str) -> int:
-    since = datetime.utcnow() - timedelta(days=1)
-    return WalletAuditLog.query.filter(WalletAuditLog.created_at >= since, WalletAuditLog.action == action).count()
+def _audit_count(category: str, action_fragment: str) -> int | None:
+    try:
+        since = datetime.utcnow() - timedelta(days=1)
+        return AuditLog.query.filter(
+            AuditLog.created_at >= since,
+            AuditLog.category == category,
+            AuditLog.action.contains(action_fragment),
+        ).count()
+    except Exception:  # noqa: BLE001
+        db.session.rollback()
+        return None
+
+
+def _wallet_audit_count(action: str) -> int | None:
+    try:
+        since = datetime.utcnow() - timedelta(days=1)
+        return WalletAuditLog.query.filter(WalletAuditLog.created_at >= since, WalletAuditLog.action == action).count()
+    except Exception:  # noqa: BLE001
+        db.session.rollback()
+        return None
 
 
 def _prefers_json_response() -> bool:
@@ -718,6 +775,30 @@ def _prefers_json_response() -> bool:
     if request.accept_mimetypes["application/json"] >= request.accept_mimetypes["text/html"]:
         return True
     return False
+
+
+def _block_when_database_startup_failed(app: Flask) -> Response | None:
+    if not app.config.get("DATABASE_STARTUP_ERROR"):
+        return None
+    path = request.path.lower()
+    if (
+        request.endpoint == "static"
+        or path in {"/healthz", "/readyz", "/manifest.json", "/manifest.webmanifest", "/sw.js"}
+        or path.startswith(("/static/", "/icons/"))
+    ):
+        return None
+
+    status = 503
+    if _prefers_json_response():
+        response = jsonify({"ok": False, "error": "database_unavailable", "status": status})
+        response.status_code = status
+        return response
+    return Response(
+        "<!doctype html><title>Service Unavailable</title><main><h1>Service Unavailable</h1>"
+        "<p>The database is temporarily unavailable. Trading actions are blocked until readiness recovers.</p></main>",
+        status=status,
+        content_type="text/html; charset=utf-8",
+    )
 
 
 def _rate_limit_request(app: Flask) -> Response | None:
@@ -842,7 +923,8 @@ def _set_response_headers(app: Flask, response: Response) -> Response:
     path = request.path.lower()
     if path.startswith("/admin/api/") or (path.startswith("/api/vault-cycles/") and path.endswith("/process-profit-share")):
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-    if request.endpoint == "static" or path in {"/manifest.json", "/sw.js"} or path.startswith("/icons/"):
+    cacheable_static_response = request.endpoint == "static" or path in {"/manifest.json", "/sw.js"} or path.startswith("/icons/")
+    if cacheable_static_response:
         if path.endswith("/sw.js") or path.endswith("static/js/sw.js"):
             max_age = max(0, int(app.config.get("SERVICE_WORKER_CACHE_SECONDS", 0) or 0))
             response.headers["Cache-Control"] = f"public, max-age={max_age}, must-revalidate"
@@ -853,6 +935,10 @@ def _set_response_headers(app: Flask, response: Response) -> Response:
         elif any(path.endswith(ext) for ext in (".css", ".js", ".png", ".jpg", ".jpeg", ".webp", ".svg", ".ico", ".woff2")):
             max_age = max(0, int(app.config.get("STATIC_CACHE_SECONDS", 31_536_000) or 31_536_000))
             response.headers["Cache-Control"] = f"public, max-age={max_age}, immutable"
+    else:
+        response.headers.setdefault("Cache-Control", "private, no-store, no-cache, must-revalidate, max-age=0")
+        response.headers.setdefault("Pragma", "no-cache")
+        response.headers.setdefault("Expires", "0")
     return response
 
 
@@ -895,6 +981,60 @@ def _configure_sqlite_pragmas(app: Flask) -> None:
         db.session.execute(text("PRAGMA synchronous=NORMAL"))
 
 
+def _run_database_startup(app: Flask) -> None:
+    _configure_sqlite_pragmas(app)
+    if _skip_schema_bootstrap_requested():
+        return
+    if _schema_bootstrap_allowed(app):
+        _create_all_tolerant()
+        _ensure_schema()
+    else:
+        _verify_migrated_schema()
+    db.session.commit()
+    _seed_default_settings(app)
+    admin_user = _seed_admin_user(app)
+    db.session.commit()
+    _migrate_legacy_wallet_rows(admin_user)
+    _reset_stale_strategy_runs()
+
+
+def _record_database_startup_error(app: Flask, exc: Exception) -> None:
+    db.session.rollback()
+    app.config["DATABASE_STARTUP_ERROR"] = str(exc)
+    app.config["DATABASE_STARTUP_ERROR_CLASS"] = exc.__class__.__name__
+    app.logger.exception("Database startup checks failed; serving readiness 503 until the runtime recovers.")
+
+
+def _should_defer_database_startup_error(app: Flask, exc: Exception) -> bool:
+    if not bool(app.config.get("DEFER_DATABASE_STARTUP_ERRORS", False)):
+        return False
+    if _is_missing_schema_error(exc):
+        return False
+    return isinstance(exc, DatabaseStartupError) or any(isinstance(item, OperationalError) for item in _exception_chain(exc))
+
+
+def _exception_chain(exc: BaseException) -> list[BaseException]:
+    chain: list[BaseException] = []
+    current: BaseException | None = exc
+    while current is not None and current not in chain:
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+    return chain
+
+
+def _is_missing_schema_error(exc: BaseException) -> bool:
+    for item in _exception_chain(exc):
+        message = str(item).lower()
+        if "alembic_version" in message and (
+            "no such table" in message
+            or "does not exist" in message
+            or "undefinedtable" in message
+            or "undefined table" in message
+        ):
+            return True
+    return False
+
+
 def _skip_schema_bootstrap_requested() -> bool:
     return os.getenv("SKIP_SCHEMA_BOOTSTRAP", "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -916,6 +1056,8 @@ def _verify_migrated_schema() -> None:
         version = db.session.execute(text("SELECT version_num FROM alembic_version LIMIT 1")).scalar()
     except Exception as exc:  # noqa: BLE001
         db.session.rollback()
+        if not _is_missing_schema_error(exc):
+            raise DatabaseStartupError("Database schema verification failed because the database is unavailable.") from exc
         raise RuntimeError("Database schema is not migrated; run `flask db upgrade` before starting production.") from exc
     if not version:
         raise RuntimeError("Database schema is not migrated; alembic_version is empty.")

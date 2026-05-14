@@ -98,6 +98,23 @@ def _create_live_connection(app, user):
     return connection
 
 
+def _seed_backtest_market(provider: str = "hyperliquid", symbol: str = "BTC", venue_symbol: str | None = None) -> LeveragedMarket:
+    market = LeveragedMarket(
+        provider=provider,
+        venue_symbol=venue_symbol or symbol,
+        symbol=symbol,
+        status="active",
+        settlement_asset="USDC" if provider == "hyperliquid" else "USDT",
+        max_leverage=20.0,
+        liquidity_usd=250_000.0,
+        spread_bps=2.5,
+        fee_bps=5.0,
+    )
+    db.session.add(market)
+    db.session.commit()
+    return market
+
+
 def _confirm_one_h10_live(app) -> None:
     app.config["EXPLICIT_LIVE_CONFIRMED"] = True
     app.config["SECONDARY_CONFIRMATION"] = True
@@ -684,7 +701,7 @@ def test_admin_with_2fa_can_access_admin_and_user_cannot(app) -> None:
     assert b"Test Allocation Amount" in backtests.data
     assert b"Vault Cycle" in backtests.data
     assert b"Vault Cycle Duration" not in backtests.data
-    assert b"Run Vault Simulation" in backtests.data
+    assert b"Run Vault Cycle" in backtests.data
     assert b"static/js/backtests.js" in backtests.data
     assert b"static/js/vendor/lightweight-charts.standalone.production.js" in backtests.data
     assert b'name="strategy_name"' not in backtests.data
@@ -694,11 +711,9 @@ def test_admin_with_2fa_can_access_admin_and_user_cannot(app) -> None:
     assert b'name="stop_loss_pct"' not in backtests.data
     assert b'name="take_profit_pct"' not in backtests.data
     assert b'name="sizing_mode"' not in backtests.data
-    assert b"1M" not in backtests.data
-    assert b"4H</button>" not in backtests.data
-    assert b"24H" not in backtests.data
-    for timeframe_label in [b"LIVE", b"5M", b"15M", b"45M", b"4HR", b"1D"]:
-        assert timeframe_label in backtests.data
+    assert b"Auto Universe" in backtests.data
+    assert b"All enabled leveraged pairs" in backtests.data
+    assert b"Auto-Optimized Metrics" in backtests.data
     for removed_copy in [
         b"Short-Term Optimizer",
         b'value="dynamic_intraday"',
@@ -763,6 +778,16 @@ def test_manual_trading_routes_are_not_registered(app) -> None:
     } & rules
 
 
+def test_admin_login_defaults_to_consumer_home_instead_of_heavy_dashboard(app) -> None:
+    _, admin_secret = _create_user(username="admin-home", role="admin")
+    client = app.test_client()
+
+    response = _login(client, "admin-home", admin_secret)
+
+    assert response.status_code == 302
+    assert response.location == "/"
+
+
 def test_removed_manual_trading_posts_return_404_without_service_calls(app, monkeypatch) -> None:
     def fail_order_submit(*args, **kwargs):
         raise AssertionError("manual order route called order_manager.place_order")
@@ -795,6 +820,7 @@ def test_removed_manual_trading_posts_return_404_without_service_calls(app, monk
 def test_backtests_json_run_uses_paper_allocation_and_returns_charts(app) -> None:
     _patch_market_data(app)
     _, admin_secret = _create_user(username="backtestjson", role="admin")
+    _seed_backtest_market()
     client = app.test_client()
     _login(client, "backtestjson", admin_secret)
 
@@ -820,33 +846,52 @@ def test_backtests_json_run_uses_paper_allocation_and_returns_charts(app) -> Non
     payload = response.get_json()
     assert payload["ok"] is True
     assert payload["run_id"]
-    assert {"metrics", "charts", "summary", "result", "autopilot", "strategy_weights", "execution_quality", "overlays"} <= set(payload)
+    assert {"metrics", "charts", "summary", "result", "autopilot", "asset_breakdown", "execution_quality"} <= set(payload)
     assert payload["autopilot"]["enabled"] is True
-    assert payload["execution_quality"]["auto_leverage"] != 99
+    assert payload["execution_quality"]["venue_count"] == 1
     assert payload["execution_quality"]["fee_bps"] != 999
     assert payload["execution_quality"]["slippage_bps"] != 999
-    assert payload["strategy_weights"]
+    assert payload["asset_breakdown"]
     assert payload["metrics"]["ending_balance"] >= 0
     assert payload["charts"]["equity"]
     assert payload["charts"]["pnl"]
     assert payload["charts"]["drawdown"]
     assert payload["charts"]["growth"]
-    assert payload["charts"]["candles"]
-    assert payload["charts"]["liquidity_depth"]
-    assert payload["charts"]["slippage_simulation"]
+    assert "trade_timeline" in payload["charts"]
     assert payload["summary"]["allocation"] == 500.0
     run = BacktestRun.query.one()
-    assert run.strategy_name == "vault_ensemble_auto"
-    assert run.timeframe == "live"
+    assert run.strategy_name == "portfolio_vault_cycle_auto"
+    assert run.timeframe == "1h10"
     assert run.parameters["initial_balance"] == 500.0
     assert run.parameters["allocation_amount_usd"] == 500.0
     assert run.parameters["parameters"]["simulated_capital_only"] is True
     assert run.parameters["parameters"]["paper_balance_usd"] == 10_000.0
     assert run.parameters["parameters"]["one_h10_vault"] is True
     assert run.parameters["parameters"]["ml_horizon"] == "1h10"
-    assert run.parameters["parameters"]["auto_leverage"] != 99
-    assert run.parameters["parameters"]["auto_cost_model"]["fee_bps"] != 999
+    assert run.parameters["parameters"]["asset_breakdown"]
+    assert "leverage" not in run.parameters
+    assert "fee_bps" not in run.parameters
     assert run.result["autopilot"]["enabled"] is True
+
+
+def test_backtests_run_fails_closed_without_eligible_leveraged_pairs(app) -> None:
+    _patch_market_data(app)
+    _, admin_secret = _create_user(username="backtestnomarkets", role="admin")
+    client = app.test_client()
+    _login(client, "backtestnomarkets", admin_secret)
+
+    response = client.post(
+        "/admin/backtests/run",
+        data={
+            "allocation_amount_usd": "500",
+            "cycle_duration": "1h10",
+        },
+        headers={"Accept": "application/json"},
+    )
+
+    assert response.status_code == 500
+    assert b"Enable an exchange with leveraged pairs" in response.data
+    assert BacktestRun.query.count() == 0
 
 
 def test_backtests_symbol_api_returns_paginated_exchange_universe(app) -> None:
@@ -972,6 +1017,7 @@ def test_backtests_page_skips_optimizer_scanner_and_ml_services(app, monkeypatch
 def test_backtests_form_fallback_persists_without_javascript(app) -> None:
     _patch_market_data(app)
     _, admin_secret = _create_user(username="backtestform", role="admin")
+    _seed_backtest_market()
     client = app.test_client()
     _login(client, "backtestform", admin_secret)
 
@@ -997,10 +1043,10 @@ def test_backtests_form_fallback_persists_without_javascript(app) -> None:
     assert b"Vault simulation completed." in response.data
     assert BacktestRun.query.count() == 1
     run = BacktestRun.query.one()
-    assert run.strategy_name == "vault_ensemble_auto"
+    assert run.strategy_name == "portfolio_vault_cycle_auto"
     assert run.parameters["initial_balance"] == 750.0
     assert run.parameters["parameters"]["vault_cycle_duration"] == "1h10"
-    assert run.parameters["parameters"]["auto_leverage"] != 99
+    assert "leverage" not in run.parameters
 
 
 def test_aggressive_optimizer_hidden_and_forced_submission_blocked(app) -> None:

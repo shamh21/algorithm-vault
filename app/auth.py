@@ -5,8 +5,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import io
+from collections.abc import Callable
 from functools import wraps
-from typing import Any, Callable
+from typing import Any
 
 import pyotp
 import qrcode
@@ -24,7 +25,11 @@ def password_hash(password: str) -> str:
 
 
 def password_matches(user: User, password: str) -> bool:
-    return check_password_hash(user.password_hash, password)
+    try:
+        return check_password_hash(user.password_hash, password)
+    except Exception:  # noqa: BLE001
+        current_app.logger.warning("Stored password hash could not be verified for user_id=%s", user.__dict__.get("id"))
+        return False
 
 
 def current_user() -> User | None:

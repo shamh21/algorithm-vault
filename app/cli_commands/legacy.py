@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import json
 import importlib.util
 import inspect
+import json
 import signal
 import sqlite3
 import threading
@@ -19,12 +19,17 @@ import click
 from cryptography.fernet import Fernet
 from flask import Flask, current_app, has_app_context
 from flask.cli import with_appcontext
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy import inspect as sa_inspect
-from sqlalchemy import or_
 
 from ..backtesting.engine import BacktestConfig
+from ..config import public_origin_violations
 from ..extensions import db
+from ..ml.decision_engine import MODEL_FAMILIES as ML_DECISION_MODEL_FAMILIES
+from ..ml.decision_engine import SIGNAL_FAMILY as ML_SIGNAL_FAMILY
+from ..ml.features import MLFeatureFactory
+from ..ml.online_ranker import OnlineRanker, extract_features, horizon_from_duration, outcome_from_result
+from ..ml.signal_model import MLSignalModel
 from ..models import (
     AuditLog,
     BacktestRun,
@@ -48,11 +53,6 @@ from ..models import (
     WalletTransaction,
     WalletWithdrawal,
 )
-from ..ml.features import MLFeatureFactory
-from ..ml.decision_engine import MODEL_FAMILIES as ML_DECISION_MODEL_FAMILIES
-from ..ml.decision_engine import SIGNAL_FAMILY as ML_SIGNAL_FAMILY
-from ..ml.online_ranker import OnlineRanker, extract_features, horizon_from_duration, outcome_from_result
-from ..ml.signal_model import MLSignalModel
 from ..runtime import get_service
 from ..services.connection_health import (
     active_connection_health,
@@ -216,6 +216,27 @@ def register_cli(app: Flask) -> None:
                 indent=2,
             )
         )
+
+    @app.cli.command("one-h10-evaluation-report")
+    @click.option("--symbol", default="BTC", show_default=True)
+    @click.option("--timeframe", default="1m", show_default=True)
+    @click.option("--strategy", "strategy_name", default="scalping", show_default=True)
+    @click.option("--initial-balance", default=None, type=float)
+    @with_appcontext
+    def one_h10_evaluation_report(symbol: str, timeframe: str, strategy_name: str, initial_balance: float | None) -> None:
+        """Run a minimal cost-aware 1H10 validation report."""
+
+        from ..services.one_h10_evaluation import build_one_h10_evaluation_report
+
+        report = build_one_h10_evaluation_report(
+            current_app.config,
+            get_service("backtest_engine"),
+            symbol=symbol,
+            timeframe=timeframe,
+            strategy_name=strategy_name,
+            initial_balance=initial_balance,
+        )
+        click.echo(json.dumps(report, indent=2, default=str))
 
     @app.cli.command("one-h10-backfill")
     @click.option("--user-id", default=1, show_default=True, type=int)
@@ -772,6 +793,34 @@ def register_cli(app: Flask) -> None:
         result = get_service("wallet_summary").profile_wallet_check(username=username, user_id=user_id)
         click.echo(json.dumps(result, indent=2, default=str))
         if not bool(result.get("exists", False)):
+            raise click.exceptions.Exit(1)
+
+    @app.cli.command("production-account-readiness")
+    @click.option("--username", default="sufyanh", show_default=True, help="Protected application username to verify.")
+    @click.option("--user-id", default=None, type=int, help="Optional user id cross-check.")
+    @click.option("--expected-origin", default="https://app.algvault.com", show_default=True, help="Production origin expected for browser traffic.")
+    @click.option("--expected-wallet-snapshot", type=click.Path(exists=True, dir_okay=False, path_type=Path), default=None)
+    @click.option("--allow-no-snapshot", is_flag=True, default=False, help="Only verify the account exists and has nonzero local app funds.")
+    @with_appcontext
+    def production_account_readiness(
+        username: str,
+        user_id: int | None,
+        expected_origin: str,
+        expected_wallet_snapshot: Path | None,
+        allow_no_snapshot: bool,
+    ) -> None:
+        """Verify production URL config and protected account wallet readiness."""
+
+        snapshot = _load_json_file(expected_wallet_snapshot) if expected_wallet_snapshot is not None else None
+        result = _production_account_readiness_payload(
+            username=username,
+            user_id=user_id,
+            expected_origin=expected_origin,
+            expected_wallet_snapshot=snapshot,
+            require_expected_snapshot=not allow_no_snapshot,
+        )
+        click.echo(json.dumps(result, indent=2, default=str))
+        if result.get("blockers"):
             raise click.exceptions.Exit(1)
 
     @app.cli.command("reset-local-state")
@@ -8551,6 +8600,64 @@ def _vacuum_sqlite_database() -> bool:
         return True
     finally:
         connection.close()
+
+
+def _load_json_file(path: Path) -> dict[str, object]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise click.ClickException(f"Invalid JSON in {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise click.ClickException(f"Expected {path} to contain a JSON object.")
+    return value
+
+
+def _production_account_readiness_payload(
+    *,
+    username: str = "sufyanh",
+    user_id: int | None = None,
+    expected_origin: str = "https://app.algvault.com",
+    expected_wallet_snapshot: dict[str, object] | None = None,
+    require_expected_snapshot: bool = True,
+) -> dict[str, object]:
+    blockers: list[str] = []
+    warnings: list[str] = []
+    expected = str(expected_origin or "").strip().rstrip("/")
+    app_origin = str(current_app.config.get("PUBLIC_APP_ORIGIN") or "").strip().rstrip("/")
+    api_origin = str(current_app.config.get("PUBLIC_API_ORIGIN") or "").strip().rstrip("/")
+    deployment_target = str(current_app.config.get("DEPLOYMENT_TARGET") or "local")
+
+    for key, origin in (("PUBLIC_APP_ORIGIN", app_origin), ("PUBLIC_API_ORIGIN", api_origin)):
+        violations = public_origin_violations(origin, require_public_https=True)
+        blockers.extend(f"{key.lower()}_{violation.replace(' ', '_').replace(',', '')}" for violation in violations)
+        if expected and origin != expected:
+            blockers.append(f"{key.lower()}_does_not_match_expected_origin")
+
+    wallet_result = get_service("wallet_summary").account_funds_readiness(
+        username=username,
+        user_id=user_id,
+        expected_snapshot=expected_wallet_snapshot,
+        require_expected_snapshot=require_expected_snapshot,
+    )
+    blockers.extend(str(item) for item in wallet_result.get("blockers", []) or [])
+    warnings.extend(str(item) for item in wallet_result.get("warnings", []) or [])
+
+    return {
+        "ready": not blockers,
+        "production_url": {
+            "expected_origin": expected,
+            "public_app_origin": app_origin,
+            "public_api_origin": api_origin,
+            "deployment_target": deployment_target,
+        },
+        "account": wallet_result,
+        "blockers": blockers,
+        "warnings": warnings,
+        "notes": [
+            "This command is read-only and does not call live exchanges or mutate balances.",
+            "Use a profile-wallet-check JSON export from the local machine as --expected-wallet-snapshot for fund parity.",
+        ],
+    }
 
 
 def _sqlite_backup_path() -> Path | None:

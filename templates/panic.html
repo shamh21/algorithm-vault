@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "partials/_ui.html" import page_header, empty_state %}
 
 {% block title %}Panic Controls - Algorithm Vault{% endblock %}
 
@@ -8,7 +9,7 @@
     <header class="panic-header">
       <div class="panic-title-block">
         <span class="panic-kicker">Emergency Control</span>
-        <h1 id="panic-title">Panic Controls</h1>
+        <h1 id="panic-title">Emergency controls</h1>
       </div>
 
       <div class="panic-state-rail" aria-label="Current safety state">
@@ -25,11 +26,19 @@
 
     <form class="panic-action-form" method="post" action="{{ url_for('panic.activate') }}" data-panic-form>
       {{ csrf_input()|safe }}
+      <div class="panic-confirmation-panel">
+        <strong>Confirm emergency action</strong>
+        <p>This action may interrupt active vault operations and pause live automation until reviewed.</p>
+        <label class="panic-confirm-check">
+          <input type="checkbox" required>
+          <span>I understand this will activate emergency controls.</span>
+        </label>
+      </div>
       <button type="submit" class="panic-action-button" id="panic-btn" aria-describedby="panic-submit-status">
         <span class="panic-button-mark" aria-hidden="true">!</span>
         <span class="panic-button-copy">
           <strong>Activate Panic</strong>
-          <small>Lock trading now</small>
+          <small>Pause automation now</small>
         </span>
       </button>
       <p class="panic-submit-status" id="panic-submit-status" role="status" aria-live="polite" hidden>
@@ -62,11 +71,7 @@
       {% endfor %}
       </div>
     {% else %}
-      <div class="panic-empty-state">
-        <span class="panic-empty-mark" aria-hidden="true">-</span>
-        <strong>No panic events</strong>
-        <span>Audit feed is clear</span>
-      </div>
+{{ empty_state('No panic events', 'Emergency audit feed is clear.') }}
     {% endif %}
   </section>
 </section>

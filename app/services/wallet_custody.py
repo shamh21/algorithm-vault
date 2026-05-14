@@ -24,6 +24,7 @@ from flask import current_app, has_app_context
 from ..extensions import db
 from ..models import WalletAccount, WalletAddress, WalletAuditLog, WalletBalance, WalletLedgerEvent, WalletTransaction, WalletWithdrawal
 from .failures import WalletBroadcastError, WalletCustodyError
+from .withdrawal_config import automatic_withdrawal_blockers, wallet_withdrawals_enabled
 
 
 EVM_NETWORKS = {"ETHEREUM", "ARBITRUM", "OPTIMISM", "BASE", "POLYGON", "AVALANCHE", "BSC"}
@@ -135,12 +136,17 @@ class RealWalletCustodyService:
                     }
                 )
                 blockers.extend(f"{asset}/{network}: {reason}" for reason in pair_blockers)
+        withdrawals_explicitly_enabled = bool(self.config.get("WALLET_WITHDRAWALS_ENABLED", False))
+        withdrawals_ready = wallet_withdrawals_enabled(self.config)
+        withdrawals_auto_blockers = [] if withdrawals_explicitly_enabled else automatic_withdrawal_blockers(self.config)
         return {
             "use_real_addresses": self._real_address_mode_enabled(),
             "real_custody_enabled": self.enabled,
             "keygen_enabled": bool(self.config.get("WALLET_ALLOW_IN_APP_KEYGEN", False)),
             "valid_encryption_key": self._has_valid_encryption_key(),
-            "withdrawals_enabled": bool(self.config.get("WALLET_WITHDRAWALS_ENABLED", False)),
+            "withdrawals_enabled": withdrawals_ready,
+            "withdrawals_auto_enabled": not withdrawals_explicitly_enabled and withdrawals_ready,
+            "withdrawals_auto_blockers": withdrawals_auto_blockers,
             "approval_required": bool(self.config.get("WALLET_REQUIRE_WITHDRAWAL_APPROVAL", True)),
             "supported": supported,
             "ready": not blockers,

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
+from cryptography.fernet import Fernet
 
 from app import create_app
 from app.extensions import db
@@ -18,6 +19,7 @@ from app.models import (
     WorkerLease,
 )
 from app.services.model_registry import ModelRegistryService
+from app.services.withdrawal_config import automatic_withdrawal_blockers, wallet_withdrawals_enabled
 from app.services.worker_lease import WorkerLeaseService
 from app.settings_validation import RuntimeConfigError, validate_runtime_config
 from app.workers.runner import _run_due_jobs
@@ -131,6 +133,8 @@ def test_runtime_config_treats_vercel_as_production() -> None:
 
     assert validation.ok is False
     assert any("PostgreSQL" in blocker for blocker in validation.blockers)
+    assert any("FLASK_SECRET_KEY" in blocker for blocker in validation.blockers)
+    assert any("TOTP_ENCRYPTION_KEY" in blocker for blocker in validation.blockers)
 
 
 def test_runtime_config_blocks_vercel_in_process_web_workers() -> None:
@@ -179,6 +183,8 @@ def test_runtime_config_accepts_vercel_live_with_dedicated_worker() -> None:
             "SCHEMA_BOOTSTRAP_ENABLED": False,
             "WALLET_WITHDRAWALS_ENABLED": False,
             "WALLET_CUSTODY_MODE": "local_dev",
+            "SECRET_KEY": "vercel-runtime-secret-key-123456789",
+            "TOTP_ENCRYPTION_KEY": Fernet.generate_key().decode("utf-8"),
         }
     )
 
@@ -330,3 +336,80 @@ def test_thin_compatibility_entrypoints_register_cli_and_routes(app) -> None:
     result = app.test_cli_runner().invoke(args=["worker", "start", "--help"])
     assert result.exit_code == 0
     assert "dedicated DB-lease worker" in result.output
+
+
+def test_worker_status_handles_timezone_aware_heartbeats(monkeypatch) -> None:
+    import app as app_module
+
+    class _Lease:
+        lease_name = "test-aware-heartbeat"
+        status = "held"
+        heartbeat_at = datetime.now(UTC) - timedelta(seconds=7)
+        expires_at = datetime.now(UTC) + timedelta(seconds=60)
+
+    class _Query:
+        def order_by(self, *_args, **_kwargs):
+            return self
+
+        def all(self):
+            return [_Lease()]
+
+    class _WorkerLease:
+        lease_name = WorkerLease.lease_name
+        query = _Query()
+
+    monkeypatch.setattr(app_module, "WorkerLease", _WorkerLease)
+
+    status = app_module._worker_status(datetime.utcnow())
+
+    assert status["available"] is True
+    assert status["leases"][0]["lease_name"] == "test-aware-heartbeat"
+    assert status["max_lease_lag_seconds"] >= 0
+
+
+def test_wallet_withdrawals_auto_enable_for_ready_live_real_custody() -> None:
+    config = {
+        "APP_MODE": "live",
+        "ENABLE_LIVE_TRADING": True,
+        "USE_REAL_ADDRESSES": True,
+        "WALLET_REAL_CUSTODY_ENABLED": True,
+        "WALLET_ALLOW_IN_APP_KEYGEN": True,
+        "WALLET_WITHDRAWALS_ENABLED": False,
+        "WALLET_AUTO_ENABLE_WITHDRAWALS": True,
+    }
+
+    assert wallet_withdrawals_enabled(config) is True
+    assert automatic_withdrawal_blockers(config) == []
+
+
+def test_wallet_withdrawals_auto_enable_keeps_production_safeguards_required() -> None:
+    unsafe = {
+        "DEPLOYMENT_TARGET": "production",
+        "APP_MODE": "live",
+        "ENABLE_LIVE_TRADING": True,
+        "USE_REAL_ADDRESSES": True,
+        "WALLET_REAL_CUSTODY_ENABLED": True,
+        "WALLET_ALLOW_IN_APP_KEYGEN": True,
+        "WALLET_WITHDRAWALS_ENABLED": False,
+        "WALLET_AUTO_ENABLE_WITHDRAWALS": True,
+        "WALLET_CUSTODY_MODE": "encrypted_db",
+    }
+    safe = {
+        **unsafe,
+        "SQLALCHEMY_DATABASE_URI": "postgresql+psycopg://bot:secret@db.internal/tradingbot",
+        "WORKER_MODE": "worker",
+        "ENABLE_IN_PROCESS_WORKERS": False,
+        "WORKER_PROCESS_CONFIGURED": True,
+        "WALLET_CUSTODY_MODE": "kms",
+        "WALLET_SIGNER_ISOLATION_CONFIRMED": True,
+        "WALLET_SDK_CHECKS_PASSED": True,
+        "WALLET_DAILY_WITHDRAWAL_LIMIT_BY_WALLET": 1.0,
+        "WALLET_DAILY_WITHDRAWAL_LIMIT_BY_ASSET": {"ETH": 1.0},
+        "WALLET_DAILY_WITHDRAWAL_LIMIT_BY_DESTINATION": 1.0,
+        "WALLET_DAILY_GLOBAL_WITHDRAWAL_LIMIT": 2.0,
+    }
+
+    assert wallet_withdrawals_enabled(unsafe) is False
+    assert any("production withdrawals require" in blocker for blocker in automatic_withdrawal_blockers(unsafe))
+    assert wallet_withdrawals_enabled(safe) is True
+    assert validate_runtime_config(safe).withdrawals_enabled is True

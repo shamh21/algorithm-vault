@@ -6,6 +6,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from cryptography.fernet import Fernet
+
+from .services.withdrawal_config import wallet_withdrawals_enabled
+
 SECRET_KEYWORDS = ("SECRET", "TOKEN", "KEY", "PASSWORD", "PRIVATE", "WEBHOOK", "FERNET")
 PRODUCTION_TARGETS = {"vps", "production", "prod", "postgres", "staging", "vercel"}
 APPROVED_PRODUCTION_CUSTODY_MODES = {"kms", "hsm", "mpc"}
@@ -68,7 +72,7 @@ def validate_runtime_config(config: Mapping[str, Any], *, strict: bool = False) 
     backend = database_backend(str(config.get("SQLALCHEMY_DATABASE_URI", "") or ""))
     worker_mode = str(config.get("WORKER_MODE", "web") or "web").strip().lower()
     custody_mode = str(config.get("WALLET_CUSTODY_MODE", "local_dev") or "local_dev").strip().lower()
-    withdrawals_enabled = bool(config.get("WALLET_WITHDRAWALS_ENABLED", False))
+    withdrawals_enabled = wallet_withdrawals_enabled(config)
     live_trading_enabled = bool(config.get("ENABLE_LIVE_TRADING", False))
     ml_enabled = any(
         bool(config.get(key, False))
@@ -89,6 +93,14 @@ def validate_runtime_config(config: Mapping[str, Any], *, strict: bool = False) 
 
     production_like = deployment_target in PRODUCTION_TARGETS
     if production_like:
+        secret_key = str(config.get("SECRET_KEY", "") or "")
+        totp_key = str(config.get("TOTP_ENCRYPTION_KEY", "") or "").strip()
+        if secret_key in {"", "dev-secret-change-me"} or len(secret_key) < 32:
+            blockers.append("FLASK_SECRET_KEY must be a non-default value with at least 32 characters")
+        try:
+            Fernet(totp_key.encode("utf-8"))
+        except Exception:  # noqa: BLE001
+            blockers.append("TOTP_ENCRYPTION_KEY must be a valid Fernet key")
         if backend != "postgres":
             blockers.append("production DEPLOYMENT_TARGET requires a PostgreSQL DATABASE_URL")
         if bool(config.get("SCHEMA_BOOTSTRAP_ENABLED", False)) and not bool(config.get("ALLOW_PRODUCTION_SCHEMA_BOOTSTRAP", False)):

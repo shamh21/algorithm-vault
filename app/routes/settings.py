@@ -12,7 +12,6 @@ from ..models import AuditLog, Setting, TradingConnection
 from ..runtime import get_current_mode, get_service
 from ..services.connection_health import build_connection_health, latest_connection_health, store_connection_health
 
-
 settings_bp = Blueprint("settings", __name__, url_prefix="/settings")
 
 
@@ -40,6 +39,7 @@ def index():
         trading_connections=connections,
         enabled_trading_connections=enabled_connections,
         enabled_provider_count=len(enabled_connections),
+        credential_saved_count=sum(1 for connection in connections if _has_saved_credential(connection)),
         providers=provider_specs,
         provider_cards=_provider_cards(connections, provider_specs, connection_health_by_id),
         connection_health_by_id=connection_health_by_id,
@@ -310,16 +310,12 @@ def _provider_cards(
     cards: list[dict[str, Any]] = []
     for key, spec in provider_specs.items():
         connection = records_by_provider.get(key)
-        status = str(getattr(connection, "verification_status", "") or "not_connected")
+        raw_status = str(getattr(connection, "verification_status", "") or "not_connected")
+        status = "not_connected" if connection is None else raw_status
         enabled = bool(connection and connection.is_active and status == "verified" and spec.get("tradable"))
         health = connection_health_by_id.get(connection.id, {}) if connection and connection.id is not None else {}
-        can_trade = bool(health.get("can_trade")) if health else False
-        if health:
-            health_label = "Online" if can_trade else "Blocked"
-            health_class = "positive" if can_trade else "danger"
-        else:
-            health_label = "Not checked" if connection else "Not connected"
-            health_class = "muted"
+        status_label, status_class, status_tone = _provider_status_display(connection, status)
+        connection_label, connection_class = _provider_connection_display(connection, health)
         cards.append(
             {
                 "key": key,
@@ -330,11 +326,16 @@ def _provider_cards(
                 "connection": connection,
                 "enabled": enabled,
                 "status": status,
-                "status_label": status.replace("_", " ").title(),
+                "status_label": status_label,
+                "status_class": status_class,
+                "status_tone": status_tone,
                 "health": health,
-                "health_label": health_label,
-                "health_class": health_class,
-                "wallet_preview": _connection_preview(connection),
+                "connection_label": connection_label,
+                "connection_class": connection_class,
+                "trading_label": "Enabled" if enabled else "Disabled",
+                "credential_label": _connection_preview(connection, str(spec.get("connection_type", ""))),
+                "detail_note": _provider_detail_note(connection, health),
+                "action_label": _provider_action_label(connection, status, enabled),
                 "can_enable": bool(connection and spec.get("tradable") and status == "verified" and not enabled),
                 "can_disable": enabled,
             }
@@ -342,17 +343,70 @@ def _provider_cards(
     return cards
 
 
-def _connection_preview(connection: TradingConnection | None) -> str:
+def _provider_status_display(connection: TradingConnection | None, status: str) -> tuple[str, str, str]:
+    if connection is None or status == "not_connected":
+        return "Not connected", "muted", "muted"
+    if status == "verified":
+        return "Verified", "positive", "positive"
+    if status in {"needs_verification", "failed", "error"}:
+        return "Action needed", "warning", "warning"
+    if status == "not_supported":
+        return "Disabled", "muted", "muted"
+    return "Action needed", "warning", "warning"
+
+
+def _provider_connection_display(connection: TradingConnection | None, health: dict[str, Any]) -> tuple[str, str]:
     if connection is None:
-        return "Not saved"
+        return "Not connected", "muted"
+    if not health:
+        return "Connection not checked", "muted"
+    if bool(health.get("can_trade")):
+        return "Online", "positive"
+    if health.get("transient_failure"):
+        return "Connection not checked", "warning"
+    return "Action needed", "warning"
+
+
+def _provider_action_label(connection: TradingConnection | None, status: str, enabled: bool) -> str:
+    if connection is None:
+        return "Connect"
+    if enabled:
+        return "Manage"
+    if status == "verified":
+        return "Manage"
+    return "Review"
+
+
+def _provider_detail_note(connection: TradingConnection | None, health: dict[str, Any]) -> str:
+    if connection is None:
+        return "Save limited credentials before verification or live trading can be enabled."
+    if health.get("failure_reason"):
+        return "Review the latest provider check before enabling trading."
+    if not health:
+        return "Connection has not been checked in this session."
+    return ""
+
+
+def _connection_preview(connection: TradingConnection | None, connection_type: str = "") -> str:
+    if connection is None:
+        return "No wallet connected" if connection_type == "wallet_delegation" else "No credentials saved"
     if connection.wallet_address:
         value = str(connection.wallet_address)
         return f"{value[:10]}...{value[-6:]}" if len(value) > 20 else value
     if connection.encrypted_api_key:
         return "API key saved"
-    if connection.encrypted_api_secret:
-        return "Secret saved"
-    return "Saved"
+    if connection.encrypted_api_secret or connection.encrypted_passphrase:
+        return "Credentials saved"
+    return "Connection saved"
+
+
+def _has_saved_credential(connection: TradingConnection) -> bool:
+    return bool(
+        connection.wallet_address
+        or connection.encrypted_api_key
+        or connection.encrypted_api_secret
+        or connection.encrypted_passphrase
+    )
 
 
 def _audit(action: str, message: str, details: dict[str, Any]) -> None:

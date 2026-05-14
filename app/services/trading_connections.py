@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
+import os
 import re
 import threading
 import time
@@ -781,12 +783,17 @@ class TradingConnectionService:
             if snapshot.alerts:
                 raise RuntimeError("; ".join(snapshot.alerts))
         except Exception as exc:  # noqa: BLE001
+            normalized = self._normalize_provider_verification_error(connection.provider, exc)
             connection.is_active = False
-            connection.verification_status = ACTION_NEEDED_STATUS
+            connection.verification_status = str(normalized.get("verification_status") or ACTION_NEEDED_STATUS)
             connection.last_verified_at = None
-            connection.last_verification_error = str(exc)
+            connection.last_verification_error = str(normalized.get("client_error") or "Connection verification failed.")
+            if normalized.get("diagnostics"):
+                metadata = connection.provider_metadata
+                metadata["provider_diagnostics"] = normalized["diagnostics"]
+                connection.provider_metadata = metadata
             db.session.flush()
-            return {"ok": False, "connection": connection, "error": str(exc)}
+            return {"ok": False, "connection": connection, "error": connection.last_verification_error, "diagnostics": normalized.get("diagnostics", {})}
 
         connection.verification_status = VERIFIED_STATUS
         connection.last_verified_at = datetime.utcnow()
@@ -797,6 +804,77 @@ class TradingConnectionService:
         connection.provider_metadata = metadata
         db.session.flush()
         return {"ok": True, "connection": connection, "snapshot": snapshot}
+
+    def _normalize_provider_verification_error(self, provider: str, exc: Exception) -> dict[str, Any]:
+        raw = str(exc or "")
+        provider_code = str(getattr(exc, "provider_code", "") or "")
+        provider_key = self._normalize_provider(provider)
+        if provider_key == "kucoin" and (provider_code == "400302" or self._is_kucoin_geo_restriction(raw)):
+            detected_area = self._detected_area_from_text(raw) or ("US" if self._mentions_us(raw) else "restricted region")
+            diagnostics = {
+                "providerCode": provider_code or ("400302" if "400302" in raw else ""),
+                "detectedArea": str(detected_area).upper() if len(str(detected_area)) <= 3 else str(detected_area),
+                "egressRegion": os.environ.get("VERCEL_REGION") or os.environ.get("AWS_REGION") or "unknown",
+                "maskedIp": self._mask_ip(raw),
+            }
+            diagnostics = {key: value for key, value in diagnostics.items() if value}
+            client_error = f"Provider detected restricted region: {diagnostics.get('detectedArea', 'restricted region')}. Recheck after server-region update or use another supported exchange."
+            current_app.logger.warning("KuCoin verification geo restriction diagnostics=%s", diagnostics)
+            return {
+                "verification_status": "geo_restricted",
+                "client_error": client_error,
+                "diagnostics": diagnostics,
+            }
+        return {
+            "verification_status": ACTION_NEEDED_STATUS,
+            "client_error": self._sanitize_provider_error(raw) or "Connection verification failed.",
+            "diagnostics": {},
+        }
+
+    @staticmethod
+    def _is_kucoin_geo_restriction(message: str) -> bool:
+        lowered = str(message or "").lower()
+        return "400302" in str(message or "") or any(
+            phrase in lowered
+            for phrase in (
+                "unavailable in your current area",
+                "unavailable in the detected region",
+                "provider detected restricted region",
+                "restricted region",
+            )
+        )
+
+    @staticmethod
+    def _mentions_us(message: str) -> bool:
+        lowered = f" {str(message or '').lower()} "
+        return " us " in lowered or " u.s." in lowered or "united states" in lowered
+
+    @staticmethod
+    def _sanitize_provider_error(message: str) -> str:
+        text = re.sub(r"\b(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}\b", r"\1.\2.xxx.xxx", str(message or ""))
+        return text[:500]
+
+    @staticmethod
+    def _mask_ip(message: str) -> str:
+        match = re.search(r"\b(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\b", str(message or ""))
+        return f"{match.group(1)}.{match.group(2)}.xxx.xxx" if match else ""
+
+    @staticmethod
+    def _detected_area_from_text(message: str) -> str:
+        text = str(message or "")
+        for pattern in (r'"(?:detectedArea|detected_area|area|country|region)"\s*:\s*"?([A-Za-z]{2,32})', r"detected region[:= ]+([A-Za-z]{2,32})", r"current area[:= ]+([A-Za-z]{2,32})"):
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if match:
+                return match.group(1)
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            return ""
+        if isinstance(payload, dict):
+            for key in ("detectedArea", "detected_area", "area", "country", "region"):
+                if payload.get(key):
+                    return str(payload[key])
+        return ""
 
     def activate_verified(self, user_id: int, connection_id: int) -> TradingConnection:
         connection = self.get_for_user(user_id, connection_id)

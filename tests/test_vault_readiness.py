@@ -211,7 +211,7 @@ def test_kucoin_region_restriction_is_structured_and_redacted(app, monkeypatch) 
         enabled_exchanges=["kucoin"],
     )
 
-    assert "kucoin_region_restricted" in _codes(payload)
+    assert "kucoin_geo_restricted" in _codes(payload)
     rendered = str(payload)
     assert "3.86.110.165" not in rendered
     assert '{"code": "400302"' not in rendered
@@ -224,7 +224,7 @@ def test_kucoin_region_restriction_is_structured_and_redacted(app, monkeypatch) 
     )
     response_text = response.get_data(as_text=True)
     assert response.status_code == 200
-    assert "kucoin_region_restricted" in response_text
+    assert "kucoin_geo_restricted" in response_text
     assert "3.86.110.165" not in response_text
     assert '{"code": "400302"' not in response_text
     assert "currently unavailable in the U.S." not in response_text
@@ -460,3 +460,162 @@ def test_vault_mobile_html_css_contains_safe_area_and_sticky_actions() -> None:
     assert "-webkit-overflow-scrolling: touch" in css
     assert "vaultApiUrl" in js
     assert 'credentials: "include"' in js
+
+
+def _ready_hyperliquid_zero_collateral(app, monkeypatch, user: User) -> TradingConnection:
+    service = app.extensions["services"]["trading_connections"]
+    connection = service.create_or_update(
+        user_id=user.id,
+        provider="hyperliquid",
+        connection_type="cex_api_key",
+        api_secret="0x" + ("1" * 64),
+        wallet_address="0x" + ("2" * 40),
+        is_active=True,
+    )
+    connection.verification_status = "verified"
+    connection.is_active = True
+    db.session.add(WalletBalance(user_id=user.id, asset="USDC", available_balance=30.0, estimated_usd_value=30.0))
+    db.session.add(
+        LeveragedMarket(
+            provider="hyperliquid",
+            venue_symbol="BTC",
+            symbol="BTC",
+            status="active",
+            settlement_asset="USDC",
+            max_leverage=20,
+            liquidity_usd=1_000_000,
+            last_seen_at=datetime.utcnow(),
+        )
+    )
+    db.session.commit()
+    monkeypatch.setattr(service, "can_trade", lambda user_id, mode, connection_id=None: connection_id == connection.id)
+    monkeypatch.setattr(
+        service,
+        "account_snapshot",
+        lambda user_id, mode, connection_id=None: ClientSnapshot(mode, [], [], [], [], []),
+    )
+    return connection
+
+
+def test_hyperliquid_zero_collateral_is_ready_auto_funded(app, monkeypatch) -> None:
+    _confirm_live(app)
+    user = _user("hlautofunded")
+    _ready_hyperliquid_zero_collateral(app, monkeypatch, user)
+
+    payload = get_vault_cycle_readiness(user.id, amount=10, live_acknowledged=True, enabled_exchanges=["hyperliquid"])
+
+    status = payload["exchange_status"]["hyperliquid"]
+    assert payload["ready"] is True
+    assert status["ready"] is True
+    assert status["enabled"] is True
+    assert status["status"] == "ready_auto_funded"
+    assert status["funding_status"] == "auto_funded"
+    assert "hyperliquid_settlement_balance_unavailable" not in _codes(payload)
+    assert "Auto-funded during vault cycle" in status["funding_label"]
+    assert "Collateral is transferred at cycle start" in status["funding_detail"]
+
+
+def test_hyperliquid_missing_wallet_returns_needs_wallet(app, monkeypatch) -> None:
+    _confirm_live(app)
+    user = _user("hlmissingwallet")
+    service = app.extensions["services"]["trading_connections"]
+    connection = TradingConnection(
+        user_id=user.id,
+        provider="hyperliquid",
+        connection_type="cex_api_key",
+        encrypted_api_secret=service._encrypt("0x" + ("1" * 64)),
+        wallet_address="",
+        is_active=True,
+        verification_status="verified",
+    )
+    db.session.add(connection)
+    db.session.add(WalletBalance(user_id=user.id, asset="USDC", available_balance=30.0, estimated_usd_value=30.0))
+    db.session.commit()
+    monkeypatch.setattr(service, "can_trade", lambda user_id, mode, connection_id=None: connection_id == connection.id)
+    monkeypatch.setattr(
+        service,
+        "account_snapshot",
+        lambda user_id, mode, connection_id=None: ClientSnapshot(
+            mode,
+            [{"asset": "USDC", "type": "margin", "value": 30.0, "withdrawable": 30.0}],
+            [],
+            [],
+            [],
+            [],
+        ),
+    )
+
+    payload = get_vault_cycle_readiness(user.id, amount=10, live_acknowledged=True, enabled_exchanges=["hyperliquid"])
+
+    assert payload["exchange_status"]["hyperliquid"]["status"] == "needs_wallet"
+    assert "hyperliquid_wallet_not_verified" in _codes(payload)
+
+
+def test_kucoin_400302_maps_to_geo_restricted_without_enabling(app, monkeypatch) -> None:
+    _confirm_live(app)
+    user = _user("kucoingeo")
+    connection = _kucoin_connection(app, user)
+    connection.verification_status = "geo_restricted"
+    connection.is_active = False
+    connection.last_verification_error = '{"code":"400302","msg":"Sorry, the service is unavailable in your current area. IP: 98.84.12.34","detectedArea":"US"}'
+    db.session.add(WalletBalance(user_id=user.id, asset="USDC", available_balance=30.0, estimated_usd_value=30.0))
+    db.session.commit()
+
+    payload = get_vault_cycle_readiness(user.id, amount=10, live_acknowledged=True, enabled_exchanges=["kucoin"])
+
+    status = payload["exchange_status"]["kucoin"]
+    blocker = next(item for item in status["blockers"] if item["code"] == "kucoin_geo_restricted")
+    assert status["enabled"] is True
+    assert status["ready"] is False
+    assert status["can_trade"] is False
+    assert status["status"] == "geo_restricted"
+    assert blocker["title"] == "Provider restricted"
+    assert blocker["description"] == "KuCoin rejected verification from detected region: US."
+    assert blocker["diagnostics"]["maskedIp"] == "98.84.xxx.xxx"
+    assert "98.84.12.34" not in str(status)
+
+
+def test_kucoin_verification_400302_stores_safe_geo_diagnostics(app, monkeypatch) -> None:
+    user = _user("kucoinverifygeo")
+    connection = _kucoin_connection(app, user)
+    service = app.extensions["services"]["trading_connections"]
+
+    class GeoRestrictedConnector:
+        def can_trade(self, mode: str) -> bool:
+            raise RuntimeError('{"code":"400302","msg":"unavailable in your current area: US from 98.84.12.34"}')
+
+    monkeypatch.setattr(service, "_connector_for_connection", lambda saved: GeoRestrictedConnector())
+
+    result = service.verify_connection(user.id, connection.id)
+
+    assert result["ok"] is False
+    assert connection.verification_status == "geo_restricted"
+    assert connection.is_active is False
+    assert result["diagnostics"]["providerCode"] == "400302"
+    assert result["diagnostics"]["detectedArea"] == "US"
+    assert result["diagnostics"]["maskedIp"] == "98.84.xxx.xxx"
+    assert "98.84.12.34" not in result["error"]
+
+
+def test_routing_preview_providers_include_new_readiness_fields(app, monkeypatch) -> None:
+    _confirm_live(app)
+    user = _user("previewfields")
+    _ready_hyperliquid_zero_collateral(app, monkeypatch, user)
+    client = app.test_client()
+    _login(client, user)
+
+    response = client.get(
+        "/api/vault/routing-preview?amount=10&deposit_asset=USDC&settlement_asset=USDC&providers=hyperliquid&one_h10_live_ack=1",
+        headers={"Accept": "application/json"},
+    )
+
+    payload = response.get_json()
+    assert response.status_code == 200
+    provider = next(item for item in payload["providers"] if item["provider"] == "hyperliquid")
+    assert provider["ready"] is True
+    assert provider["eligible"] is True
+    assert provider["status"] == "ready_auto_funded"
+    assert provider["readiness_state"] == "ready_auto_funded"
+    assert provider["funding_status"] == "auto_funded"
+    assert provider["funding_label"] == "Auto-funded during vault cycle"
+    assert provider["funding_detail"] == "Collateral is transferred at cycle start and withdrawn after cycle completion."

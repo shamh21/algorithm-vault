@@ -15,17 +15,27 @@ from flask import Flask
 from sqlalchemy import or_
 
 from ...extensions import db
-from ...ml.online_ranker import ONE_H10_HORIZON, OnlineRanker, extract_features, horizon_from_context, outcome_from_result
 from ...features.engine import FeatureEngine
-from ...models import AuditLog, Order, ShadowLiveObservation, StrategyRun, StrategyValidation, Setting, TradingConnection, VaultAllocationLeg, VaultCycle
+from ...ml.online_ranker import ONE_H10_HORIZON, OnlineRanker, extract_features, horizon_from_context, outcome_from_result
+from ...models import (
+    AuditLog,
+    Order,
+    Setting,
+    ShadowLiveObservation,
+    StrategyRun,
+    StrategyValidation,
+    TradingConnection,
+    VaultAllocationLeg,
+    VaultCycle,
+)
 from ...strategies.base import Signal
 from ...strategies.registry import StrategyRegistry
 from ..db_retry import commit_with_retry, is_database_locked, write_with_retry
-from ..order_manager import OrderIntent, OrderManager
 from ..market_data import MarketDataService
+from ..one_h10_quality import first_one_h10_reason_code, one_h10_forecast_live_blockers, one_h10_reason_code
+from ..order_manager import OrderIntent, OrderManager
 from ..signal_quality import SignalQualityEvaluator
 from ..worker_lease import WorkerLeaseService
-
 
 logger = logging.getLogger(__name__)
 _UNSET = object()
@@ -265,6 +275,10 @@ class StrategyManager:
                         last_error=None,
                         heartbeat_now=tick_now,
                     )
+                    if signal.action == "hold" and bool((run.parameters or {}).get("one_h10_vault")):
+                        hold_payload = self._one_h10_hold_no_trade_payload(run, signal)
+                        if hold_payload.get("no_trade_reason"):
+                            self._record_no_trade(run, hold_payload)
 
                     if self._vault_live_gate_pending(run):
                         self._mark_full_eval_complete(loop_state, started_at=started_at, now_ts=tick_now, market_fingerprint=market_fingerprint)
@@ -2057,6 +2071,36 @@ class StrategyManager:
                 summary[key] = self._safe_float(value, 0.0) if isinstance(value, (int, float, str)) else value
         return summary
 
+    def _one_h10_hold_no_trade_payload(self, run: StrategyRun, signal: Any) -> dict[str, Any]:
+        metadata = dict(getattr(signal, "metadata", {}) or {})
+        reason = str(metadata.get("no_trade_reason") or "").strip()
+        if not reason:
+            return {}
+        forecast = metadata.get("one_h10_forecast") if isinstance(metadata.get("one_h10_forecast"), dict) else {}
+        raw_decision_blockers = metadata.get("forecast_decision_blockers", [])
+        blockers = [str(item) for item in raw_decision_blockers if str(item)] if isinstance(raw_decision_blockers, list) else []
+        if not blockers and forecast:
+            blockers = one_h10_forecast_live_blockers(forecast, self.config)
+        return {
+            "run_id": run.id,
+            "symbol": run.symbol,
+            "timeframe": run.timeframe,
+            "strategy_name": run.strategy_name,
+            "one_h10_vault": True,
+            "ml_horizon": (run.parameters or {}).get("ml_horizon"),
+            "provider": (run.parameters or {}).get("provider"),
+            "direction": str(forecast.get("predicted_side") or forecast.get("action") or "hold") if forecast else "hold",
+            "confidence": metadata.get("forecast_confidence", forecast.get("confidence") if forecast else None),
+            "expected_edge_bps": forecast.get("net_expected_return_bps") if forecast else None,
+            "estimated_fees_bps": forecast.get("estimated_fee_bps") if forecast else None,
+            "estimated_slippage_bps": forecast.get("estimated_slippage_bps") if forecast else None,
+            "risk_reward": forecast.get("risk_reward") if forecast else None,
+            "forecast_blockers": blockers or [reason],
+            "forecast_advisory_blockers": list(forecast.get("advisory_blockers", []) or []) if forecast else [],
+            "decision_reason_code": metadata.get("decision_reason_code") or one_h10_reason_code(reason),
+            "no_trade_reason": reason,
+        }
+
     def _record_no_trade(self, run: StrategyRun, edge_payload: dict[str, Any]) -> None:
         blocker_category = self._no_trade_blocker_category(edge_payload)
         reason = str(edge_payload.get("no_trade_reason") or edge_payload.get("reason") or "unknown").strip() or "unknown"
@@ -2130,6 +2174,11 @@ class StrategyManager:
             "forecast_predicted_side",
             "forecast_confidence",
             "forecast_expected_return_bps",
+            "expected_edge_bps",
+            "estimated_fees_bps",
+            "estimated_slippage_bps",
+            "risk_reward",
+            "decision_reason_code",
             "suggested_execution_style",
         )
         payload = {key: edge_payload.get(key) for key in keys if key in edge_payload}
@@ -2457,32 +2506,45 @@ class StrategyManager:
         metadata["forecast_metadata"] = forecast
         blockers = list(forecast.get("blockers", []) or [])
         advisory_blockers = list(forecast.get("advisory_blockers", []) or [])
+        decision_blockers = one_h10_forecast_live_blockers(forecast, self.config)
         metadata["forecast_blockers"] = blockers
         metadata["forecast_advisory_blockers"] = advisory_blockers
+        metadata["forecast_decision_blockers"] = decision_blockers
+        metadata["forecast_confidence"] = forecast.get("confidence")
+        metadata["forecast_expected_return_bps"] = forecast.get("net_expected_return_bps", forecast.get("expected_return_bps"))
+        metadata["forecast_cost_drag_bps"] = forecast.get("cost_drag_bps")
+        metadata["forecast_estimated_fee_bps"] = forecast.get("estimated_fee_bps")
+        metadata["forecast_estimated_slippage_bps"] = forecast.get("estimated_slippage_bps")
+        metadata["forecast_risk_reward"] = forecast.get("risk_reward")
+        metadata["decision_reason_code"] = first_one_h10_reason_code(decision_blockers)
         if bool(self.config.get("ONE_H10_REQUIRE_PROMOTED_ML", True)) and not bool(forecast.get("ml_ready", False)):
             metadata["no_trade_reason"] = metadata.get("no_trade_reason") or "one_h10_promoted_ml_not_ready"
             metadata["ml_signal_not_ready"] = True
             return Signal("hold", "1H10 opening signal blocked until promoted 1h10 ML is ready.", run.timeframe, None, None, 0.0, metadata)
-        blocking_reasons = {"features_stale", "missing_fibonacci_features", "ml_not_ready"}
-        if bool(self.config.get("ONE_H10_REQUIRE_PROMOTED_ML", True)) and blocking_reasons.intersection(str(item) for item in blockers):
-            metadata["no_trade_reason"] = metadata.get("no_trade_reason") or "one_h10_forecast_blocked:" + ",".join(sorted(blocking_reasons.intersection(str(item) for item in blockers)))
-            return Signal("hold", "1H10 opening signal blocked by required ML feature gates.", run.timeframe, None, None, 0.0, metadata)
+        if decision_blockers:
+            metadata["no_trade_reason"] = metadata.get("no_trade_reason") or "one_h10_forecast_blocked:" + ",".join(decision_blockers)
+            metadata["decision_reason_code"] = first_one_h10_reason_code(decision_blockers)
+            return Signal("hold", "1H10 opening signal blocked by forecast quality gates.", run.timeframe, None, None, 0.0, metadata)
         action = str(forecast.get("predicted_side") or forecast.get("action") or "hold").lower()
         if action not in {"buy", "sell"}:
             metadata["no_trade_reason"] = metadata.get("no_trade_reason") or "forecast_hold"
-            return Signal(signal.action, signal.rationale, signal.timeframe, signal.stop_loss, signal.take_profit, signal.position_fraction, metadata)
+            metadata["decision_reason_code"] = one_h10_reason_code("forecast_hold")
+            return Signal("hold", "1H10 forecast selected hold.", run.timeframe, None, None, 0.0, metadata)
         if "low_confidence" in blockers and bool(self.config.get("ONE_H10_REQUIRE_PROMOTED_ML", True)):
             metadata["no_trade_reason"] = metadata.get("no_trade_reason") or "forecast_low_confidence"
-            return Signal(signal.action, signal.rationale, signal.timeframe, signal.stop_loss, signal.take_profit, signal.position_fraction, metadata)
+            metadata["decision_reason_code"] = one_h10_reason_code("low_confidence")
+            return Signal("hold", "1H10 forecast confidence is below the configured threshold.", run.timeframe, None, None, 0.0, metadata)
         mid = self._safe_float((candles[-1] if candles else {}).get("close"), 0.0)
         if mid <= 0:
             metadata["no_trade_reason"] = metadata.get("no_trade_reason") or "forecast_mid_unavailable"
-            return Signal(signal.action, signal.rationale, signal.timeframe, signal.stop_loss, signal.take_profit, signal.position_fraction, metadata)
+            metadata["decision_reason_code"] = one_h10_reason_code("stale_market_data")
+            return Signal("hold", "1H10 forecast cannot resolve a current reference price.", run.timeframe, None, None, 0.0, metadata)
         stop_pct = self._safe_float(forecast.get("suggested_stop_loss_pct"), 0.0)
         take_pct = self._safe_float(forecast.get("suggested_take_profit_pct"), 0.0)
         if stop_pct <= 0 or take_pct <= 0:
             metadata["no_trade_reason"] = metadata.get("no_trade_reason") or "forecast_missing_exit"
-            return Signal(signal.action, signal.rationale, signal.timeframe, signal.stop_loss, signal.take_profit, signal.position_fraction, metadata)
+            metadata["decision_reason_code"] = one_h10_reason_code("poor_risk_reward")
+            return Signal("hold", "1H10 forecast is missing required exit levels.", run.timeframe, None, None, 0.0, metadata)
         if action == "buy":
             stop_loss = mid * (1 - stop_pct)
             take_profit = mid * (1 + take_pct)
@@ -2494,7 +2556,8 @@ class StrategyManager:
         position_fraction = forecast_fraction if forecast_fraction > 0 else base_fraction
         if position_fraction <= 0:
             metadata["no_trade_reason"] = metadata.get("no_trade_reason") or "forecast_zero_sizing"
-            return Signal(signal.action, signal.rationale, signal.timeframe, signal.stop_loss, signal.take_profit, signal.position_fraction, metadata)
+            metadata["decision_reason_code"] = one_h10_reason_code("forecast_zero_sizing")
+            return Signal("hold", "1H10 forecast sizing is zero.", run.timeframe, None, None, 0.0, metadata)
         metadata["forecast_signal_applied"] = True
         if blockers:
             metadata["ml_signal_not_ready"] = "ml_not_ready" in blockers

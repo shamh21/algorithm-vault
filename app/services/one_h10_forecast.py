@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from ..ml.online_ranker import ONE_H10_HORIZON
+from .one_h10_quality import (
+    ONE_H10_HORIZON_SECONDS,
+    first_one_h10_reason_code,
+    one_h10_forecast_live_blockers,
+    one_h10_quality_thresholds,
+)
 from .provider_assets import normalize_provider
 from .vault_coherence import (
     build_horizon_forecasts,
@@ -102,6 +108,9 @@ class OneH10ForecastService:
                 advisory_blockers.append("low_confidence")
         forecast["blockers"] = list(dict.fromkeys(str(item) for item in forecast["blockers"] if str(item)))
         forecast["advisory_blockers"] = list(dict.fromkeys(str(item) for item in advisory_blockers if str(item)))
+        decision_blockers = one_h10_forecast_live_blockers(forecast, self.config)
+        forecast["decision_blockers"] = decision_blockers
+        forecast["decision_reason_code"] = first_one_h10_reason_code(decision_blockers)
         forecast.update(self._coherence_payload(context, forecast))
         return forecast
 
@@ -289,6 +298,8 @@ class OneH10ForecastService:
         gross_expected_bps = max(abs(directional) * 75.0, take_pct * 10_000 * confidence)
         quality = self._market_quality(context, gross_expected_bps)
         confidence = max(0.0, min(confidence * quality["confidence_multiplier"], 1.0))
+        risk_reward = self._risk_reward(stop_pct, take_pct)
+        thresholds = one_h10_quality_thresholds(self.config)
         budget = self._capital_budget(context)
         max_leverage = min(
             self._safe_float(self.config.get("MAX_LEVERAGE"), 1.0),
@@ -299,19 +310,29 @@ class OneH10ForecastService:
         suggested_leverage = max(1.0, min(max_leverage, 1.0 + aggressive_confidence * max(max_leverage - 1.0, 0.0)))
         sizing_fraction = min(max(aggressive_confidence * quality["sizing_multiplier"], 0.0), 1.0)
         blockers = list(quality["blockers"])
+        if thresholds["min_risk_reward"] > 0 and risk_reward < thresholds["min_risk_reward"]:
+            blockers.append("poor_risk_reward")
         return {
             "predicted_side": side,
             "action": side,
-            "horizon_seconds": 3600,
+            "horizon_seconds": ONE_H10_HORIZON_SECONDS,
             "gross_expected_return_bps": gross_expected_bps,
             "expected_return_bps": quality["net_expected_return_bps"],
             "net_expected_return_bps": quality["net_expected_return_bps"],
             "cost_drag_bps": quality["cost_drag_bps"],
+            "estimated_fee_bps": quality["fee_bps"],
+            "estimated_slippage_bps": quality["slippage_bps"],
             "spread_bps": quality["spread_bps"],
             "execution_quality": quality["execution_quality"],
             "capital_efficiency_score": quality["capital_efficiency_score"],
             "expected_net_edge_passed": quality["net_expected_return_bps"] >= quality["min_edge_bps"],
+            "min_expected_edge_after_cost_bps": quality["min_edge_bps"],
+            "max_cost_drag_bps": quality["max_cost_drag_bps"],
+            "risk_reward": risk_reward,
+            "min_risk_reward": thresholds["min_risk_reward"],
             "confidence": confidence,
+            "confidence_kind": "heuristic_confidence",
+            "confidence_calibrated": False,
             "position_fraction": sizing_fraction,
             "suggested_notional_usd": budget * sizing_fraction,
             "suggested_leverage": suggested_leverage,
@@ -476,20 +497,32 @@ class OneH10ForecastService:
         if self._safe_float(consensus.get("calibration_score"), 1.0) < 0.50:
             advisory_blockers.append("ml_calibration_weak")
         advisory_blockers.extend(quality["blockers"])
+        risk_reward = self._risk_reward(stop_pct, take_pct)
+        thresholds = one_h10_quality_thresholds(self.config)
+        if thresholds["min_risk_reward"] > 0 and risk_reward < thresholds["min_risk_reward"]:
+            advisory_blockers.append("poor_risk_reward")
 
         return {
             "predicted_side": side,
             "action": side,
-            "horizon_seconds": int(self._safe_float(fallback.get("horizon_seconds"), 3600)),
+            "horizon_seconds": int(self._safe_float(fallback.get("horizon_seconds"), ONE_H10_HORIZON_SECONDS)),
             "gross_expected_return_bps": gross_expected_bps,
             "expected_return_bps": quality["net_expected_return_bps"],
             "net_expected_return_bps": quality["net_expected_return_bps"],
             "cost_drag_bps": quality["cost_drag_bps"],
+            "estimated_fee_bps": quality["fee_bps"],
+            "estimated_slippage_bps": quality["slippage_bps"],
             "spread_bps": quality["spread_bps"],
             "execution_quality": quality["execution_quality"],
             "capital_efficiency_score": quality["capital_efficiency_score"],
             "expected_net_edge_passed": quality["net_expected_return_bps"] >= quality["min_edge_bps"],
+            "min_expected_edge_after_cost_bps": quality["min_edge_bps"],
+            "max_cost_drag_bps": quality["max_cost_drag_bps"],
+            "risk_reward": risk_reward,
+            "min_risk_reward": thresholds["min_risk_reward"],
             "confidence": confidence,
+            "confidence_kind": "model_suite_confidence_score",
+            "confidence_calibrated": False,
             "position_fraction": position_fraction,
             "suggested_notional_usd": max(suggested_notional, 0.0),
             "suggested_leverage": suggested_leverage,
@@ -644,8 +677,9 @@ class OneH10ForecastService:
         configured_cost = self._safe_float(context.get("cost_drag_bps"), -1.0)
         implied_cost = spread + fee * 2.0 + slippage
         cost_drag = max(configured_cost, implied_cost) if configured_cost >= 0 else implied_cost
-        max_cost = max(1.0, self._safe_float(self.config.get("AGGRESSIVE_1H_MAX_COST_DRAG_BPS"), 18.0))
-        min_edge = max(0.0, self._safe_float(self.config.get("NET_ROI_MIN_EDGE_BPS"), 4.0))
+        thresholds = one_h10_quality_thresholds(self.config)
+        max_cost = thresholds["max_cost_drag_bps"]
+        min_edge = thresholds["min_edge_after_cost_bps"]
         net_expected = self._safe_float(gross_expected_bps) - cost_drag
 
         liquidity = max(
@@ -667,12 +701,16 @@ class OneH10ForecastService:
         blockers: list[str] = []
         if cost_drag > max_cost:
             blockers.append("cost_drag_above_threshold")
+        if max_spread > 0 and max(spread, slippage) > max_spread:
+            blockers.append("high_slippage")
         if net_expected < min_edge:
             blockers.append("low_edge_after_costs")
         if liquidity > 0 and capital_efficiency < 0.25:
             blockers.append("low_liquidity_capacity")
         if bool(context.get("stale_data", False)):
             blockers.append("stale_market_data")
+        if execution_quality < thresholds["min_execution_quality"]:
+            blockers.append("poor_execution_quality")
 
         confidence_multiplier = max(0.15, min(0.55 + execution_quality * 0.45, 1.0))
         sizing_multiplier = max(0.10, min(0.35 + execution_quality * 0.45 + edge_quality * 0.20, 1.0))
@@ -699,6 +737,12 @@ class OneH10ForecastService:
             "blockers": blockers,
         }
 
+    @staticmethod
+    def _risk_reward(stop_pct: float, take_pct: float) -> float:
+        if stop_pct <= 0:
+            return 0.0
+        return max(take_pct, 0.0) / stop_pct
+
     def _capital_budget(self, context: dict[str, Any]) -> float:
         allocation = self._safe_float(context.get("allocation_cap_usd"))
         margin = self._safe_float(context.get("available_margin_usd"))
@@ -715,7 +759,7 @@ class OneH10ForecastService:
         except ValueError:
             return True
         if updated_at.tzinfo is None:
-            updated_at = updated_at.replace(tzinfo=timezone.utc)
+            updated_at = updated_at.replace(tzinfo=UTC)
         max_age = self._safe_float(
             self.config.get(
                 "ONE_H10_MAX_FEATURE_AGE_SECONDS",
@@ -725,7 +769,7 @@ class OneH10ForecastService:
         )
         if max_age <= 0:
             return False
-        return (datetime.now(timezone.utc) - updated_at.astimezone(timezone.utc)).total_seconds() > max_age
+        return (datetime.now(UTC) - updated_at.astimezone(UTC)).total_seconds() > max_age
 
     def _coerce_ml_raw(self, raw: dict[str, Any], fallback: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
         advisory_blockers = [str(item) for item in raw.get("blockers", [])] if isinstance(raw.get("blockers"), list) else []

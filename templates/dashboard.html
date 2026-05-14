@@ -9,6 +9,7 @@
   data-chart-url="{{ url_for('dashboard.dashboard_chart') }}"
   data-stream-url="{{ url_for('dashboard.dashboard_stream') }}"
   data-activity-url="{{ url_for('dashboard.dashboard_activity') }}"
+  data-dashboard-data-url="{{ url_for('dashboard.dashboard_data') }}"
   data-performance-url="{{ url_for('dashboard.dashboard_performance') }}"
   data-chart-module-src="{{ url_for('static', filename='js/dashboard-chart.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}"
   data-chart-lib-src="{{ url_for('static', filename='js/vendor/lightweight-charts.standalone.production.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}"
@@ -20,45 +21,116 @@
       "risk_status": risk_status,
       "market_summary": market_summary,
       "strategy_rankings": strategy_rankings,
+      "balances": balances,
       "positions": positions,
       "open_orders": open_orders,
       "recent_trades": recent_trades,
-      "alerts": alerts
+      "paper_equity_curve": paper_equity_curve,
+      "account_synced_at": account_synced_at,
+      "alerts": alerts,
+      "account_snapshot": account_snapshot|default({})
     }|tojson }}
   </script>
 
-  <header class="trade-command-bar">
+  {% set snapshot = account_snapshot|default({}) %}
+  {% set snapshot_status = snapshot.get('status', 'unavailable') %}
+  {% set has_account_snapshot = snapshot_status in ['cached', 'live'] %}
+  {% set broker_label = snapshot.get('provider') or '—' %}
+  {% set sync_label = snapshot.get('synced_at') or '—' %}
+  {% set emergency_active = risk_status.panic_lock if risk_status.panic_lock is defined else none %}
+  {% set live_blocked = risk_status.live_trading_blocked if risk_status.live_trading_blocked is defined else none %}
+
+  <header class="trade-command-bar" aria-labelledby="live-operations-title">
     <div class="trade-command-copy">
-      <span class="trade-kicker">Live Operations</span>
-      <h1>Algorithm Vault</h1>
-      <p>{{ mode|upper }} intelligence desk</p>
+      <span class="trade-kicker">{{ mode|replace('_', ' ')|upper }} Environment</span>
+      <h1 id="live-operations-title">Live Operations</h1>
+      <p>Monitor execution, risk state, strategy activity, and exchange connectivity.</p>
     </div>
-    <div class="trade-health-pill" data-stream-status>
-      <span class="trade-health-dot" aria-hidden="true"></span>
-      <span>Connecting</span>
+    <div class="trade-command-statuses" aria-label="Live operation status">
+      <div class="trade-health-pill" data-stream-status>
+        <span class="trade-health-dot" aria-hidden="true"></span>
+        <span>Connecting</span>
+      </div>
+      <span class="trade-live-badge">LIVE</span>
     </div>
   </header>
 
-  <section class="trade-account-strip" aria-label="Account summary">
+  <section class="trade-account-strip" aria-label="Operational status summary">
     <div class="trade-metric">
-      <span>Equity</span>
-      <strong data-equity-value>{{ "%.2f"|format((pnl.realized|float) + (pnl.unrealized|float)) }}</strong>
+      <span>Account Equity</span>
+      <strong data-equity-value>{% if has_account_snapshot %}{{ "%.2f"|format((pnl.realized|float) + (pnl.unrealized|float)) }}{% else %}—{% endif %}</strong>
+      <small>{{ 'Cached snapshot' if snapshot_status == 'cached' else ('Live snapshot' if snapshot_status == 'live' else 'Not loaded') }}</small>
     </div>
     <div class="trade-metric">
       <span>Daily PnL</span>
-      <strong class="{{ 'positive' if risk_status.daily_realized_pnl >= 0 else 'negative' }}" data-daily-pnl>
-        {{ "%.4f"|format(risk_status.daily_realized_pnl|float) }}
-      </strong>
+      {% if risk_status.daily_realized_pnl is defined and has_account_snapshot %}
+        <strong class="{{ 'positive' if risk_status.daily_realized_pnl >= 0 else 'negative' }}" data-daily-pnl>{{ "%.4f"|format(risk_status.daily_realized_pnl|float) }}</strong>
+      {% else %}
+        <strong data-daily-pnl>—</strong>
+      {% endif %}
+      <small>Realized today</small>
     </div>
-    <div class="trade-metric">
-      <span>Risk</span>
-      <strong>{{ "Blocked" if risk_status.live_trading_blocked else "Armed" }}</strong>
+    <div class="trade-metric status-connected">
+      <span>Risk Engine</span>
+      <strong>{{ 'Blocked' if live_blocked else ('Armed' if live_blocked is not none else '—') }}</strong>
+      <small>{{ 'Live execution blocked' if live_blocked else ('Risk checks active' if live_blocked is not none else 'Status unavailable') }}</small>
     </div>
-    <div class="trade-metric">
-      <span>Panic</span>
-      <strong>{{ "ON" if risk_status.panic_lock else "OFF" }}</strong>
+    <div class="trade-metric {{ 'status-error' if emergency_active else 'status-connected' }}">
+      <span>Emergency Stop</span>
+      <strong>{{ 'Engaged' if emergency_active else ('Clear' if emergency_active is not none else '—') }}</strong>
+      <small>{{ 'Manual review required' if emergency_active else ('Guarded controls ready' if emergency_active is not none else 'Status unavailable') }}</small>
+    </div>
+    <div class="trade-metric {{ 'status-connected' if broker_label != '—' else 'status-stale' }}">
+      <span>Broker</span>
+      <strong>{{ broker_label|upper if broker_label != '—' else '—' }}</strong>
+      <small>{{ 'Connected' if broker_label != '—' else 'Disconnected or not loaded' }}</small>
+    </div>
+    <div class="trade-metric {{ 'status-stale' if snapshot_status == 'cached' else ('status-connected' if snapshot_status == 'live' else 'status-loading') }}">
+      <span>Last Sync</span>
+      <strong>{{ sync_label }}</strong>
+      <small>{{ 'Cached snapshot · Last updated ' ~ sync_label if sync_label != '—' else 'Loading or unavailable' }}</small>
     </div>
   </section>
+
+  <section class="exchange-cache-note" aria-label="Exchange data refresh">
+    <p>{{ 'Cached snapshot · Last updated ' ~ sync_label if sync_label != '—' else 'Account data is cached to reduce exchange requests. Use refresh for a read-only live update.' }}</p>
+    <a class="button-link secondary" href="{{ url_for('dashboard.index', refresh_exchange=1) }}">Refresh Exchange Data</a>
+  </section>
+
+  <article class="trade-panel vault-pulse-card" data-vault-pulse aria-labelledby="vault-pulse-title" aria-busy="true">
+    <div class="trade-panel-head vault-pulse-head">
+      <div>
+        <span class="trade-kicker">Account</span>
+        <h2 id="vault-pulse-title">Vault Pulse</h2>
+      </div>
+    </div>
+    <div class="vault-pulse-body">
+      <section class="vault-pulse-wallet" aria-labelledby="vault-pulse-wallet-label">
+        <p class="vault-pulse-label" id="vault-pulse-wallet-label">Wallet balance</p>
+        <strong class="vault-pulse-balance dashboard-skeleton" data-vault-wallet-value aria-live="polite">Loading balance</strong>
+        <p class="vault-pulse-status" data-vault-wallet-status>Syncing account data…</p>
+      </section>
+      <section class="vault-pulse-performance" aria-labelledby="vault-pulse-performance-label">
+        <div class="vault-pulse-performance-copy">
+          <p class="vault-pulse-label" id="vault-pulse-performance-label">Past account performance</p>
+          <strong class="vault-pulse-change dashboard-skeleton" data-vault-performance-value aria-live="polite">Loading history</strong>
+          <p class="vault-pulse-helper">Historical account movement based on available account data.</p>
+        </div>
+        <svg
+          class="vault-pulse-sparkline"
+          data-vault-performance-sparkline
+          viewBox="0 0 120 38"
+          role="img"
+          aria-label="Past account performance trend loading"
+          preserveAspectRatio="none"
+        >
+          <path data-vault-performance-path d="" pathLength="100" />
+        </svg>
+        <p class="vault-pulse-empty" data-vault-performance-empty hidden>Performance history will appear once account data is available.</p>
+      </section>
+      <p class="vault-pulse-error" data-vault-pulse-error hidden>Unable to load Vault Pulse. Check your connection and try again.</p>
+    </div>
+  </article>
 
   {% if alerts %}
     <section class="trade-alert-strip" aria-live="polite">
@@ -68,14 +140,21 @@
     </section>
   {% endif %}
 
-  <section class="trade-layout">
+  <section class="trade-layout" aria-label="Scanner and projection workspace">
     <article class="trade-panel opportunity-panel">
       <div class="trade-panel-head">
         <div>
           <span class="trade-kicker">Scanner</span>
           <h2>Dynamic Opportunities</h2>
+          <p class="panel-helper">Ranked by configured strategy readiness and expected edge.</p>
         </div>
         <button type="button" class="trade-icon-button" data-refresh-opportunities aria-label="Refresh opportunities">↻</button>
+      </div>
+      <div class="opportunity-filter-row" aria-label="Opportunity direction filters">
+        <button type="button" class="filter-chip is-active" data-opportunity-filter="all">All</button>
+        <button type="button" class="filter-chip" data-opportunity-filter="long">Long</button>
+        <button type="button" class="filter-chip" data-opportunity-filter="short">Short</button>
+        <button type="button" class="filter-chip" data-opportunity-filter="hold">Hold</button>
       </div>
       <div class="opportunity-list" data-opportunity-list role="list">
         {% for ranking in strategy_rankings[:6] %}
@@ -91,12 +170,13 @@
               <strong>{{ ranking.symbol }}</strong>
               <small>{{ ranking.strategy_name|replace("_", " ")|title }}</small>
             </span>
-            <span class="opportunity-score">{{ "%.2f"|format(ranking.score|float) }}</span>
+            <span class="opportunity-score"><small>Score</small>{{ "%.2f"|format(ranking.score|float) }}</span>
           </button>
         {% else %}
           <div class="opportunity-empty dashboard-skeleton" data-opportunity-empty>Loading ranked markets.</div>
         {% endfor %}
       </div>
+      <p class="opportunity-neutral" data-opportunity-neutral hidden>No executable setup currently meets the configured threshold.</p>
     </article>
 
     <article class="trade-panel chart-panel" data-chart-panel>
@@ -117,11 +197,12 @@
         <div class="chart-loading" data-chart-loading>Loading forecast</div>
       </div>
       <div class="forecast-summary-grid">
-        <div><span>Direction</span><strong data-forecast-direction>Hold</strong></div>
-        <div><span>ROI</span><strong data-forecast-roi>0.00%</strong></div>
-        <div><span>Confidence</span><strong data-forecast-confidence>0%</strong></div>
-        <div><span>R/R</span><strong data-forecast-risk>0.00</strong></div>
+        <div><span>Direction</span><strong data-forecast-direction>No active setup</strong></div>
+        <div><span>ROI</span><strong data-forecast-roi>—</strong></div>
+        <div><span>Confidence</span><strong data-forecast-confidence>—</strong></div>
+        <div><span>R/R</span><strong data-forecast-risk>—</strong></div>
       </div>
+      <p class="setup-hold-helper" data-setup-helper>The strategy is currently holding. No executable setup meets the configured risk threshold.</p>
     </article>
   </section>
 
@@ -131,18 +212,19 @@
         <div>
           <span class="trade-kicker">Setup</span>
           <h2>Trade Intelligence</h2>
+          <p class="panel-helper">Preview data only; execution remains controlled by existing vault and risk flows.</p>
         </div>
       </div>
       <dl class="intelligence-list" data-intelligence-panel>
-        <div><dt>Pair</dt><dd data-intel-pair>--</dd></div>
-        <div><dt>Exchange</dt><dd data-intel-provider>--</dd></div>
-        <div><dt>Entry</dt><dd data-intel-entry>--</dd></div>
-        <div><dt>Exit</dt><dd data-intel-exit>--</dd></div>
-        <div><dt>Stop</dt><dd data-intel-stop>--</dd></div>
-        <div><dt>Liquidity</dt><dd data-intel-liquidity>--</dd></div>
-        <div><dt>Slippage</dt><dd data-intel-slippage>--</dd></div>
-        <div><dt>ML Agreement</dt><dd data-intel-ml>--</dd></div>
-        <div><dt>Fibonacci</dt><dd data-intel-fib>--</dd></div>
+        <div><dt>Pair</dt><dd data-intel-pair>—</dd></div>
+        <div><dt>Exchange</dt><dd data-intel-provider>—</dd></div>
+        <div><dt>Entry</dt><dd data-intel-entry>—</dd></div>
+        <div><dt>Exit</dt><dd data-intel-exit>—</dd></div>
+        <div><dt>Stop</dt><dd data-intel-stop>—</dd></div>
+        <div><dt>Liquidity</dt><dd data-intel-liquidity>—</dd></div>
+        <div><dt>Slippage</dt><dd data-intel-slippage>—</dd></div>
+        <div><dt>ML Agreement</dt><dd data-intel-ml>—</dd></div>
+        <div><dt>Fibonacci</dt><dd data-intel-fib>—</dd></div>
       </dl>
     </article>
 
@@ -157,12 +239,27 @@
         {% for item in market_summary[:8] %}
           <div class="market-tape-row">
             <strong>{{ item.symbol }}</strong>
-            <span>{{ "%.4f"|format(item.mid|float) }}</span>
-            <em class="{{ 'positive' if item.change_pct >= 0 else 'negative' }}">{{ "%.2f"|format(item.change_pct|float) }}%</em>
+            {% if item.mid is defined %}<span>{{ "%.4f"|format(item.mid|float) }}</span>{% else %}<span>—</span>{% endif %}
+            {% if item.change_pct is defined %}<em class="{{ 'positive' if item.change_pct >= 0 else 'negative' }}">{{ "%.2f"|format(item.change_pct|float) }}%</em>{% else %}<em>—</em>{% endif %}
           </div>
         {% else %}
-          <div class="market-tape-row"><strong>N/A</strong><span>0.0000</span><em>0.00%</em></div>
+          <div class="trade-empty-state">Market monitor is waiting for live market data.</div>
         {% endfor %}
+      </div>
+    </article>
+
+    <article class="trade-panel provider-health-panel">
+      <div class="trade-panel-head">
+        <div>
+          <span class="trade-kicker">Connectivity</span>
+          <h2>Provider Health</h2>
+        </div>
+      </div>
+      <div class="provider-health-table">
+        <div><span>Provider</span><strong>{{ broker_label|upper if broker_label != '—' else 'Activity feed' }}</strong></div>
+        <div><span>Status</span><strong>{{ 'Connected' if broker_label != '—' else 'Provider status appears in Activity' }}</strong></div>
+        <div><span>Last Check</span><strong>{{ sync_label }}</strong></div>
+        <div><span>Impact</span><strong>{{ 'Account snapshot available' if broker_label != '—' else 'No structured health data loaded' }}</strong></div>
       </div>
     </article>
 
@@ -180,32 +277,31 @@
   </section>
 
   <nav class="quick-action-bar" aria-label="Dashboard quick actions">
-    <button type="button" data-quick-action="allocate" data-action-href="{{ url_for('consumer.vault') }}">
-      <span>Allocate</span>
-    </button>
-    <button type="button" data-quick-action="cycle" data-action-href="{{ url_for('consumer.vault') }}">
-      <span>Cycle</span>
-    </button>
-    <button type="button" data-quick-action="panic" data-action-href="{{ url_for('panic.index') }}">
-      <span>Stop</span>
-    </button>
-    <button type="button" data-quick-action="risk" data-action-href="{{ url_for('admin.risk') }}">
+    <div class="quick-action-group">
+      <span>Execution</span>
+      <button type="button" data-quick-action="cycle" data-action-href="{{ url_for('consumer.vault') }}"><span>Run Cycle</span></button>
+      <button type="button" data-quick-action="allocate" data-action-href="{{ url_for('consumer.vault') }}"><span>Allocate</span></button>
+      <button type="button" data-quick-action="setup" data-action-href="{{ url_for('consumer.vault') }}"><span>Preview Only</span></button>
+    </div>
+    <div class="quick-action-group">
       <span>Risk</span>
-    </button>
-    <button type="button" data-quick-action="refresh" data-refresh-opportunities>
-      <span>Refresh</span>
-    </button>
-    <button type="button" data-quick-action="fullscreen">
-      <span>Chart</span>
-    </button>
+      <button type="button" data-quick-action="risk" data-action-href="{{ url_for('admin.risk') }}"><span>Risk Settings</span></button>
+      <button type="button" data-quick-action="panic" data-action-href="{{ url_for('panic.index') }}"><span>Emergency Stop</span></button>
+    </div>
+    <div class="quick-action-group">
+      <span>Data</span>
+      <button type="button" data-quick-action="refresh" data-refresh-opportunities><span>Refresh</span></button>
+      <button type="button" data-quick-action="fullscreen"><span>Open Chart</span></button>
+      <button type="button" data-quick-action="setup" data-action-href="{{ url_for('consumer.vault') }}"><span>Best Setup</span></button>
+    </div>
   </nav>
 
-  <section class="dashboard-bottom-sheet" data-preview-sheet aria-hidden="true">
+  <section class="dashboard-bottom-sheet" data-preview-sheet aria-hidden="true" aria-labelledby="preview-sheet-title">
     <div class="sheet-handle" aria-hidden="true"></div>
     <div class="sheet-head">
       <div>
         <span class="trade-kicker">Preview Only</span>
-        <h2 data-sheet-title>Best Setup</h2>
+        <h2 id="preview-sheet-title" data-sheet-title>Best Setup</h2>
       </div>
       <button type="button" class="trade-icon-button" data-close-preview aria-label="Close preview">×</button>
     </div>
@@ -214,7 +310,7 @@
   </section>
   <div class="sheet-backdrop" data-preview-backdrop aria-hidden="true"></div>
 
-  <section class="ops-accordion">
+  <section class="ops-accordion" aria-label="Operational detail sections">
     <details class="trade-panel" open>
       <summary>Automation Rankings</summary>
       <div class="ops-table-wrap">
@@ -230,7 +326,7 @@
                 <td>{{ "rejected" if ranking.rejected else "live-readiness candidate" }}</td>
               </tr>
             {% else %}
-              <tr><td colspan="5">No optimizer rankings yet.</td></tr>
+              <tr><td colspan="5">No optimizer rankings yet. Run a strategy cycle to populate rankings.</td></tr>
             {% endfor %}
           </tbody>
         </table>
@@ -252,7 +348,7 @@
                 <td>{{ "yes" if order.reduce_only else "no" }}</td>
               </tr>
             {% else %}
-              <tr><td colspan="5">No open orders.</td></tr>
+              <tr><td colspan="5">No open orders. Live execution has no active resting orders.</td></tr>
             {% endfor %}
           </tbody>
         </table>
@@ -274,7 +370,7 @@
                 <td><span class="{{ 'positive' if position.unrealized_pnl >= 0 else 'negative' }}">{{ "%.4f"|format(position.unrealized_pnl|float) }}</span></td>
               </tr>
             {% else %}
-              <tr><td colspan="5">No open positions.</td></tr>
+              <tr><td colspan="5">No positions. The connected account currently has no open exposure.</td></tr>
             {% endfor %}
           </tbody>
         </table>
@@ -283,13 +379,17 @@
 
     <details class="trade-panel">
       <summary>Risk Status</summary>
-      <ul class="compact-list">
-        <li>Max Daily Loss: {{ risk_status.daily_loss_limit }}</li>
-        <li>Current Daily PnL: {{ "%.4f"|format(risk_status.daily_realized_pnl|float) }}</li>
-        <li>Max Leverage: {{ risk_status.max_leverage }}</li>
-        <li>Adaptive Slippage: {{ "%.2f"|format((risk_status.adaptive_slippage.estimate_bps or 0)|float) }} bps</li>
-        <li>Live Blocked: {{ "yes" if risk_status.live_trading_blocked else "no" }}</li>
-      </ul>
+      {% if risk_status %}
+        <ul class="compact-list">
+          <li>Max Daily Loss: {{ risk_status.daily_loss_limit if risk_status.daily_loss_limit is defined else '—' }}</li>
+          <li>Current Daily PnL: {% if risk_status.daily_realized_pnl is defined %}{{ "%.4f"|format(risk_status.daily_realized_pnl|float) }}{% else %}—{% endif %}</li>
+          <li>Max Leverage: {{ risk_status.max_leverage if risk_status.max_leverage is defined else '—' }}</li>
+          <li>Adaptive Slippage: {% if risk_status.adaptive_slippage is defined %}{{ "%.2f"|format((risk_status.adaptive_slippage.estimate_bps or 0)|float) }} bps{% else %}—{% endif %}</li>
+          <li>Live Blocked: {{ "yes" if risk_status.live_trading_blocked else "no" }}</li>
+        </ul>
+      {% else %}
+        <p class="trade-empty-state">Risk status is unavailable. Refresh data or check provider connectivity.</p>
+      {% endif %}
     </details>
 
     <details class="trade-panel">
@@ -306,7 +406,7 @@
                 <td>{{ run.last_signal.get('action', 'n/a') }}</td>
               </tr>
             {% else %}
-              <tr><td colspan="4">No strategy runs recorded.</td></tr>
+              <tr><td colspan="4">No strategy runs recorded. Run a strategy cycle to populate activity.</td></tr>
             {% endfor %}
           </tbody>
         </table>
@@ -328,7 +428,7 @@
                 <td>{{ "%.4f"|format(trade.closed_pnl|float) }}</td>
               </tr>
             {% else %}
-              <tr><td colspan="5">No recent trades.</td></tr>
+              <tr><td colspan="5">No recent trades. Executed trades will appear here after the next filled order.</td></tr>
             {% endfor %}
           </tbody>
         </table>

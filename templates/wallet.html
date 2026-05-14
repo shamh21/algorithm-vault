@@ -1,15 +1,18 @@
 {% extends "base.html" %}
 {% from "components/crypto_icon.html" import crypto_icon %}
+{% from "partials/_ui.html" import page_header, empty_state %}
 
 {% block title %}Wallet · Algorithm Vault{% endblock %}
 
 {% block content %}
 <section class="wallet-exchange-shell">
+  {{ page_header('Wallet', 'Balances and funding', 'Available balances, funding status, and recent wallet activity. Sensitive identifiers are masked.', 'Synced', 'success') }}
   <article class="wallet-total-card">
-    <span class="card-kicker">Total Portfolio Value</span>
+    <span class="card-kicker">Total Portfolio Value · Available balance</span>
     <strong class="hero-value">${{ "%.2f"|format(portfolio_total) }}</strong>
     <div class="wallet-actions">
       <a href="{{ url_for('consumer.vault') }}" class="button-link primary">Allocate</a>
+      <a href="{{ url_for('settings.connections') }}" class="button-link secondary">Providers</a>
     </div>
   </article>
 </section>
@@ -88,6 +91,8 @@
         {% endif %}
       </div>
     </article>
+  {% else %}
+    {{ empty_state('No balances available', 'Balances appear after a verified provider or supported wallet asset is available.', url_for('settings.connections'), 'Check provider') }}
   {% endfor %}
   </div>
 </section>
@@ -114,7 +119,7 @@
         </div>
       </article>
     {% else %}
-      <div class="wallet-empty-state">No wallet activity yet.</div>
+      {{ empty_state('No activity yet', 'Funding and wallet events will appear here after deposits, withdrawals, or provider syncs.') }}
     {% endfor %}
   </div>
 

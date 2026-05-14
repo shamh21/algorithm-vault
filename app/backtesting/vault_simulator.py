@@ -1,4 +1,5 @@
 """Paper Vault ensemble simulation for the Backtests PWA."""
+# ruff: noqa: BLE001, SIM105
 
 from __future__ import annotations
 
@@ -11,7 +12,6 @@ from ..backtesting.engine import BacktestConfig
 from ..models import BacktestRun, LeveragedMarket
 from ..services.provider_assets import normalize_provider, provider_collateral_asset
 from ..services.tradability import book_liquidity_usd, cost_drag_bps, spread_bps, volatility_pct, volatility_regime
-
 
 AUTO_STRATEGIES = (
     "breakout",
@@ -37,12 +37,17 @@ _PUBLIC_TIMEFRAME_VALUES = {item["value"] for item in PUBLIC_TIMEFRAMES}
 
 @dataclass(frozen=True, slots=True)
 class SimulationInput:
-    provider: str
-    symbol: str
-    venue_symbol: str
-    timeframe: str
+    mode: str
     allocation_usd: float
     cycle: str = "1h10"
+    cycle_duration_minutes: int = 70
+    provider: str = "global"
+    symbol: str = "PORTFOLIO"
+    venue_symbol: str = "PORTFOLIO"
+    timeframe: str = "live"
+    exchange_ids: tuple[str, ...] = ()
+    include_leveraged_pairs_only: bool = True
+    user: Any | None = None
 
 
 class VaultBacktestSimulator:
@@ -156,29 +161,57 @@ class VaultBacktestSimulator:
             "updated_at": self._utc_now(),
         }
 
-    def parse_input(self, form: Any) -> SimulationInput:
-        symbol = str(form.get("symbol", "BTC")).upper().strip()
-        provider = normalize_provider(form.get("provider"), default="global")
-        venue_symbol = str(form.get("venue_symbol") or symbol).upper().strip()
-        timeframe = self.normalize_timeframe(str(form.get("timeframe", "live")))
+    def parse_input(self, form: Any, *, user: Any | None = None) -> SimulationInput:
         allocation = self._safe_float(form.get("allocation_amount_usd"), self.allocation_default_usd())
         cap = self.allocation_cap_usd()
-        if not symbol:
-            raise ValueError("Symbol is required.")
         if allocation <= 0:
             raise ValueError("Test allocation amount must be greater than zero.")
         if allocation > cap:
             raise ValueError(f"Test allocation amount cannot exceed ${cap:,.2f} paper funds.")
         return SimulationInput(
-            provider=provider,
-            symbol=symbol,
-            venue_symbol=venue_symbol or symbol,
-            timeframe=timeframe,
+            mode="all_assets",
             allocation_usd=allocation,
             cycle="1h10",
+            cycle_duration_minutes=70,
+            exchange_ids=tuple(
+                normalize_provider(value, default="global") for value in form.getlist("exchange_ids") if str(value or "").strip()
+            ),
+            include_leveraged_pairs_only=True,
+            user=user,
         )
 
     def run(self, request_input: SimulationInput) -> dict[str, Any]:
+        rows = self._symbol_rows(user=request_input.user)
+        if request_input.exchange_ids:
+            allowed = set(request_input.exchange_ids)
+            rows = [row for row in rows if normalize_provider(row.get("provider"), default="global") in allowed]
+        if not rows:
+            raise RuntimeError("Enable an exchange with leveraged pairs to run a vault cycle.")
+        max_assets = max(1, int(self.config.get("BACKTEST_PORTFOLIO_MAX_ASSETS", 6) or 6))
+        selected_rows = rows[:max_assets]
+        per_asset_allocation = request_input.allocation_usd / max(len(selected_rows), 1)
+        asset_runs: list[dict[str, Any]] = []
+        for row in selected_rows:
+            single_input = SimulationInput(
+                mode="single_asset_adapter",
+                allocation_usd=per_asset_allocation,
+                provider=normalize_provider(row.get("provider"), default="global"),
+                symbol=str(row.get("symbol") or "").upper(),
+                venue_symbol=str(row.get("venue_symbol") or row.get("symbol") or "").upper(),
+                timeframe="live",
+            )
+            try:
+                asset_runs.append(self._run_single_asset(single_input, market_row=row)["result"])
+            except Exception as exc:  # noqa: BLE001
+                asset_runs.append(self._failed_asset_result(row, per_asset_allocation, str(exc)))
+        combined = self._combine_asset_results(request_input, asset_runs, rows)
+        return {
+            "record": {"strategy_name": "portfolio_vault_cycle_auto", "symbol": "PORTFOLIO", "timeframe": "1h10"},
+            "parameters": combined["parameters"],
+            "result": self._json_safe(combined["result"]),
+        }
+
+    def _run_single_asset(self, request_input: SimulationInput, market_row: dict[str, Any] | None = None) -> dict[str, Any]:
         quote = self.quote_payload(
             provider=request_input.provider,
             symbol=request_input.symbol,
@@ -269,6 +302,224 @@ class VaultBacktestSimulator:
             "result": self._json_safe(result),
         }
 
+    def _failed_asset_result(self, row: dict[str, Any], allocation: float, error: str) -> dict[str, Any]:
+        provider = normalize_provider(row.get("provider"), default="global")
+        symbol = str(row.get("symbol") or "--").upper()
+        return {
+            "vault_simulation": True,
+            "summary": {
+                "symbol": symbol,
+                "venue_symbol": str(row.get("venue_symbol") or symbol).upper(),
+                "provider": provider,
+                "provider_label": self._provider_label(provider),
+                "allocation": allocation,
+                "duration": "1H10",
+                "quote_asset": str(row.get("settlement_asset") or provider_collateral_asset(provider)).upper(),
+            },
+            "metrics": {
+                "roi": 0.0,
+                "pnl": 0.0,
+                "win_rate": 0.0,
+                "max_drawdown": 0.0,
+                "trades": 0,
+                "fees": 0.0,
+                "ending_balance": allocation,
+            },
+            "charts": {
+                "equity": self._flat_chart(allocation),
+                "pnl": self._flat_chart(0.0),
+                "drawdown": self._flat_chart(0.0),
+                "growth": self._flat_chart(0.0),
+                "trade_timeline": [],
+            },
+            "execution_quality": {
+                "fee_bps": self._safe_float(row.get("fee_bps")),
+                "slippage_bps": 0.0,
+                "fill_quality": 0.0,
+                "liquidity_usd": self._safe_float(row.get("liquidity_usd")),
+                "max_exchange_leverage": self._safe_float(row.get("max_leverage"), 1.0),
+            },
+            "strategy_weights": [],
+            "error": error,
+        }
+
+    def _flat_chart(self, value: float) -> list[dict[str, float]]:
+        now = time.time()
+        return [{"x": now - 70 * 60, "y": value}, {"x": now, "y": value}]
+
+    def _combine_asset_results(
+        self,
+        request_input: SimulationInput,
+        asset_results: list[dict[str, Any]],
+        all_rows: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        allocation = request_input.allocation_usd
+        venues = sorted({self._provider_label(str((item.get("summary") or {}).get("provider") or "global")) for item in asset_results})
+        collateral = sorted({str((item.get("summary") or {}).get("quote_asset") or "USDC").upper() for item in asset_results})
+        asset_breakdown: list[dict[str, Any]] = []
+        total_pnl = 0.0
+        total_fees = 0.0
+        total_trades = 0
+        weighted_win = 0.0
+        weighted_drawdown = 0.0
+        equity_series = self._merge_asset_series(asset_results, "equity", allocation)
+        pnl_series = self._merge_asset_series(asset_results, "pnl", 0.0)
+        drawdown_series = self._merge_asset_series(asset_results, "drawdown", 0.0)
+        growth_series = [{"x": point["x"], "y": self._safe_float(point.get("y")) / max(allocation, 1e-9)} for point in pnl_series]
+        timeline: list[dict[str, Any]] = []
+        for result in asset_results:
+            summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+            metrics = result.get("metrics") if isinstance(result.get("metrics"), dict) else {}
+            charts = result.get("charts") if isinstance(result.get("charts"), dict) else {}
+            asset_allocation = self._safe_float(summary.get("allocation"), allocation / max(len(asset_results), 1))
+            pnl = self._safe_float(metrics.get("pnl"))
+            fees = self._safe_float(metrics.get("fees"))
+            trades = int(metrics.get("trades") or 0)
+            total_pnl += pnl
+            total_fees += fees
+            total_trades += trades
+            weighted_win += self._safe_float(metrics.get("win_rate")) * asset_allocation
+            weighted_drawdown += self._safe_float(metrics.get("max_drawdown")) * asset_allocation
+            timeline.extend(charts.get("trade_timeline") if isinstance(charts.get("trade_timeline"), list) else [])
+            asset_breakdown.append(
+                {
+                    "asset": summary.get("symbol") or "--",
+                    "exchange": summary.get("provider_label") or self._provider_label(str(summary.get("provider") or "global")),
+                    "pnl": pnl,
+                    "roi": pnl / max(asset_allocation, 1e-9),
+                    "trades": trades,
+                    "fees": fees,
+                    "max_exposure": asset_allocation,
+                    "max_drawdown": self._safe_float(metrics.get("max_drawdown")),
+                }
+            )
+        ending_balance = allocation + total_pnl
+        roi = total_pnl / max(allocation, 1e-9)
+        result = {
+            "vault_simulation": True,
+            "portfolio_vault_cycle": True,
+            "summary": {
+                "title": "Portfolio Vault Cycle",
+                "subtitle": f"{', '.join(venues) if venues else 'All enabled leveraged pairs'} / 1H10",
+                "strategy": "Vault Autopilot Portfolio",
+                "symbol": "PORTFOLIO",
+                "timeframe": "1H10",
+                "duration": "1H10",
+                "duration_label": "1h 10m",
+                "allocation": allocation,
+                "paper_balance": self.allocation_cap_usd(),
+                "mode": "all_assets",
+                "eligible_pair_count": len(all_rows),
+                "simulated_pair_count": len(asset_results),
+                "provider_label": ", ".join(venues) if venues else "All enabled leveraged pairs",
+                "collateral_asset": " + ".join(collateral) if collateral else "USDC",
+            },
+            "metrics": {
+                "roi": roi,
+                "pnl": total_pnl,
+                "win_rate": weighted_win / max(allocation, 1e-9),
+                "max_drawdown": weighted_drawdown / max(allocation, 1e-9),
+                "trades": total_trades,
+                "fees": total_fees,
+                "ending_balance": ending_balance,
+            },
+            "charts": {
+                "equity": self._downsample(equity_series),
+                "pnl": self._downsample(pnl_series),
+                "drawdown": self._downsample(drawdown_series),
+                "growth": self._downsample(growth_series),
+                "trade_timeline": self._downsample_timeline(timeline),
+            },
+            "asset_breakdown": sorted(asset_breakdown, key=lambda row: abs(self._safe_float(row.get("pnl"))), reverse=True),
+            "autopilot": {
+                "enabled": True,
+                "status": "portfolio-ready",
+                "confidence": self._average_asset_value(asset_results, "autopilot", "confidence"),
+                "market_regime": "multi-asset aggregate",
+                "strategy_count": sum(len(item.get("strategy_weights") or []) for item in asset_results),
+                "active_strategy_count": sum(
+                    len([row for row in (item.get("strategy_weights") or []) if row.get("enabled")]) for item in asset_results
+                ),
+                "objective": "risk-adjusted portfolio vault cycle",
+                "model_stack": ["ensemble_ranker", "execution_cost_model", "portfolio_risk_allocator", "liquidity_router"],
+            },
+            "execution_quality": {
+                "venue_count": len(venues),
+                "eligible_pair_count": len(all_rows),
+                "simulated_pair_count": len(asset_results),
+                "fee_bps": self._average_asset_value(asset_results, "execution_quality", "fee_bps"),
+                "slippage_bps": self._average_asset_value(asset_results, "execution_quality", "slippage_bps"),
+                "fill_quality": self._average_asset_value(asset_results, "execution_quality", "fill_quality"),
+                "liquidity_usd": sum(
+                    self._safe_float((item.get("execution_quality") or {}).get("liquidity_usd")) for item in asset_results
+                ),
+                "max_exposure_usd": max([self._safe_float(row.get("max_exposure")) for row in asset_breakdown] or [0.0]),
+            },
+            "system_metrics": {
+                "fees": "aggregated enabled-venue fee model",
+                "slippage": "portfolio depth and volatility adjusted",
+                "exits": "dynamic multi-asset exits",
+                "sizing": "portfolio risk weighted",
+                "cycle": "AI-optimized multi-asset vault cycle",
+            },
+            "generated_at": self._utc_now(),
+        }
+        parameters = {
+            "mode": "all_assets",
+            "initial_balance": allocation,
+            "allocation_amount_usd": allocation,
+            "cycle_id": "1h10",
+            "cycle_duration_minutes": request_input.cycle_duration_minutes,
+            "exchange_ids": [normalize_provider(item, default="global") for item in request_input.exchange_ids]
+            or [normalize_provider((item.get("summary") or {}).get("provider"), default="global") for item in asset_results],
+            "include_leveraged_pairs_only": True,
+            "parameters": {
+                "sandbox_backtest": True,
+                "simulated_capital_only": True,
+                "paper_balance_usd": self.allocation_cap_usd(),
+                "vault_cycle_duration": "1h10",
+                "lock_duration_seconds": 70 * 60,
+                "lock_duration_hours": 2,
+                "one_h10_vault": True,
+                "ml_horizon": "1h10",
+                "eligible_pair_count": len(all_rows),
+                "asset_breakdown": asset_breakdown,
+            },
+        }
+        return {"parameters": parameters, "result": result}
+
+    def _merge_asset_series(self, asset_results: list[dict[str, Any]], key: str, base: float) -> list[dict[str, float]]:
+        series_rows = []
+        for result in asset_results:
+            charts = result.get("charts") if isinstance(result.get("charts"), dict) else {}
+            series = charts.get(key) if isinstance(charts.get(key), list) else []
+            if series:
+                series_rows.append(series)
+        if not series_rows:
+            return self._flat_chart(base)
+        length = max(len(series) for series in series_rows)
+        merged: list[dict[str, float]] = []
+        for index in range(length):
+            x = 0.0
+            y = 0.0
+            for series in series_rows:
+                point = series[min(index, len(series) - 1)]
+                x = self._safe_float(point.get("x"), x)
+                y += self._safe_float(point.get("y"))
+            merged.append({"x": x or float(index), "y": y})
+        return merged
+
+    def _downsample_timeline(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        cleaned = [row for row in rows if isinstance(row, dict)]
+        if len(cleaned) <= 80:
+            return cleaned
+        step = math.ceil(len(cleaned) / 80)
+        return cleaned[::step]
+
+    def _average_asset_value(self, asset_results: list[dict[str, Any]], section: str, key: str) -> float:
+        values = [self._safe_float((item.get(section) or {}).get(key)) for item in asset_results if isinstance(item.get(section), dict)]
+        return sum(values) / len(values) if values else 0.0
+
     def response_payload(self, run: BacktestRun) -> dict[str, Any]:
         result = run.result if isinstance(run.result, dict) else {}
         if not result.get("vault_simulation"):
@@ -285,6 +536,7 @@ class VaultBacktestSimulator:
             "execution_quality": result.get("execution_quality", {}),
             "system_metrics": result.get("system_metrics", {}),
             "quote": result.get("quote", {}),
+            "asset_breakdown": result.get("asset_breakdown", []),
             "result": result,
         }
         return self._json_safe(payload)
@@ -386,45 +638,24 @@ class VaultBacktestSimulator:
                     "liquidity_usd": self._safe_float(getattr(market, "liquidity_usd", 0.0)),
                     "spread_bps": self._safe_float(getattr(market, "spread_bps", 0.0)),
                     "fee_bps": self._safe_float(getattr(market, "fee_bps", self.config.get("FEE_BPS", 5.0))),
-                    "compatibility_badges": [self._provider_label(provider), str(getattr(market, "settlement_asset", provider_collateral_asset(provider)) or "").upper()],
+                    "compatibility_badges": [
+                        self._provider_label(provider),
+                        str(getattr(market, "settlement_asset", provider_collateral_asset(provider)) or "").upper(),
+                    ],
                     "category": "Connected markets",
                     "token_icon": symbol[:1],
                     "favorite": False,
                     "recent": self._recent_symbol(symbol),
                 }
             )
-        if rows:
-            rows.sort(
-                key=lambda item: (
-                    not bool(item.get("recent")),
-                    -self._safe_float(item.get("liquidity_usd")),
-                    str(item.get("symbol")),
-                    str(item.get("provider")),
-                )
+        rows.sort(
+            key=lambda item: (
+                not bool(item.get("recent")),
+                -self._safe_float(item.get("liquidity_usd")),
+                str(item.get("symbol")),
+                str(item.get("provider")),
             )
-            return rows
-        for symbol in self.config.get("ALLOWED_SYMBOLS", ["BTC", "ETH", "SOL"]):
-            symbol_key = str(symbol or "").upper().strip()
-            if not symbol_key:
-                continue
-            rows.append(
-                {
-                    "provider": "global",
-                    "provider_label": "Configured",
-                    "symbol": symbol_key,
-                    "venue_symbol": symbol_key,
-                    "settlement_asset": "USDT",
-                    "max_leverage": self._safe_float(self.config.get("MAX_LEVERAGE", 1.0), 1.0),
-                    "liquidity_usd": 0.0,
-                    "spread_bps": 0.0,
-                    "fee_bps": self._safe_float(self.config.get("FEE_BPS", 5.0), 5.0),
-                    "compatibility_badges": ["Configured"],
-                    "category": "Configured assets",
-                    "token_icon": symbol_key[:1],
-                    "favorite": symbol_key in {"BTC", "ETH"},
-                    "recent": self._recent_symbol(symbol_key),
-                }
-            )
+        )
         return rows
 
     def _active_markets(self, *, user: Any | None) -> list[LeveragedMarket]:
@@ -439,7 +670,9 @@ class VaultBacktestSimulator:
         try:
             connections = list(self.trading_connections.verified_tradable_connections(user.id))
         except Exception:
-            return markets
+            return []
+        if not connections:
+            return []
         connection_ids = {int(connection.id) for connection in connections if getattr(connection, "id", None)}
         providers = {normalize_provider(getattr(connection, "provider", ""), default="global") for connection in connections}
         scoped = [
@@ -557,8 +790,15 @@ class VaultBacktestSimulator:
         }
 
     def _auto_controls(self, market: LeveragedMarket | None, profile: dict[str, Any]) -> dict[str, Any]:
-        fee_bps = self._safe_float(getattr(market, "fee_bps", self.config.get("FEE_BPS", 5.0)) if market is not None else self.config.get("FEE_BPS", 5.0), 5.0)
-        max_exchange = self._safe_float(getattr(market, "max_leverage", self.config.get("MAX_LEVERAGE", 1.0)) if market is not None else self.config.get("MAX_LEVERAGE", 1.0), 1.0)
+        fee_bps = self._safe_float(
+            getattr(market, "fee_bps", self.config.get("FEE_BPS", 5.0)) if market is not None else self.config.get("FEE_BPS", 5.0), 5.0
+        )
+        max_exchange = self._safe_float(
+            getattr(market, "max_leverage", self.config.get("MAX_LEVERAGE", 1.0))
+            if market is not None
+            else self.config.get("MAX_LEVERAGE", 1.0),
+            1.0,
+        )
         configured_max = min(
             max_exchange,
             self._safe_float(self.config.get("MAX_LEVERAGE", max_exchange), max_exchange),
@@ -586,7 +826,9 @@ class VaultBacktestSimulator:
             "stop_loss_pct": stop,
             "take_profit_pct": take,
             "risk_per_trade_pct": min(max(0.006 + confidence * 0.018, 0.006), 0.03),
-            "liquidation_buffer_pct": max(0.05, self._safe_float(self.config.get("MIN_LIQUIDATION_BUFFER_PCT", 0.015), 0.015) + (1.0 - confidence) * 0.12),
+            "liquidation_buffer_pct": max(
+                0.05, self._safe_float(self.config.get("MIN_LIQUIDATION_BUFFER_PCT", 0.015), 0.015) + (1.0 - confidence) * 0.12
+            ),
             "sizing_policy": "ml_volatility_risk_weighted",
         }
 
@@ -727,7 +969,9 @@ class VaultBacktestSimulator:
                 result = item.get("result") or {}
                 fees += self._safe_float(result.get("fees_paid")) * weight
                 trades.extend(result.get("trades") if isinstance(result.get("trades"), list) else [])
-        final_equity = self._safe_float(equity_curve[-1].get("equity"), request_input.allocation_usd) if equity_curve else request_input.allocation_usd
+        final_equity = (
+            self._safe_float(equity_curve[-1].get("equity"), request_input.allocation_usd) if equity_curve else request_input.allocation_usd
+        )
         total_return = (final_equity - request_input.allocation_usd) / max(request_input.allocation_usd, 1e-9)
         max_drawdown = min([self._safe_float(row.get("drawdown")) for row in drawdown_curve] or [0.0])
         wins = len([trade for trade in trades if self._safe_float(trade.get("pnl")) > 0])
@@ -796,7 +1040,9 @@ class VaultBacktestSimulator:
         allocation: float,
         trades: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        equity = [{"x": self._safe_float(row.get("timestamp")), "y": self._safe_float(row.get("equity"), allocation)} for row in equity_curve]
+        equity = [
+            {"x": self._safe_float(row.get("timestamp")), "y": self._safe_float(row.get("equity"), allocation)} for row in equity_curve
+        ]
         pnl = [{"x": row["x"], "y": row["y"] - allocation} for row in equity]
         growth = [{"x": row["x"], "y": (row["y"] - allocation) / max(allocation, 1e-9)} for row in equity]
         drawdown = [{"x": self._safe_float(row.get("timestamp")), "y": self._safe_float(row.get("drawdown"))} for row in drawdown_curve]
@@ -811,6 +1057,15 @@ class VaultBacktestSimulator:
             "profit_curve": self._downsample(pnl),
             "win_loss": {"wins": wins, "losses": losses, "flat": flat},
             "trade_distribution": self._trade_distribution(trades),
+            "trade_timeline": [
+                {
+                    "x": self._safe_float(trade.get("exit_timestamp"), self._safe_float(trade.get("timestamp"), index)),
+                    "asset": str(trade.get("symbol") or ""),
+                    "pnl": self._safe_float(trade.get("pnl")),
+                }
+                for index, trade in enumerate(trades[:80])
+                if isinstance(trade, dict)
+            ],
         }
 
     def _projection_chart(
@@ -889,8 +1144,7 @@ class VaultBacktestSimulator:
                 "stop_loss": {"price": price * (1 - volatility * 1.5)},
             },
             "fibonacci_time_zones": [
-                {"time": float(timestamp + 70 * 60 * ratio), "ratio": ratio}
-                for ratio in (0.236, 0.382, 0.5, 0.618, 0.786, 1.0)
+                {"time": float(timestamp + 70 * 60 * ratio), "ratio": ratio} for ratio in (0.236, 0.382, 0.5, 0.618, 0.786, 1.0)
             ],
         }
 
@@ -928,8 +1182,20 @@ class VaultBacktestSimulator:
             side_name = "bid" if side_index == 0 else "ask"
             cumulative = 0.0
             for level in (side or [])[:12]:
-                price = self._safe_float(level.get("px", level.get("price")) if isinstance(level, dict) else level[0] if isinstance(level, (list, tuple)) and level else 0.0)
-                size = self._safe_float(level.get("sz", level.get("size")) if isinstance(level, dict) else level[1] if isinstance(level, (list, tuple)) and len(level) > 1 else 0.0)
+                price = self._safe_float(
+                    level.get("px", level.get("price"))
+                    if isinstance(level, dict)
+                    else level[0]
+                    if isinstance(level, (list, tuple)) and level
+                    else 0.0
+                )
+                size = self._safe_float(
+                    level.get("sz", level.get("size"))
+                    if isinstance(level, dict)
+                    else level[1]
+                    if isinstance(level, (list, tuple)) and len(level) > 1
+                    else 0.0
+                )
                 cumulative += price * size
                 rows.append({"side": side_name, "price": price, "notional": cumulative})
         return rows
@@ -937,10 +1203,7 @@ class VaultBacktestSimulator:
     def _slippage_simulation(self, auto: dict[str, Any], profile: dict[str, Any]) -> list[dict[str, float]]:
         base = self._safe_float(auto.get("slippage_bps"))
         liquidity_drag = (1.0 - self._safe_float(profile.get("liquidity_quality"))) * 4.0
-        return [
-            {"size_pct": pct, "bps": base + liquidity_drag * (pct / 100.0) ** 1.25}
-            for pct in (10, 25, 50, 75, 100)
-        ]
+        return [{"size_pct": pct, "bps": base + liquidity_drag * (pct / 100.0) ** 1.25} for pct in (10, 25, 50, 75, 100)]
 
     def _trade_distribution(self, trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
         buckets = [

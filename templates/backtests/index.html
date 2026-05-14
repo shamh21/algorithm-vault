@@ -11,14 +11,13 @@
   class="backtest-pwa-shell"
   data-backtest-root
   data-symbols-url="{{ url_for('backtests.symbols_api') }}"
-  data-quote-url="{{ url_for('backtests.quote_api') }}"
   data-chart-lib-src="{{ url_for('static', filename='js/vendor/lightweight-charts.standalone.production.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}"
 >
   <header class="backtest-pwa-top">
     <div>
       <span class="card-kicker">Paper Vault</span>
       <h1>Backtests</h1>
-      <p>AI-native vault simulation across connected exchange conditions.</p>
+      <p>AI-native vault simulation across enabled exchange conditions.</p>
     </div>
     <div class="backtest-balance-pill">
       <span>Paper Cap</span>
@@ -35,13 +34,11 @@
     data-allocation-cap="{{ allocation_cap_usd }}"
   >
     {{ csrf_input()|safe }}
-    <input type="hidden" name="provider" value="global" data-backtest-provider>
-    <input type="hidden" name="symbol" value="BTC" data-backtest-symbol>
-    <input type="hidden" name="venue_symbol" value="BTC" data-backtest-venue-symbol>
-    <input type="hidden" name="timeframe" value="live" data-backtest-timeframe>
+    <input type="hidden" name="mode" value="all_assets">
+    <input type="hidden" name="include_leveraged_pairs_only" value="1">
     <input type="hidden" name="cycle_duration" value="1h10">
 
-    <section class="backtest-control-panel" aria-label="Vault simulation controls">
+    <section class="backtest-control-panel" aria-label="Vault cycle simulation controls">
       <div class="backtest-panel-head">
         <div>
           <span class="card-kicker">Simulation Engine</span>
@@ -50,34 +47,27 @@
         <span class="backtest-live-dot">Paper</span>
       </div>
 
-      <div class="backtest-symbol-module">
-        <label for="backtest-symbol-search">Asset Universe</label>
-        <div class="backtest-search-box">
-          <input id="backtest-symbol-search" type="search" placeholder="Search symbols, venues" autocomplete="off" inputmode="search" data-symbol-search>
+      <section class="backtest-auto-universe" aria-labelledby="backtest-auto-universe-title" data-auto-universe>
+        <div class="backtest-module-label" id="backtest-auto-universe-title">Auto Universe</div>
+        <div class="backtest-universe-card" data-universe-card>
+          <div>
+            <strong>All enabled leveraged pairs</strong>
+            <small data-universe-venues>Loading enabled venues…</small>
+          </div>
+          <span data-universe-ready>Checking</span>
         </div>
-        <div class="backtest-selected-asset" data-selected-asset>
-          {{ crypto_icon("BTC", "backtest-token-icon") }}
-          <span>
-            <strong>BTC</strong>
-            <small>Configured · USDT</small>
-          </span>
-          <em>Ready</em>
+        <div class="backtest-universe-facts" aria-label="Auto universe summary">
+          <div><span>Collateral</span><strong data-universe-collateral>USDC</strong></div>
+          <div><span>Eligible Pairs</span><strong data-universe-count>--</strong></div>
         </div>
-        <div class="backtest-symbol-list" role="listbox" aria-label="Supported assets" data-symbol-list>
-          <div class="backtest-skeleton-row"></div>
-          <div class="backtest-skeleton-row"></div>
-          <div class="backtest-skeleton-row"></div>
-        </div>
-      </div>
-
-      <div class="backtest-timeframe-module">
-        <span class="backtest-module-label">Timeframe</span>
-        <div class="backtest-timeframe-grid" role="radiogroup" aria-label="Backtest timeframe">
-          {% for timeframe in timeframes %}
-            <button type="button" class="{{ 'is-active' if loop.first else '' }}" data-timeframe-option="{{ timeframe.value }}">{{ timeframe.label }}</button>
-          {% endfor %}
-        </div>
-      </div>
+        <details class="backtest-eligible-pairs">
+          <summary>View eligible pairs</summary>
+          <div class="backtest-symbol-list" aria-label="Eligible leveraged pairs" data-symbol-list>
+            <div class="backtest-skeleton-row"></div>
+            <div class="backtest-skeleton-row"></div>
+          </div>
+        </details>
+      </section>
 
       <label class="backtest-allocation-module">Test Allocation Amount
         <div class="backtest-allocation-card">
@@ -94,10 +84,11 @@
             >
             <button type="button" data-backtest-max>MAX</button>
           </div>
-          <div class="backtest-conversion-preview" data-conversion-preview>
-            <span>Live conversion</span>
-            <strong>--</strong>
+          <div class="backtest-conversion-preview" data-allocation-preview>
+            <span>Simulation allocation</span>
+            <strong>${{ "%.0f"|format(allocation_default_usd) }} USDC</strong>
           </div>
+          <small class="backtest-help-copy">Simulation allocation distributed across the auto universe.</small>
           <input type="range" min="0" max="{{ allocation_cap_usd }}" value="{{ allocation_default_usd }}" step="1" aria-label="Allocation amount" data-allocation-slider>
         </div>
       </label>
@@ -106,9 +97,9 @@
         <div class="backtest-module-label">Vault Cycle</div>
         <div class="backtest-cycle-card is-active">
           <span>1H10</span>
-          <strong>60:00 MIN</strong>
-          <small>AI optimized high-frequency vault cycle</small>
-          <em data-cycle-summary>Ensemble, risk, liquidity, and execution models auto-calibrated.</em>
+          <strong>1h 10m duration</strong>
+          <small>AI-optimized multi-asset vault cycle</small>
+          <em data-cycle-summary>Runs across eligible leveraged pairs from enabled exchanges.</em>
         </div>
       </section>
 
@@ -122,24 +113,25 @@
         </div>
       </section>
 
-      <button type="submit" class="primary backtest-run-button" data-backtest-submit data-loading-label="Simulating...">Run Vault Simulation</button>
+      <button type="submit" class="primary backtest-run-button" data-backtest-submit data-loading-label="Running vault cycle...">Run Vault Cycle</button>
       <div class="backtest-form-status" data-backtest-status aria-live="polite"></div>
     </section>
 
     <section class="backtest-result-panel" data-backtest-dashboard hidden>
       <div class="backtest-result-head">
         <div>
-          <span class="card-kicker">Latest Simulation</span>
-          <h2 data-backtest-title>Vault Ensemble</h2>
+          <span class="card-kicker">Latest Vault Cycle Results</span>
+          <h2 data-backtest-title>Portfolio Vault Cycle</h2>
+          <small class="backtest-result-note">Historical simulation results from the completed vault cycle.</small>
         </div>
-        <span class="backtest-result-chip" data-backtest-summary>1H10</span>
+        <span class="backtest-result-chip" data-backtest-summary>All enabled pairs / 1H10</span>
       </div>
 
       <div class="backtest-metric-strip">
         <div><span>ROI</span><strong data-metric="roi">0.00%</strong></div>
         <div><span>PnL</span><strong data-metric="pnl">$0.00</strong></div>
         <div><span>Win Rate</span><strong data-metric="win_rate">0.00%</strong></div>
-        <div><span>Drawdown</span><strong data-metric="max_drawdown">0.00%</strong></div>
+        <div><span>Max Drawdown</span><strong data-metric="max_drawdown">0.00%</strong></div>
         <div><span>Trades</span><strong data-metric="trades">0</strong></div>
         <div><span>Fees</span><strong data-metric="fees">$0.00</strong></div>
       </div>
@@ -147,19 +139,19 @@
       <div class="backtest-chart-panel">
         <div class="backtest-chart-toolbar">
           <div>
-            <span class="card-kicker">Projection</span>
-            <strong data-chart-title>Market + AI Overlay</strong>
+            <span class="card-kicker">Portfolio Projection</span>
+            <strong data-chart-title>Portfolio Equity Curve</strong>
           </div>
-          <div class="backtest-chart-tabs" role="tablist" aria-label="Simulation chart mode">
-            <button type="button" class="is-active" data-chart-mode="market">Market</button>
-            <button type="button" data-chart-mode="equity">Equity</button>
+          <div class="backtest-chart-tabs" role="tablist" aria-label="Portfolio simulation chart mode">
+            <button type="button" class="is-active" data-chart-mode="equity">Equity</button>
             <button type="button" data-chart-mode="pnl">PnL</button>
-            <button type="button" data-chart-mode="drawdown">Risk</button>
+            <button type="button" data-chart-mode="contribution">Assets</button>
+            <button type="button" data-chart-mode="timeline">Timeline</button>
           </div>
         </div>
         <div class="backtest-chart-stage">
           <div class="backtest-lightweight-host" data-backtest-chart></div>
-          <canvas data-backtest-overlay aria-label="Projection and risk overlays"></canvas>
+          <canvas data-backtest-overlay aria-label="Portfolio equity, contribution, exposure, and trade timeline summaries"></canvas>
         </div>
       </div>
 
@@ -183,17 +175,17 @@
 
       <section class="backtest-strategy-panel">
         <div class="backtest-panel-mini-head">
-          <span>Strategy Ensemble</span>
+          <span>Asset Contribution</span>
           <strong data-active-strategies>--</strong>
         </div>
-        <div class="backtest-strategy-list" data-strategy-list></div>
+        <div class="backtest-asset-breakdown" data-asset-breakdown></div>
       </section>
     </section>
 
     <section class="backtest-empty-state" data-backtest-empty {% if latest_payload %}hidden{% endif %}>
       <span class="panic-empty-mark" aria-hidden="true">AV</span>
-      <strong>Ready to simulate</strong>
-      <small>Select an asset, allocation, and timeframe to run the vault engine.</small>
+      <strong>Ready to run a vault cycle</strong>
+      <small>Enable an exchange with leveraged pairs to run a portfolio vault cycle.</small>
     </section>
   </form>
 </section>

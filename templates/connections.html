@@ -1,16 +1,12 @@
 {% extends "base.html" %}
+{% from "partials/_ui.html" import page_header, empty_state %}
 
 {% block title %}Trading Connections · Algorithm Vault{% endblock %}
 
 {% block content %}
 <section class="settings-shell connections-shell">
-  <header class="settings-compact-header connections-header">
-    <div>
-      <span class="card-kicker">Live Trading</span>
-      <h1>Providers</h1>
-    </div>
-    <a class="settings-icon-link" href="{{ url_for('settings.index') }}">Settings</a>
-  </header>
+  {{ page_header('Settings', 'Providers', 'Connect, verify, and enable supported providers without exposing credentials in the browser.', 'Credentials masked', 'success') }}
+  <div class="connections-header-action"><a class="settings-icon-link" href="{{ url_for('settings.index') }}">Settings</a></div>
 
   <section class="connection-summary-bar" aria-label="Provider summary">
     <div>
@@ -140,7 +136,7 @@
         {% if selected_connection.last_verification_error %}
           <div class="credential-note danger-note">
             <strong>Action needed</strong>
-            <span>{{ selected_connection.last_verification_error }}</span>
+            <span>Verification failed. Review the provider credentials, permissions, and network availability.</span>
           </div>
         {% endif %}
 
@@ -148,9 +144,8 @@
           <div class="provider-health-panel {{ 'is-ready' if selected_connection_health.get('can_trade') else 'is-blocked' }}">
             <strong>{{ "Online" if selected_connection_health.get("can_trade") else "Blocked" }}</strong>
             <span>
-              {{ selected_connection_health.get("last_checked_at", "not checked") }}
-              {% if selected_connection_health.get("client_ip") %} · {{ selected_connection_health.get("client_ip") }}{% endif %}
-              {% if selected_connection_health.get("failure_reason") %} · {{ selected_connection_health.get("failure_reason") }}{% endif %}
+              Last checked {{ selected_connection_health.get("last_checked_at", "not checked") }}
+              {% if selected_connection_health.get("failure_reason") %} · Action needed{% endif %}
             </span>
           </div>
         {% endif %}

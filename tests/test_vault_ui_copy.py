@@ -92,3 +92,36 @@ def test_cycle_detail_forecast_copy_is_probability_oriented() -> None:
         "investment advice",
     ]:
         assert misleading_copy not in source.lower()
+
+
+def test_vault_provider_ui_supports_safe_geo_and_auto_funded_copy() -> None:
+    source = Path("static/js/vault.js").read_text()
+
+    assert "ready_auto_funded" in source
+    assert "Auto-funded" in source
+    assert "geo_restricted" in source
+    assert "Provider restricted" in source
+    assert "metricLabel" in source
+    assert "98.84.12.34" not in source
+
+
+def test_vault_assets_use_explicit_readiness_cache_busters() -> None:
+    vault_source = Path("templates/vault.html").read_text()
+    base_source = Path("templates/base.html").read_text()
+    sw_source = Path("static/js/sw.js").read_text()
+
+    assert "vault-readiness-3" in vault_source
+    assert "algvault-command-center-dark" in base_source
+    assert "algvault-v8-command-center-dark" in sw_source
+
+
+def test_vault_template_server_renders_provider_readiness_fallbacks() -> None:
+    source = Path("templates/vault.html").read_text()
+
+    assert "preview_providers" in source
+    assert "data-provider-status>{{ status_label }}" in source
+    assert "data-provider-score>{{ metric_label }}" in source
+    assert "data-provider-allocation>{{ allocation_label }}" in source
+    assert "is-auto-funded" in source
+    assert "is-restricted" in source
+    assert "funding_detail" in source

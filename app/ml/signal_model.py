@@ -19,7 +19,6 @@ from .features import MLFeatureFactory
 from .offline_ranker import OfflineRanker
 from .online_ranker import OnlineRanker, extract_features
 
-
 FEATURE_SCHEMA_VERSION = "ml_signal_v1"
 ACTION_LABELS = ("sell", "hold", "buy")
 
@@ -392,6 +391,8 @@ class MLSignalModel:
             "hold_probability": probability_decision.get("hold_probability"),
             "directional_confidence": probability_decision.get("directional_confidence"),
             "directional_margin": probability_decision.get("directional_margin"),
+            "confidence_kind": probability_decision.get("confidence_kind"),
+            "confidence_calibrated": bool(probability_decision.get("confidence_calibrated", False)),
             "suggested_stop_loss_pct": stop_pct,
             "suggested_take_profit_pct": take_pct,
             "sizing_score": sizing_score,
@@ -581,6 +582,7 @@ class MLSignalModel:
             "5m": 5,
             "15m": 15,
             "1h": 60,
+            "1h10": 70,
             "4h": 240,
             "24h": 1440,
             "1d": 1440,
@@ -754,6 +756,8 @@ class MLSignalModel:
                 "hold_probability": hold_probability,
                 "directional_confidence": 0.0,
                 "directional_margin": abs(buy_probability - sell_probability),
+                "confidence_kind": "softmax_score",
+                "confidence_calibrated": False,
                 "blockers": [],
             }
 
@@ -791,6 +795,8 @@ class MLSignalModel:
                 "hold_probability": hold_probability,
                 "directional_confidence": directional_confidence,
                 "directional_margin": directional_margin,
+                "confidence_kind": "softmax_directional_confidence",
+                "confidence_calibrated": False,
                 "blockers": blockers,
             }
         return {
@@ -802,6 +808,8 @@ class MLSignalModel:
             "hold_probability": hold_probability,
             "directional_confidence": directional_confidence,
             "directional_margin": directional_margin,
+            "confidence_kind": "softmax_directional_confidence",
+            "confidence_calibrated": False,
             "blockers": [],
         }
 

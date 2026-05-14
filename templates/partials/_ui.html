@@ -1,0 +1,31 @@
+{% macro page_header(kicker, title, body='', status_label='', status_tone='neutral') -%}
+<header class="av-page-header">
+  <div>
+    <span class="card-kicker">{{ kicker }}</span>
+    <h1>{{ title }}</h1>
+    {% if body %}<p>{{ body }}</p>{% endif %}
+  </div>
+  {% if status_label %}
+    <span class="av-status-chip av-status-{{ status_tone }}">
+      <span aria-hidden="true"></span>{{ status_label }}
+    </span>
+  {% endif %}
+</header>
+{%- endmacro %}
+
+{% macro metric_card(label, value, detail='', tone='neutral') -%}
+<article class="av-metric-card av-metric-{{ tone }}">
+  <span>{{ label }}</span>
+  <strong>{{ value }}</strong>
+  {% if detail %}<small>{{ detail }}</small>{% endif %}
+</article>
+{%- endmacro %}
+
+{% macro empty_state(title, body='', action_href='', action_label='') -%}
+<div class="av-empty-state" role="status">
+  <span class="av-empty-icon" aria-hidden="true">◇</span>
+  <strong>{{ title }}</strong>
+  {% if body %}<p>{{ body }}</p>{% endif %}
+  {% if action_href and action_label %}<a class="button-link secondary" href="{{ action_href }}">{{ action_label }}</a>{% endif %}
+</div>
+{%- endmacro %}

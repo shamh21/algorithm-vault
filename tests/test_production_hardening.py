@@ -8,7 +8,9 @@ from pathlib import Path
 import pytest
 
 from app import create_app
+from app.auth import password_hash, password_matches
 from app.extensions import db
+from app.models import User
 
 
 def test_health_and_readiness_are_public_and_database_backed(app) -> None:
@@ -47,6 +49,19 @@ def test_static_cache_headers_distinguish_assets_from_pwa_control_files(app) -> 
     assert root_worker.headers["Service-Worker-Allowed"] == "/"
     assert icon.status_code == 200
     assert "immutable" in icon.headers["Cache-Control"]
+
+
+def test_dynamic_auth_responses_are_not_edge_cached(app) -> None:
+    client = app.test_client()
+
+    login = client.get("/login")
+    protected_redirect = client.get("/", follow_redirects=False)
+
+    for response in (login, protected_redirect):
+        assert "no-store" in response.headers["Cache-Control"]
+        assert "private" in response.headers["Cache-Control"]
+        assert response.headers["Pragma"] == "no-cache"
+        assert response.headers["Expires"] == "0"
 
 
 def test_service_worker_registers_with_root_scope(app) -> None:
@@ -234,6 +249,55 @@ def test_rate_limit_can_protect_login_when_enabled(tmp_path) -> None:
         assert second.headers["Retry-After"]
         db.session.remove()
         db.drop_all()
+
+
+def test_login_post_recovers_from_missing_anonymous_csrf_session(tmp_path) -> None:
+    app = create_app(
+        {
+            "TESTING": True,
+            "SQLALCHEMY_DATABASE_URI": f"sqlite:///{tmp_path / 'csrf-login.db'}",
+            "SECRET_KEY": "test-secret-key-12345678901234567890",
+            "WTF_CSRF_ENABLED": True,
+        }
+    )
+    with app.app_context():
+        client = app.test_client()
+
+        response = client.post("/login", data={"username": "missing", "password": "bad"}, follow_redirects=False)
+
+        assert response.status_code == 302
+        assert response.location == "/login"
+        db.session.remove()
+        db.drop_all()
+
+
+def test_admin_api_sign_in_recovers_from_missing_anonymous_csrf_session(tmp_path) -> None:
+    app = create_app(
+        {
+            "TESTING": True,
+            "SQLALCHEMY_DATABASE_URI": f"sqlite:///{tmp_path / 'csrf-admin-login.db'}",
+            "SECRET_KEY": "test-secret-key-12345678901234567890",
+            "WTF_CSRF_ENABLED": True,
+        }
+    )
+    with app.app_context():
+        client = app.test_client()
+
+        response = client.post("/admin/api/sign-in", json={"username": "missing", "password": "bad", "totpCode": "000000"})
+
+        assert response.status_code == 401
+        assert response.get_json()["code"] == "admin_sign_in_failed"
+        db.session.remove()
+        db.drop_all()
+
+
+def test_malformed_password_hash_fails_closed_without_application_error(app) -> None:
+    user = User(username="broken-hash", password_hash=password_hash("password123"))
+    db.session.add(user)
+    db.session.commit()
+    user.password_hash = None  # type: ignore[assignment]
+
+    assert password_matches(user, "password123") is False
 
 
 def test_rate_limit_can_protect_admin_pwa_sign_in_when_enabled(tmp_path) -> None:

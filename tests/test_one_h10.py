@@ -7,17 +7,36 @@ from typing import Any
 import pyotp
 import pytest
 
+import app.routes.consumer as consumer_module
+import app.services.risk_engine as risk_engine_module
 from app.auth import encrypt_totp_secret, password_hash
 from app.extensions import db
 from app.ml.decision_engine import MLDecisionEngine
 from app.ml.online_ranker import ONE_H10_HORIZON, OnlineRanker, extract_features, horizon_from_context
-from app.models import LeveragedMarket, LeveragedMarketFeature, MLModelState, MLOfflineModel, Order, Setting, StrategyRun, TradingConnection, User, VaultAllocationLeg, VaultCycle, WalletBalance
-import app.routes.consumer as consumer_module
-from app.routes.consumer import _cycle_summary, _one_h10_live_context, _one_h10_ml_readiness, _refresh_one_h10_cycle_ml_state, _resume_one_h10_active_runs
+from app.models import (
+    LeveragedMarket,
+    LeveragedMarketFeature,
+    MLModelState,
+    MLOfflineModel,
+    Order,
+    Setting,
+    StrategyRun,
+    TradingConnection,
+    User,
+    VaultAllocationLeg,
+    VaultCycle,
+    WalletBalance,
+)
+from app.routes.consumer import (
+    _cycle_summary,
+    _one_h10_live_context,
+    _one_h10_ml_readiness,
+    _refresh_one_h10_cycle_ml_state,
+    _resume_one_h10_active_runs,
+)
 from app.services.hyperliquid_client import ClientSnapshot
 from app.services.order_manager import OrderIntent
 from app.strategies.base import Signal
-import app.services.risk_engine as risk_engine_module
 
 
 def _create_user(username: str = "oneh10") -> tuple[User, str]:
@@ -671,9 +690,16 @@ def test_one_h10_forecast_service_uses_1h10_namespace_and_bootstrap_blocker(app)
     assert forecast["ml_namespace"] == "1h10"
     assert forecast["ml_horizon"] == "1h10"
     assert forecast["objective"] == "one_h10"
+    assert forecast["horizon_seconds"] == 70 * 60
     assert forecast["predicted_side"] in {"buy", "sell"}
     assert forecast["suggested_stop_loss_pct"] > 0
     assert forecast["suggested_take_profit_pct"] > 0
+    assert forecast["estimated_fee_bps"] >= 0
+    assert forecast["estimated_slippage_bps"] >= 0
+    assert forecast["risk_reward"] >= app.config["ONE_H10_MIN_RISK_REWARD"]
+    assert forecast["confidence_kind"] == "heuristic_confidence"
+    assert forecast["confidence_calibrated"] is False
+    assert forecast["decision_reason_code"]
     assert "ml_not_ready" in forecast["blockers"]
     assert "features_stale" in forecast["blockers"]
     assert "missing_fibonacci_features" in forecast["blockers"]
@@ -1722,6 +1748,168 @@ def test_one_h10_forecast_signal_blocks_when_promoted_ml_is_required(app) -> Non
     assert selected.metadata["no_trade_reason"] == "one_h10_promoted_ml_not_ready"
 
 
+def test_one_h10_forecast_signal_holds_on_cost_quality_blocker_without_fallback(app) -> None:
+    app.config["ONE_H10_REQUIRE_PROMOTED_ML"] = False
+    app.config["ONE_H10_BOOTSTRAP_LIVE_ENABLED"] = True
+    manager = app.extensions["services"]["strategy_manager"]
+    run = StrategyRun(strategy_name="scalping", symbol="DOGE", timeframe="1m", mode="live")
+    run.parameters = {
+        "one_h10_vault": True,
+        "ml_horizon": "1h10",
+        "one_h10_forecast": {
+            "ml_ready": True,
+            "ml_horizon": "1h10",
+            "predicted_side": "buy",
+            "confidence": 0.8,
+            "position_fraction": 0.6,
+            "gross_expected_return_bps": 20.0,
+            "expected_return_bps": 1.0,
+            "net_expected_return_bps": 1.0,
+            "cost_drag_bps": 30.0,
+            "estimated_fee_bps": 5.0,
+            "estimated_slippage_bps": 15.0,
+            "spread_bps": 10.0,
+            "execution_quality": 0.4,
+            "expected_net_edge_passed": False,
+            "risk_reward": 2.0,
+            "suggested_notional_usd": 10.0,
+            "suggested_stop_loss_pct": 0.01,
+            "suggested_take_profit_pct": 0.02,
+            "blockers": ["low_edge_after_costs"],
+        },
+    }
+    base = Signal("buy", "base signal should not execute", "1m", 99.0, 102.0, 0.5, {})
+
+    selected = manager._one_h10_forecast_signal(run, base, [{"close": 100.0}])
+
+    assert selected.action == "hold"
+    assert selected.position_fraction == 0.0
+    assert selected.metadata["no_trade_reason"].startswith("one_h10_forecast_blocked:")
+    assert "low_edge_after_costs" in selected.metadata["forecast_decision_blockers"]
+    assert selected.metadata["decision_reason_code"] == "BELOW_EDGE_THRESHOLD"
+
+
+def test_one_h10_risk_rejects_low_edge_forecast_before_live_order(app) -> None:
+    _confirm_one_h10_live(app)
+    app.config["ONE_H10_REQUIRE_PROMOTED_ML"] = False
+    app.config["ONE_H10_BOOTSTRAP_LIVE_ENABLED"] = True
+    forecast = {
+        "ml_ready": True,
+        "ml_horizon": "1h10",
+        "predicted_side": "buy",
+        "confidence": 0.8,
+        "gross_expected_return_bps": 12.0,
+        "expected_return_bps": 1.0,
+        "net_expected_return_bps": 1.0,
+        "cost_drag_bps": 10.0,
+        "estimated_fee_bps": 5.0,
+        "estimated_slippage_bps": 3.0,
+        "spread_bps": 1.0,
+        "execution_quality": 0.9,
+        "expected_net_edge_passed": False,
+        "risk_reward": 2.0,
+        "suggested_notional_usd": 25.0,
+        "suggested_stop_loss_pct": 0.01,
+        "suggested_take_profit_pct": 0.02,
+        "blockers": [],
+    }
+    intent = _one_h10_intent(one_h10_forecast=forecast)
+
+    decision = app.extensions["services"]["risk_engine"].evaluate(intent, market_price=100.0, has_trading_access=True)
+
+    assert decision.approved is False
+    assert decision.rule_name == "one_h10_signal_quality_blocked"
+    assert "low_edge_after_costs" in decision.details["blockers"]
+    assert decision.details["decision_reason_code"] == "BELOW_EDGE_THRESHOLD"
+
+
+def test_one_h10_signal_model_forward_steps_use_seventy_minute_horizon() -> None:
+    from app.ml.signal_model import MLSignalModel
+
+    assert MLSignalModel._forward_steps("1h10", "1m") == 70
+    assert MLSignalModel._forward_steps("1h10", "5m") == 14
+    assert MLSignalModel._forward_steps("1h10", "15m") == 5
+
+
+def test_one_h10_backtest_ml_first_uses_explicit_horizon(app) -> None:
+    from app.backtesting.engine import BacktestConfig
+
+    class CaptureDecisionEngine:
+        horizon = ""
+
+        def decision(self, family: str, context: dict[str, Any], *, horizon: str = "1h", candles=None) -> dict[str, Any]:
+            self.horizon = horizon
+            return {"ready": False, "action": "hold", "blockers": ["test_blocker"], "raw": {}}
+
+    engine = app.extensions["services"]["backtest_engine"]
+    capture = CaptureDecisionEngine()
+    engine.ml_decision_engine = capture
+    app.config["ML_FIRST_STRATEGIES_ENABLED"] = True
+    config = BacktestConfig(
+        strategy_name="scalping",
+        symbol="BTC",
+        timeframe="1m",
+        mode="testnet",
+        initial_balance=1000.0,
+        fee_bps=5.0,
+        slippage_bps=8.0,
+        stop_loss_pct=0.01,
+        take_profit_pct=0.02,
+        position_size_fraction=0.1,
+        parameters={"one_h10_vault": True, "vault_cycle_duration": "1h10", "lock_duration_hours": 2},
+    )
+    base = Signal("buy", "base", "1m", 99.0, 102.0, 0.2, {})
+
+    selected = engine._ml_first_signal(config, base, _candles(40), {"trend_strength": 1.0})
+
+    assert selected.action == "hold"
+    assert capture.horizon == "1h10"
+
+
+def test_one_h10_evaluation_report_includes_cost_metrics_and_small_sample_warning(app) -> None:
+    from app.services.one_h10_evaluation import build_one_h10_evaluation_report
+
+    class FakeEngine:
+        captured = None
+
+        def run(self, backtest, candles=None):
+            self.captured = backtest
+            return {
+                "total_return": 0.01,
+                "net_return_after_costs": 0.008,
+                "sharpe_like": 0.4,
+                "sortino_like": 0.3,
+                "max_drawdown": 0.02,
+                "win_rate": 0.5,
+                "profit_factor": 1.2,
+                "average_return_per_trade": 0.002,
+                "avg_loss": 0.001,
+                "trade_count": 1,
+                "fees_paid": 0.5,
+                "funding_cost_estimate": 0.0,
+                "cost_drag_bps": 13.0,
+                "average_trade_duration_minutes": 12.0,
+                "no_trade_reason": "",
+                "trades": [{"direction": "long", "duration_minutes": 12.0, "return": 0.002}],
+            }
+
+    fake = FakeEngine()
+    report = build_one_h10_evaluation_report(
+        app.config,
+        fake,
+        symbol="btc",
+        timeframe="1m",
+        candles=[{"timestamp": 1}, {"timestamp": 2}],
+    )
+
+    assert report["horizon_seconds"] == 70 * 60
+    assert report["config"]["fee_bps"] == app.config["FEE_BPS"]
+    assert report["baseline"]["fees_paid"] == 0.5
+    assert report["baseline"]["long_trade_count"] == 1
+    assert "sample_size_below_threshold" in report["warnings"]
+    assert fake.captured.parameters["ml_horizon"] == "1h10"
+
+
 def test_one_h10_market_data_failure_backs_off_without_limiting_cycle(app) -> None:
     user, _ = _create_user("mdbackoff")
     cycle = VaultCycle(
@@ -1925,6 +2113,16 @@ def _one_h10_intent(**metadata: Any) -> OrderIntent:
             "source": "promoted_1h10_ml",
             "predicted_side": "buy",
             "confidence": 0.8,
+            "gross_expected_return_bps": 40.0,
+            "expected_return_bps": 24.0,
+            "net_expected_return_bps": 24.0,
+            "cost_drag_bps": 10.0,
+            "estimated_fee_bps": 5.0,
+            "estimated_slippage_bps": 2.0,
+            "spread_bps": 1.0,
+            "execution_quality": 0.9,
+            "expected_net_edge_passed": True,
+            "risk_reward": 2.0,
             "suggested_leverage": 1.0,
             "suggested_notional_usd": 50.0,
             "suggested_stop_loss_pct": 0.01,

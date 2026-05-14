@@ -114,6 +114,81 @@ class WalletSummaryService:
             }
         return self.summary_for_user(user).as_dict()
 
+    def account_funds_readiness(
+        self,
+        *,
+        username: str,
+        user_id: int | None = None,
+        expected_snapshot: dict[str, Any] | None = None,
+        require_expected_snapshot: bool = True,
+        tolerance: float = 0.00000001,
+    ) -> dict[str, Any]:
+        """Check that a protected account exists and retains expected local wallet funds."""
+
+        profile = self.profile_wallet_check(username=username, user_id=user_id)
+        blockers: list[str] = []
+        comparisons: list[dict[str, Any]] = []
+        warnings: list[str] = []
+        if not bool(profile.get("exists", False)):
+            blockers.append("profile_not_found")
+            return {
+                "ready": False,
+                "username": username,
+                "user_id": user_id,
+                "blockers": blockers,
+                "warnings": warnings,
+                "profile": profile,
+                "comparisons": comparisons,
+            }
+
+        wallet = profile.get("wallet") if isinstance(profile.get("wallet"), dict) else {}
+        current_balances = _balance_index(wallet.get("balances", []))
+        funded_assets = [asset for asset, balance in current_balances.items() if balance["total_balance"] > tolerance]
+        if not funded_assets:
+            blockers.append("wallet_has_no_funds")
+
+        if expected_snapshot is None:
+            if require_expected_snapshot:
+                blockers.append("expected_wallet_snapshot_required")
+        else:
+            expected_wallet = expected_snapshot.get("wallet") if isinstance(expected_snapshot.get("wallet"), dict) else expected_snapshot
+            expected_balances = _balance_index(expected_wallet.get("balances", []) if isinstance(expected_wallet, dict) else [])
+            if not expected_balances:
+                blockers.append("expected_wallet_snapshot_has_no_balances")
+            for asset, expected in sorted(expected_balances.items()):
+                current = current_balances.get(asset, _empty_balance(asset))
+                total_ok = current["total_balance"] + tolerance >= expected["total_balance"]
+                available_ok = current["available_balance"] + tolerance >= expected["available_balance"]
+                locked_ok = current["locked_balance"] + tolerance >= expected["locked_balance"]
+                comparison = {
+                    "asset": asset,
+                    "current": current,
+                    "expected_minimum": expected,
+                    "total_ok": total_ok,
+                    "available_ok": available_ok,
+                    "locked_ok": locked_ok,
+                }
+                comparisons.append(comparison)
+                if not total_ok:
+                    blockers.append(f"balance_below_expected:{asset}")
+                elif not available_ok or not locked_ok:
+                    warnings.append(f"balance_distribution_changed:{asset}")
+            expected_portfolio = _safe_float(expected_wallet.get("portfolio_total_usd") if isinstance(expected_wallet, dict) else None)
+            current_portfolio = _safe_float(wallet.get("portfolio_total_usd"))
+            if expected_portfolio > tolerance and current_portfolio + tolerance < expected_portfolio:
+                blockers.append("portfolio_total_usd_below_expected")
+
+        return {
+            "ready": not blockers,
+            "username": username,
+            "user_id": profile.get("user", {}).get("id") if isinstance(profile.get("user"), dict) else user_id,
+            "blockers": blockers,
+            "warnings": warnings,
+            "funded_assets": sorted(funded_assets),
+            "profile": profile,
+            "comparisons": comparisons,
+        }
+
     def summary_for_user(self, user: User, *, balances: list[WalletBalance] | None = None) -> ProfileWalletSummary:
         balance_views = self._balance_views(user.id, balances=balances)
         return ProfileWalletSummary(
@@ -332,6 +407,40 @@ class WalletSummaryService:
 
 def _exchange_balance_snapshot_key(user_id: int) -> str:
     return f"exchange_balance_snapshot:{int(user_id)}"
+
+
+def _balance_index(rows: Any) -> dict[str, dict[str, float | str]]:
+    if not isinstance(rows, list):
+        return {}
+    indexed: dict[str, dict[str, float | str]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        asset = str(row.get("asset") or "").strip().upper()
+        if not asset:
+            continue
+        available = _safe_float(row.get("available_balance"))
+        locked = _safe_float(row.get("locked_balance"))
+        explicit_total = row.get("total_balance")
+        total = _safe_float(explicit_total) if explicit_total is not None else available + locked
+        indexed[asset] = {
+            "asset": asset,
+            "available_balance": available,
+            "locked_balance": locked,
+            "total_balance": total,
+            "estimated_usd_value": _safe_float(row.get("estimated_usd_value")),
+        }
+    return indexed
+
+
+def _empty_balance(asset: str) -> dict[str, float | str]:
+    return {
+        "asset": asset,
+        "available_balance": 0.0,
+        "locked_balance": 0.0,
+        "total_balance": 0.0,
+        "estimated_usd_value": 0.0,
+    }
 
 
 def _safe_float(value: Any) -> float:

@@ -162,12 +162,28 @@
   }
 
   function statusLabel(provider) {
-    const status = provider.status || (provider.ready ? "ready" : "blocked");
-    if (status === "ready") return "Ready";
+    const status = provider.status || provider.readiness_state || (provider.ready ? "ready" : "blocked");
+    if (status === "ready" || status === "ready_auto_funded") return "Ready";
+    if (status === "geo_restricted") return "Provider restricted";
+    if (status === "needs_wallet") return "Wallet needed";
+    if (status === "needs_api_credentials") return "Credentials needed";
+    if (status === "needs_verification") return "Verify";
+    if (status === "provider_unavailable") return "Provider unavailable";
+    if (status === "credential_error") return "Credential error";
+    if (status === "transfer_failed") return "Transfer failed";
     if (status === "disabled") return "Disabled";
     if (status === "not_connected") return "Connect";
-    if (status === "blocked") return "Blocked";
+    if (status === "blocked") return "Action needed";
     return "Checking";
+  }
+
+  function metricLabel(provider, status) {
+    if (status === "ready_auto_funded" || provider.funding_status === "auto_funded") return "Auto-funded";
+    if (status === "geo_restricted") return "Recheck provider";
+    if (status === "needs_verification") return "Verify";
+    if (status === "needs_wallet" || status === "needs_api_credentials" || status === "credential_error") return "Action needed";
+    if (status === "ready") return `${Math.round(numberValue(provider.score, numberValue(provider.routing_score, 0) * 100))} score`;
+    return statusLabel({ ...provider, status });
   }
 
   function selectedAllocationOption(form) {
@@ -268,22 +284,24 @@
     if (!card) return;
     const input = card.querySelector("[data-provider-toggle]");
     const enabled = input?.checked ?? provider.enabled;
-    const ready = Boolean(provider.ready) || provider.status === "ready";
-    const status = enabled ? (ready ? "ready" : provider.status || "blocked") : "disabled";
+    const ready = Boolean(provider.ready) || provider.status === "ready" || provider.status === "ready_auto_funded";
+    const status = enabled ? (ready ? (provider.status || "ready") : provider.status || provider.readiness_state || "blocked") : "disabled";
     const topBlocker = Array.isArray(provider.blockers) ? provider.blockers.find((item) => item?.severity !== "info") || provider.blockers[0] : null;
     const blockerEl = card.querySelector("[data-provider-blocker]");
 
     card.classList.toggle("is-enabled", Boolean(enabled));
-    card.classList.toggle("is-ready", status === "ready");
-    card.classList.toggle("is-blocked", status === "blocked" || status === "not_connected");
+    card.classList.toggle("is-ready", status === "ready" || status === "ready_auto_funded");
+    card.classList.toggle("is-auto-funded", status === "ready_auto_funded" || provider.funding_status === "auto_funded");
+    card.classList.toggle("is-restricted", status === "geo_restricted");
+    card.classList.toggle("is-blocked", status === "blocked" || status === "not_connected" || status === "provider_unavailable" || status === "credential_error" || status === "transfer_failed");
     card.classList.toggle("is-disabled", !enabled);
-    card.querySelector("[data-provider-status]").textContent = statusLabel({ ...provider, status });
-    card.querySelector("[data-provider-score]").textContent =
-      status === "ready" ? `${Math.round(numberValue(provider.score, numberValue(provider.routing_score, 0) * 100))} score` : statusLabel({ ...provider, status });
+    const safeStatus = statusLabel({ ...provider, status });
+    card.querySelector("[data-provider-status]").textContent = safeStatus;
+    card.querySelector("[data-provider-score]").textContent = metricLabel(provider, status);
     card.querySelector("[data-provider-allocation]").textContent =
       numberValue(provider.allocation_pct, 0) > 0 ? formatPercent(provider.allocation_pct) : formatPercent(provider.allocation_weight);
     if (blockerEl) {
-      const text = blockerText(topBlocker);
+      const text = blockerText(topBlocker) || provider.funding_detail || provider.funding_label || "";
       blockerEl.textContent = text;
       blockerEl.hidden = !text || status === "ready" || !enabled;
     }
