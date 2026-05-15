@@ -51,6 +51,19 @@ def test_static_cache_headers_distinguish_assets_from_pwa_control_files(app) -> 
     assert "immutable" in icon.headers["Cache-Control"]
 
 
+def test_vercel_static_assets_are_allowlisted_from_committed_static_tree() -> None:
+    config = json.loads(Path("vercel.json").read_text(encoding="utf-8"))
+    builds = config["builds"]
+    rewrites = {item["source"]: item["destination"] for item in config["rewrites"]}
+
+    assert {"src": "static/**/*", "use": "@vercel/static"} in builds
+    assert not any(str(item["src"]).startswith("public/") for item in builds)
+    assert rewrites["/sw.js"] == "/static/js/sw.js"
+    assert rewrites["/icons/(.*)"] == "/static/icons/$1"
+    assert rewrites["/manifest.json"] == "/static/manifest.json"
+    assert all(not destination.startswith("/public/") for destination in rewrites.values())
+
+
 def test_dynamic_auth_responses_are_not_edge_cached(app) -> None:
     client = app.test_client()
 

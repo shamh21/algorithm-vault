@@ -1,10 +1,9 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "version": 2,
-  "buildCommand": "bash scripts/prepare_vercel_static.sh",
   "builds": [
     {
-      "src": "public/**/*",
+      "src": "static/**/*",
       "use": "@vercel/static"
     },
     {
@@ -82,23 +81,23 @@
   "rewrites": [
     {
       "source": "/sw.js",
-      "destination": "/public/static/js/sw.js"
+      "destination": "/static/js/sw.js"
     },
     {
       "source": "/static/(.*)",
-      "destination": "/public/static/$1"
+      "destination": "/static/$1"
     },
     {
       "source": "/icons/(.*)",
-      "destination": "/public/icons/$1"
+      "destination": "/static/icons/$1"
     },
     {
       "source": "/manifest.json",
-      "destination": "/public/manifest.json"
+      "destination": "/static/manifest.json"
     },
     {
       "source": "/manifest.webmanifest",
-      "destination": "/public/manifest.webmanifest"
+      "destination": "/static/manifest.webmanifest"
     },
     {
       "source": "/(.*)",
