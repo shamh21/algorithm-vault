@@ -10,7 +10,17 @@ from typing import Any
 
 from flask import Flask, current_app
 
-from ..models import AuditLog, Order, RiskEvent, ShadowLiveObservation, StrategyRanking, StrategyRun, StrategyValidation
+from ..models import (
+    AuditLog,
+    Order,
+    RiskEvent,
+    ShadowLiveObservation,
+    StrategyRanking,
+    StrategyRun,
+    StrategyValidation,
+    TradingConnection,
+)
+from .connection_health import latest_connection_health
 
 
 @dataclass
@@ -55,16 +65,17 @@ class DashboardPayloadService:
         risk_engine: Any,
         trading_connections: Any,
         wallet_summary: Any,
+        refresh_exchange: bool = False,
     ) -> dict[str, Any]:
         """Return the lightweight authenticated dashboard shell payload."""
 
         self.metrics["requests"] += 1
         started_at = time.perf_counter()
         account_payload = self._get_cached_segment(
-            self._account_segment_key(user, mode, False),
+            self._account_segment_key(user, mode, refresh_exchange),
             "DASHBOARD_ACCOUNT_SEGMENT_TTL_SECONDS",
             "DASHBOARD_ACCOUNT_SEGMENT_STALE_SECONDS",
-            lambda: self._cached_account_payload(user, trading_connections, wallet_summary, False),
+            lambda: self._cached_account_payload(user, trading_connections, wallet_summary, refresh_exchange),
             "dashboard-account",
         )
         active_connection = trading_connections.active_tradable_connection(user.id) if user else None
@@ -108,6 +119,7 @@ class DashboardPayloadService:
             "audits": [],
             "alerts": self._limit_rows(account_payload.get("alerts"), 3),
             "account_snapshot": dict(account_payload.get("account_snapshot") or {"status": "unavailable"}),
+            "provider_health": dict(account_payload.get("provider_health") or {}),
             "recent_risk": [],
             "market_summary": [],
             "shell": True,
@@ -187,6 +199,7 @@ class DashboardPayloadService:
             "audits": static_payload["audits"],
             "alerts": account_payload["alerts"],
             "account_snapshot": dict(account_payload.get("account_snapshot") or {"status": "unavailable"}),
+            "provider_health": dict(account_payload.get("provider_health") or {}),
             "recent_risk": static_payload["recent_risk"],
             "market_summary": static_payload["market_summary"],
         }
@@ -392,34 +405,76 @@ class DashboardPayloadService:
                 "alerts": [],
                 "synced_at": None,
                 "account_snapshot": {"status": "unavailable"},
+                "provider_health": self._provider_health_payload(
+                    connection=None,
+                    account_status="unavailable",
+                    synced_at=None,
+                    snapshot_alerts=[],
+                    cached_health={},
+                ),
             }
 
         alerts: list[str] = []
         active_connection = trading_connections.active_tradable_connection(user.id)
-        active_provider = getattr(active_connection, "provider", None) if active_connection is not None else None
+        display_connection = active_connection or self._latest_user_connection(user.id)
+        active_provider = getattr(display_connection, "provider", None) if display_connection is not None else None
+        cached_health = latest_connection_health(display_connection.id if display_connection is not None else None)
+        cached = wallet_summary.cached_exchange_snapshot(user.id)
         if refresh_exchange:
             try:
-                snapshot = trading_connections.account_snapshot(user.id, "live")
-                refreshed = wallet_summary.refresh_exchange_snapshot(user, trading_connections, mode="live", snapshot=snapshot)
+                snapshot = trading_connections.account_snapshot(
+                    user.id,
+                    "live",
+                    active_connection.id if active_connection is not None else None,
+                )
+                snapshot_alerts = [str(item) for item in (snapshot.alerts or [])]
+                has_snapshot_data = self._snapshot_has_account_data(snapshot)
+                if snapshot_alerts and not has_snapshot_data and cached:
+                    alerts.extend(snapshot_alerts)
+                    return self._cached_account_payload_from_cache(
+                        cached,
+                        alerts=alerts,
+                        connection=display_connection,
+                        cached_health=cached_health,
+                        account_status="degraded" if active_provider else "unavailable",
+                    )
+
+                refreshed = wallet_summary.refresh_exchange_snapshot(
+                    user,
+                    trading_connections,
+                    mode="live",
+                    connection_id=active_connection.id if active_connection is not None else None,
+                    snapshot=snapshot,
+                )
                 synced_at = refreshed.get("synced_at") if isinstance(refreshed, dict) else None
                 synced_at = synced_at or datetime.utcnow().isoformat() + "Z"
+                status = "live" if active_provider and not snapshot_alerts else "degraded" if active_provider else "unavailable"
+                equity_usd = self._estimated_account_equity(snapshot.balances)
                 return {
                     "balances": snapshot.balances,
                     "positions": snapshot.positions,
                     "recent_trades": snapshot.recent_fills,
                     "open_orders": snapshot.open_orders,
-                    "alerts": [str(item) for item in snapshot.alerts],
+                    "alerts": snapshot_alerts,
                     "synced_at": synced_at,
                     "account_snapshot": {
-                        "status": "live" if active_provider else "unavailable",
+                        "status": status,
                         "provider": active_provider,
                         "synced_at": synced_at,
+                        "equity_usd": equity_usd,
+                        "alerts": snapshot_alerts,
                     },
+                    "provider_health": self._provider_health_payload(
+                        connection=display_connection,
+                        account_status=status,
+                        synced_at=synced_at,
+                        snapshot_alerts=snapshot_alerts,
+                        cached_health=cached_health,
+                    ),
                 }
             except Exception as exc:  # noqa: BLE001
                 alerts.append(f"Live exchange snapshot refresh failed: {exc}")
 
-        cached = wallet_summary.cached_exchange_snapshot(user.id)
         if not cached:
             alerts.append("Account data is cached to reduce exchange requests. Use refresh for a read-only live update.")
             return {
@@ -429,28 +484,171 @@ class DashboardPayloadService:
                 "open_orders": [],
                 "alerts": alerts,
                 "synced_at": None,
-                "account_snapshot": {"status": "unavailable"},
+                "account_snapshot": {
+                    "status": "unavailable",
+                    "provider": active_provider,
+                    "synced_at": None,
+                    "equity_usd": None,
+                    "alerts": self._limit_rows(alerts, 150),
+                },
+                "provider_health": self._provider_health_payload(
+                    connection=display_connection,
+                    account_status="unavailable",
+                    synced_at=None,
+                    snapshot_alerts=alerts,
+                    cached_health=cached_health,
+                ),
             }
 
+        return self._cached_account_payload_from_cache(
+            cached,
+            alerts=alerts,
+            connection=display_connection,
+            cached_health=cached_health,
+            account_status="degraded" if alerts else "cached",
+        )
+
+    def _cached_account_payload_from_cache(
+        self,
+        cached: dict[str, Any],
+        *,
+        alerts: list[str],
+        connection: TradingConnection | None,
+        cached_health: dict[str, Any],
+        account_status: str,
+    ) -> dict[str, Any]:
         if int(cached.get("positions_count", 0) or 0) > 0:
             alerts.append(f"Cached exchange snapshot reports {int(cached.get('positions_count', 0) or 0)} open position(s).")
         if int(cached.get("open_orders_count", 0) or 0) > 0:
             alerts.append(f"Cached exchange snapshot reports {int(cached.get('open_orders_count', 0) or 0)} open order(s).")
         alerts.extend([str(item) for item in (cached.get("alerts") or [])])
+        provider = cached.get("provider") or (getattr(connection, "provider", None) if connection is not None else None)
+        synced_at = cached.get("synced_at")
+        balances = self._limit_rows(cached.get("balances"), 150)
+        equity_usd = self._estimated_account_equity(balances)
 
         return {
-            "balances": self._limit_rows(cached.get("balances"), 150),
-            "synced_at": cached.get("synced_at"),
+            "balances": balances,
+            "synced_at": synced_at,
             "positions": self._limit_rows(cached.get("positions"), 150),
             "recent_trades": self._limit_rows(cached.get("recent_fills"), 150),
             "open_orders": self._limit_rows(cached.get("open_orders"), 150),
             "alerts": self._limit_rows(alerts, 150),
             "account_snapshot": {
-                "status": "cached",
-                "provider": cached.get("provider"),
-                "synced_at": cached.get("synced_at"),
+                "status": account_status,
+                "provider": provider,
+                "synced_at": synced_at,
+                "equity_usd": equity_usd,
+                "alerts": self._limit_rows(alerts, 150),
             },
+            "provider_health": self._provider_health_payload(
+                connection=connection,
+                account_status=account_status,
+                synced_at=synced_at,
+                snapshot_alerts=alerts,
+                cached_health=cached_health,
+            ),
         }
+
+    @staticmethod
+    def _latest_user_connection(user_id: int) -> TradingConnection | None:
+        return (
+            TradingConnection.query.filter_by(user_id=int(user_id))
+            .order_by(TradingConnection.updated_at.desc(), TradingConnection.id.desc())
+            .first()
+        )
+
+    @staticmethod
+    def _snapshot_has_account_data(snapshot: Any) -> bool:
+        return bool(
+            (getattr(snapshot, "balances", None) or [])
+            or (getattr(snapshot, "positions", None) or [])
+            or (getattr(snapshot, "open_orders", None) or [])
+            or (getattr(snapshot, "recent_fills", None) or [])
+        )
+
+    def _provider_health_payload(
+        self,
+        *,
+        connection: TradingConnection | None,
+        account_status: str,
+        synced_at: str | None,
+        snapshot_alerts: list[str],
+        cached_health: dict[str, Any],
+    ) -> dict[str, Any]:
+        provider = getattr(connection, "provider", None) if connection is not None else cached_health.get("provider")
+        verification_status = getattr(connection, "verification_status", None) if connection is not None else None
+        last_error = getattr(connection, "last_verification_error", None) if connection is not None else None
+        health_alerts = [str(item) for item in (cached_health.get("alerts") or [])]
+        alerts = self._limit_rows([*snapshot_alerts, *health_alerts], 8)
+        failure_reason = self._clean_text(
+            cached_health.get("failure_reason") or last_error or (alerts[0] if alerts else "")
+        )
+        can_trade = bool(cached_health.get("can_trade")) or (account_status == "live" and not alerts)
+
+        if connection is None and not provider:
+            status = "unavailable"
+            status_label = "Not connected"
+            impact = "Connect and verify a trading account before live data can load."
+        elif can_trade and account_status == "live":
+            status = "online"
+            status_label = "Connected"
+            impact = "Account snapshot available"
+        elif account_status == "cached":
+            status = "cached"
+            status_label = "Using cached data"
+            impact = failure_reason or "Live provider data was not refreshed for this request."
+        elif cached_health.get("transient_failure") or account_status == "degraded":
+            status = "degraded"
+            status_label = "Provider unavailable"
+            impact = failure_reason or "Using cached account data while the provider is unavailable."
+        elif verification_status and verification_status != "verified":
+            status = "action_needed"
+            status_label = str(verification_status).replace("_", " ").title()
+            impact = failure_reason or "Review provider credentials and verification status."
+        else:
+            status = "unavailable"
+            status_label = "Unavailable"
+            impact = failure_reason or "No structured provider health data loaded."
+
+        return {
+            "provider": provider,
+            "status": status,
+            "status_label": status_label,
+            "last_checked_at": cached_health.get("last_checked_at") or synced_at,
+            "impact": self._clean_text(impact),
+            "can_trade": bool(can_trade),
+            "alerts": alerts,
+            "failure_reason": failure_reason,
+            "failure_category": cached_health.get("failure_category", ""),
+            "verification_status": verification_status,
+        }
+
+    @staticmethod
+    def _estimated_account_equity(balances: Any) -> float | None:
+        total = 0.0
+        seen = False
+        for row in balances or []:
+            if not isinstance(row, dict):
+                continue
+            estimated = row.get("estimated_usd_value")
+            if estimated is None:
+                estimated = row.get("value") if str(row.get("asset") or "").upper() in {"USD", "USDC", "USDT"} else None
+            try:
+                value = float(estimated or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if value:
+                seen = True
+                total += value
+        return total if seen else None
+
+    @staticmethod
+    def _clean_text(value: Any, *, limit: int = 240) -> str:
+        text = str(value or "").strip()
+        if len(text) <= limit:
+            return text
+        return text[: max(0, limit - 3)].rstrip() + "..."
 
     def _cached_trade_payload(self, account_payload: dict[str, Any]) -> dict[str, Any]:
         return {

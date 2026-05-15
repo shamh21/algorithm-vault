@@ -33,6 +33,21 @@
     vaultPerformancePath: root.querySelector("[data-vault-performance-path]"),
     vaultPerformanceEmpty: root.querySelector("[data-vault-performance-empty]"),
     vaultPulseError: root.querySelector("[data-vault-pulse-error]"),
+    equityValue: root.querySelector("[data-equity-value]"),
+    equityStatus: root.querySelector("[data-equity-status]"),
+    dailyPnl: root.querySelector("[data-daily-pnl]"),
+    brokerValue: root.querySelector("[data-broker-value]"),
+    brokerStatus: root.querySelector("[data-broker-status]"),
+    syncValue: root.querySelector("[data-sync-value]"),
+    syncStatus: root.querySelector("[data-sync-status]"),
+    cacheNote: root.querySelector("[data-cache-note]"),
+    providerHealthProvider: root.querySelector("[data-provider-health-provider]"),
+    providerHealthStatus: root.querySelector("[data-provider-health-status]"),
+    providerHealthLastCheck: root.querySelector("[data-provider-health-last-check]"),
+    providerHealthImpact: root.querySelector("[data-provider-health-impact]"),
+    openOrdersTable: root.querySelector("[data-open-orders-table]"),
+    positionsTable: root.querySelector("[data-positions-table]"),
+    recentTradesTable: root.querySelector("[data-recent-trades-table]"),
     sheet: root.querySelector("[data-preview-sheet]"),
     sheetTitle: root.querySelector("[data-sheet-title]"),
     sheetBody: root.querySelector("[data-sheet-body]"),
@@ -82,6 +97,7 @@
     opportunities: [],
     activity: [],
     active: null,
+    opportunityDiagnostics: {},
     filter: "all",
     timeframe: "live",
     chart: null,
@@ -112,6 +128,7 @@
   const percent = (value, digits = 0) => (hasNumber(value) ? `${(Number(value) * 100).toFixed(digits)}%` : dash);
   const roi = (value) => (hasNumber(value) ? `${Number(value).toFixed(2)}%` : dash);
   const currency = (value) => number(value).toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 2 });
+  const plainCurrency = (value) => (hasNumber(value) ? Number(value).toFixed(2) : dash);
   const price = (value) => {
     if (!hasNumber(value)) return dash;
     const parsed = Number(value);
@@ -179,7 +196,10 @@
 
   const setOpportunities = (rows) => {
     state.opportunities = (Array.isArray(rows) ? rows.filter(Boolean) : []).slice(0, MAX_ROWS);
-    if (!state.active && state.opportunities.length) {
+    if (!state.opportunities.length) {
+      state.active = null;
+      updateEmptyForecast();
+    } else if (!state.active || !state.opportunities.some((row) => row.provider === state.active.provider && row.symbol === state.active.symbol)) {
       state.active = state.opportunities[0];
       updateSelectionText(state.active);
       if (state.chartInView) fetchChart(state.active);
@@ -221,6 +241,9 @@
 
   const renderOpportunities = () => {
     const rows = filteredOpportunities();
+    const emptyText = state.opportunityDiagnostics?.stale
+      ? "Cached scanner data has no ranked markets."
+      : "No ranked markets loaded. Check provider health or run a strategy cycle to populate rankings.";
     renderVirtual(refs.list, rows, ROW_HEIGHT, (row, index) => {
       const button = document.createElement("button");
       button.type = "button";
@@ -261,7 +284,7 @@
       button.addEventListener("touchend", cancelLongPress, { passive: true });
       button.addEventListener("touchmove", cancelLongPress, { passive: true });
       return button;
-    }, state.filter === "all" ? "Waiting for ranked markets." : `No ${state.filter.toUpperCase()} setups in the current scanner window.`);
+    }, state.filter === "all" ? emptyText : `No ${state.filter.toUpperCase()} setups in the current scanner window.`);
   };
 
 
@@ -293,6 +316,106 @@
     const deltaSeconds = Math.max(0, Math.round((Date.now() - date.getTime()) / 1000));
     if (deltaSeconds < 60) return "Updated just now";
     return `Last synced ${date.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`;
+  };
+
+  const formatSyncValue = (value) => {
+    if (!value) return dash;
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    return date.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  };
+
+  const accountStatusCopy = (status) => {
+    const normalized = String(status || "").toLowerCase();
+    if (normalized === "live") return "Live snapshot";
+    if (normalized === "cached") return "Cached snapshot";
+    if (normalized === "degraded") return "Provider unavailable";
+    if (normalized === "error") return "Provider error";
+    return "Not loaded";
+  };
+
+  const renderRows = (tbody, rows, columns, emptyText) => {
+    if (!tbody) return;
+    const data = Array.isArray(rows) ? rows.slice(0, MAX_ROWS) : [];
+    if (!data.length) {
+      const tr = document.createElement("tr");
+      const td = document.createElement("td");
+      td.colSpan = columns.length;
+      td.textContent = emptyText;
+      tr.append(td);
+      tbody.replaceChildren(tr);
+      return;
+    }
+    const fragment = document.createDocumentFragment();
+    data.forEach((row) => {
+      const tr = document.createElement("tr");
+      columns.forEach((column) => {
+        const td = document.createElement("td");
+        const value = column.value(row);
+        if (column.className) td.className = column.className(row);
+        td.textContent = value;
+        tr.append(td);
+      });
+      fragment.append(tr);
+    });
+    tbody.replaceChildren(fragment);
+  };
+
+  const renderAccountSummary = (payload = {}) => {
+    const snapshot = payload.account_snapshot || {};
+    const providerHealth = payload.provider_health || {};
+    const balances = Array.isArray(payload.balances) ? payload.balances : [];
+    const balance = getBalanceAmount(balances);
+    const equity = hasNumber(snapshot.equity_usd) ? Number(snapshot.equity_usd) : balance > 0 ? balance : null;
+    const status = String(snapshot.status || "unavailable").toLowerCase();
+    const provider = snapshot.provider || providerHealth.provider || "";
+    const syncedAt = snapshot.synced_at || providerHealth.last_checked_at || payload.account_synced_at || "";
+    const dailyPnl = payload.risk_status?.daily_realized_pnl;
+
+    if (refs.equityValue) refs.equityValue.textContent = equity !== null ? plainCurrency(equity) : dash;
+    if (refs.equityStatus) refs.equityStatus.textContent = accountStatusCopy(status);
+    if (refs.dailyPnl) {
+      refs.dailyPnl.textContent = hasNumber(dailyPnl) ? Number(dailyPnl).toFixed(4) : dash;
+      refs.dailyPnl.classList.toggle("positive", hasNumber(dailyPnl) && Number(dailyPnl) >= 0);
+      refs.dailyPnl.classList.toggle("negative", hasNumber(dailyPnl) && Number(dailyPnl) < 0);
+    }
+    if (refs.brokerValue) refs.brokerValue.textContent = provider ? String(provider).toUpperCase() : dash;
+    if (refs.brokerStatus) refs.brokerStatus.textContent = providerHealth.status_label || (provider ? "Connected" : "Disconnected or not loaded");
+    if (refs.syncValue) refs.syncValue.textContent = formatSyncValue(syncedAt);
+    if (refs.syncStatus) refs.syncStatus.textContent = syncedAt ? `${accountStatusCopy(status)} · ${formatSyncValue(syncedAt)}` : "Loading or unavailable";
+    if (refs.cacheNote) {
+      refs.cacheNote.textContent = providerHealth.impact
+        || (status === "cached" && syncedAt ? `Cached snapshot · Last updated ${formatSyncValue(syncedAt)}` : "Dashboard opens with one read-only live exchange refresh; cached data remains visible during provider backoff.");
+    }
+    if (refs.providerHealthProvider) refs.providerHealthProvider.textContent = provider ? String(provider).toUpperCase() : "Activity feed";
+    if (refs.providerHealthStatus) refs.providerHealthStatus.textContent = providerHealth.status_label || (provider ? "Connected" : "Provider status appears in Activity");
+    if (refs.providerHealthLastCheck) refs.providerHealthLastCheck.textContent = formatSyncValue(syncedAt);
+    if (refs.providerHealthImpact) refs.providerHealthImpact.textContent = providerHealth.impact || "No structured health data loaded";
+
+    renderRows(refs.openOrdersTable, payload.open_orders, [
+      { value: (row) => row.symbol || dash },
+      { value: (row) => label(row.side).toUpperCase() },
+      { value: (row) => price(row.price ?? row.limit_price) },
+      { value: (row) => price(row.size ?? row.quantity) },
+      { value: (row) => row.reduce_only ? "yes" : "no" },
+    ], "No open orders. Live execution has no active resting orders.");
+    renderRows(refs.positionsTable, payload.positions, [
+      { value: (row) => row.symbol || dash },
+      { value: (row) => price(row.quantity ?? row.size) },
+      { value: (row) => price(row.entry_price ?? row.entry) },
+      { value: (row) => price(row.mark_price ?? row.mark_value) },
+      {
+        value: (row) => hasNumber(row.unrealized_pnl) ? Number(row.unrealized_pnl).toFixed(4) : dash,
+        className: (row) => hasNumber(row.unrealized_pnl) ? Number(row.unrealized_pnl) >= 0 ? "positive" : "negative" : "",
+      },
+    ], "No positions. The connected account currently has no open exposure.");
+    renderRows(refs.recentTradesTable, payload.recent_trades, [
+      { value: (row) => row.symbol || dash },
+      { value: (row) => label(row.side).toUpperCase() },
+      { value: (row) => price(row.price) },
+      { value: (row) => price(row.size ?? row.quantity) },
+      { value: (row) => hasNumber(row.closed_pnl) ? Number(row.closed_pnl).toFixed(4) : dash },
+    ], "No recent trades. Executed trades will appear here after the next filled order.");
   };
 
   const renderSparkline = (points, changePercent) => {
@@ -366,15 +489,33 @@
     renderSparkline(hasPerformance ? points : [], changePercent);
   };
 
+  const updateEmptyForecast = () => {
+    refs.chartLoading?.setAttribute("hidden", "hidden");
+    if (refs.chartTitle) refs.chartTitle.textContent = "Market Projection";
+    if (refs.chartProvider) refs.chartProvider.textContent = "Forecast";
+    if (refs.forecastDirection) refs.forecastDirection.textContent = "No active setup";
+    if (refs.forecastRoi) refs.forecastRoi.textContent = dash;
+    if (refs.forecastConfidence) refs.forecastConfidence.textContent = dash;
+    if (refs.forecastRisk) refs.forecastRisk.textContent = dash;
+    Object.values(refs.intel).forEach((node) => {
+      if (node) node.textContent = dash;
+    });
+    refs.setupHelper?.removeAttribute("hidden");
+  };
+
   const fetchVaultPulse = async () => {
     renderVaultPulse(initialPayload, { loading: true });
     if (!urls.dashboardData) {
+      renderAccountSummary(initialPayload);
       renderVaultPulse(initialPayload, { loading: false });
       return;
     }
     try {
       const payload = await requestJson("dashboard", urls.dashboardData);
-      if (payload) renderVaultPulse(payload, { loading: false });
+      if (payload) {
+        renderAccountSummary(payload);
+        renderVaultPulse(payload, { loading: false });
+      }
     } catch (error) {
       if (error.name !== "AbortError") renderVaultPulse(initialPayload, { loading: false, error: true });
     }
@@ -426,6 +567,7 @@
     try {
       const payload = await requestJson("opportunities", url);
       if (!payload) return;
+      state.opportunityDiagnostics = payload.diagnostics || {};
       setOpportunities(payload.opportunities || []);
       setStatus(payload.diagnostics?.stale ? "Cached" : "Live", payload.diagnostics?.stale ? "stale" : "live");
     } catch (error) {
@@ -756,6 +898,8 @@
   }
 
   initEvents();
+  renderAccountSummary(initialPayload);
+  if (!state.active) updateEmptyForecast();
   fetchVaultPulse();
   fetchOpportunities(false);
   fetchActivity();

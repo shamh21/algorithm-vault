@@ -6,8 +6,9 @@ from typing import Any
 
 from app.auth import password_hash
 from app.extensions import db
-from app.models import LeveragedMarket, LeveragedMarketFeature, MarketForecast, User
+from app.models import LeveragedMarket, LeveragedMarketFeature, MarketForecast, Setting, TradingConnection, User
 from app.routes import dashboard as dashboard_routes
+from app.services.hyperliquid_client import ClientSnapshot
 
 
 def _add_market(provider: str, symbol: str, venue_symbol: str, *, close: float = 100.0) -> LeveragedMarket:
@@ -214,21 +215,37 @@ def test_dashboard_new_api_routes_remain_admin_protected(app) -> None:
     assert client.get("/admin/api/dashboard/activity").status_code in {302, 401, 403}
 
 
-def test_dashboard_render_does_not_refresh_provider_snapshot_by_default(app, monkeypatch) -> None:
+def test_dashboard_render_refreshes_provider_snapshot_on_open(app, monkeypatch) -> None:
     admin = User(username="dash-admin", password_hash=password_hash("password123"), role="admin")
     db.session.add(admin)
+    db.session.flush()
+    connection = TradingConnection(
+        user_id=admin.id,
+        provider="hyperliquid",
+        connection_type="cex_api_key",
+        is_active=True,
+        verification_status="verified",
+    )
+    db.session.add(connection)
     db.session.commit()
     monkeypatch.setattr(dashboard_routes, "require_admin", lambda: None)
     monkeypatch.setattr(dashboard_routes, "current_user", lambda: admin)
 
     calls = {"count": 0}
 
-    def fail_snapshot(*args: Any, **kwargs: Any) -> None:
+    def account_snapshot(*args: Any, **kwargs: Any) -> ClientSnapshot:
         calls["count"] += 1
-        raise AssertionError("normal dashboard render must not refresh provider snapshots")
+        return ClientSnapshot(
+            "live",
+            [{"asset": "USDC", "type": "margin", "value": 500.0, "withdrawable": 500.0}],
+            [{"symbol": "BTC", "quantity": 0.2, "entry_price": 100.0, "mark_price": 110.0, "unrealized_pnl": 2.0}],
+            [{"symbol": "BTC", "side": "buy", "price": 99.0, "size": 0.1, "reduce_only": False}],
+            [{"symbol": "BTC", "side": "sell", "price": 111.0, "size": 0.1, "closed_pnl": 1.25}],
+            [],
+        )
 
     services = app.extensions["services"]
-    monkeypatch.setattr(services["trading_connections"], "account_snapshot", fail_snapshot)
+    monkeypatch.setattr(services["trading_connections"], "account_snapshot", account_snapshot)
     services["market_data"].get_dashboard_market_summary = lambda symbols, timeframe, mode: [
         {"symbol": "BTC", "mid": 100.0, "change_pct": 0.0}
     ]
@@ -241,9 +258,72 @@ def test_dashboard_render_does_not_refresh_provider_snapshot_by_default(app, mon
 
     assert response.status_code == 200
     assert "no-store" in response.headers["Cache-Control"]
-    assert calls["count"] == 0
+    assert calls["count"] == 1
     assert b"Dynamic Opportunities" in response.data
+    assert b'data-dashboard-data-url="/admin/api/dashboard-data?refresh_exchange=1"' in response.data
+    assert b"500.00" in response.data
+    assert b"Provider Health" in response.data
     assert b"Manual Order Entry" not in response.data
+
+
+def test_dashboard_data_refresh_returns_provider_health_and_cached_ops_rows(app, monkeypatch) -> None:
+    admin = User(username="dash-api-admin", password_hash=password_hash("password123"), role="admin")
+    db.session.add(admin)
+    db.session.flush()
+    connection = TradingConnection(
+        user_id=admin.id,
+        provider="hyperliquid",
+        connection_type="cex_api_key",
+        is_active=True,
+        verification_status="verified",
+    )
+    db.session.add(connection)
+    db.session.commit()
+    monkeypatch.setattr(dashboard_routes, "require_admin", lambda: None)
+    monkeypatch.setattr(dashboard_routes, "current_user", lambda: admin)
+    services = app.extensions["services"]
+    services["market_data"].get_dashboard_market_summary = lambda symbols, timeframe, mode: []
+    services["market_data"].get_candles = lambda symbol, timeframe, mode, limit: []
+
+    def live_snapshot(*args: Any, **kwargs: Any) -> ClientSnapshot:
+        return ClientSnapshot(
+            "live",
+            [{"asset": "USDC", "type": "margin", "value": 500.0, "withdrawable": 500.0}],
+            [{"symbol": "BTC", "quantity": 0.2, "entry_price": 100.0, "mark_price": 110.0, "unrealized_pnl": 2.0}],
+            [{"symbol": "BTC", "side": "buy", "price": 99.0, "size": 0.1, "reduce_only": False}],
+            [{"symbol": "BTC", "side": "sell", "price": 111.0, "size": 0.1, "closed_pnl": 1.25}],
+            [],
+        )
+
+    monkeypatch.setattr(services["trading_connections"], "account_snapshot", live_snapshot)
+    response = app.test_client().get("/admin/api/dashboard-data?refresh_exchange=1")
+    payload = response.get_json()
+    cached = Setting.get_json(f"exchange_balance_snapshot:{admin.id}", {})
+
+    assert response.status_code == 200
+    assert payload["account_snapshot"]["status"] == "live"
+    assert payload["provider_health"]["status"] == "online"
+    assert payload["positions"][0]["symbol"] == "BTC"
+    assert payload["open_orders"][0]["symbol"] == "BTC"
+    assert payload["recent_trades"][0]["closed_pnl"] == 1.25
+    assert cached["positions"][0]["symbol"] == "BTC"
+    assert cached["open_orders"][0]["price"] == 99.0
+    assert cached["recent_fills"][0]["closed_pnl"] == 1.25
+
+    services["dashboard_payload"]._cache.clear()
+    services["dashboard_payload"]._inflight.clear()
+    monkeypatch.setattr(
+        services["trading_connections"],
+        "account_snapshot",
+        lambda *args, **kwargs: ClientSnapshot("live", [], [], [], [], ["Hyperliquid unavailable"]),
+    )
+
+    degraded = app.test_client().get("/admin/api/dashboard-data?refresh_exchange=1").get_json()
+
+    assert degraded["account_snapshot"]["status"] == "degraded"
+    assert degraded["positions"][0]["symbol"] == "BTC"
+    assert degraded["provider_health"]["status"] == "degraded"
+    assert "Hyperliquid unavailable" in degraded["provider_health"]["impact"]
 
 
 def test_dashboard_service_worker_does_not_cache_authenticated_html_or_apis() -> None:
@@ -263,3 +343,6 @@ def test_dashboard_frontend_uses_lazy_chart_module_and_abortable_requests() -> N
     assert "AlgorithmVaultDashboardChart" in source
     assert "EventSource" in source
     assert "scheduleReconnect" in source
+    assert "renderAccountSummary" in source
+    assert "updateEmptyForecast" in source
+    assert "data-provider-health-status" in open("templates/dashboard.html", encoding="utf-8").read()

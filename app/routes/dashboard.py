@@ -29,7 +29,7 @@ def _dashboard_cache_headers(response: Response) -> Response:
 
 @dashboard_bp.get("/dashboard")
 def index():
-    return render_template("advanced/dashboard.html", **_dashboard_shell_payload())
+    return render_template("advanced/dashboard.html", **_dashboard_shell_payload(refresh_exchange=True))
 
 
 @dashboard_bp.get("/api/dashboard-data")
@@ -47,6 +47,8 @@ def dashboard_data():
             "mode": payload["mode"],
             "balances": payload["balances"],
             "account_synced_at": payload.get("account_synced_at"),
+            "account_snapshot": payload.get("account_snapshot", {"status": "unavailable"}),
+            "provider_health": payload.get("provider_health", {}),
             "positions": positions["rows"],
             "open_orders": open_orders["rows"],
             "recent_trades": recent_trades["rows"],
@@ -149,7 +151,7 @@ def dashboard_stream():
     return Response(stream_with_context(events), mimetype="text/event-stream", headers=headers)
 
 
-def _dashboard_payload() -> dict[str, Any]:
+def _dashboard_payload(refresh_exchange: bool | None = None) -> dict[str, Any]:
     mode = get_current_mode()
     market_mode = market_mode_for(mode)
     dashboard_payload = get_service("dashboard_payload")
@@ -164,22 +166,25 @@ def _dashboard_payload() -> dict[str, Any]:
         wallet_summary=get_service("wallet_summary"),
         feature_engine=get_service("feature_engine"),
         registry=get_service("strategy_registry"),
-        refresh_exchange=_refresh_exchange_requested(),
+        refresh_exchange=_refresh_exchange_requested() if refresh_exchange is None else bool(refresh_exchange),
     )
 
 
-def _dashboard_shell_payload() -> dict[str, Any]:
+def _dashboard_shell_payload(*, refresh_exchange: bool = False) -> dict[str, Any]:
     mode = get_current_mode()
     market_mode = market_mode_for(mode)
     dashboard_payload = get_service("dashboard_payload")
-    return dashboard_payload.get_shell_payload(
+    payload = dashboard_payload.get_shell_payload(
         user=current_user(),
         mode=mode,
         market_mode=market_mode,
         risk_engine=get_service("risk_engine"),
         trading_connections=get_service("trading_connections"),
         wallet_summary=get_service("wallet_summary"),
+        refresh_exchange=refresh_exchange,
     )
+    payload["refresh_exchange"] = bool(refresh_exchange)
+    return payload
 
 
 def _refresh_exchange_requested() -> bool:

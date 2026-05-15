@@ -108,7 +108,7 @@ def test_profile_wallet_check_missing_user_exits_nonzero(app) -> None:
     assert payload["blockers"] == ["profile_not_found"]
 
 
-def test_wallet_and_dashboard_pages_do_not_require_fresh_provider_snapshot(app) -> None:
+def test_wallet_and_dashboard_api_without_refresh_do_not_require_fresh_provider_snapshot(app) -> None:
     user = _create_user()
     _create_verified_connection(user)
     db.session.add(WalletBalance(user_id=user.id, asset="USDC", available_balance=10.0, estimated_usd_value=10.0))
@@ -122,12 +122,10 @@ def test_wallet_and_dashboard_pages_do_not_require_fresh_provider_snapshot(app) 
 
     home = client.get("/")
     wallet = client.get("/wallet")
-    dashboard = client.get("/admin/dashboard")
     dashboard_api = client.get("/admin/api/dashboard-data")
 
     assert home.status_code == 200
     assert wallet.status_code == 200
-    assert dashboard.status_code == 200
     assert dashboard_api.status_code == 200
     assert b"Refresh Snapshot" not in wallet.data
     assert b"Exchange Margin" not in wallet.data

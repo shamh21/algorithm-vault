@@ -9,7 +9,7 @@
   data-chart-url="{{ url_for('dashboard.dashboard_chart') }}"
   data-stream-url="{{ url_for('dashboard.dashboard_stream') }}"
   data-activity-url="{{ url_for('dashboard.dashboard_activity') }}"
-  data-dashboard-data-url="{{ url_for('dashboard.dashboard_data') }}"
+  data-dashboard-data-url="{{ url_for('dashboard.dashboard_data', refresh_exchange=1) if refresh_exchange else url_for('dashboard.dashboard_data') }}"
   data-performance-url="{{ url_for('dashboard.dashboard_performance') }}"
   data-chart-module-src="{{ url_for('static', filename='js/dashboard-chart.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}"
   data-chart-lib-src="{{ url_for('static', filename='js/vendor/lightweight-charts.standalone.production.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}"
@@ -28,15 +28,20 @@
       "paper_equity_curve": paper_equity_curve,
       "account_synced_at": account_synced_at,
       "alerts": alerts,
-      "account_snapshot": account_snapshot|default({})
+      "account_snapshot": account_snapshot|default({}),
+      "provider_health": provider_health|default({})
     }|tojson }}
   </script>
 
   {% set snapshot = account_snapshot|default({}) %}
+  {% set health = provider_health|default({}) %}
   {% set snapshot_status = snapshot.get('status', 'unavailable') %}
-  {% set has_account_snapshot = snapshot_status in ['cached', 'live'] %}
-  {% set broker_label = snapshot.get('provider') or '—' %}
-  {% set sync_label = snapshot.get('synced_at') or '—' %}
+  {% set has_account_snapshot = snapshot_status in ['cached', 'live', 'degraded'] %}
+  {% set broker_label = snapshot.get('provider') or health.get('provider') or '—' %}
+  {% set sync_label = snapshot.get('synced_at') or health.get('last_checked_at') or '—' %}
+  {% set equity_value = snapshot.get('equity_usd') %}
+  {% set provider_status_label = health.get('status_label') or ('Connected' if broker_label != '—' else 'Provider status appears in Activity') %}
+  {% set provider_impact = health.get('impact') or ('Account snapshot available' if broker_label != '—' else 'No structured health data loaded') %}
   {% set emergency_active = risk_status.panic_lock if risk_status.panic_lock is defined else none %}
   {% set live_blocked = risk_status.live_trading_blocked if risk_status.live_trading_blocked is defined else none %}
 
@@ -58,8 +63,8 @@
   <section class="trade-account-strip" aria-label="Operational status summary">
     <div class="trade-metric">
       <span>Account Equity</span>
-      <strong data-equity-value>{% if has_account_snapshot %}{{ "%.2f"|format((pnl.realized|float) + (pnl.unrealized|float)) }}{% else %}—{% endif %}</strong>
-      <small>{{ 'Cached snapshot' if snapshot_status == 'cached' else ('Live snapshot' if snapshot_status == 'live' else 'Not loaded') }}</small>
+      <strong data-equity-value>{% if equity_value is not none %}{{ "%.2f"|format(equity_value|float) }}{% else %}—{% endif %}</strong>
+      <small data-equity-status>{{ 'Cached snapshot' if snapshot_status == 'cached' else ('Live snapshot' if snapshot_status == 'live' else ('Provider unavailable' if snapshot_status == 'degraded' else 'Not loaded')) }}</small>
     </div>
     <div class="trade-metric">
       <span>Daily PnL</span>
@@ -80,20 +85,20 @@
       <strong>{{ 'Engaged' if emergency_active else ('Clear' if emergency_active is not none else '—') }}</strong>
       <small>{{ 'Manual review required' if emergency_active else ('Guarded controls ready' if emergency_active is not none else 'Status unavailable') }}</small>
     </div>
-    <div class="trade-metric {{ 'status-connected' if broker_label != '—' else 'status-stale' }}">
+    <div class="trade-metric {{ 'status-connected' if broker_label != '—' and snapshot_status == 'live' else ('status-error' if snapshot_status == 'degraded' else 'status-stale') }}">
       <span>Broker</span>
-      <strong>{{ broker_label|upper if broker_label != '—' else '—' }}</strong>
-      <small>{{ 'Connected' if broker_label != '—' else 'Disconnected or not loaded' }}</small>
+      <strong data-broker-value>{{ broker_label|upper if broker_label != '—' else '—' }}</strong>
+      <small data-broker-status>{{ provider_status_label }}</small>
     </div>
     <div class="trade-metric {{ 'status-stale' if snapshot_status == 'cached' else ('status-connected' if snapshot_status == 'live' else 'status-loading') }}">
       <span>Last Sync</span>
-      <strong>{{ sync_label }}</strong>
-      <small>{{ 'Cached snapshot · Last updated ' ~ sync_label if sync_label != '—' else 'Loading or unavailable' }}</small>
+      <strong data-sync-value>{{ sync_label }}</strong>
+      <small data-sync-status>{{ 'Cached snapshot · Last updated ' ~ sync_label if sync_label != '—' and snapshot_status == 'cached' else ('Provider check · ' ~ sync_label if sync_label != '—' else 'Loading or unavailable') }}</small>
     </div>
   </section>
 
   <section class="exchange-cache-note" aria-label="Exchange data refresh">
-    <p>{{ 'Cached snapshot · Last updated ' ~ sync_label if sync_label != '—' else 'Account data is cached to reduce exchange requests. Use refresh for a read-only live update.' }}</p>
+    <p data-cache-note>{{ provider_impact if snapshot_status == 'degraded' else ('Cached snapshot · Last updated ' ~ sync_label if sync_label != '—' and snapshot_status == 'cached' else 'Dashboard opens with one read-only live exchange refresh; cached data remains visible during provider backoff.') }}</p>
     <a class="button-link secondary" href="{{ url_for('dashboard.index', refresh_exchange=1) }}">Refresh Exchange Data</a>
   </section>
 
@@ -256,10 +261,10 @@
         </div>
       </div>
       <div class="provider-health-table">
-        <div><span>Provider</span><strong>{{ broker_label|upper if broker_label != '—' else 'Activity feed' }}</strong></div>
-        <div><span>Status</span><strong>{{ 'Connected' if broker_label != '—' else 'Provider status appears in Activity' }}</strong></div>
-        <div><span>Last Check</span><strong>{{ sync_label }}</strong></div>
-        <div><span>Impact</span><strong>{{ 'Account snapshot available' if broker_label != '—' else 'No structured health data loaded' }}</strong></div>
+        <div><span>Provider</span><strong data-provider-health-provider>{{ broker_label|upper if broker_label != '—' else 'Activity feed' }}</strong></div>
+        <div><span>Status</span><strong data-provider-health-status>{{ provider_status_label }}</strong></div>
+        <div><span>Last Check</span><strong data-provider-health-last-check>{{ sync_label }}</strong></div>
+        <div><span>Impact</span><strong data-provider-health-impact>{{ provider_impact }}</strong></div>
       </div>
     </article>
 
@@ -316,7 +321,7 @@
       <div class="ops-table-wrap">
         <table>
           <thead><tr><th>Strategy</th><th>Score</th><th>Recent</th><th>Drawdown</th><th>Status</th></tr></thead>
-          <tbody>
+          <tbody data-open-orders-table>
             {% for ranking in strategy_rankings %}
               <tr>
                 <td>{{ ranking.strategy_name }}<br><span class="muted">{{ ranking.symbol }} / {{ ranking.timeframe }}</span></td>
@@ -338,7 +343,7 @@
       <div class="ops-table-wrap">
         <table>
           <thead><tr><th>Symbol</th><th>Side</th><th>Price</th><th>Size</th><th>Reduce</th></tr></thead>
-          <tbody>
+          <tbody data-positions-table>
             {% for order in open_orders %}
               <tr>
                 <td>{{ order.symbol }}</td>
@@ -360,7 +365,7 @@
       <div class="ops-table-wrap">
         <table>
           <thead><tr><th>Symbol</th><th>Qty</th><th>Entry</th><th>Mark</th><th>Unrealized PnL</th></tr></thead>
-          <tbody>
+          <tbody data-recent-trades-table>
             {% for position in positions %}
               <tr>
                 <td>{{ position.symbol }}</td>

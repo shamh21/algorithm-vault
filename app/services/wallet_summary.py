@@ -242,7 +242,7 @@ class WalletSummaryService:
         if snapshot is None:
             snapshot = trading_connections.account_snapshot(user.id, mode, connection.id)
         balances: list[dict[str, Any]] = []
-        for item in snapshot.balances:
+        for item in _snapshot_rows(snapshot.balances):
             asset = str(item.get("asset", "") or "").upper()
             if not asset:
                 continue
@@ -262,8 +262,12 @@ class WalletSummaryService:
             "connection_id": connection.id,
             "provider": connection.provider,
             "balances": balances,
+            "positions": _snapshot_rows(snapshot.positions),
+            "open_orders": _snapshot_rows(snapshot.open_orders),
+            "recent_fills": _snapshot_rows(snapshot.recent_fills),
             "positions_count": len(snapshot.positions or []),
             "open_orders_count": len(snapshot.open_orders or []),
+            "recent_fills_count": len(snapshot.recent_fills or []),
             "alerts": snapshot.alerts or [],
             "synced_at": datetime.utcnow().isoformat() + "Z",
         }
@@ -512,6 +516,29 @@ class WalletSummaryService:
 
 def _exchange_balance_snapshot_key(user_id: int) -> str:
     return f"exchange_balance_snapshot:{int(user_id)}"
+
+
+def _snapshot_rows(rows: Any, *, limit: int = 150) -> list[dict[str, Any]]:
+    payload: list[dict[str, Any]] = []
+    if not isinstance(rows, list):
+        return payload
+    for row in rows[: max(0, int(limit or 0))]:
+        if not isinstance(row, dict):
+            continue
+        payload.append({str(key): _json_safe_value(value) for key, value in row.items()})
+    return payload
+
+
+def _json_safe_value(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, datetime):
+        return _iso(value)
+    if isinstance(value, dict):
+        return {str(key): _json_safe_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe_value(item) for item in value]
+    return str(value)
 
 
 def _balance_index(rows: Any) -> dict[str, dict[str, float | str]]:
