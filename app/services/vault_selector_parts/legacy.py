@@ -193,7 +193,7 @@ class VaultStrategySelector:
                     "target_multiplier": target_multiplier,
                     "target_return_objective": "one_h10",
                     "target_amount_usd": float(allocation_amount_usd or 0.0) * target_multiplier,
-                    "target_copy": "1H10",
+                    "target_copy": "1H10 high-upside objective",
                 }
             )
             parameters.update(
@@ -315,7 +315,7 @@ class VaultStrategySelector:
                     "take_profit_pct": 0.0045,
                     "leverage": 1.0,
                 },
-                "reasons": ["1H10 aims to 10x the user's input amount in 1 hour while remaining risk-gated"],
+                "reasons": ["1H10 evaluates a high-upside one-hour objective while remaining risk-gated"],
             }
 
         if duration_hours <= 24:

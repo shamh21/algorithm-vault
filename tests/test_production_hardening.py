@@ -381,7 +381,7 @@ def test_ios_pwa_head_tags_target_algvault(app) -> None:
 def test_service_worker_clears_old_algvault_and_tradingbot_caches(app) -> None:
     worker = app.test_client().get("/static/js/sw.js").get_data(as_text=True)
 
-    assert 'const CACHE_VERSION = "algvault-v8-command-center-dark"' in worker
+    assert 'const CACHE_VERSION = "algvault-v9-command-center-dark"' in worker
     assert 'name.startsWith("algvault-") || name.startsWith("tradingbot-")' in worker
     assert "self.clients.claim()" in worker
     assert "/manifest.json" in worker

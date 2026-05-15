@@ -424,6 +424,8 @@ def test_consumer_pages_render_wallet_and_vault_experience(app) -> None:
         assert removed_copy not in home.data
     assert wallet.status_code == 200
     assert b"Total Portfolio Value" in wallet.data
+    assert b"Balance Trend" in wallet.data
+    assert b"Asset Mix" in wallet.data
     assert b"Deposit" in wallet.data
     assert b"Withdraw" in wallet.data
     assert b"Settlement Currency" not in wallet.data
@@ -751,7 +753,8 @@ def test_admin_with_2fa_can_access_admin_and_user_cannot(app) -> None:
     assert b"Max " + b"Slippage" not in risk.data
     assert b"/admin/orders" not in risk.data
     assert strategies.status_code == 200
-    assert b"Strategy and Vault Internals" in strategies.data
+    assert b"Strategy Diagnostics" in strategies.data
+    assert b"Why Candidates Rank" in strategies.data
     assert readiness.status_code == 200
     assert b"Live Readiness" in readiness.data
 

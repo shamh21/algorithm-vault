@@ -13699,3 +13699,227 @@ html[data-theme] .connections-header-action {
     justify-self: start;
   }
 }
+
+/* AlgVault lightweight diagnostics and on-demand chart surfaces. */
+.mini-chart-card,
+.allocation-panel,
+.strategy-run-monitor,
+.strategy-health-card {
+  position: relative;
+  overflow: hidden;
+  min-width: 0;
+  padding: clamp(0.95rem, 2vw, 1.15rem);
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 20px;
+  background:
+    linear-gradient(145deg, rgba(125, 211, 252, 0.08), rgba(134, 239, 172, 0.035)),
+    rgba(8, 13, 24, 0.82);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.24);
+}
+
+.mini-chart-head,
+.strategy-diagnostics-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.8rem;
+}
+
+.mini-chart-head h2,
+.mini-chart-head h3 {
+  margin: 0.15rem 0 0;
+  color: #f8fafc;
+  font-size: clamp(1rem, 2.3vw, 1.2rem);
+  letter-spacing: 0;
+}
+
+.chart-summary,
+.wallet-card-subtitle,
+.portfolio-card-note {
+  margin: 0;
+  color: rgba(203, 213, 225, 0.72);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.mini-chart-canvas {
+  display: block;
+  width: 100%;
+  height: 150px;
+  margin-bottom: 0.75rem;
+  border-radius: 14px;
+  background:
+    linear-gradient(180deg, rgba(125, 211, 252, 0.09), rgba(125, 211, 252, 0)),
+    rgba(255, 255, 255, 0.025);
+}
+
+.mini-chart-canvas--short {
+  height: 104px;
+}
+
+.mini-chart-card.is-empty .mini-chart-canvas {
+  display: none;
+}
+
+.compact-state {
+  display: flex;
+  align-items: center;
+  min-height: 6.5rem;
+  padding: 0.9rem;
+  border: 1px dashed rgba(148, 163, 184, 0.24);
+  border-radius: 14px;
+  color: rgba(226, 232, 240, 0.76);
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.compact-state--warning {
+  min-height: 0;
+  margin-top: 0.75rem;
+  border-color: rgba(251, 191, 36, 0.32);
+  color: #fde68a;
+}
+
+.wallet-chart-card {
+  min-height: 100%;
+}
+
+.cycle-analytics-grid,
+.strategy-diagnostics-shell {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr));
+  gap: clamp(0.85rem, 2vw, 1.15rem);
+  align-items: stretch;
+  margin: clamp(0.9rem, 2vw, 1.2rem) 0;
+}
+
+.allocation-panel {
+  margin: clamp(0.9rem, 2vw, 1.2rem) 0;
+}
+
+.allocation-bars {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.allocation-bar-row {
+  display: grid;
+  grid-template-columns: minmax(5.5rem, 0.75fr) minmax(8rem, 1.5fr) minmax(5rem, auto);
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.allocation-row-label {
+  display: grid;
+  gap: 0.12rem;
+  min-width: 0;
+}
+
+.allocation-row-label strong,
+.allocation-pct {
+  color: rgba(248, 250, 252, 0.96);
+  font-size: 0.86rem;
+}
+
+.allocation-row-label span {
+  color: rgba(203, 213, 225, 0.62);
+  font-size: 0.76rem;
+}
+
+.allocation-track {
+  height: 0.55rem;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.allocation-track span {
+  display: block;
+  height: 100%;
+  min-width: 0.35rem;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #7dd3fc, #86efac);
+}
+
+.strategy-diagnostics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr));
+  gap: 0.9rem;
+  margin-top: 1rem;
+}
+
+.strategy-diagnostics-heading {
+  grid-column: 1 / -1;
+  margin-bottom: 0;
+}
+
+.strategy-status-strip,
+.strategy-factor-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+}
+
+.strategy-status-strip span,
+.strategy-factor-list span {
+  display: grid;
+  gap: 0.08rem;
+  min-width: 5.4rem;
+  padding: 0.62rem 0.7rem;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  border-radius: 14px;
+  color: rgba(203, 213, 225, 0.68);
+  background: rgba(255, 255, 255, 0.035);
+  font-size: 0.72rem;
+}
+
+.strategy-status-strip strong,
+.strategy-factor-list strong {
+  color: rgba(248, 250, 252, 0.96);
+  font-size: 0.92rem;
+}
+
+.strategy-run-list {
+  display: grid;
+  gap: 0.72rem;
+}
+
+.strategy-run-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.35rem 0.75rem;
+  padding: 0.8rem;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.strategy-run-row p {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: rgba(203, 213, 225, 0.7);
+  font-size: 0.8rem;
+}
+
+@media (max-width: 760px) {
+  .mini-chart-card,
+  .allocation-panel,
+  .strategy-run-monitor,
+  .strategy-health-card {
+    border-radius: 18px;
+    padding: 0.82rem;
+  }
+
+  .allocation-bar-row {
+    grid-template-columns: 1fr;
+    gap: 0.4rem;
+  }
+
+  .allocation-pct {
+    justify-self: start;
+  }
+
+  .strategy-run-row {
+    grid-template-columns: 1fr;
+  }
+}

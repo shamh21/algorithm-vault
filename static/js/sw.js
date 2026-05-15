@@ -1,4 +1,4 @@
-const CACHE_VERSION = "algvault-v8-command-center-dark";
+const CACHE_VERSION = "algvault-v9-command-center-dark";
 const SHELL_CACHE = `${CACHE_VERSION}-shell`;
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 

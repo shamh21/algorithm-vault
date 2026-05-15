@@ -16,6 +16,9 @@
 {% set horizon_forecasts = summary.get("horizon_forecasts", []) %}
 {% set horizon_strategy_scores = summary.get("horizon_strategy_scores", []) %}
 {% set readiness = coherence.get("automationReadiness", "caution") %}
+{% set cycle_charts = summary.get("chart_payload", {}) %}
+{% set value_chart = cycle_charts.get("value", {}) %}
+{% set pnl_chart = cycle_charts.get("pnl", {}) %}
 
 <section class="cycle-detail-shell">
   <header class="cycle-detail-header">
@@ -90,7 +93,7 @@
             <dd>{{ "%.6f"|format(final_settlement_amount) }} {{ cycle.settlement_asset }}</dd>
           </div>
           <div class="cycle-metric">
-            <dt>Target</dt>
+            <dt>Objective</dt>
             <dd>${{ "%.2f"|format(summary.get("target_amount_usd", 0)) }}</dd>
           </div>
         </dl>
@@ -127,6 +130,77 @@
       </section>
     </div>
   </article>
+
+  <section class="cycle-analytics-grid" aria-label="Cycle analytics">
+    <article class="mini-chart-card" data-chart-card aria-labelledby="cycle-value-chart-title">
+      <div class="mini-chart-head">
+        <div>
+          <span class="card-kicker">Cycle Value</span>
+          <h2 id="cycle-value-chart-title">Value Path</h2>
+        </div>
+        <span class="metric-pill metric-pill-muted">{{ value_chart.get("points", [])|length }} points</span>
+      </div>
+      {% if value_chart.get("empty") %}
+        <div class="compact-state">Value chart appears after cycle snapshots or orders are available.</div>
+      {% else %}
+        <canvas
+          class="mini-chart-canvas"
+          data-mini-chart
+          data-chart-source="cycle-value-chart-data"
+          role="img"
+          aria-label="{{ value_chart.get('summary', 'Cycle value path') }}"
+        ></canvas>
+      {% endif %}
+      <p class="chart-summary">{{ value_chart.get("summary", "Cycle value path from available snapshots.") }}</p>
+    </article>
+
+    <article class="mini-chart-card" data-chart-card aria-labelledby="cycle-pnl-chart-title">
+      <div class="mini-chart-head">
+        <div>
+          <span class="card-kicker">PnL</span>
+          <h2 id="cycle-pnl-chart-title">Execution Path</h2>
+        </div>
+        <span class="metric-pill metric-pill-muted">{{ pnl_chart.get("points", [])|length }} points</span>
+      </div>
+      {% if pnl_chart.get("empty") %}
+        <div class="compact-state">PnL chart appears after fills or estimates are available.</div>
+      {% else %}
+        <canvas
+          class="mini-chart-canvas"
+          data-mini-chart
+          data-chart-source="cycle-pnl-chart-data"
+          data-chart-color="{{ '#86efac' if total_pnl >= 0 else '#fb7185' }}"
+          role="img"
+          aria-label="{{ pnl_chart.get('summary', 'Cycle PnL path') }}"
+        ></canvas>
+      {% endif %}
+      <p class="chart-summary">{{ pnl_chart.get("summary", "Cycle PnL path from available order events.") }}</p>
+    </article>
+  </section>
+
+  {% if cycle_charts.get("allocations") %}
+    <section class="allocation-panel" aria-labelledby="cycle-allocation-chart-title">
+      <div class="wallet-section-heading">
+        <div>
+          <span class="card-kicker">Allocation</span>
+          <h2 id="cycle-allocation-chart-title">Leg Breakdown</h2>
+        </div>
+        <span class="wallet-count">{{ cycle_charts.get("allocations", [])|length }} legs</span>
+      </div>
+      <div class="allocation-bars" role="list">
+        {% for row in cycle_charts.get("allocations", []) %}
+          <div class="allocation-bar-row" role="listitem">
+            <div class="allocation-row-label">
+              <strong>{{ row.label }}</strong>
+              <span>{{ row.asset or "cycle leg" }}</span>
+            </div>
+            <div class="allocation-track" aria-hidden="true"><span style="width: {{ [row.pct, 100]|min }}%"></span></div>
+            <span class="allocation-pct">${{ "%.2f"|format(row.value) }} · {{ "%.1f"|format(row.pct) }}%</span>
+          </div>
+        {% endfor %}
+      </div>
+    </section>
+  {% endif %}
 
   {% if summary.get("runtime_notice") %}
     {% set runtime_notice = summary.get("runtime_notice") %}
@@ -441,4 +515,10 @@
     {% endif %}
   </section>
 </section>
+<script type="application/json" id="cycle-value-chart-data">{{ value_chart|tojson }}</script>
+<script type="application/json" id="cycle-pnl-chart-data">{{ pnl_chart|tojson }}</script>
+{% endblock %}
+
+{% block page_scripts %}
+<script defer src="{{ url_for('static', filename='js/mini-charts.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}-mini-charts-1"></script>
 {% endblock %}

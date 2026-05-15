@@ -15,6 +15,52 @@
       <a href="{{ url_for('settings.connections') }}" class="button-link secondary">Providers</a>
     </div>
   </article>
+
+  <article class="mini-chart-card wallet-chart-card" data-chart-card aria-labelledby="wallet-trend-title">
+    <div class="mini-chart-head">
+      <div>
+        <span class="card-kicker">Balance Trend</span>
+        <h2 id="wallet-trend-title">Vault Snapshots</h2>
+      </div>
+      <span class="metric-pill metric-pill-muted">{{ portfolio_trend.points|length }} points</span>
+    </div>
+    {% if portfolio_trend.empty %}
+      <div class="compact-state">Trend appears after vault cycles create value snapshots.</div>
+    {% else %}
+      <canvas
+        class="mini-chart-canvas"
+        data-mini-chart
+        data-chart-source="wallet-trend-data"
+        role="img"
+        aria-label="{{ portfolio_trend.summary }}"
+      ></canvas>
+    {% endif %}
+    <p class="chart-summary">{{ portfolio_trend.summary }}</p>
+  </article>
+</section>
+
+<section class="allocation-panel wallet-allocation-panel" aria-labelledby="wallet-allocation-title">
+  <div class="wallet-section-heading">
+    <div>
+      <span class="card-kicker">Allocation</span>
+      <h2 id="wallet-allocation-title">Asset Mix</h2>
+    </div>
+    <span class="wallet-count">{{ allocation_chart.rows|length }} assets</span>
+  </div>
+  <div class="allocation-bars" role="list">
+    {% for row in allocation_chart.rows %}
+      <div class="allocation-bar-row" role="listitem">
+        <div class="allocation-row-label">
+          <strong>{{ row.asset }}</strong>
+          <span>{{ "%.6f"|format(row.total_balance) }} total</span>
+        </div>
+        <div class="allocation-track" aria-hidden="true"><span style="width: {{ [row.pct, 100]|min }}%"></span></div>
+        <span class="allocation-pct">${{ "%.2f"|format(row.value) }} · {{ "%.1f"|format(row.pct) }}%</span>
+      </div>
+    {% else %}
+      <div class="compact-state">No wallet balances are available yet.</div>
+    {% endfor %}
+  </div>
 </section>
 
 <section class="wallet-assets-section" aria-label="Wallet balances">
@@ -145,4 +191,9 @@
     </nav>
   {% endif %}
 </section>
+<script type="application/json" id="wallet-trend-data">{{ portfolio_trend|tojson }}</script>
+{% endblock %}
+
+{% block page_scripts %}
+<script defer src="{{ url_for('static', filename='js/mini-charts.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}-mini-charts-1"></script>
 {% endblock %}

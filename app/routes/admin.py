@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import secrets
 from datetime import datetime, timezone
 from functools import wraps
@@ -396,9 +397,10 @@ def _latency_quality(latency_ms: float, can_trade: bool) -> str:
 
 def _safe_float(value: object, default: float = 0.0) -> float:
     try:
-        return float(value)
+        parsed = float(value)
     except (TypeError, ValueError):
         return default
+    return parsed if math.isfinite(parsed) else default
 
 
 @admin_bp.get("/live-readiness")
@@ -455,23 +457,119 @@ def live_readiness():
 @admin_bp.get("/strategies")
 @admin_required
 def strategies():
+    strategy_runs = StrategyRun.query.order_by(StrategyRun.created_at.desc()).limit(50).all()
+    strategy_rankings = (
+        StrategyRanking.query.order_by(
+            StrategyRanking.rejected.asc(),
+            StrategyRanking.score.desc(),
+            StrategyRanking.created_at.desc(),
+        )
+        .limit(30)
+        .all()
+    )
+    validations = StrategyValidation.query.order_by(StrategyValidation.started_at.desc()).limit(30).all()
+    vault_cycles = VaultCycle.query.order_by(VaultCycle.started_at.desc()).limit(30).all()
     return render_template(
         "advanced/strategies.html",
         mode=get_current_mode(),
-        strategy_runs=StrategyRun.query.order_by(StrategyRun.created_at.desc()).limit(50).all(),
-        strategy_rankings=(
-            StrategyRanking.query.order_by(
-                StrategyRanking.rejected.asc(),
-                StrategyRanking.score.desc(),
-                StrategyRanking.created_at.desc(),
-            )
-            .limit(30)
-            .all()
-        ),
-        validations=StrategyValidation.query.order_by(StrategyValidation.started_at.desc()).limit(30).all(),
+        strategy_runs=strategy_runs,
+        strategy_rankings=strategy_rankings,
+        strategy_diagnostics=_strategy_diagnostics(strategy_runs, strategy_rankings, vault_cycles),
+        validations=validations,
         shadow_observations=ShadowLiveObservation.query.order_by(ShadowLiveObservation.created_at.desc()).limit(30).all(),
-        vault_cycles=VaultCycle.query.order_by(VaultCycle.started_at.desc()).limit(30).all(),
+        vault_cycles=vault_cycles,
     )
+
+
+def _strategy_diagnostics(
+    strategy_runs: list[StrategyRun],
+    strategy_rankings: list[StrategyRanking],
+    vault_cycles: list[VaultCycle],
+) -> dict[str, object]:
+    now = datetime.utcnow()
+    statuses: dict[str, int] = {}
+    stale_runs = 0
+    run_rows: list[dict[str, object]] = []
+    for run in strategy_runs:
+        status = str(run.status or "unknown").lower()
+        statuses[status] = statuses.get(status, 0) + 1
+        heartbeat_age = (now - run.last_heartbeat_at).total_seconds() if run.last_heartbeat_at else None
+        active_run = status in {"running", "starting"}
+        stale = active_run and (heartbeat_age is None or heartbeat_age > 180)
+        stale_runs += 1 if stale else 0
+        last_signal = run.last_signal if isinstance(run.last_signal, dict) else {}
+        metadata = last_signal.get("metadata") if isinstance(last_signal.get("metadata"), dict) else {}
+        run_rows.append(
+            {
+                "id": run.id,
+                "name": run.strategy_name,
+                "symbol": run.symbol,
+                "timeframe": run.timeframe,
+                "status": status,
+                "mode": run.mode,
+                "heartbeat_age_seconds": heartbeat_age,
+                "stale": stale,
+                "last_action": last_signal.get("action", "n/a"),
+                "diagnostic": metadata.get("no_trade_reason") or last_signal.get("rationale") or run.last_error or "Monitoring",
+            }
+        )
+
+    cycle_statuses: dict[str, int] = {}
+    for cycle in vault_cycles:
+        status = str(cycle.status or "unknown").lower()
+        cycle_statuses[status] = cycle_statuses.get(status, 0) + 1
+
+    return {
+        "status_distribution": [{"label": key.replace("_", " ").title(), "value": value} for key, value in sorted(statuses.items())],
+        "cycle_distribution": [{"label": key.replace("_", " ").title(), "value": value} for key, value in sorted(cycle_statuses.items())],
+        "stale_runs": stale_runs,
+        "ranking_rows": [_strategy_ranking_diagnostic(row) for row in strategy_rankings[:12]],
+        "run_rows": run_rows[:12],
+        "summary": "Strategy diagnostics use risk-adjusted ranking, execution quality, and heartbeat freshness without changing live gates.",
+    }
+
+
+def _strategy_ranking_diagnostic(ranking: StrategyRanking) -> dict[str, object]:
+    explanation = ranking.ml_explanation if isinstance(ranking.ml_explanation, dict) else {}
+    net_roi = explanation.get("net_roi") if isinstance(explanation.get("net_roi"), dict) else {}
+    net_roi_v2 = explanation.get("net_roi_v2") if isinstance(explanation.get("net_roi_v2"), dict) else {}
+    edge = explanation.get("one_hour_edge_v2") if isinstance(explanation.get("one_hour_edge_v2"), dict) else {}
+    quality = edge.get("candidate_quality_breakdown") if isinstance(edge.get("candidate_quality_breakdown"), dict) else {}
+    factors = [
+        {"label": "Score", "value": round(_safe_float(ranking.score), 4)},
+        {"label": "Net ROI", "value": round(_safe_float(net_roi.get("net_roi_score"), _safe_float(ranking.net_return_after_costs)), 4)},
+        {"label": "Drawdown", "value": round(_safe_float(ranking.max_drawdown), 4)},
+        {"label": "Win Rate", "value": round(_safe_float(ranking.win_rate), 4)},
+        {"label": "Execution", "value": round(_safe_float(quality.get("expected_execution_quality"), _safe_float(edge.get("expected_execution_quality"))), 4)},
+    ]
+    blockers: list[str] = []
+    if ranking.rejection_reason:
+        blockers.append(str(ranking.rejection_reason))
+    blockers.extend(str(item) for item in ranking.warnings[:3])
+    chart_values = [
+        _safe_float(ranking.score),
+        _safe_float(ranking.ml_adjusted_score or ranking.ml_score),
+        _safe_float(ranking.net_return_after_costs),
+        _safe_float(ranking.sharpe_like),
+        _safe_float(net_roi_v2.get("net_roi_v2_score")),
+    ]
+    return {
+        "id": ranking.id,
+        "name": ranking.strategy_name,
+        "symbol": ranking.symbol,
+        "timeframe": ranking.timeframe,
+        "status": "Rejected" if ranking.rejected else "Candidate",
+        "rejected": bool(ranking.rejected),
+        "score": round(_safe_float(ranking.score), 4),
+        "factors": factors,
+        "blockers": blockers,
+        "points": [{"value": round(value, 4)} for value in chart_values if value == value],
+        "selection_reason": (
+            "Rejected by optimizer or validation blockers."
+            if ranking.rejected
+            else "Candidate ranked by risk-adjusted score, net return after costs, execution quality, and freshness signals."
+        ),
+    }
 
 
 @admin_bp.get("/deposit-addresses")

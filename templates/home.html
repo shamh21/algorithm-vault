@@ -15,6 +15,8 @@
   data-provider-state-count="{{ enabled_provider_states|length }}"
 >
   <script type="application/json" id="command-center-payload">{{ dashboard_payload|tojson }}</script>
+  <script type="application/json" id="portfolio-trend-data">{{ portfolio_trend|tojson }}</script>
+  <script type="application/json" id="wallet-allocation-data">{{ allocation_chart|tojson }}</script>
 
   <header class="av-hero-panel" aria-labelledby="vault-pulse-title">
     <div class="av-hero-copy">

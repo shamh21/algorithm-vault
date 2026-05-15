@@ -5,8 +5,113 @@
 {% block content %}
 <section class="page-heading advanced-only">
   <span class="card-kicker">Advanced / Admin</span>
-  <h1>Strategy and Vault Internals</h1>
-  <p class="muted">Protected view for selected strategy mappings, validation records, and vault-started runs.</p>
+  <h1>Strategy Diagnostics</h1>
+  <p class="muted">Protected view for strategy selection, heartbeat freshness, validation records, and vault-started runs.</p>
+</section>
+
+<section class="strategy-diagnostics-shell" aria-label="Strategy diagnostics overview">
+  <article class="card strategy-health-card">
+    <div class="mini-chart-head">
+      <div>
+        <span class="card-kicker">Run Status</span>
+        <h2>Automation Health</h2>
+      </div>
+      <span class="metric-pill {{ 'negative' if strategy_diagnostics.stale_runs else 'metric-pill-muted' }}">
+        {{ strategy_diagnostics.stale_runs }} stale
+      </span>
+    </div>
+    <div class="strategy-status-strip" role="list">
+      {% for item in strategy_diagnostics.status_distribution %}
+        <span role="listitem"><strong>{{ item.value }}</strong>{{ item.label }}</span>
+      {% else %}
+        <span role="listitem"><strong>0</strong>No runs</span>
+      {% endfor %}
+    </div>
+    <p class="chart-summary">{{ strategy_diagnostics.summary }}</p>
+  </article>
+
+  <article class="card strategy-health-card">
+    <div class="mini-chart-head">
+      <div>
+        <span class="card-kicker">Vault Cycles</span>
+        <h2>Cycle State</h2>
+      </div>
+      <span class="metric-pill metric-pill-muted">{{ vault_cycles|length }} recent</span>
+    </div>
+    <div class="strategy-status-strip" role="list">
+      {% for item in strategy_diagnostics.cycle_distribution %}
+        <span role="listitem"><strong>{{ item.value }}</strong>{{ item.label }}</span>
+      {% else %}
+        <span role="listitem"><strong>0</strong>No cycles</span>
+      {% endfor %}
+    </div>
+    <p class="chart-summary">Cycle state is read-only and does not modify trading or risk controls.</p>
+  </article>
+</section>
+
+<section class="strategy-diagnostics-grid" aria-labelledby="ranking-diagnostics-title">
+  <div class="wallet-section-heading strategy-diagnostics-heading">
+    <div>
+      <span class="card-kicker">Selection Quality</span>
+      <h2 id="ranking-diagnostics-title">Why Candidates Rank</h2>
+    </div>
+    <span class="wallet-count">{{ strategy_diagnostics.ranking_rows|length }} diagnostics</span>
+  </div>
+  {% for row in strategy_diagnostics.ranking_rows[:6] %}
+    <article class="mini-chart-card strategy-ranking-card" data-chart-card>
+      <div class="mini-chart-head">
+        <div>
+          <span class="card-kicker">{{ row.status }}</span>
+          <h3>{{ row.name }} · {{ row.symbol }}</h3>
+        </div>
+        <span class="metric-pill {{ 'negative' if row.rejected else 'metric-pill-muted' }}">{{ "%.3f"|format(row.score) }}</span>
+      </div>
+      <canvas
+        class="mini-chart-canvas mini-chart-canvas--short"
+        data-mini-chart
+        data-chart-source="strategy-rank-chart-{{ row.id }}"
+        role="img"
+        aria-label="{{ row.selection_reason }}"
+      ></canvas>
+      <div class="strategy-factor-list" role="list">
+        {% for factor in row.factors %}
+          <span role="listitem"><strong>{{ factor.label }}</strong>{{ "%.3f"|format(factor.value) }}</span>
+        {% endfor %}
+      </div>
+      <p class="chart-summary">{{ row.selection_reason }}</p>
+      {% if row.blockers %}
+        <div class="compact-state compact-state--warning">{{ row.blockers[0] }}</div>
+      {% endif %}
+    </article>
+  {% else %}
+    <div class="compact-state">No optimizer rankings have been recorded yet.</div>
+  {% endfor %}
+</section>
+
+<section class="card strategy-run-monitor" aria-labelledby="run-monitor-title">
+  <div class="wallet-section-heading">
+    <div>
+      <span class="card-kicker">Heartbeat</span>
+      <h2 id="run-monitor-title">Strategy Run Freshness</h2>
+    </div>
+    <span class="wallet-count">{{ strategy_diagnostics.run_rows|length }} runs</span>
+  </div>
+  <div class="strategy-run-list" role="list">
+    {% for run in strategy_diagnostics.run_rows %}
+      <article class="strategy-run-row" role="listitem">
+        <div>
+          <strong>{{ run.name }} · {{ run.symbol }}</strong>
+          <span>{{ run.timeframe }} · {{ run.mode }} · {{ run.last_action|replace("_", " ")|title }}</span>
+        </div>
+        <span class="metric-pill {{ 'negative' if run.stale and run.status in ['running', 'starting'] else 'metric-pill-muted' }}">
+          {{ "stale" if run.stale else "fresh" }}
+        </span>
+        <p>{{ run.diagnostic }}</p>
+      </article>
+    {% else %}
+      <div class="compact-state">No strategy runs recorded.</div>
+    {% endfor %}
+  </div>
 </section>
 
 <section class="grid two-up">
@@ -97,4 +202,11 @@
     </table>
   </article>
 </section>
+{% for row in strategy_diagnostics.ranking_rows %}
+  <script type="application/json" id="strategy-rank-chart-{{ row.id }}">{{ {"points": row.points, "summary": row.selection_reason}|tojson }}</script>
+{% endfor %}
+{% endblock %}
+
+{% block page_scripts %}
+<script defer src="{{ url_for('static', filename='js/mini-charts.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}-mini-charts-1"></script>
 {% endblock %}

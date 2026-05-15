@@ -87,6 +87,7 @@ def test_service_worker_precaches_only_safe_shell_assets() -> None:
     assert '"/admin/dashboard"' not in app_shell
     assert '"/wallet"' not in app_shell
     assert '"/vault"' not in app_shell
+    assert "mini-charts.js" not in app_shell
     assert "dashboard.js" not in app_shell
     assert "backtests.js" not in app_shell
     assert "vendor/" not in app_shell

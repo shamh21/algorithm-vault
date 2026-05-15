@@ -3,7 +3,7 @@
   let startupFailed = false;
   let startupComplete = false;
   const startupStartedAt = window.performance?.now?.() || Date.now();
-  const STARTUP_MIN_VISIBLE_MS = 720;
+  const STARTUP_MIN_VISIBLE_MS = 160;
   const STARTUP_TIMEOUT_MS = 4500;
   const BOTTOM_NAV_SWITCH_KEY = "av-bottom-nav-switch";
   const THEME_STORAGE_KEY = "av-color-theme";
@@ -24,7 +24,8 @@
     window.clearTimeout(startupTimeout);
 
     const elapsed = (window.performance?.now?.() || Date.now()) - startupStartedAt;
-    const delay = skipDelay ? 0 : Math.max(0, STARTUP_MIN_VISIBLE_MS - elapsed);
+    const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+    const delay = skipDelay || reduceMotion ? 0 : Math.max(0, STARTUP_MIN_VISIBLE_MS - elapsed);
     window.setTimeout(() => {
       const { loader } = startupNodes();
       document.body.classList.remove("app-starting", "app-startup-failed");
@@ -334,7 +335,7 @@
     };
 
     registerServiceWorker();
-    finishStartupAfterRouteReady(switchedFromBottomNav);
+    finishStartupAfterRouteReady(switchedFromBottomNav || prefersReducedMotion);
   };
 
   const runInitShell = () => {

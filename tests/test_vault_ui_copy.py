@@ -112,7 +112,29 @@ def test_vault_assets_use_explicit_readiness_cache_busters() -> None:
 
     assert "vault-readiness-3" in vault_source
     assert "algvault-command-center-dark" in base_source
-    assert "algvault-v8-command-center-dark" in sw_source
+    assert "algvault-v9-command-center-dark" in sw_source
+
+
+def test_pwa_shell_keeps_heavy_chart_libraries_off_precache_path() -> None:
+    source = Path("static/js/sw.js").read_text()
+    app_shell = source.split("const APP_SHELL = [", 1)[1].split("];", 1)[0]
+
+    assert "vendor/chart.umd.min.js" not in app_shell
+    assert "vendor/lightweight-charts.standalone.production.js" not in app_shell
+    assert "dashboard.js" not in app_shell
+    assert "backtests.js" not in app_shell
+    assert "mini-charts.js" not in app_shell
+
+
+def test_one_h10_copy_avoids_profit_claims() -> None:
+    selector_source = Path("app/services/vault_selector_parts/legacy.py").read_text()
+    route_source = Path("app/routes/consumer_parts/legacy.py").read_text()
+    source = selector_source + route_source
+
+    assert "aims to 10x" not in source
+    assert "guaranteed" not in source.lower()
+    assert "risk-free" not in source.lower()
+    assert "high-upside one-hour objective" in source
 
 
 def test_vault_template_server_renders_provider_readiness_fallbacks() -> None:

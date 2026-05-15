@@ -168,6 +168,8 @@ def home():
     return render_template(
         "home.html",
         portfolio_total=wallet_summary.portfolio_total_usd,
+        allocation_chart=_wallet_allocation_payload(wallet_summary),
+        portfolio_trend=_portfolio_trend_payload(user, wallet_summary),
         enabled_provider_states=enabled_provider_states,
         dashboard_payload=dashboard_payload,
     )
@@ -186,6 +188,8 @@ def wallet():
         balances=wallet_summary.balances,
         wallet_summary=wallet_summary,
         portfolio_total=wallet_summary.portfolio_total_usd,
+        allocation_chart=_wallet_allocation_payload(wallet_summary),
+        portfolio_trend=_portfolio_trend_payload(user, wallet_summary),
         transactions=activity_page.items,
         activity_page=activity_page,
         networks=ASSET_NETWORKS,
@@ -1346,6 +1350,7 @@ def cycle_detail(cycle_id: int):
         summary = get_service("vault_cycle_reporting").status_payload(cycle)
     else:
         summary = _cycle_summary(cycle, performance=performance) if cycle.status in {"active", "settling"} else cycle.cycle_summary or _cycle_summary(cycle)
+    summary["chart_payload"] = _cycle_chart_payload(cycle, summary)
     return render_template(
         "cycle_detail.html",
         cycle=cycle,
@@ -1530,6 +1535,61 @@ def _decimal_amount(value: float) -> str:
 
 def _portfolio_total(balances: list[WalletBalance]) -> float:
     return sum(float(balance.estimated_usd_value or 0.0) for balance in balances)
+
+
+def _wallet_allocation_payload(wallet_summary) -> dict[str, object]:
+    total = max(float(wallet_summary.portfolio_total_usd or 0.0), 0.0)
+    rows: list[dict[str, object]] = []
+    for balance in wallet_summary.balances:
+        value = max(float(balance.estimated_usd_value or 0.0), 0.0)
+        rows.append(
+            {
+                "asset": balance.asset,
+                "value": round(value, 2),
+                "pct": round((value / total) * 100.0, 2) if total > 0 else 0.0,
+                "total_balance": round(float(balance.total_balance or 0.0), 8),
+                "available_balance": round(float(balance.available_balance or 0.0), 8),
+                "locked_balance": round(float(balance.locked_balance or 0.0), 8),
+            }
+        )
+    rows = sorted(rows, key=lambda item: float(item["value"]), reverse=True)
+    return {
+        "total": round(total, 2),
+        "rows": rows,
+        "summary": "Vault allocation is weighted by current estimated wallet value." if total > 0 else "No wallet balances are available yet.",
+        "empty": total <= 0,
+    }
+
+
+def _portfolio_trend_payload(user, wallet_summary) -> dict[str, object]:
+    cycles = (
+        VaultCycle.query.filter_by(user_id=user.id)
+        .order_by(VaultCycle.started_at.desc())
+        .limit(8)
+        .all()
+    )
+    points: list[dict[str, object]] = []
+    for cycle in reversed(cycles):
+        starting = max(float(cycle.starting_value_usd or 0.0), 0.0)
+        current = max(
+            float(cycle.current_estimated_value_usd or 0.0)
+            or float(cycle.cycle_summary.get("final_settlement_value_usd", 0.0) or 0.0)
+            or starting,
+            0.0,
+        )
+        if cycle.started_at and starting > 0:
+            points.append({"t": cycle.started_at.isoformat(), "value": round(starting, 2)})
+        end_time = cycle.settled_at or cycle.updated_at or cycle.unlocks_at or cycle.started_at
+        if end_time and current > 0:
+            points.append({"t": end_time.isoformat(), "value": round(current, 2)})
+    if len(points) == 1:
+        current_total = max(float(wallet_summary.portfolio_total_usd or 0.0), float(points[0]["value"]))
+        points.append({"t": datetime.utcnow().isoformat(), "value": round(current_total, 2)})
+    return {
+        "points": points[-16:],
+        "summary": "Recent vault value path from started and settled cycle snapshots." if len(points) >= 2 else "Portfolio trend appears after vault cycles generate value snapshots.",
+        "empty": len(points) < 2,
+    }
 
 
 def _live_connection_required() -> bool:
@@ -2227,7 +2287,7 @@ def _one_h10_live_context(user) -> dict[str, object]:
         "secondary_confirmation": bool(current_app.config.get("SECONDARY_CONFIRMATION", False))
         and bool(Setting.get_json("secondary_confirmation", False)),
         "ack_required": True,
-        "target_copy": "1H10",
+        "target_copy": "1H10 high-upside objective",
         "providers": providers,
         "enabled_provider_count": sum(1 for item in providers if bool(item.get("can_trade")) and float(item.get("available_margin_usd", 0.0) or 0.0) > 0),
         "total_free_margin_usd": total_free_margin,
@@ -4380,6 +4440,74 @@ def _cycle_ranked_candidates(cycle: VaultCycle) -> list[dict[str, object]]:
     return sorted(rows, key=lambda item: float(item.get("scanner_score", 0.0) or 0.0), reverse=True)
 
 
+def _cycle_chart_payload(cycle: VaultCycle, summary: dict[str, object]) -> dict[str, object]:
+    starting_value = max(float(summary.get("starting_value_usd", cycle.starting_value_usd) or 0.0), 0.0)
+    current_value = max(float(summary.get("current_estimated_value_usd", cycle.current_estimated_value_usd) or 0.0), 0.0)
+    value_points: list[dict[str, object]] = []
+    pnl_points: list[dict[str, object]] = []
+    cumulative_pnl = 0.0
+    if cycle.started_at:
+        value_points.append({"t": cycle.started_at.isoformat(), "value": round(starting_value, 2)})
+        pnl_points.append({"t": cycle.started_at.isoformat(), "value": 0.0})
+
+    orders = [order for order in (summary.get("orders") or []) if isinstance(order, dict)]
+    for order in orders:
+        order_time = order.get("created_at")
+        if not order_time:
+            continue
+        cumulative_pnl += float(order.get("realized_pnl", 0.0) or 0.0)
+        value_points.append({"t": order_time, "value": round(max(starting_value + cumulative_pnl, 0.0), 2)})
+        pnl_points.append({"t": order_time, "value": round(cumulative_pnl, 2)})
+
+    end_time = cycle.settled_at or cycle.updated_at or datetime.utcnow()
+    value_points.append({"t": end_time.isoformat(), "value": round(current_value or starting_value + cumulative_pnl, 2)})
+    pnl_points.append({"t": end_time.isoformat(), "value": round(float(summary.get("total_pnl_usd", cumulative_pnl) or 0.0), 2)})
+
+    allocation_rows: list[dict[str, object]] = []
+    raw_allocations = summary.get("allocations") or summary.get("legs") or []
+    total_allocation = 0.0
+    allocation_source = raw_allocations if isinstance(raw_allocations, list) else []
+    for row in allocation_source:
+        if not isinstance(row, dict):
+            continue
+        amount = float(row.get("allocated_amount", row.get("allocation_cap_usd", 0.0)) or 0.0)
+        total_allocation += max(amount, 0.0)
+        allocation_rows.append(
+            {
+                "label": str(row.get("provider") or row.get("symbol") or row.get("strategy_name") or "Allocation"),
+                "asset": row.get("collateral_asset") or row.get("settlement_asset"),
+                "value": round(max(amount, 0.0), 2),
+                "score": round(float(row.get("risk_adjusted_score", row.get("scanner_score", 0.0)) or 0.0), 4),
+            }
+        )
+    for row in allocation_rows:
+        row["pct"] = round((float(row["value"]) / total_allocation) * 100.0, 2) if total_allocation > 0 else 0.0
+
+    timeline = [
+        {
+            "t": order.get("created_at"),
+            "label": f"{str(order.get('side') or '').upper()} {order.get('symbol')}",
+            "status": order.get("status"),
+            "pnl": round(float(order.get("realized_pnl", 0.0) or 0.0), 2),
+        }
+        for order in orders[:12]
+    ]
+    return {
+        "value": {
+            "points": value_points[-18:],
+            "summary": "Cycle value path from allocation, order, and latest estimate snapshots.",
+            "empty": len(value_points) < 2,
+        },
+        "pnl": {
+            "points": pnl_points[-18:],
+            "summary": "Realized and estimated cycle PnL over available order events.",
+            "empty": len(pnl_points) < 2,
+        },
+        "allocations": allocation_rows,
+        "timeline": timeline,
+    }
+
+
 def _cycle_repairable_no_order(cycle: VaultCycle, orders: list[Order]) -> bool:
     if orders:
         return False
@@ -4638,6 +4766,7 @@ def _order_summary(order: Order) -> dict[str, object]:
     return {
         "id": order.id,
         "client_order_id": order.client_order_id,
+        "created_at": order.created_at.isoformat() if order.created_at else None,
         "symbol": order.symbol,
         "side": order.side,
         "status": order.status,
