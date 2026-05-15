@@ -9019,6 +9019,7 @@ def _production_readiness_payload(*, provider: str = "global", horizon: str = "1
     secret_key = str(current_app.config.get("SECRET_KEY", "") or "")
     totp_key = str(current_app.config.get("TOTP_ENCRYPTION_KEY", "") or "").strip()
     caps = current_app.config.get("WALLET_MAX_WITHDRAWAL_BY_ASSET") or {}
+    custody_mode = str(current_app.config.get("WALLET_CUSTODY_MODE", "local_dev") or "local_dev").strip().lower()
     required_cap_assets = ("ETH", "USDC", "USDT", "BTC", "SOL", "XRP")
 
     if current_app.config.get("APP_MODE") != "live":
@@ -9075,6 +9076,29 @@ def _production_readiness_payload(*, provider: str = "global", horizon: str = "1
                 warnings.append(f"{provider} API key whitelist must include current client IP {health.get('client_ip')}")
     if not bool(wallet.get("ready", False)):
         blockers.extend(str(item) for item in wallet.get("blockers", []))
+    if deployment_target in {"vps", "postgres", "production", "vercel"} and bool(current_app.config.get("WALLET_WITHDRAWALS_ENABLED", False)):
+        if custody_mode not in {"kms", "hsm", "mpc"}:
+            blockers.append("production withdrawals require approved custody mode: kms, hsm, or mpc")
+        if custody_mode == "mpc":
+            if not str(current_app.config.get("WALLET_MPC_SIGNER_URL", "") or "").strip():
+                blockers.append("WALLET_MPC_SIGNER_URL must be configured for mpc custody")
+            if not str(current_app.config.get("WALLET_MPC_SIGNER_TOKEN", "") or "").strip():
+                blockers.append("WALLET_MPC_SIGNER_TOKEN must be configured for mpc custody")
+        if bool(current_app.config.get("WALLET_SIGNER_ISOLATION_REQUIRED", True)) and not bool(
+            current_app.config.get("WALLET_SIGNER_ISOLATION_CONFIRMED", False)
+        ):
+            blockers.append("production withdrawals require confirmed signer isolation")
+        if not bool(current_app.config.get("WALLET_SDK_CHECKS_PASSED", False)):
+            blockers.append("production withdrawals require passing wallet SDK/integration checks")
+        if float(current_app.config.get("WALLET_DAILY_WITHDRAWAL_LIMIT_BY_WALLET", 0.0) or 0.0) <= 0:
+            blockers.append("WALLET_DAILY_WITHDRAWAL_LIMIT_BY_WALLET must be configured")
+        asset_limits = current_app.config.get("WALLET_DAILY_WITHDRAWAL_LIMIT_BY_ASSET") or {}
+        if not isinstance(asset_limits, dict) or not asset_limits:
+            blockers.append("WALLET_DAILY_WITHDRAWAL_LIMIT_BY_ASSET_JSON must be configured")
+        if float(current_app.config.get("WALLET_DAILY_WITHDRAWAL_LIMIT_BY_DESTINATION", 0.0) or 0.0) <= 0:
+            blockers.append("WALLET_DAILY_WITHDRAWAL_LIMIT_BY_DESTINATION must be configured")
+        if float(current_app.config.get("WALLET_DAILY_GLOBAL_WITHDRAWAL_LIMIT", 0.0) or 0.0) <= 0:
+            blockers.append("WALLET_DAILY_GLOBAL_WITHDRAWAL_LIMIT must be configured")
     for asset in required_cap_assets:
         cap = caps.get(asset) if isinstance(caps, dict) else None
         if cap is None and isinstance(caps, dict):

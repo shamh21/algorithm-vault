@@ -3213,31 +3213,36 @@ def _one_h10_provider_legs(
                 if len(symbol_matches) == 1:
                     market = symbol_matches[0]
             if market is None:
-                provider_history["legs"].append(
-                    {
-                        "symbol": leg_symbol,
-                        "app_symbol": leg_symbol,
-                        "venue_symbol": venue_symbol or leg_symbol,
-                        "provider_symbol": venue_symbol or leg_symbol,
-                        "allocation_cap_usd": 0.0,
-                        "strategy_name": leg.get("strategy_name") or selection.strategy_name,
-                        "market_id": candidate_market_id,
-                        "market_status": "candidate_market_missing",
-                        "scanner_score": candidate.score,
-                        "scanner_source": candidate.source,
-                        "score_breakdown": candidate.score_breakdown or {},
-                        "skip_reason": "one_h10_candidate_market_missing",
-                    }
+                bootstrap_fallback = (
+                    str(candidate.source or "") == "one_h10_bootstrap_fallback"
+                    and bool(current_app.config.get("ONE_H10_BOOTSTRAP_LIVE_ENABLED", True))
                 )
-                blockers.append(
-                    {
-                        "provider": provider,
-                        "trading_connection_id": connection_id,
-                        "symbol": leg_symbol,
-                        "reason": "one_h10_candidate_market_missing",
-                    }
-                )
-                continue
+                if not bootstrap_fallback:
+                    provider_history["legs"].append(
+                        {
+                            "symbol": leg_symbol,
+                            "app_symbol": leg_symbol,
+                            "venue_symbol": venue_symbol or leg_symbol,
+                            "provider_symbol": venue_symbol or leg_symbol,
+                            "allocation_cap_usd": 0.0,
+                            "strategy_name": leg.get("strategy_name") or selection.strategy_name,
+                            "market_id": candidate_market_id,
+                            "market_status": "candidate_market_missing",
+                            "scanner_score": candidate.score,
+                            "scanner_source": candidate.source,
+                            "score_breakdown": candidate.score_breakdown or {},
+                            "skip_reason": "one_h10_candidate_market_missing",
+                        }
+                    )
+                    blockers.append(
+                        {
+                            "provider": provider,
+                            "trading_connection_id": connection_id,
+                            "symbol": leg_symbol,
+                            "reason": "one_h10_candidate_market_missing",
+                        }
+                    )
+                    continue
             symbol = str(getattr(market, "symbol", leg_symbol) or leg_symbol).upper()
             venue_symbol = str(getattr(market, "venue_symbol", venue_symbol) or venue_symbol or symbol).strip()
             market_status = getattr(market, "status", "fallback_configured") if market is not None else "fallback_configured"

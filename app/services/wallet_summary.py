@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from flask import current_app, has_app_context
 from sqlalchemy import func
 from sqlalchemy.orm import joinedload
 
@@ -32,10 +33,18 @@ class WalletBalanceView:
     onchain_reason: str = ""
     onchain_delta: float = 0.0
     onchain_mismatch_status: str = "unavailable"
+    sync_status: str = "not_configured"
+    sync_reason: str = ""
+    sync_checked_at: str | None = None
+    verified_on_chain_balance: float | None = None
 
     @property
     def total_balance(self) -> float:
         return float(self.available_balance or 0.0) + float(self.locked_balance or 0.0)
+
+    @property
+    def sync_stale(self) -> bool:
+        return self.sync_status in {"sync_failed", "partial_sync_failed", "unconfirmed", "not_synced"}
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -50,6 +59,11 @@ class WalletBalanceView:
             "onchain_reason": self.onchain_reason,
             "onchain_delta": float(self.onchain_delta or 0.0),
             "onchain_mismatch_status": self.onchain_mismatch_status,
+            "sync_status": self.sync_status,
+            "sync_reason": self.sync_reason,
+            "sync_checked_at": self.sync_checked_at,
+            "sync_stale": self.sync_stale,
+            "verified_on_chain_balance": self.verified_on_chain_balance,
         }
 
 
@@ -190,7 +204,8 @@ class WalletSummaryService:
         }
 
     def summary_for_user(self, user: User, *, balances: list[WalletBalance] | None = None) -> ProfileWalletSummary:
-        balance_views = self._balance_views(user.id, balances=balances)
+        sync_report = self._sync_and_reconcile_custody(user.id)
+        balance_views = self._balance_views(user.id, balances=None if sync_report.get("touched") else balances)
         return ProfileWalletSummary(
             user=user,
             balances=balance_views,
@@ -313,6 +328,7 @@ class WalletSummaryService:
         by_asset = {record.asset.upper(): record for record in records}
         onchain_by_asset = self._onchain_snapshots(user_id)
         assets = sorted(set(DEFAULT_WALLET_ASSETS) | set(by_asset))
+        sync_status = self._sync_status_by_asset(user_id)
         views: list[WalletBalanceView] = []
         for asset in assets:
             record = by_asset.get(asset)
@@ -323,6 +339,7 @@ class WalletSummaryService:
             onchain_status = str(onchain.get("status") or "unavailable")
             onchain_balance = float(onchain.get("balance", 0.0) or 0.0) if onchain_status == "checked" else 0.0
             onchain_delta = onchain_balance - total if onchain_status == "checked" else 0.0
+            status = sync_status.get(asset, {"status": "not_configured", "reason": "", "checked_at": None, "on_chain_total": None})
             views.append(
                 WalletBalanceView(
                     asset=asset,
@@ -336,6 +353,10 @@ class WalletSummaryService:
                     onchain_reason=str(onchain.get("reason") or ""),
                     onchain_delta=onchain_delta,
                     onchain_mismatch_status=_onchain_mismatch_status(onchain_status, onchain_delta),
+                    sync_status=str(status.get("status") or "not_configured"),
+                    sync_reason=str(status.get("reason") or ""),
+                    sync_checked_at=status.get("checked_at"),
+                    verified_on_chain_balance=status.get("on_chain_total"),
                 )
             )
         return views
@@ -380,6 +401,90 @@ class WalletSummaryService:
             row.pop("reasons", None)
             row.pop("checked_count", None)
         return by_asset
+
+    def _sync_and_reconcile_custody(self, user_id: int) -> dict[str, Any]:
+        if not has_app_context():
+            return {"touched": False}
+        custody = current_app.extensions.get("services", {}).get("wallet_custody")
+        if custody is None or not getattr(custody, "enabled", False):
+            return {"touched": False}
+        touched = False
+        try:
+            custody.sync_user(user_id)
+            touched = True
+        except Exception as exc:  # noqa: BLE001
+            current_app.logger.warning("Wallet summary custody sync failed for user %s: %s", user_id, exc)
+        assets = {
+            row.asset
+            for row in WalletBalance.query.filter_by(user_id=user_id).all()
+        } | {
+            row.asset
+            for row in WalletAddress.query.filter_by(user_id=user_id, status="active").all()
+        }
+        for asset in assets:
+            try:
+                custody.reconcile_custody_balance(user_id, asset)
+                touched = True
+            except Exception as exc:  # noqa: BLE001
+                current_app.logger.warning("Wallet summary custody reconciliation failed for user %s asset %s: %s", user_id, asset, exc)
+        if touched:
+            db.session.flush()
+        return {"touched": touched}
+
+    def _sync_status_by_asset(self, user_id: int) -> dict[str, dict[str, Any]]:
+        rows = WalletAddress.query.filter_by(user_id=user_id, status="active").order_by(WalletAddress.asset.asc()).all()
+        status_by_asset: dict[str, dict[str, Any]] = {}
+        grouped: dict[str, list[WalletAddress]] = {}
+        for row in rows:
+            grouped.setdefault(row.asset.upper(), []).append(row)
+        for asset, addresses in grouped.items():
+            checked_total = 0.0
+            checked_count = 0
+            failed_reasons: list[str] = []
+            unconfirmed_reasons: list[str] = []
+            unchecked_count = 0
+            latest_checked_at: str | None = None
+            for address in addresses:
+                metadata = address.encrypted_metadata or {}
+                status = str(metadata.get("last_sync_status") or "not_synced")
+                reason = str(metadata.get("last_sync_reason") or "")
+                checked_at = metadata.get("last_sync_checked_at")
+                if isinstance(checked_at, str) and (latest_checked_at is None or checked_at > latest_checked_at):
+                    latest_checked_at = checked_at
+                if status == "checked":
+                    checked_count += 1
+                    checked_total += _safe_float(metadata.get("last_checked_balance"))
+                elif status == "failed":
+                    failed_reasons.append(reason or "chain balance check failed")
+                elif status == "unconfirmed":
+                    unconfirmed_reasons.append(reason or "waiting for confirmations")
+                else:
+                    unchecked_count += 1
+            if failed_reasons and checked_count == 0:
+                sync_status = "sync_failed"
+                sync_reason = "; ".join(dict.fromkeys(failed_reasons))
+            elif failed_reasons:
+                sync_status = "partial_sync_failed"
+                sync_reason = "; ".join(dict.fromkeys(failed_reasons))
+            elif unconfirmed_reasons and checked_count == 0:
+                sync_status = "unconfirmed"
+                sync_reason = "; ".join(dict.fromkeys(unconfirmed_reasons))
+            elif checked_count > 0 and unchecked_count == 0:
+                sync_status = "verified"
+                sync_reason = "Verified against active on-chain wallet address."
+            elif checked_count > 0:
+                sync_status = "partial"
+                sync_reason = "Some active wallet addresses have not synced yet."
+            else:
+                sync_status = "not_synced"
+                sync_reason = "Active wallet address has not synced yet."
+            status_by_asset[asset] = {
+                "status": sync_status,
+                "reason": sync_reason,
+                "checked_at": latest_checked_at,
+                "on_chain_total": checked_total if checked_count > 0 else None,
+            }
+        return status_by_asset
 
     def _active_cycles_count(self, user_id: int) -> int:
         return VaultCycle.query.filter(

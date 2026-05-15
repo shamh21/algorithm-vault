@@ -9,6 +9,7 @@ import math
 import re
 import secrets
 import time
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime
@@ -25,6 +26,7 @@ from ..extensions import db
 from ..models import WalletAccount, WalletAddress, WalletAuditLog, WalletBalance, WalletLedgerEvent, WalletTransaction, WalletWithdrawal
 from .failures import WalletBroadcastError, WalletCustodyError
 from .withdrawal_config import automatic_withdrawal_blockers, wallet_withdrawals_enabled
+from .wallet_addresses import validate_withdraw_address
 
 
 EVM_NETWORKS = {"ETHEREUM", "ARBITRUM", "OPTIMISM", "BASE", "POLYGON", "AVALANCHE", "BSC"}
@@ -71,6 +73,16 @@ class BroadcastResult:
     raw: dict[str, Any]
 
 
+@dataclass(frozen=True, slots=True)
+class SignerWallet:
+    address: str
+    public_key: str
+    signer_key_id: str
+    key_type: str = ""
+    provider: str = "mpc_signer"
+    raw: dict[str, Any] | None = None
+
+
 class WalletChainAdapter(Protocol):
     def supports(self, asset: str, network: str) -> bool:
         ...
@@ -94,7 +106,12 @@ class WalletChainAdapter(Protocol):
 class RealWalletCustodyService:
     """Generates encrypted real wallets, syncs deposits, and broadcasts withdrawals."""
 
-    def __init__(self, config: dict[str, Any], adapters: list[WalletChainAdapter] | None = None) -> None:
+    def __init__(
+        self,
+        config: dict[str, Any],
+        adapters: list[WalletChainAdapter] | None = None,
+        signer_client: "MpcSignerClient | None" = None,
+    ) -> None:
         self.config = config
         self.adapters = adapters or [
             EvmWalletAdapter(config),
@@ -102,6 +119,7 @@ class RealWalletCustodyService:
             SolanaWalletAdapter(config),
             XrpWalletAdapter(config),
         ]
+        self.signer_client = signer_client or MpcSignerClient(config)
 
     @property
     def enabled(self) -> bool:
@@ -147,6 +165,8 @@ class RealWalletCustodyService:
             "withdrawals_enabled": withdrawals_ready,
             "withdrawals_auto_enabled": not withdrawals_explicitly_enabled and withdrawals_ready,
             "withdrawals_auto_blockers": withdrawals_auto_blockers,
+            "custody_mode": self._custody_mode(),
+            "mpc_signer_configured": self._mpc_mode() and not self._mpc_signer_blockers(),
             "approval_required": bool(self.config.get("WALLET_REQUIRE_WITHDRAWAL_APPROVAL", True)),
             "supported": supported,
             "ready": not blockers,
@@ -161,10 +181,13 @@ class RealWalletCustodyService:
 
         if not self.enabled:
             blockers.append("WALLET_REAL_CUSTODY_ENABLED is disabled")
-        if not bool(self.config.get("WALLET_ALLOW_IN_APP_KEYGEN", False)):
-            blockers.append("wallet key generation is disabled (WALLET_ALLOW_IN_APP_KEYGEN=false)")
-        if not self._has_valid_encryption_key():
-            blockers.append("TOTP_ENCRYPTION_KEY must be a valid Fernet key")
+        if self._mpc_mode():
+            blockers.extend(self._mpc_signer_blockers())
+        else:
+            if not bool(self.config.get("WALLET_ALLOW_IN_APP_KEYGEN", False)):
+                blockers.append("wallet key generation is disabled (WALLET_ALLOW_IN_APP_KEYGEN=false)")
+            if not self._has_valid_encryption_key():
+                blockers.append("TOTP_ENCRYPTION_KEY must be a valid Fernet key")
         if self._adapter_for(asset_key, network_name) is None:
             blockers.append("no custody adapter supports this asset/network")
 
@@ -203,7 +226,7 @@ class RealWalletCustodyService:
             raise RuntimeError("Real wallet generation is not ready: " + "; ".join(blockers))
         adapter = self._require_adapter(asset_key, network_name)
 
-        existing = (
+        existing_addresses = (
             WalletAddress.query.filter_by(
                 user_id=user_id,
                 asset=asset_key,
@@ -211,20 +234,33 @@ class RealWalletCustodyService:
                 status="active",
             )
             .order_by(WalletAddress.rotation_index.desc())
-            .first()
+            .all()
         )
-        if existing is not None and not force_new:
-            if deposit_address_id is not None and existing.deposit_address_id is None:
-                existing.deposit_address_id = deposit_address_id
-            return existing
+        if not force_new:
+            for existing in existing_addresses:
+                if self._address_matches_current_custody(existing):
+                    if deposit_address_id is not None and existing.deposit_address_id is None:
+                        existing.deposit_address_id = deposit_address_id
+                    return existing
 
-        generated = adapter.generate_wallet(asset_key, network_name)
+        signer_wallet: SignerWallet | None = None
+        generated: GeneratedWallet | None = None
+        if self._mpc_mode():
+            signer_wallet = self.signer_client.create_wallet(user_id=user_id, asset=asset_key, network=network_name)
+            if not validate_withdraw_address(signer_wallet.address, asset_key, network_name):
+                raise RuntimeError("MPC signer returned an invalid wallet address for the asset/network.")
+            if not signer_wallet.signer_key_id:
+                raise RuntimeError("MPC signer did not return a signer_key_id.")
+            generated_address = signer_wallet.address
+        else:
+            generated = adapter.generate_wallet(asset_key, network_name)
+            generated_address = generated.address
         duplicate = (
             WalletAddress.query.filter_by(
                 user_id=user_id,
                 asset=asset_key,
                 network=network_name,
-                address=generated.address,
+                address=generated_address,
             )
             .order_by(WalletAddress.rotation_index.desc())
             .first()
@@ -243,19 +279,31 @@ class RealWalletCustodyService:
             deposit_address_id=deposit_address_id,
             asset=asset_key,
             network=network_name,
-            address=generated.address,
+            address=generated_address,
             status="active",
             rotation_index=(latest.rotation_index if latest else 0) + 1,
         )
-        wallet_address.encrypted_metadata = {
-            "custody": "in_app",
-            "provider": generated.provider,
-            "key_type": generated.key_type,
-            "public_key": generated.public_key,
-            "encrypted_private_key": self._encrypt(generated.private_key),
-            "sync_status": "not_synced",
-            "last_sync_cursor": "",
-        }
+        if signer_wallet is not None:
+            wallet_address.encrypted_metadata = {
+                "custody": "mpc",
+                "provider": signer_wallet.provider,
+                "key_type": signer_wallet.key_type,
+                "public_key": signer_wallet.public_key,
+                "signer_key_id": signer_wallet.signer_key_id,
+                "sync_status": "not_synced",
+                "last_sync_cursor": "",
+            }
+        else:
+            assert generated is not None
+            wallet_address.encrypted_metadata = {
+                "custody": "in_app",
+                "provider": generated.provider,
+                "key_type": generated.key_type,
+                "public_key": generated.public_key,
+                "encrypted_private_key": self._encrypt(generated.private_key),
+                "sync_status": "not_synced",
+                "last_sync_cursor": "",
+            }
         db.session.add(wallet_address)
         db.session.flush()
         self._audit(
@@ -267,9 +315,10 @@ class RealWalletCustodyService:
             metadata={
                 "asset": asset_key,
                 "network": network_name,
-                "address": generated.address,
-                "provider": generated.provider,
-                "key_type": generated.key_type,
+                "address": wallet_address.address,
+                "provider": wallet_address.encrypted_metadata.get("provider"),
+                "key_type": wallet_address.encrypted_metadata.get("key_type"),
+                "custody": wallet_address.encrypted_metadata.get("custody"),
             },
         )
         return wallet_address
@@ -292,6 +341,11 @@ class RealWalletCustodyService:
         adapter = self._require_adapter(wallet_address.asset, wallet_address.network)
         snapshot = adapter.get_balance(wallet_address.address, wallet_address.asset, wallet_address.network)
         self._persist_onchain_snapshot(wallet_address, snapshot)
+        metadata = wallet_address.encrypted_metadata
+        metadata["last_sync_status"] = "checked" if snapshot.checked else "failed"
+        metadata["last_sync_reason"] = snapshot.reason
+        metadata["last_sync_checked_at"] = datetime.utcnow().isoformat() + "Z"
+        wallet_address.encrypted_metadata = metadata
         if not snapshot.checked:
             self._audit(
                 user_id=wallet_address.user_id,
@@ -305,8 +359,21 @@ class RealWalletCustodyService:
 
         required = int(self._duration_map_value("WALLET_REQUIRED_CONFIRMATIONS", wallet_address.network, 1))
         if snapshot.confirmations < required:
+            metadata = wallet_address.encrypted_metadata
+            metadata["last_sync_status"] = "unconfirmed"
+            metadata["last_sync_reason"] = f"waiting for {required} confirmation(s)"
+            metadata["last_checked_balance"] = max(0.0, float(snapshot.amount or 0.0))
+            metadata["last_checked_confirmations"] = int(snapshot.confirmations or 0)
+            wallet_address.encrypted_metadata = metadata
             return {"credited": 0.0, "checked": True, "unconfirmed": True}
 
+        metadata = wallet_address.encrypted_metadata
+        metadata["last_sync_status"] = "checked"
+        metadata["last_sync_reason"] = ""
+        metadata["last_checked_balance"] = max(0.0, float(snapshot.amount or 0.0))
+        metadata["last_checked_confirmations"] = int(snapshot.confirmations or 0)
+        metadata["last_checked_provider_reference"] = snapshot.provider_reference
+        wallet_address.encrypted_metadata = metadata
         credited = self._credited_amount(wallet_address)
         delta = max(0.0, float(snapshot.amount or 0.0) - credited)
         if delta <= 1e-12:
@@ -736,6 +803,17 @@ class RealWalletCustodyService:
                 code="wallet_gas_topup_required",
             )
         wallet_address = self._withdrawal_source(withdrawal)
+        if self._mpc_mode():
+            try:
+                return self.signer_client.sign_and_broadcast(withdrawal, wallet_address)
+            except WalletCustodyError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                raise WalletBroadcastError(
+                    "Wallet broadcast failed through MPC signer.",
+                    code="mpc_signer_broadcast_failed",
+                    context={"withdrawal_id": withdrawal.id, "asset": withdrawal.asset, "network": withdrawal.network},
+                ) from exc
         adapter = self._require_adapter(withdrawal.asset, withdrawal.network)
         private_key = self._private_key(wallet_address)
         try:
@@ -777,7 +855,7 @@ class RealWalletCustodyService:
         network = str(withdrawal.network or "").strip() or "native"
         network_key = self._network_key(network)
         if network_key not in EVM_NETWORKS or asset not in EVM_ASSETS:
-            return {"ready": True, "blockers": [], "source_wallet_address_id": withdrawal.source_wallet_address_id}
+            return self._native_withdrawal_preflight(withdrawal, asset=asset, network=network)
 
         adapter = self._require_adapter(asset, network)
         gas_adapter = self._require_adapter("ETH", network)
@@ -832,6 +910,51 @@ class RealWalletCustodyService:
             "source_wallet_address_id": selected.id if selected is not None else None,
             "source_address": selected.address if selected is not None else "",
             "estimated_gas_eth": gas_fee,
+            "candidates": rows,
+        }
+
+    def _native_withdrawal_preflight(self, withdrawal: WalletWithdrawal, *, asset: str, network: str) -> dict[str, Any]:
+        adapter = self._require_adapter(asset, network)
+        amount = max(0.0, float(withdrawal.amount or 0.0))
+        candidates = self._withdrawal_source_candidates(withdrawal)
+        rows: list[dict[str, Any]] = []
+        selected: WalletAddress | None = None
+        estimated_fee = max(0.0, float(adapter.estimate_fee(asset, network, withdrawal.destination_address, amount) or 0.0))
+        for candidate in candidates:
+            snapshot = adapter.get_balance(candidate.address, asset, network)
+            balance = max(0.0, float(snapshot.amount or 0.0)) if snapshot.checked else 0.0
+            withdrawable = max(0.0, balance - estimated_fee)
+            has_amount = withdrawable + 1e-12 >= amount
+            rows.append(
+                {
+                    "wallet_address_id": candidate.id,
+                    "address": candidate.address,
+                    "balance": balance,
+                    "withdrawable": withdrawable,
+                    "estimated_fee": estimated_fee,
+                    "has_amount": has_amount,
+                    "checked": bool(snapshot.checked),
+                    "reason": snapshot.reason,
+                }
+            )
+            if has_amount:
+                selected = candidate
+                break
+        blockers: list[str] = []
+        if selected is None:
+            if rows and any(not bool(row["checked"]) for row in rows):
+                blockers.append(f"{asset} source wallet balance could not be verified")
+            else:
+                blockers.append(f"no active {asset} wallet has enough on-chain balance for withdrawal")
+        if selected is not None:
+            withdrawal.source_wallet_address_id = selected.id
+        return {
+            "ready": selected is not None,
+            "gas_topup_required": False,
+            "blockers": blockers,
+            "source_wallet_address_id": selected.id if selected is not None else None,
+            "source_address": selected.address if selected is not None else "",
+            "estimated_fee": estimated_fee,
             "candidates": rows,
         }
 
@@ -940,8 +1063,14 @@ class RealWalletCustodyService:
             ).all()
         )
         locked = max(0.0, float(balance.locked_balance or 0.0))
-        expected_available = max(0.0, deposit_total - completed_withdrawal_total - locked)
+        ledger_available = max(0.0, deposit_total - completed_withdrawal_total - locked)
+        on_chain = self._last_checked_on_chain_total(user_id, asset_key)
         before = float(balance.available_balance or 0.0)
+        has_ledger_basis = deposit_total > 0 or completed_withdrawal_total > 0
+        expected_available = ledger_available if has_ledger_basis else before
+        if on_chain["checked"]:
+            on_chain_available = max(0.0, float(on_chain["total"] or 0.0) - locked)
+            expected_available = min(ledger_available if has_ledger_basis else before, on_chain_available)
         balance.available_balance = expected_available
         if asset_key in {"USDC", "USDT", "USD"}:
             balance.estimated_usd_value = expected_available + locked
@@ -957,6 +1086,9 @@ class RealWalletCustodyService:
                 "deposit_total": deposit_total,
                 "completed_withdrawal_total": completed_withdrawal_total,
                 "locked_balance": locked,
+                "on_chain_checked": bool(on_chain["checked"]),
+                "on_chain_total": float(on_chain["total"] or 0.0),
+                "on_chain_failures": on_chain["failures"],
             },
         )
         db.session.flush()
@@ -968,6 +1100,9 @@ class RealWalletCustodyService:
             "locked_balance": locked,
             "deposit_total": deposit_total,
             "completed_withdrawal_total": completed_withdrawal_total,
+            "on_chain_checked": bool(on_chain["checked"]),
+            "on_chain_total": float(on_chain["total"] or 0.0),
+            "on_chain_failures": on_chain["failures"],
             "changed": not math.isclose(before, expected_available, rel_tol=1e-12, abs_tol=1e-12),
         }
 
@@ -1042,14 +1177,16 @@ class RealWalletCustodyService:
         candidates = self._withdrawal_source_candidates(withdrawal)
         source = candidates[0] if candidates else None
         if source is None:
+            if self._mpc_mode():
+                raise RuntimeError("No active MPC source wallet address is available for withdrawal.")
             raise RuntimeError("No active source wallet address is available for withdrawal.")
         return source
 
     def _withdrawal_source_candidates(self, withdrawal: WalletWithdrawal) -> list[WalletAddress]:
         if withdrawal.source_wallet_address_id:
             source = db.session.get(WalletAddress, int(withdrawal.source_wallet_address_id))
-            return [source] if source is not None else []
-        return (
+            return [source] if source is not None and self._wallet_address_withdrawable(source) else []
+        candidates = (
             WalletAddress.query.filter_by(
                 user_id=withdrawal.user_id,
                 asset=withdrawal.asset,
@@ -1059,6 +1196,7 @@ class RealWalletCustodyService:
             .order_by(WalletAddress.rotation_index.desc(), WalletAddress.created_at.desc(), WalletAddress.id.desc())
             .all()
         )
+        return [candidate for candidate in candidates if self._wallet_address_withdrawable(candidate)]
 
     def _receipt_matches_withdrawal(self, withdrawal: WalletWithdrawal, receipt: dict[str, Any]) -> bool:
         asset = self._asset_key(withdrawal.asset)
@@ -1216,21 +1354,22 @@ class RealWalletCustodyService:
         return self._decrypt(encrypted)
 
     def _account_for(self, user_id: int, asset: str, network: str) -> WalletAccount:
+        provider = "mpc_signer" if self._mpc_mode() else str(self.config.get("WALLET_PROVIDER", "in_app_custody") or "in_app_custody")
         account = WalletAccount.query.filter_by(
             user_id=user_id,
-            provider=str(self.config.get("WALLET_PROVIDER", "in_app_custody") or "in_app_custody"),
+            provider=provider,
             asset=asset,
             network=network,
         ).one_or_none()
         if account is None:
             account = WalletAccount(
                 user_id=user_id,
-                provider=str(self.config.get("WALLET_PROVIDER", "in_app_custody") or "in_app_custody"),
+                provider=provider,
                 asset=asset,
                 network=network,
                 status="active",
             )
-            account.encrypted_metadata = {"custody": "in_app", "network": network}
+            account.encrypted_metadata = {"custody": "mpc" if self._mpc_mode() else "in_app", "network": network}
             db.session.add(account)
             db.session.flush()
         return account
@@ -1244,6 +1383,45 @@ class RealWalletCustodyService:
             status="complete",
         ).all()
         return sum(float(event.amount or 0.0) for event in events)
+
+    def _custody_mode(self) -> str:
+        return str(self.config.get("WALLET_CUSTODY_MODE", "local_dev") or "local_dev").strip().lower()
+
+    def _mpc_mode(self) -> bool:
+        return self._custody_mode() == "mpc"
+
+    def _mpc_signer_blockers(self) -> list[str]:
+        if not self._mpc_mode():
+            return []
+        return self.signer_client.readiness_blockers()
+
+    def _address_matches_current_custody(self, wallet_address: WalletAddress) -> bool:
+        metadata = wallet_address.encrypted_metadata or {}
+        if self._mpc_mode():
+            return metadata.get("custody") == "mpc" and bool(metadata.get("signer_key_id"))
+        return metadata.get("custody") != "mpc" and bool(metadata.get("encrypted_private_key"))
+
+    def _wallet_address_withdrawable(self, wallet_address: WalletAddress) -> bool:
+        if self._mpc_mode():
+            metadata = wallet_address.encrypted_metadata or {}
+            return metadata.get("custody") == "mpc" and bool(metadata.get("signer_key_id"))
+        return True
+
+    def _last_checked_on_chain_total(self, user_id: int, asset: str) -> dict[str, Any]:
+        addresses = WalletAddress.query.filter_by(user_id=user_id, asset=asset, status="active").all()
+        total = 0.0
+        checked = False
+        failures: list[str] = []
+        for address in addresses:
+            metadata = address.encrypted_metadata or {}
+            status = str(metadata.get("last_sync_status") or "")
+            if status == "checked":
+                checked = True
+                total += max(0.0, _float(metadata.get("last_checked_balance"), 0.0))
+            elif status in {"failed", "unconfirmed"}:
+                reason = str(metadata.get("last_sync_reason") or status)
+                failures.append(f"{address.address}: {reason}")
+        return {"checked": checked, "total": total, "failures": failures}
 
     def _adapter_for(self, asset: str, network: str) -> WalletChainAdapter | None:
         for adapter in self.adapters:
@@ -1330,6 +1508,128 @@ class RealWalletCustodyService:
         if asset == "XRP":
             return "XRP Ledger"
         return "Ethereum"
+
+
+class MpcSignerClient:
+    """HTTP client for an isolated production signer service."""
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        self.config = config
+
+    def readiness_blockers(self) -> list[str]:
+        blockers: list[str] = []
+        if not self._base_url():
+            blockers.append("WALLET_MPC_SIGNER_URL is not configured")
+        if not self._token():
+            blockers.append("WALLET_MPC_SIGNER_TOKEN is not configured")
+        return blockers
+
+    def create_wallet(self, *, user_id: int, asset: str, network: str) -> SignerWallet:
+        payload = self._post(
+            "/wallets",
+            {
+                "user_id": int(user_id),
+                "asset": _asset_key(asset),
+                "network": str(network or "").strip(),
+            },
+        )
+        address = str(payload.get("address") or "").strip()
+        signer_key_id = str(payload.get("signer_key_id") or payload.get("key_id") or "").strip()
+        public_key = str(payload.get("public_key") or "").strip()
+        key_type = str(payload.get("key_type") or "").strip()
+        provider = str(payload.get("provider") or "mpc_signer").strip() or "mpc_signer"
+        if not address or not signer_key_id:
+            raise WalletCustodyError("MPC signer wallet response is missing address or signer_key_id.", code="mpc_wallet_response_invalid")
+        return SignerWallet(
+            address=address,
+            public_key=public_key,
+            signer_key_id=signer_key_id,
+            key_type=key_type,
+            provider=provider,
+            raw=payload,
+        )
+
+    def sign_and_broadcast(self, withdrawal: WalletWithdrawal, source: WalletAddress) -> BroadcastResult:
+        metadata = source.encrypted_metadata or {}
+        signer_key_id = str(metadata.get("signer_key_id") or "").strip()
+        if not signer_key_id:
+            raise WalletCustodyError("MPC source wallet is missing signer_key_id.", code="mpc_source_key_missing")
+        payload = self._post(
+            "/withdrawals/sign-and-broadcast",
+            {
+                "withdrawal_id": withdrawal.id,
+                "user_id": withdrawal.user_id,
+                "asset": _asset_key(withdrawal.asset),
+                "network": str(withdrawal.network or "").strip(),
+                "amount": float(withdrawal.amount or 0.0),
+                "source_address": source.address,
+                "destination_address": withdrawal.destination_address,
+                "signer_key_id": signer_key_id,
+            },
+        )
+        status = str(payload.get("status") or "submitted").strip() or "submitted"
+        provider_reference = str(
+            payload.get("provider_reference")
+            or payload.get("tx_hash")
+            or payload.get("transaction_hash")
+            or payload.get("signature")
+            or ""
+        ).strip()
+        if not provider_reference and status not in {"failed", "failed_safety_gate"}:
+            raise WalletCustodyError("MPC signer broadcast response is missing provider_reference.", code="mpc_broadcast_response_invalid")
+        return BroadcastResult(status, provider_reference, payload)
+
+    def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        blockers = self.readiness_blockers()
+        if blockers:
+            raise WalletCustodyError("; ".join(blockers), code="mpc_signer_not_configured", context={"blockers": blockers})
+        url = self._base_url().rstrip("/") + path
+        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        request = urllib.request.Request(
+            url,
+            data=body,
+            method="POST",
+            headers={
+                "Authorization": f"Bearer {self._token()}",
+                "Content-Type": "application/json",
+                "User-Agent": "TradingBotMpcSigner/1.0",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self._timeout()) as response:
+                raw = response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:500]
+            raise WalletCustodyError(
+                f"MPC signer request failed with HTTP {exc.code}: {detail}",
+                code="mpc_signer_http_error",
+                context={"status": exc.code, "path": path},
+            ) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise WalletCustodyError(
+                f"MPC signer request failed: {exc}",
+                code="mpc_signer_request_failed",
+                context={"path": path},
+            ) from exc
+        try:
+            parsed = json.loads(raw or "{}")
+        except json.JSONDecodeError as exc:
+            raise WalletCustodyError("MPC signer returned invalid JSON.", code="mpc_signer_invalid_json") from exc
+        if not isinstance(parsed, dict):
+            raise WalletCustodyError("MPC signer returned a non-object JSON response.", code="mpc_signer_invalid_json")
+        if parsed.get("ok") is False:
+            message = str(parsed.get("error") or parsed.get("message") or "MPC signer rejected the request.")
+            raise WalletCustodyError(message, code=str(parsed.get("code") or "mpc_signer_rejected"), context={"path": path})
+        return parsed
+
+    def _base_url(self) -> str:
+        return str(self.config.get("WALLET_MPC_SIGNER_URL", "") or "").strip()
+
+    def _token(self) -> str:
+        return str(self.config.get("WALLET_MPC_SIGNER_TOKEN", "") or "").strip()
+
+    def _timeout(self) -> float:
+        return max(1.0, _float(self.config.get("WALLET_SIGNER_TIMEOUT_SECONDS"), 10.0))
 
 
 class EvmWalletAdapter:

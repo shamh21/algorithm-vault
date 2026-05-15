@@ -43,7 +43,12 @@ def _ready_config(db_path):
         "WALLET_REAL_CUSTODY_ENABLED": True,
         "WALLET_ALLOW_IN_APP_KEYGEN": True,
         "WALLET_WITHDRAWALS_ENABLED": True,
-        "WALLET_REQUIRE_WITHDRAWAL_APPROVAL": True,
+        "WALLET_REQUIRE_WITHDRAWAL_APPROVAL": False,
+        "WALLET_CUSTODY_MODE": "mpc",
+        "WALLET_MPC_SIGNER_URL": "https://signer.example.invalid",
+        "WALLET_MPC_SIGNER_TOKEN": "test-signer-token",
+        "WALLET_SIGNER_ISOLATION_CONFIRMED": True,
+        "WALLET_SDK_CHECKS_PASSED": True,
         "WALLET_EVM_RPC_URL": "https://evm.example.invalid",
         "WALLET_EVM_TOKEN_CONTRACTS": {
             "ETHEREUM": {
@@ -64,6 +69,17 @@ def _ready_config(db_path):
             "SOL": 5.0,
             "XRP": 500.0,
         },
+        "WALLET_DAILY_WITHDRAWAL_LIMIT_BY_WALLET": 100.0,
+        "WALLET_DAILY_WITHDRAWAL_LIMIT_BY_ASSET": {
+            "ETH": 0.1,
+            "USDC": 100.0,
+            "USDT": 100.0,
+            "BTC": 0.005,
+            "SOL": 5.0,
+            "XRP": 500.0,
+        },
+        "WALLET_DAILY_WITHDRAWAL_LIMIT_BY_DESTINATION": 100.0,
+        "WALLET_DAILY_GLOBAL_WITHDRAWAL_LIMIT": 250.0,
         "WTF_CSRF_ENABLED": True,
     }
 

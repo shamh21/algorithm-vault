@@ -135,6 +135,11 @@ def validate_runtime_config(config: Mapping[str, Any], *, strict: bool = False) 
 def _validate_production_withdrawal_settings(config: Mapping[str, Any], custody_mode: str, blockers: list[str]) -> None:
     if custody_mode not in APPROVED_PRODUCTION_CUSTODY_MODES:
         blockers.append("production withdrawals require approved custody mode: kms, hsm, or mpc")
+    if custody_mode == "mpc":
+        if not str(config.get("WALLET_MPC_SIGNER_URL", "") or "").strip():
+            blockers.append("WALLET_MPC_SIGNER_URL must be configured for mpc custody")
+        if not str(config.get("WALLET_MPC_SIGNER_TOKEN", "") or "").strip():
+            blockers.append("WALLET_MPC_SIGNER_TOKEN must be configured for mpc custody")
     if bool(config.get("WALLET_EMERGENCY_STOP", False)):
         blockers.append("WALLET_EMERGENCY_STOP is active")
     if bool(config.get("WALLET_SIGNER_ISOLATION_REQUIRED", True)) and not bool(config.get("WALLET_SIGNER_ISOLATION_CONFIRMED", False)):

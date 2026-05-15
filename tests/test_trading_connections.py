@@ -888,6 +888,7 @@ def test_register_2fa_connection_onboarding_then_live_home(app, monkeypatch) -> 
     home = client.get("/")
     assert home.status_code == 200
     assert b"Portfolio Balance" in home.data
+    assert b"Vault Pulse" in home.data
 
 
 def test_unsupported_provider_does_not_satisfy_live_onboarding(app) -> None:

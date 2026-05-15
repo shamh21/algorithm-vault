@@ -26,7 +26,7 @@ from app.models import (
     WalletWithdrawal,
 )
 from app.services import wallet_custody as wallet_custody_module
-from app.services.wallet_custody import BroadcastResult, EvmWalletAdapter, GeneratedWallet, RealWalletCustodyService, WalletBalanceSnapshot
+from app.services.wallet_custody import BroadcastResult, EvmWalletAdapter, GeneratedWallet, RealWalletCustodyService, SignerWallet, WalletBalanceSnapshot
 
 
 def _create_user(username: str = "custody") -> tuple[User, str]:
@@ -86,6 +86,66 @@ class _ConfirmingAdapter(_FakeAdapter):
 
     def confirm_transaction(self, provider_reference: str, asset: str, network: str) -> dict[str, Any]:
         return {"confirmed": self.receipt.get("status") == "0x1", "raw": self.receipt}
+
+
+class _AllAssetAdapter(_FakeAdapter):
+    def supports(self, asset: str, network: str) -> bool:
+        return (asset.upper(), network) in {
+            ("ETH", "Ethereum"),
+            ("USDC", "Ethereum"),
+            ("USDT", "Ethereum"),
+            ("BTC", "Bitcoin"),
+            ("SOL", "Solana"),
+            ("XRP", "XRP Ledger"),
+        }
+
+    def get_balance(self, address: str, asset: str, network: str) -> WalletBalanceSnapshot:
+        amount = 5.0 if asset.upper() not in {"BTC"} else 0.5
+        return WalletBalanceSnapshot(amount=amount, asset=asset, checked=True, confirmations=12)
+
+    def sign_and_broadcast(self, withdrawal: WalletWithdrawal, private_key: str) -> BroadcastResult:
+        raise AssertionError("MPC mode must not use local private-key signing")
+
+
+class _FakeMpcSigner:
+    def __init__(self, *, fail_broadcast: bool = False) -> None:
+        self.fail_broadcast = fail_broadcast
+        self.created: list[dict[str, Any]] = []
+        self.broadcasts: list[dict[str, Any]] = []
+
+    def readiness_blockers(self) -> list[str]:
+        return []
+
+    def create_wallet(self, *, user_id: int, asset: str, network: str) -> SignerWallet:
+        addresses = {
+            "ETH": "0x1111111111111111111111111111111111111111",
+            "USDC": "0x2222222222222222222222222222222222222222",
+            "USDT": "0x3333333333333333333333333333333333333333",
+            "BTC": "1BoatSLRHtKNngkdXEeobR76b53LETtpyT",
+            "SOL": "11111111111111111111111111111112",
+            "XRP": "rrrrrrrrrrrrrrrrrrrrrhoLvTp",
+        }
+        self.created.append({"user_id": user_id, "asset": asset, "network": network})
+        return SignerWallet(
+            address=addresses[asset],
+            public_key=f"pub-{asset.lower()}",
+            signer_key_id=f"signer-{asset.lower()}",
+            key_type="mpc",
+            provider="fake_mpc",
+        )
+
+    def sign_and_broadcast(self, withdrawal: WalletWithdrawal, source: WalletAddress) -> BroadcastResult:
+        self.broadcasts.append(
+            {
+                "withdrawal_id": withdrawal.id,
+                "asset": withdrawal.asset,
+                "source_address": source.address,
+                "signer_key_id": (source.encrypted_metadata or {}).get("signer_key_id"),
+            }
+        )
+        if self.fail_broadcast:
+            return BroadcastResult("failed", "", {"error": "signer rejected"})
+        return BroadcastResult("submitted", f"mpc-{withdrawal.asset.lower()}-{withdrawal.id}", {"ok": True})
 
 
 class _FakeTreasuryConversionConnector:
@@ -184,6 +244,99 @@ def test_force_new_real_wallet_address_generates_replacement(app) -> None:
     assert second.rotation_index == first.rotation_index + 1
     assert first.status == "active"
     assert second.status == "active"
+
+
+def test_mpc_signer_generates_wallets_without_private_keys_for_all_assets(app) -> None:
+    _enable_generated_wallets(app)
+    app.config["WALLET_CUSTODY_MODE"] = "mpc"
+    signer = _FakeMpcSigner()
+    custody = RealWalletCustodyService(app.config, adapters=[_AllAssetAdapter()], signer_client=signer)
+    app.extensions["services"]["wallet_custody"] = custody
+    user, _ = _create_user("mpcwallets")
+
+    pairs = [
+        ("ETH", "Ethereum"),
+        ("USDC", "Ethereum"),
+        ("USDT", "Ethereum"),
+        ("BTC", "Bitcoin"),
+        ("SOL", "Solana"),
+        ("XRP", "XRP Ledger"),
+    ]
+    wallets = [custody.get_or_create_address(user_id=user.id, asset=asset, network=network) for asset, network in pairs]
+
+    assert [item["asset"] for item in signer.created] == [asset for asset, _ in pairs]
+    for wallet in wallets:
+        metadata = wallet.encrypted_metadata
+        assert metadata["custody"] == "mpc"
+        assert metadata["signer_key_id"] == f"signer-{wallet.asset.lower()}"
+        assert metadata["provider"] == "fake_mpc"
+        assert "encrypted_private_key" not in metadata
+        assert wallet.address not in wallet.encrypted_metadata_json
+
+
+def test_mpc_signer_broadcasts_all_assets_and_ignores_in_app_sources(app) -> None:
+    _enable_generated_wallets(app)
+    user, _ = _create_user("mpcbroadcast")
+    in_app_custody = app.extensions["services"]["wallet_custody"]
+    legacy_eth = in_app_custody.get_or_create_address(user_id=user.id, asset="ETH", network="Ethereum")
+    app.config["WALLET_CUSTODY_MODE"] = "mpc"
+    signer = _FakeMpcSigner()
+    custody = RealWalletCustodyService(app.config, adapters=[_AllAssetAdapter()], signer_client=signer)
+    app.extensions["services"]["wallet_custody"] = custody
+
+    pairs = [
+        ("ETH", "Ethereum", "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        ("USDC", "Ethereum", "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        ("USDT", "Ethereum", "0xcccccccccccccccccccccccccccccccccccccccc"),
+        ("BTC", "Bitcoin", "1BoatSLRHtKNngkdXEeobR76b53LETtpyT"),
+        ("SOL", "Solana", "11111111111111111111111111111112"),
+        ("XRP", "XRP Ledger", "rrrrrrrrrrrrrrrrrrrrrhoLvTp"),
+    ]
+    mpc_wallets = {
+        asset: custody.get_or_create_address(user_id=user.id, asset=asset, network=network)
+        for asset, network, _ in pairs
+    }
+
+    for asset, network, destination in pairs:
+        withdrawal = WalletWithdrawal(
+            user_id=user.id,
+            asset=asset,
+            network=network,
+            destination_address=destination,
+            amount=0.01 if asset == "BTC" else 1.0,
+            status="pending_submission",
+            workflow_type="manual_withdrawal",
+            idempotency_token=f"mpc:{asset}",
+        )
+        db.session.add(withdrawal)
+        db.session.flush()
+
+        result = custody.sign_and_broadcast(withdrawal, mode="live")
+
+        assert result.status == "submitted"
+        assert result.provider_reference == f"mpc-{asset.lower()}-{withdrawal.id}"
+
+    assert signer.broadcasts[0]["source_address"] == mpc_wallets["ETH"].address
+    assert signer.broadcasts[0]["source_address"] != legacy_eth.address
+    assert all(item["signer_key_id"] == f"signer-{item['asset'].lower()}" for item in signer.broadcasts)
+
+
+def test_mpc_generation_fails_closed_without_signer_configuration(app) -> None:
+    _enable_generated_wallets(app)
+    app.config["WALLET_CUSTODY_MODE"] = "mpc"
+    app.config["WALLET_MPC_SIGNER_URL"] = ""
+    app.config["WALLET_MPC_SIGNER_TOKEN"] = ""
+    custody = RealWalletCustodyService(app.config, adapters=[_AllAssetAdapter()])
+    app.extensions["services"]["wallet_custody"] = custody
+    user, _ = _create_user("mpcmissing")
+
+    readiness = custody.readiness()
+
+    assert readiness["ready"] is False
+    assert any("WALLET_MPC_SIGNER_URL is not configured" in blocker for blocker in readiness["blockers"])
+    assert any("WALLET_MPC_SIGNER_TOKEN is not configured" in blocker for blocker in readiness["blockers"])
+    with pytest.raises(RuntimeError, match="WALLET_MPC_SIGNER_URL"):
+        custody.get_or_create_address(user_id=user.id, asset="ETH", network="Ethereum")
 
 
 def test_real_wallet_generation_fails_closed_when_keygen_disabled(app) -> None:

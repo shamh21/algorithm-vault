@@ -119,6 +119,32 @@ def test_runtime_config_blocks_unsafe_production_withdrawals() -> None:
         validate_runtime_config(config, strict=True)
 
 
+def test_runtime_config_requires_mpc_signer_for_production_withdrawals() -> None:
+    config = {
+        "DEPLOYMENT_TARGET": "production",
+        "SQLALCHEMY_DATABASE_URI": "postgresql+psycopg://bot:secret@db.internal/tradingbot",
+        "WORKER_MODE": "web",
+        "WORKER_PROCESS_CONFIGURED": True,
+        "ENABLE_IN_PROCESS_WORKERS": False,
+        "ENABLE_LIVE_TRADING": True,
+        "SCHEMA_BOOTSTRAP_ENABLED": False,
+        "WALLET_WITHDRAWALS_ENABLED": True,
+        "WALLET_CUSTODY_MODE": "mpc",
+        "WALLET_SIGNER_ISOLATION_CONFIRMED": True,
+        "WALLET_SDK_CHECKS_PASSED": True,
+        "WALLET_DAILY_WITHDRAWAL_LIMIT_BY_WALLET": 100.0,
+        "WALLET_DAILY_WITHDRAWAL_LIMIT_BY_ASSET": {"USDC": 100.0},
+        "WALLET_DAILY_WITHDRAWAL_LIMIT_BY_DESTINATION": 100.0,
+        "WALLET_DAILY_GLOBAL_WITHDRAWAL_LIMIT": 250.0,
+    }
+
+    validation = validate_runtime_config(config)
+
+    assert validation.ok is False
+    assert any("WALLET_MPC_SIGNER_URL" in blocker for blocker in validation.blockers)
+    assert any("WALLET_MPC_SIGNER_TOKEN" in blocker for blocker in validation.blockers)
+
+
 def test_runtime_config_treats_vercel_as_production() -> None:
     validation = validate_runtime_config(
         {
