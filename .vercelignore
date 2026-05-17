@@ -11,6 +11,7 @@ env/
 
 instance/
 logs/
+app/recovery/
 htmlcov/
 .pytest_cache/
 .mypy_cache/
