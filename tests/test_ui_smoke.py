@@ -968,6 +968,8 @@ def test_backtests_json_run_uses_paper_allocation_and_returns_charts(app) -> Non
     assert payload["portfolio_diagnostics"]["allocation_policy"] == "after_cost_pnl_weighted"
     assert "allocation_plan" in payload
     assert "skipped_candidates" in payload
+    assert "asset_diagnostics" in payload
+    assert "market_history_validation" in payload
     assert payload["result"]["screener_source"]
     assert payload["result"]["ml_families_used"]
     assert payload["asset_breakdown"]
@@ -983,6 +985,12 @@ def test_backtests_json_run_uses_paper_allocation_and_returns_charts(app) -> Non
     assert "trade_timeline" in payload["charts"]
     assert payload["summary"]["allocation"] == 500.0
     assert payload["summary"]["allocation_assets"] == ["USDC"]
+    assert payload["asset_diagnostics"][0]["status"] in {"simulated", "skipped"}
+    assert payload["asset_diagnostics"][0]["market_history_validation"]["valid_candle_count"] >= 30
+    assert payload["simulation_scope"]["creates_vault_cycle"] is False
+    assert Order.query.count() == 0
+    assert StrategyRun.query.count() == 0
+    assert VaultCycle.query.count() == 0
     run = BacktestRun.query.one()
     assert run.strategy_name == "portfolio_vault_cycle_auto"
     assert run.timeframe == "1h10"
@@ -1045,7 +1053,7 @@ def test_backtests_after_cost_allocator_skips_higher_raw_return_high_cost_candid
         },
     ]
 
-    def fake_result(row: dict[str, Any], *, allocation: float, cycle_duration_minutes: int) -> dict[str, Any]:
+    def fake_result(row: dict[str, Any], *, allocation: float, cycle_duration_minutes: int, user: Any | None = None) -> dict[str, Any]:
         roi = 0.08 if row["symbol"] == "BTC" else 0.22
         return {
             "vault_simulation": True,
@@ -1080,6 +1088,8 @@ def test_backtests_after_cost_allocator_skips_higher_raw_return_high_cost_candid
                 "liquidity_usd": row["liquidity_usd"],
             },
             "strategy_weights": [],
+            "status": "simulated",
+            "status_label": "Simulated",
             "screener_source": "test",
         }
 
@@ -1181,6 +1191,92 @@ def test_backtests_json_run_persists_multiple_vault_allocation_assets(app) -> No
     assert run.parameters["parameters"]["selected_allocation_assets"] == ["USDC", "ETH"]
 
 
+def test_backtests_continue_when_one_asset_has_insufficient_history(app) -> None:
+    _patch_market_data(app)
+    admin, admin_secret = _create_user(username="backtestpartialhistory", role="admin")
+    _seed_wallet_balance(admin, "USDC", 1_000.0)
+    _seed_backtest_market(provider="hyperliquid", symbol="BTC", venue_symbol="BTC")
+    _seed_backtest_market(provider="hyperliquid", symbol="ETH", venue_symbol="ETH")
+    market_data = app.extensions["services"]["market_data"]
+    market_data.get_candles = lambda symbol, timeframe, mode, limit: _candles()[:12] if symbol == "ETH" else _candles()
+    client = app.test_client()
+    _login(client, "backtestpartialhistory", admin_secret)
+
+    response = client.post(
+        "/admin/backtests/run",
+        data={"allocation_amount_usd": "500", "allocation_assets": "USDC", "cycle_duration": "1h10"},
+        headers={"Accept": "application/json"},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    diagnostics = {row["asset"]: row for row in payload["asset_diagnostics"]}
+    assert diagnostics["ETH"]["status"] == "insufficient_history"
+    assert diagnostics["ETH"]["error_code"] == "insufficient_market_history"
+    assert diagnostics["ETH"]["market_history_validation"]["valid_candle_count"] == 12
+    assert "BTC" in diagnostics
+    assert BacktestRun.query.count() == 1
+    assert Order.query.count() == 0
+    assert StrategyRun.query.count() == 0
+    assert VaultCycle.query.count() == 0
+
+
+def test_backtests_kucoin_uses_verified_connector_venue_symbol_for_candles(app, monkeypatch) -> None:
+    _patch_market_data(app)
+    admin, admin_secret = _create_user(username="backtestkucoinhistory", role="admin")
+    _seed_wallet_balance(admin, "USDT", 1_000.0)
+    client = app.test_client()
+    _login(client, "backtestkucoinhistory", admin_secret)
+    connection = app.extensions["services"]["trading_connections"].create_or_update(
+        user_id=admin.id,
+        provider="kucoin",
+        connection_type="cex_api_key",
+        api_key="kucoin-key",
+        api_secret="kucoin-secret",
+        passphrase="kucoin-passphrase",
+        is_active=True,
+    )
+    connection.verification_status = "verified"
+    connection.is_active = True
+    market = _seed_backtest_market(provider="kucoin", symbol="BTC", venue_symbol="BTCUSDTM")
+    market.trading_connection_id = connection.id
+    db.session.commit()
+    calls: list[tuple[str, str, str, int]] = []
+
+    class FakeKucoinConnector:
+        def get_candles(self, symbol: str, timeframe: str, mode: str, limit: int) -> list[dict[str, Any]]:
+            calls.append((symbol, timeframe, mode, limit))
+            return _candles()
+
+    trading_connections = app.extensions["services"]["trading_connections"]
+    original_connector_for_user = trading_connections.connector_for_user
+
+    def connector_for_user(user_id: int, connection_id: int | None = None):
+        if connection_id == connection.id:
+            return FakeKucoinConnector()
+        return original_connector_for_user(user_id, connection_id)
+
+    monkeypatch.setattr(trading_connections, "connector_for_user", connector_for_user)
+    monkeypatch.setattr(app.extensions["services"]["backtest_vault_simulator"], "_one_h10_screener_rows", lambda markets: [])
+    app.extensions["services"]["market_data"].get_candles = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("KuCoin backtest should use the verified connector candle loader")
+    )
+
+    response = client.post(
+        "/admin/backtests/run",
+        data={"allocation_amount_usd": "500", "allocation_assets": "USDT", "cycle_duration": "1h10"},
+        headers={"Accept": "application/json"},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert calls
+    assert calls[0][0] == "BTCUSDTM"
+    assert payload["asset_diagnostics"][0]["market_history_validation"]["provider_source"] == "kucoin_connector"
+    assert payload["summary"]["collateral_asset"] == "USDT"
+    assert Order.query.count() == 0
+
+
 def test_backtests_run_records_unavailable_asset_without_eligible_leveraged_pairs(app) -> None:
     _patch_market_data(app)
     admin, admin_secret = _create_user(username="backtestnomarkets", role="admin")
@@ -1202,8 +1298,10 @@ def test_backtests_run_records_unavailable_asset_without_eligible_leveraged_pair
     payload = response.get_json()
     assert payload["ok"] is True
     assert payload["asset_breakdown"][0]["asset"] == "XRP"
-    assert payload["asset_breakdown"][0]["status"] == "unavailable"
+    assert payload["asset_breakdown"][0]["status"] == "skipped"
+    assert payload["asset_breakdown"][0]["error_code"] == "market_unavailable"
     assert "No active leveraged market" in payload["asset_breakdown"][0]["error"]
+    assert payload["asset_diagnostics"][0]["status"] == "skipped"
     assert BacktestRun.query.count() == 1
 
 
@@ -1267,6 +1365,25 @@ def test_backtests_symbol_api_returns_paginated_exchange_universe(app) -> None:
     assert payload["has_more"] is False
 
 
+def test_backtests_symbol_api_caps_max_allocation_at_paper_balance_max(app) -> None:
+    _patch_market_data(app)
+    app.config["BACKTEST_PAPER_BALANCE_USD"] = 1_500_000.0
+    app.config["PAPER_BALANCE_MAX"] = 1_000_000.0
+    admin, admin_secret = _create_user(username="backtestmaxcap", role="admin")
+    _seed_wallet_balance(admin, "USDC", 2_000_000.0)
+    client = app.test_client()
+    _login(client, "backtestmaxcap", admin_secret)
+
+    response = client.get("/admin/backtests/api/symbols?limit=1")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["paper_balance_usd"] == 1_000_000.0
+    assert payload["allocation_cap_usd"] == 1_000_000.0
+    usdc = next(row for row in payload["allocation_assets"] if row["asset"] == "USDC")
+    assert usdc["available_usd"] == 2_000_000.0
+
+
 def test_backtests_quote_api_returns_precise_symbol_conversion(app) -> None:
     _patch_market_data(app)
     _, admin_secret = _create_user(username="backtestquote", role="admin")
@@ -1282,6 +1399,9 @@ def test_backtests_quote_api_returns_precise_symbol_conversion(app) -> None:
     assert payload["mid"] == 100.0
     assert payload["asset_amount"] == pytest.approx(100.0)
     assert payload["asset_amount_formatted"] == "100.000000"
+    assert payload["quote_asset"] == "USDT"
+    assert payload["price_status"] == "priced"
+    assert payload["price_source"] == "market_data"
 
 
 def test_backtests_rejects_allocation_above_paper_balance(app) -> None:

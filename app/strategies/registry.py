@@ -13,7 +13,6 @@ from .rule_based import RuleBasedSignalStrategy
 from .scalping import ScalpingStrategy
 from .volatility_breakout import VolatilityBreakoutStrategy
 
-
 _BUILT_IN_STRATEGIES: tuple[type[BaseStrategy], ...] = (
     EmaCrossoverStrategy,
     MeanReversionStrategy,
@@ -54,10 +53,7 @@ class StrategyRegistry:
         return sorted(self._strategies)
 
     def definitions(self) -> list[dict[str, Any]]:
-        return [
-            self.definition(name)
-            for name in self.names()
-        ]
+        return [self.definition(name) for name in self.names()]
 
     def definition(self, name: str) -> dict[str, Any]:
         strategy = self._get_strategy(name)

@@ -55,12 +55,26 @@
         <div class="asset-selector vault-asset-selector backtest-allocation-selector" role="group" aria-label="Vault allocation assets" data-allocation-asset-list>
           {% for asset in allocation_assets %}
             {% set is_default = asset.asset == default_allocation_asset %}
-            <label class="asset-option vault-asset-option backtest-allocation-option {% if is_default %}is-selected{% endif %}" data-allocation-asset data-asset="{{ asset.asset }}" data-available-usd="{{ "%.6f"|format(asset.available_usd|float) }}">
+            <label
+              class="asset-option vault-asset-option backtest-allocation-option {% if is_default %}is-selected{% endif %}"
+              data-allocation-asset
+              data-asset="{{ asset.asset }}"
+              data-available-usd="{{ "%.6f"|format(asset.available_usd|float) }}"
+              data-price-status="{{ asset.price_status|default('unavailable') }}"
+              data-price-source="{{ asset.price_source|default('unavailable') }}"
+            >
               <input type="checkbox" name="allocation_assets" value="{{ asset.asset }}" {% if is_default %}checked{% endif %}>
               {{ crypto_icon(asset.asset) }}
               <span>
                 <strong>{{ asset.asset }}</strong>
-                <small>{{ "%.6f"|format(asset.available_balance|float) }} · ${{ "%.2f"|format(asset.available_usd|float) }}</small>
+                <small>
+                  {{ "%.6f"|format(asset.available_balance|float) }} ·
+                  {% if asset.price_status == 'unavailable' %}
+                    price unavailable
+                  {% else %}
+                    ${{ "%.2f"|format(asset.available_usd|float) }} · {{ asset.price_label|default('priced') }}
+                  {% endif %}
+                </small>
               </span>
             </label>
           {% else %}
@@ -233,5 +247,5 @@
 {% endblock %}
 
 {% block page_scripts %}
-<script defer src="{{ url_for('static', filename='js/backtests.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}-backtest-sim-scope-1"></script>
+<script defer src="{{ url_for('static', filename='js/backtests.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}-backtest-history-diagnostics-2"></script>
 {% endblock %}

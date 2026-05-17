@@ -31,6 +31,9 @@ class VaultAllocationAssetView:
     price_usd: float
     available_usd: float
     cap_usd: float
+    price_status: str
+    price_source: str
+    price_label: str
     networks: tuple[str, ...]
     state: str
     configured: bool = False
@@ -46,6 +49,9 @@ class VaultAllocationAssetView:
             "price_usd": self.price_usd,
             "available_usd": self.available_usd,
             "cap_usd": self.cap_usd,
+            "price_status": self.price_status,
+            "price_source": self.price_source,
+            "price_label": self.price_label,
             "networks": list(self.networks),
             "state": self.state,
             "configured": self.configured,
@@ -105,19 +111,17 @@ def allocation_asset_views(
 ) -> list[VaultAllocationAssetView]:
     assets = supported_vault_allocation_assets(configured_assets)
     balance_rows = list(balances) if balances is not None else _query_balances(user_id)
-    balances_by_asset = {normalize_asset(getattr(row, "asset", "")): row for row in balance_rows}
+    balances_by_asset = _aggregate_balance_rows(balance_rows)
     configured_set = {normalize_asset(asset) for asset in configured_assets or () if normalize_asset(asset)}
 
     views: list[VaultAllocationAssetView] = []
     for asset in assets:
         row = balances_by_asset.get(asset)
-        available = _safe_float(getattr(row, "available_balance", 0.0) if row is not None else 0.0)
-        locked = _safe_float(getattr(row, "locked_balance", 0.0) if row is not None else 0.0)
-        total = _safe_float(getattr(row, "total_balance", available + locked) if row is not None else available + locked)
-        estimated = _safe_float(getattr(row, "estimated_usd_value", 0.0) if row is not None else 0.0)
-        price = asset_usd_price(asset, price_lookup)
-        if price <= 0 and total > 0 and estimated > 0:
-            price = estimated / max(total, 1e-9)
+        available = _safe_float(row.get("available_balance") if row is not None else 0.0)
+        locked = _safe_float(row.get("locked_balance") if row is not None else 0.0)
+        total = _safe_float(row.get("total_balance") if row is not None else available + locked)
+        estimated = _safe_float(row.get("estimated_usd_value") if row is not None else 0.0)
+        price, price_source, price_status = _asset_price_context(asset, price_lookup, total, estimated)
         available_usd = available * price if price > 0 else 0.0
         networks = vault_asset_networks(asset, configured_networks(asset) if configured_networks is not None else ())
         views.append(
@@ -131,8 +135,11 @@ def allocation_asset_views(
                 price_usd=price,
                 available_usd=max(available_usd, 0.0),
                 cap_usd=max(available_usd, 0.0),
+                price_status=price_status,
+                price_source=price_source,
+                price_label=_price_label(price, price_status),
                 networks=networks,
-                state=_asset_state(available_usd, price),
+                state=_asset_state(available_usd, price, total),
                 configured=asset in configured_set,
             )
         )
@@ -172,10 +179,61 @@ def _query_balances(user_id: int | None) -> list[WalletBalance]:
     return WalletBalance.query.filter_by(user_id=int(user_id)).order_by(WalletBalance.asset.asc()).all()
 
 
-def _asset_state(available_usd: float, price: float) -> str:
+def _aggregate_balance_rows(rows: Iterable[WalletBalance]) -> dict[str, dict[str, float]]:
+    aggregated: dict[str, dict[str, float]] = {}
+    for row in rows:
+        asset = normalize_asset(getattr(row, "asset", ""))
+        if not asset:
+            continue
+        available = _safe_float(getattr(row, "available_balance", 0.0))
+        locked = _safe_float(getattr(row, "locked_balance", 0.0))
+        total = _safe_float(getattr(row, "total_balance", available + locked), available + locked)
+        estimated = _safe_float(getattr(row, "estimated_usd_value", 0.0))
+        target = aggregated.setdefault(
+            asset,
+            {
+                "available_balance": 0.0,
+                "locked_balance": 0.0,
+                "total_balance": 0.0,
+                "estimated_usd_value": 0.0,
+            },
+        )
+        target["available_balance"] += max(available, 0.0)
+        target["locked_balance"] += max(locked, 0.0)
+        target["total_balance"] += max(total, 0.0)
+        target["estimated_usd_value"] += max(estimated, 0.0)
+    return aggregated
+
+
+def _asset_price_context(
+    asset: str,
+    price_lookup: Callable[[str], float] | None,
+    total_balance: float,
+    estimated_usd_value: float,
+) -> tuple[float, str, str]:
+    asset_key = normalize_asset(asset)
+    if asset_key in STABLE_ASSETS:
+        return 1.0, "stable_usd", "priced"
+    price = asset_usd_price(asset_key, price_lookup)
+    if price > 0:
+        return price, "market_data", "priced"
+    if total_balance > 0 and estimated_usd_value > 0:
+        return estimated_usd_value / max(total_balance, 1e-9), "wallet_estimate", "estimated"
+    return 0.0, "unavailable", "unavailable"
+
+
+def _price_label(price: float, status: str) -> str:
+    if status == "unavailable" or price <= 0:
+        return "price unavailable"
+    if price >= 1:
+        return f"${price:,.2f}"
+    return f"${price:,.6f}"
+
+
+def _asset_state(available_usd: float, price: float, total_balance: float = 0.0) -> str:
     if available_usd > 0:
         return "ready"
-    if price <= 0:
+    if price <= 0 and total_balance > 0:
         return "price_unavailable"
     return "empty"
 

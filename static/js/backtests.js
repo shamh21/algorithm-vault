@@ -151,12 +151,18 @@
         asset: String(row.asset || "").toUpperCase(),
         available_usd: number(row.available_usd || row.cap_usd),
         available_balance: number(row.available_balance),
+        price_status: String(row.price_status || row.state || "").toLowerCase(),
+        price_source: String(row.price_source || ""),
+        price_label: String(row.price_label || ""),
       })).filter((row) => row.asset);
     } else if (!state.allocationAssets.length) {
       state.allocationAssets = Array.from(refs.assetList?.querySelectorAll("[data-allocation-asset]") || []).map((node) => ({
         asset: String(node.dataset.asset || node.querySelector("input")?.value || "").toUpperCase(),
         available_usd: number(node.dataset.availableUsd),
         available_balance: 0,
+        price_status: String(node.dataset.priceStatus || ""),
+        price_source: String(node.dataset.priceSource || ""),
+        price_label: "",
       })).filter((row) => row.asset);
     }
     const defaultAsset = String(payload.default_allocation_asset || root.dataset.defaultAllocationAsset || form.dataset.defaultAllocationAsset || state.allocationAssets[0]?.asset || "").toUpperCase();
@@ -179,14 +185,16 @@
       const asset = escapeHtml(row.asset);
       const checked = state.selectedAssets.has(row.asset) ? " checked" : "";
       const selectedClass = state.selectedAssets.has(row.asset) ? " is-selected" : "";
-      const stateLabel = row.available_usd > 0 ? money.format(row.available_usd) : row.state === "price_unavailable" ? "Price unavailable" : "No balance";
+      const priceUnavailable = row.price_status === "unavailable" || row.state === "price_unavailable";
+      const stateLabel = row.available_usd > 0 ? money.format(row.available_usd) : priceUnavailable ? "Price unavailable" : "No balance";
+      const priceNote = priceUnavailable ? "excluded from MAX" : row.price_label || row.price_source || "priced";
       return `
-        <label class="asset-option vault-asset-option backtest-allocation-option${selectedClass}" data-allocation-asset data-asset="${asset}" data-available-usd="${number(row.available_usd).toFixed(6)}">
+        <label class="asset-option vault-asset-option backtest-allocation-option${selectedClass}" data-allocation-asset data-asset="${asset}" data-available-usd="${number(row.available_usd).toFixed(6)}" data-price-status="${escapeHtml(row.price_status)}" data-price-source="${escapeHtml(row.price_source)}">
           <input type="checkbox" name="allocation_assets" value="${asset}"${checked}>
           <span class="backtest-token-icon">${escapeHtml(asset.slice(0, 1) || "?")}</span>
           <span>
             <strong>${asset}</strong>
-            <small>${number(row.available_balance).toFixed(6)} · ${escapeHtml(stateLabel)}</small>
+            <small>${number(row.available_balance).toFixed(6)} · ${escapeHtml(stateLabel)} · ${escapeHtml(priceNote)}</small>
           </span>
         </label>`;
     }).join("");
@@ -231,7 +239,7 @@
     renderAutopilot(payload.autopilot || {});
     renderExecution(payload.execution_quality || {}, payload.trade_decision || {}, payload.simulation_scope || {});
     renderPortfolioDiagnostics(payload.portfolio_diagnostics || payload.result?.portfolio_diagnostics || {});
-    renderAssetBreakdown(payload.asset_breakdown || payload.result?.asset_breakdown || []);
+    renderAssetBreakdown(payload.asset_diagnostics || payload.result?.asset_diagnostics || payload.asset_breakdown || payload.result?.asset_breakdown || []);
     renderStrategyWeights(payload.strategy_weights || payload.result?.strategy_weights || []);
     renderSystemMetrics(payload.system_metrics || {});
     renderChart();
@@ -277,19 +285,29 @@
     if (!refs.assetBreakdown) return;
     if (refs.activeStrategies) refs.activeStrategies.textContent = `${rows.length} assets`;
     if (!rows.length) { refs.assetBreakdown.innerHTML = '<div class="backtest-symbol-empty">No asset-level results yet.</div>'; return; }
-    refs.assetBreakdown.innerHTML = rows.slice().sort((a, b) => Math.abs(number(b.pnl)) - Math.abs(number(a.pnl))).slice(0, 12).map((row) => `
-      <div class="backtest-asset-row">
-        <div><strong>${escapeHtml(row.asset || row.symbol || "--")}</strong><small>${escapeHtml(row.error || row.exchange || row.provider_label || "Enabled venue")}</small></div>
+    refs.assetBreakdown.innerHTML = rows.slice().sort((a, b) => Math.abs(number(b.pnl)) - Math.abs(number(a.pnl))).slice(0, 12).map((row) => {
+      const status = String(row.status || (row.error ? "failed" : "simulated")).toLowerCase();
+      const validation = row.market_history_validation || {};
+      const historyText = historyLabel(validation, row.fallback_timeframe);
+      const detail = row.error || row.skip_reason || historyText || row.exchange || row.provider_label || "Enabled venue";
+      return `
+      <div class="backtest-asset-row is-${escapeHtml(status)}">
+        <div>
+          <strong>${escapeHtml(row.asset || row.symbol || "--")}</strong>
+          <small>${escapeHtml(detail)}</small>
+          <span class="backtest-history-note">${escapeHtml(historyText)}</span>
+        </div>
+        <div><span>Status</span><strong><em class="backtest-status-chip is-${escapeHtml(status)}">${escapeHtml(row.status_label || status.replace(/_/g, " "))}</em></strong></div>
         <div><span>PnL</span><strong class="${number(row.pnl) >= 0 ? "positive" : "negative"}">${money.format(number(row.pnl))}</strong></div>
         <div><span>ROI</span><strong>${percent.format(number(row.roi))}</strong></div>
         <div><span>Weight</span><strong>${percent.format(number(row.allocation_weight))}</strong></div>
         <div><span>Net Edge</span><strong>${number(row.net_expected_return_bps).toFixed(1)} bps</strong></div>
         <div><span>Cost</span><strong>${number(row.cost_drag_bps).toFixed(1)} bps</strong></div>
-        <div><span>Trades</span><strong>${Math.round(number(row.trades))}</strong></div>
-        <div><span>Closed/Open</span><strong>${Math.round(number(row.closed_trades ?? row.trades))}/${Math.round(number(row.open_trades))}</strong></div>
-        <div><span>Fees</span><strong>${money.format(number(row.fees))}</strong></div>
-        <div><span>Max exposure</span><strong>${compactMoney.format(number(row.max_exposure))}</strong></div>
-      </div>`).join("");
+        <div><span>Trades</span><strong>${Math.round(number(row.trades ?? row.trade_count))}</strong></div>
+        <div><span>History</span><strong>${escapeHtml(historyCount(validation))}</strong></div>
+        <div><span>Max exposure</span><strong>${compactMoney.format(number(row.max_exposure ?? row.allocation_usd))}</strong></div>
+      </div>`;
+    }).join("");
   };
   const renderStrategyWeights = (rows) => {
     if (!refs.strategyWeights) return;
@@ -371,6 +389,26 @@
   syncAllocation(refs.allocation || { value: 0 });
 
   function chartLabel(mode) { return { equity: "Portfolio Equity Curve", pnl: "Portfolio PnL", contribution: "PnL by Asset", timeline: "Trade Timeline" }[mode] || "Portfolio Simulation"; }
+  function historyCount(validation) {
+    if (!validation || typeof validation !== "object") return "--";
+    const valid = number(validation.valid_candle_count, NaN);
+    const required = number(validation.required_candle_count, NaN);
+    if (!Number.isFinite(valid) || !Number.isFinite(required)) return "--";
+    return `${Math.round(valid)}/${Math.round(required)}`;
+  }
+  function historyLabel(validation, fallback) {
+    if (!validation || typeof validation !== "object") return fallback ? `fallback ${fallback}` : "";
+    const source = validation.source_timeframe || validation.requested_timeframe || "";
+    const count = historyCount(validation);
+    const gaps = number(validation.gap_count);
+    const malformed = number(validation.malformed_candle_count) + number(validation.duplicate_timestamp_count);
+    const parts = [];
+    if (source) parts.push(`${count} ${source} candles`);
+    if (fallback || validation.fallback_timeframe) parts.push(`fallback ${fallback || validation.fallback_timeframe}`);
+    if (gaps) parts.push(`${gaps} gaps`);
+    if (malformed) parts.push(`${malformed} malformed/duplicate`);
+    return parts.join(" · ");
+  }
   function escapeHtml(value) { return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
   class BacktestChart {
     constructor(host, overlay, librarySrc) { this.host = host; this.overlay = overlay; this.librarySrc = librarySrc; this.chart = null; this.lineSeries = null; this.payload = null; this.mode = "equity"; this.libraryPromise = null; }

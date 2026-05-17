@@ -45,6 +45,7 @@ PUBLIC_TIMEFRAMES = (
 )
 
 _PUBLIC_TIMEFRAME_VALUES = {item["value"] for item in PUBLIC_TIMEFRAMES}
+_MIN_SIMULATION_CANDLES = 30
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +62,14 @@ class SimulationInput:
     exchange_ids: tuple[str, ...] = ()
     include_leveraged_pairs_only: bool = True
     user: Any | None = None
+
+
+class MarketHistoryError(RuntimeError):
+    """Carries validated candle-history diagnostics for one simulated asset."""
+
+    def __init__(self, message: str, validation: dict[str, Any]) -> None:
+        self.validation = validation
+        super().__init__(message)
 
 
 class VaultBacktestSimulator:
@@ -94,7 +103,8 @@ class VaultBacktestSimulator:
 
     def allocation_cap_usd(self) -> float:
         paper_balance = float(self.config.get("BACKTEST_PAPER_BALANCE_USD", 10_000.0) or 10_000.0)
-        return min(max(paper_balance, 0.0), 10_000.0)
+        hard_cap = float(self.config.get("PAPER_BALANCE_MAX", 1_000_000.0) or 1_000_000.0)
+        return min(max(paper_balance, 0.0), max(hard_cap, 0.0))
 
     def allocation_default_usd(self) -> float:
         default = float(self.config.get("BACKTEST_ALLOCATION_DEFAULT_USD", 10_000.0) or 10_000.0)
@@ -204,9 +214,16 @@ class VaultBacktestSimulator:
         allocation = max(self._safe_float(allocation_usd), 0.0)
         mid = self._mid_price(venue_key or symbol_key, mode=mode)
         market = self._market(provider_key, symbol_key, venue_key)
+        price_source = "market_data"
         if mid <= 0 and market is not None:
             raw = market.raw if hasattr(market, "raw") else {}
             mid = self._safe_float(raw.get("mark") or raw.get("markPx") or raw.get("mid") or raw.get("lastTradePrice"))
+            price_source = "market_cache" if mid > 0 else "unavailable"
+        if mid <= 0:
+            price_source = "unavailable"
+        settlement_asset = str(
+            getattr(market, "settlement_asset", "") if market is not None else provider_collateral_asset(provider_key)
+        ).upper() or provider_collateral_asset(provider_key)
         amount = allocation / mid if mid > 0 else 0.0
         precision = 8 if mid >= 1000 else 6
         return {
@@ -218,7 +235,9 @@ class VaultBacktestSimulator:
             "mid": mid,
             "asset_amount": amount,
             "asset_amount_formatted": f"{amount:,.{precision}f}",
-            "quote_asset": "USDT",
+            "quote_asset": settlement_asset,
+            "price_status": "priced" if mid > 0 else "price_unavailable",
+            "price_source": price_source,
             "updated_at": self._utc_now(),
         }
 
@@ -268,6 +287,7 @@ class VaultBacktestSimulator:
                 row,
                 allocation=provisional_allocation,
                 cycle_duration_minutes=request_input.cycle_duration_minutes,
+                user=request_input.user,
             )
             diagnostic = self._asset_allocation_diagnostic(row, result, provisional_allocation)
             provisional.append((row, result, diagnostic))
@@ -291,6 +311,7 @@ class VaultBacktestSimulator:
                     row,
                     allocation=final_allocation,
                     cycle_duration_minutes=request_input.cycle_duration_minutes,
+                    user=request_input.user,
                 )
                 final_diagnostic = self._asset_allocation_diagnostic(row, final_result, final_allocation)
                 decision = {
@@ -320,16 +341,30 @@ class VaultBacktestSimulator:
         combined = self._combine_asset_results(request_input, asset_runs, all_rows)
         combined["result"]["allocation_plan"] = allocation_plan
         combined["result"]["skipped_candidates"] = skipped
+        combined["result"]["asset_diagnostics"] = self._asset_diagnostic_rows(allocation_plan, skipped, asset_runs)
+        combined["result"]["market_history_validation"] = [
+            row.get("market_history_validation")
+            for row in combined["result"]["asset_diagnostics"]
+            if isinstance(row.get("market_history_validation"), dict)
+        ]
         combined["result"]["portfolio_diagnostics"] = self._portfolio_diagnostics(request_input, allocation_plan, skipped)
         combined["parameters"]["parameters"]["allocation_plan"] = allocation_plan
         combined["parameters"]["parameters"]["skipped_candidates"] = skipped
+        combined["parameters"]["parameters"]["asset_diagnostics"] = combined["result"]["asset_diagnostics"]
         return {
             "record": {"strategy_name": "portfolio_vault_cycle_auto", "symbol": "PORTFOLIO", "timeframe": "1h10"},
             "parameters": combined["parameters"],
             "result": self._json_safe(combined["result"]),
         }
 
-    def _simulate_asset_row(self, row: dict[str, Any], *, allocation: float, cycle_duration_minutes: int) -> dict[str, Any]:
+    def _simulate_asset_row(
+        self,
+        row: dict[str, Any],
+        *,
+        allocation: float,
+        cycle_duration_minutes: int,
+        user: Any | None = None,
+    ) -> dict[str, Any]:
         single_input = SimulationInput(
             mode="single_asset_adapter",
             allocation_usd=max(allocation, 0.0),
@@ -339,13 +374,39 @@ class VaultBacktestSimulator:
             timeframe="live",
             cycle_duration_minutes=cycle_duration_minutes,
             allocation_assets=(str(row.get("vault_allocation_asset") or row.get("symbol") or "").upper(),),
+            user=user,
         )
         try:
             if row.get("vault_asset_only"):
-                raise RuntimeError("No active leveraged market is available for this Vault allocation asset.")
+                return self._failed_asset_result(
+                    row,
+                    allocation,
+                    "No active leveraged market is available for this Vault allocation asset.",
+                    error_code="market_unavailable",
+                    status="skipped",
+                    status_label="Skipped",
+                )
             return self._run_single_asset(single_input, market_row=row)["result"]
+        except MarketHistoryError as exc:
+            validation = exc.validation
+            return self._failed_asset_result(
+                row,
+                allocation,
+                str(exc),
+                error_code=str(validation.get("error_code") or "insufficient_market_history"),
+                status=str(validation.get("status") or "insufficient_history"),
+                status_label=str(validation.get("status_label") or "Insufficient history"),
+                market_history_validation=validation,
+            )
         except Exception as exc:  # noqa: BLE001
-            return self._failed_asset_result(row, allocation, str(exc))
+            return self._failed_asset_result(
+                row,
+                allocation,
+                str(exc),
+                error_code="simulation_error",
+                status="failed",
+                status_label="Failed",
+            )
 
     def _run_single_asset(self, request_input: SimulationInput, market_row: dict[str, Any] | None = None) -> dict[str, Any]:
         quote = self.quote_payload(
@@ -356,9 +417,11 @@ class VaultBacktestSimulator:
             mode="live",
         )
         market = self._market(request_input.provider, request_input.symbol, request_input.venue_symbol)
-        candles = self._simulation_candles(request_input.venue_symbol or request_input.symbol, request_input.timeframe)
-        if len(candles) < 30:
-            raise RuntimeError("Backtest failed: insufficient market history for vault simulation.")
+        history = self._load_simulation_history(request_input, market_row=market_row)
+        candles = history["candles"]
+        validation = history["validation"]
+        if validation.get("status") != "ready":
+            raise MarketHistoryError(self._market_history_error_message(validation), validation)
         book = self._order_book(request_input.venue_symbol or request_input.symbol, mode="live")
         profile = self._market_profile(market, candles, book, quote)
         auto = self._auto_controls(market, profile)
@@ -401,7 +464,7 @@ class VaultBacktestSimulator:
                 "paper_balance": self.allocation_cap_usd(),
                 "converted_amount": quote["asset_amount"],
                 "converted_amount_formatted": quote["asset_amount_formatted"],
-                "quote_asset": "USDT",
+                "quote_asset": quote.get("quote_asset") or provider_collateral_asset(request_input.provider),
             },
             "metrics": combined["metrics"],
             "charts": {
@@ -449,6 +512,13 @@ class VaultBacktestSimulator:
             },
             "quote": quote,
             "market_profile": profile,
+            "market_history_validation": validation,
+            "fallback_timeframe": validation.get("fallback_timeframe", ""),
+            "price_status": quote.get("price_status", "price_unavailable"),
+            "price_source": quote.get("price_source", "unavailable"),
+            "status": "simulated",
+            "status_label": "Simulated",
+            "error_code": "",
             "strategy_results": strategy_results,
             "generated_at": self._utc_now(),
         }
@@ -462,7 +532,17 @@ class VaultBacktestSimulator:
             "result": self._json_safe(result),
         }
 
-    def _failed_asset_result(self, row: dict[str, Any], allocation: float, error: str) -> dict[str, Any]:
+    def _failed_asset_result(
+        self,
+        row: dict[str, Any],
+        allocation: float,
+        error: str,
+        *,
+        error_code: str = "simulation_error",
+        status: str = "failed",
+        status_label: str = "Failed",
+        market_history_validation: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         provider = normalize_provider(row.get("provider"), default="global")
         symbol = str(row.get("symbol") or "--").upper()
         objective_fields = self._one_h10_objective_fields(ending_balance=allocation, allocation=allocation)
@@ -515,7 +595,13 @@ class VaultBacktestSimulator:
                 "max_exchange_leverage": self._safe_float(row.get("max_leverage"), 1.0),
             },
             "strategy_weights": [],
-            "status": "unavailable",
+            "market_history_validation": market_history_validation or {},
+            "fallback_timeframe": (market_history_validation or {}).get("fallback_timeframe", ""),
+            "price_status": "price_unavailable",
+            "price_source": "unavailable",
+            "status": status,
+            "status_label": status_label,
+            "error_code": error_code,
             "error": error,
         }
 
@@ -584,8 +670,14 @@ class VaultBacktestSimulator:
         if max_strategy_drawdown > 1:
             max_strategy_drawdown /= 100.0
         skip_reason = ""
-        if result.get("error"):
-            skip_reason = "market_unavailable" if row.get("vault_asset_only") else "simulation_error"
+        error_code = str(result.get("error_code") or "")
+        result_status = str(result.get("status") or ("failed" if result.get("error") else "simulated"))
+        if error_code == "market_unavailable" or row.get("vault_asset_only"):
+            skip_reason = "market_unavailable"
+        elif error_code == "insufficient_market_history" or result_status == "insufficient_history":
+            skip_reason = "insufficient_market_history"
+        elif result.get("error"):
+            skip_reason = error_code or "simulation_error"
         elif trades <= 0:
             skip_reason = "no_positive_after_cost_trades"
         elif historical_return <= 0:
@@ -601,6 +693,7 @@ class VaultBacktestSimulator:
         elif allocation_score <= 0:
             skip_reason = "non_positive_after_cost_score"
         allocated = not skip_reason and allocation_score > 0
+        diagnostic_status = "simulated" if allocated else ("skipped" if result_status == "simulated" else result_status)
         return {
             "asset": summary.get("symbol") or row.get("symbol") or "--",
             "vault_allocation_asset": summary.get("vault_allocation_asset")
@@ -626,6 +719,16 @@ class VaultBacktestSimulator:
             "screener_source": str(row.get("screener_source") or result.get("screener_source") or "active_market_fallback"),
             "allocated": allocated,
             "skip_reason": skip_reason,
+            "status": diagnostic_status,
+            "status_label": result.get("status_label") or self._status_label(diagnostic_status),
+            "error": str(result.get("error") or ""),
+            "error_code": error_code,
+            "market_history_validation": result.get("market_history_validation")
+            if isinstance(result.get("market_history_validation"), dict)
+            else {},
+            "fallback_timeframe": str(result.get("fallback_timeframe") or ""),
+            "price_status": str(result.get("price_status") or ""),
+            "price_source": str(result.get("price_source") or ""),
             "provisional_allocation_usd": allocation,
         }
 
@@ -652,6 +755,80 @@ class VaultBacktestSimulator:
             "selected_assets": list(request_input.allocation_assets),
             "live_authority": "server_risk_gates_preserved",
         }
+
+    def _asset_diagnostic_rows(
+        self,
+        allocation_plan: list[dict[str, Any]],
+        skipped: list[dict[str, Any]],
+        asset_results: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        result_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+        for result in asset_results:
+            summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+            key = (
+                str(summary.get("symbol") or "").upper(),
+                normalize_provider(summary.get("provider"), default="global"),
+            )
+            if key[0]:
+                result_by_key[key] = result
+
+        rows: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for decision in [*allocation_plan, *skipped]:
+            asset = str(decision.get("asset") or "--").upper()
+            provider = normalize_provider(decision.get("provider"), default="global")
+            key = (asset, provider)
+            result = result_by_key.get(key, {})
+            summary = result.get("summary") if isinstance(result.get("summary"), dict) else {}
+            metrics = result.get("metrics") if isinstance(result.get("metrics"), dict) else {}
+            validation = (
+                result.get("market_history_validation")
+                if isinstance(result.get("market_history_validation"), dict)
+                else decision.get("market_history_validation")
+                if isinstance(decision.get("market_history_validation"), dict)
+                else {}
+            )
+            quote = result.get("quote") if isinstance(result.get("quote"), dict) else {}
+            allocated = bool(decision.get("allocated"))
+            raw_status = str(result.get("status") or decision.get("status") or ("simulated" if allocated else "skipped"))
+            status = "simulated" if allocated and raw_status == "simulated" else raw_status
+            dedupe = (asset, provider, str(summary.get("venue_symbol") or asset))
+            if dedupe in seen:
+                continue
+            seen.add(dedupe)
+            rows.append(
+                {
+                    "asset": asset,
+                    "provider": provider,
+                    "provider_label": decision.get("provider_label") or self._provider_label(provider),
+                    "venue_symbol": summary.get("venue_symbol") or asset,
+                    "vault_allocation_asset": decision.get("vault_allocation_asset") or summary.get("vault_allocation_asset") or asset,
+                    "allocated": allocated,
+                    "allocation_usd": self._safe_float(
+                        decision.get("allocation_usd"), self._safe_float(decision.get("provisional_allocation_usd"))
+                    ),
+                    "allocation_weight": self._safe_float(decision.get("allocation_weight")),
+                    "allocation_score": self._safe_float(decision.get("allocation_score")),
+                    "trade_count": int(metrics.get("trades") or decision.get("trade_count") or 0),
+                    "pnl": self._safe_float(metrics.get("pnl")),
+                    "roi": self._safe_float(metrics.get("roi")),
+                    "status": status,
+                    "status_label": decision.get("status_label") or result.get("status_label") or self._status_label(status),
+                    "skip_reason": str(decision.get("skip_reason") or ""),
+                    "error": str(result.get("error") or decision.get("error") or ""),
+                    "error_code": str(result.get("error_code") or decision.get("error_code") or ""),
+                    "market_history_validation": validation,
+                    "fallback_timeframe": str(
+                        result.get("fallback_timeframe") or decision.get("fallback_timeframe") or validation.get("fallback_timeframe") or ""
+                    ),
+                    "price_status": str(result.get("price_status") or decision.get("price_status") or quote.get("price_status") or ""),
+                    "price_source": str(result.get("price_source") or decision.get("price_source") or quote.get("price_source") or ""),
+                    "net_expected_return_bps": self._safe_float(decision.get("net_expected_return_bps")),
+                    "cost_drag_bps": self._safe_float(decision.get("cost_drag_bps")),
+                    "expected_execution_quality": self._safe_float(decision.get("expected_execution_quality")),
+                }
+            )
+        return rows
 
     def _first_positive_or_any(self, *values: Any) -> float:
         parsed = [self._safe_float(value, math.nan) for value in values]
@@ -722,11 +899,17 @@ class VaultBacktestSimulator:
                             "allocation_weight": self._safe_float(allocation_decision.get("allocation_weight")),
                         }
                     )
+            quote = result.get("quote") if isinstance(result.get("quote"), dict) else {}
+            validation = result.get("market_history_validation") if isinstance(result.get("market_history_validation"), dict) else {}
+            status = str(allocation_decision.get("status") or result.get("status") or ("failed" if result.get("error") else "simulated"))
             asset_breakdown.append(
                 {
                     "asset": summary.get("symbol") or "--",
                     "vault_allocation_asset": summary.get("vault_allocation_asset") or summary.get("symbol") or "--",
                     "exchange": summary.get("provider_label") or self._provider_label(str(summary.get("provider") or "global")),
+                    "provider": summary.get("provider") or "global",
+                    "venue_symbol": summary.get("venue_symbol") or summary.get("symbol") or "--",
+                    "quote_asset": summary.get("quote_asset") or quote.get("quote_asset") or "USDC",
                     "pnl": pnl,
                     "roi": pnl / max(asset_allocation, 1e-9),
                     "trades": trades,
@@ -744,8 +927,16 @@ class VaultBacktestSimulator:
                     "cost_drag_bps": self._safe_float(allocation_decision.get("cost_drag_bps")),
                     "expected_execution_quality": self._safe_float(allocation_decision.get("expected_execution_quality")),
                     "skip_reason": str(allocation_decision.get("skip_reason") or ""),
-                    "status": "unavailable" if result.get("error") else "simulated",
-                    "error": str(result.get("error") or ""),
+                    "status": status,
+                    "status_label": str(
+                        allocation_decision.get("status_label") or result.get("status_label") or self._status_label(status)
+                    ),
+                    "error_code": str(result.get("error_code") or allocation_decision.get("error_code") or ""),
+                    "error": str(result.get("error") or allocation_decision.get("error") or ""),
+                    "market_history_validation": validation,
+                    "fallback_timeframe": str(result.get("fallback_timeframe") or validation.get("fallback_timeframe") or ""),
+                    "price_status": str(result.get("price_status") or quote.get("price_status") or ""),
+                    "price_source": str(result.get("price_source") or quote.get("price_source") or ""),
                 }
             )
         ending_balance = allocation + total_pnl
@@ -1089,6 +1280,13 @@ class VaultBacktestSimulator:
             "asset_amount": quote.get("asset_amount", 0.0),
             "asset_amount_formatted": quote.get("asset_amount_formatted", "0"),
             "asset_breakdown": result.get("asset_breakdown", []),
+            "asset_diagnostics": result.get("asset_diagnostics", result.get("asset_breakdown", [])),
+            "market_history_validation": result.get("market_history_validation", []),
+            "price_status": quote.get("price_status", "mixed" if result.get("asset_diagnostics") else "price_unavailable"),
+            "price_source": quote.get("price_source", "mixed" if result.get("asset_diagnostics") else "unavailable"),
+            "fallback_timeframe": result.get("fallback_timeframe", ""),
+            "error_code": result.get("error_code", ""),
+            "status_label": result.get("status_label", "Simulation complete"),
             "allocation_assets": (result.get("summary") or {}).get("allocation_assets", []),
             "target_multiplier": result.get("target_multiplier"),
             "target_roi_pct": result.get("target_roi_pct"),
@@ -1223,6 +1421,7 @@ class VaultBacktestSimulator:
             rows.append(
                 {
                     "market_id": getattr(market, "id", None),
+                    "trading_connection_id": getattr(market, "trading_connection_id", None),
                     "provider": provider,
                     "provider_label": self._provider_label(provider),
                     "symbol": symbol,
@@ -1366,26 +1565,235 @@ class VaultBacktestSimulator:
                 return market
         return None
 
+    def _load_simulation_history(
+        self,
+        request_input: SimulationInput,
+        *,
+        market_row: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        symbol = request_input.venue_symbol or request_input.symbol
+        attempts: list[dict[str, Any]] = []
+        for candidate in self._history_timeframe_candidates(request_input.timeframe):
+            raw_rows, provider_source, provider_error = self._provider_candles(
+                request_input,
+                candidate["source_timeframe"],
+                limit=int(candidate["limit"]),
+                market_row=market_row,
+            )
+            candles = self._prepare_history_candles(raw_rows, candidate)
+            validation = self._validate_market_history(
+                raw_rows=raw_rows,
+                candles=candles,
+                requested_timeframe=request_input.timeframe,
+                source_timeframe=str(candidate["source_timeframe"]),
+                provider=request_input.provider,
+                venue_symbol=symbol,
+                provider_source=provider_source,
+                provider_error=provider_error,
+                fallback_timeframe=str(candidate.get("fallback_timeframe") or ""),
+            )
+            attempts.append({"candles": candles, "validation": validation})
+            if validation["status"] == "ready":
+                validation["attempts"] = [dict(item["validation"]) for item in attempts]
+                return {"candles": candles, "validation": validation}
+
+        best = max(attempts, key=lambda item: int(item["validation"].get("valid_candle_count", 0)), default=None)
+        if best is None:
+            validation = self._empty_market_history_validation(request_input, symbol)
+            return {"candles": [], "validation": validation}
+        validation = dict(best["validation"])
+        validation["attempts"] = [dict(item["validation"]) for item in attempts]
+        return {"candles": best["candles"], "validation": validation}
+
     def _simulation_candles(self, symbol: str, public_timeframe: str) -> list[dict[str, Any]]:
+        request_input = SimulationInput(
+            mode="single_asset_adapter",
+            allocation_usd=0.0,
+            symbol=symbol,
+            venue_symbol=symbol,
+            timeframe=public_timeframe,
+        )
+        return list(self._load_simulation_history(request_input)["candles"])
+
+    def _history_timeframe_candidates(self, public_timeframe: str) -> list[dict[str, Any]]:
         public = self.normalize_timeframe(public_timeframe)
         if public == "45m":
-            source = self._safe_candles(symbol, "15m", limit=210)
-            return self._aggregate_candles(source, group_size=3)[-120:]
+            return [
+                {"source_timeframe": "15m", "limit": 210, "group_size": 3, "take": 120, "fallback_timeframe": ""},
+                {"source_timeframe": "1h", "limit": 180, "group_size": 1, "take": 160, "fallback_timeframe": "1h"},
+            ]
         if public == "1d":
-            source = self._safe_candles(symbol, "4h", limit=240)
-            return self._aggregate_candles(source, group_size=6)[-120:]
+            return [
+                {"source_timeframe": "4h", "limit": 240, "group_size": 6, "take": 120, "fallback_timeframe": ""},
+                {"source_timeframe": "1h", "limit": 240, "group_size": 24, "take": 120, "fallback_timeframe": "1h"},
+            ]
         source = {"live": "1m"}.get(public, public)
-        return self._safe_candles(symbol, source, limit=180)[-160:]
+        candidates = [{"source_timeframe": source, "limit": 180, "group_size": 1, "take": 160, "fallback_timeframe": ""}]
+        for fallback in {"live": ["5m", "15m"], "5m": ["15m", "1h"], "15m": ["1h"], "4h": ["1h"]}.get(public, []):
+            candidates.append({"source_timeframe": fallback, "limit": 220, "group_size": 1, "take": 160, "fallback_timeframe": fallback})
+        return candidates
 
-    def _safe_candles(self, symbol: str, timeframe: str, *, limit: int) -> list[dict[str, Any]]:
+    def _provider_candles(
+        self,
+        request_input: SimulationInput,
+        timeframe: str,
+        *,
+        limit: int,
+        market_row: dict[str, Any] | None = None,
+    ) -> tuple[list[dict[str, Any]], str, str]:
+        provider = normalize_provider(request_input.provider, default="global")
+        symbol = str(request_input.venue_symbol or request_input.symbol or "").upper()
+        if provider not in {"global", "hyperliquid"}:
+            connector = self._market_data_connector(request_input.user, provider, market_row)
+            getter = getattr(connector, "get_candles", None) if connector is not None else None
+            if callable(getter):
+                try:
+                    return list(getter(symbol, timeframe, "live", limit) or []), f"{provider}_connector", ""
+                except Exception as exc:
+                    return [], f"{provider}_connector", str(exc)
         try:
-            rows = list(self.market_data.get_candles(symbol, timeframe, mode="live", limit=limit) or [])
-        except Exception:
+            return list(self.market_data.get_candles(symbol, timeframe, mode="live", limit=limit) or []), "market_data_live", ""
+        except Exception as live_exc:
             try:
-                rows = list(self.market_data.get_candles(symbol, timeframe, mode="testnet", limit=limit) or [])
+                return (
+                    list(self.market_data.get_candles(symbol, timeframe, mode="testnet", limit=limit) or []),
+                    "market_data_testnet",
+                    str(live_exc),
+                )
+            except Exception as testnet_exc:
+                return [], "market_data_unavailable", f"{live_exc}; {testnet_exc}"
+
+    def _market_data_connector(self, user: Any | None, provider: str, market_row: dict[str, Any] | None) -> Any | None:
+        if user is None or self.trading_connections is None:
+            return None
+        user_id = int(getattr(user, "id", 0) or 0)
+        if user_id <= 0:
+            return None
+        connection_id = int((market_row or {}).get("trading_connection_id") or 0) or None
+        if connection_id is not None:
+            try:
+                return self.trading_connections.connector_for_user(user_id, connection_id)
             except Exception:
-                rows = []
-        return [self._normalize_candle(row, index) for index, row in enumerate(rows) if isinstance(row, dict)]
+                return None
+        try:
+            connections = list(self.trading_connections.verified_tradable_connections(user_id))
+        except Exception:
+            return None
+        provider_key = normalize_provider(provider, default="global")
+        for connection in connections:
+            if normalize_provider(getattr(connection, "provider", ""), default="global") != provider_key:
+                continue
+            connection_id = int(getattr(connection, "id", 0) or 0) or None
+            if connection_id is None:
+                continue
+            try:
+                return self.trading_connections.connector_for_user(user_id, connection_id)
+            except Exception:
+                return None
+        return None
+
+    def _prepare_history_candles(self, raw_rows: list[dict[str, Any]], candidate: dict[str, Any]) -> list[dict[str, Any]]:
+        normalized = [self._normalize_candle(row, index) for index, row in enumerate(raw_rows) if isinstance(row, dict)]
+        group_size = max(1, int(candidate.get("group_size") or 1))
+        candles = self._aggregate_candles(normalized, group_size=group_size) if group_size > 1 else normalized
+        return candles[-max(1, int(candidate.get("take") or 160)) :]
+
+    def _validate_market_history(
+        self,
+        *,
+        raw_rows: list[dict[str, Any]],
+        candles: list[dict[str, Any]],
+        requested_timeframe: str,
+        source_timeframe: str,
+        provider: str,
+        venue_symbol: str,
+        provider_source: str,
+        provider_error: str,
+        fallback_timeframe: str = "",
+    ) -> dict[str, Any]:
+        malformed = max(0, len(raw_rows) - len(candles))
+        by_timestamp: dict[int, dict[str, Any]] = {}
+        duplicate_count = 0
+        for row in candles:
+            timestamp = int(self._safe_float(row.get("timestamp"), -1))
+            close = self._safe_float(row.get("close"))
+            high = self._safe_float(row.get("high"))
+            low = self._safe_float(row.get("low"))
+            open_price = self._safe_float(row.get("open"))
+            if timestamp < 0 or close <= 0 or high <= 0 or low <= 0 or open_price <= 0 or high < low:
+                malformed += 1
+                continue
+            if timestamp in by_timestamp:
+                duplicate_count += 1
+                continue
+            by_timestamp[timestamp] = row
+        cleaned = [by_timestamp[key] for key in sorted(by_timestamp)]
+        expected_seconds = self._timeframe_seconds(source_timeframe)
+        gaps = []
+        for previous, current in zip(cleaned, cleaned[1:], strict=False):
+            delta = int(current["timestamp"]) - int(previous["timestamp"])
+            if expected_seconds > 0 and delta > expected_seconds * 3:
+                gaps.append({"from": previous["timestamp"], "to": current["timestamp"], "seconds": delta})
+        valid_count = len(cleaned)
+        status = "ready" if valid_count >= _MIN_SIMULATION_CANDLES else "insufficient_history"
+        error_code = "" if status == "ready" else "insufficient_market_history"
+        if provider_error and valid_count <= 0:
+            status = "failed"
+            error_code = "provider_market_data_unavailable"
+        return {
+            "status": status,
+            "status_label": self._status_label(status),
+            "error_code": error_code,
+            "provider": normalize_provider(provider, default="global"),
+            "venue_symbol": str(venue_symbol or "").upper(),
+            "requested_timeframe": self.normalize_timeframe(requested_timeframe),
+            "source_timeframe": source_timeframe,
+            "fallback_timeframe": fallback_timeframe,
+            "provider_source": provider_source,
+            "provider_error": provider_error,
+            "raw_candle_count": len(raw_rows),
+            "valid_candle_count": valid_count,
+            "required_candle_count": _MIN_SIMULATION_CANDLES,
+            "malformed_candle_count": malformed,
+            "duplicate_timestamp_count": duplicate_count,
+            "gap_count": len(gaps),
+            "gap_examples": gaps[:3],
+        }
+
+    def _empty_market_history_validation(self, request_input: SimulationInput, symbol: str) -> dict[str, Any]:
+        return {
+            "status": "failed",
+            "status_label": "Failed",
+            "error_code": "provider_market_data_unavailable",
+            "provider": normalize_provider(request_input.provider, default="global"),
+            "venue_symbol": str(symbol or "").upper(),
+            "requested_timeframe": self.normalize_timeframe(request_input.timeframe),
+            "source_timeframe": "",
+            "fallback_timeframe": "",
+            "provider_source": "unavailable",
+            "provider_error": "No candle loader returned market history.",
+            "raw_candle_count": 0,
+            "valid_candle_count": 0,
+            "required_candle_count": _MIN_SIMULATION_CANDLES,
+            "malformed_candle_count": 0,
+            "duplicate_timestamp_count": 0,
+            "gap_count": 0,
+            "gap_examples": [],
+        }
+
+    def _market_history_error_message(self, validation: dict[str, Any]) -> str:
+        if validation.get("status") == "failed":
+            reason = str(validation.get("provider_error") or "provider did not return candle history")
+            return f"Market history unavailable for {validation.get('venue_symbol')}: {reason}"
+        count = int(validation.get("valid_candle_count") or 0)
+        required = int(validation.get("required_candle_count") or _MIN_SIMULATION_CANDLES)
+        timeframe = str(validation.get("source_timeframe") or validation.get("requested_timeframe") or "market")
+        fallback = str(validation.get("fallback_timeframe") or "")
+        fallback_note = f" after fallback to {fallback}" if fallback else ""
+        return (
+            f"Insufficient market history for {validation.get('venue_symbol')}: "
+            f"{count}/{required} valid {timeframe} candles{fallback_note}."
+        )
 
     def _aggregate_candles(self, candles: list[dict[str, Any]], *, group_size: int) -> list[dict[str, Any]]:
         aggregated: list[dict[str, Any]] = []
@@ -1956,6 +2364,30 @@ class VaultBacktestSimulator:
             "kucoin": "KuCoin",
             "global": "Configured",
         }.get(provider_key, provider_key.replace("_", " ").title())
+
+    @staticmethod
+    def _status_label(status: str) -> str:
+        return {
+            "ready": "Ready",
+            "simulated": "Simulated",
+            "skipped": "Skipped",
+            "insufficient_history": "Insufficient history",
+            "failed": "Failed",
+            "unavailable": "Unavailable",
+        }.get(str(status or "").strip().lower(), str(status or "Status").replace("_", " ").title())
+
+    @staticmethod
+    def _timeframe_seconds(timeframe: str) -> int:
+        value = str(timeframe or "").strip().lower()
+        return {
+            "1m": 60,
+            "5m": 300,
+            "15m": 900,
+            "45m": 2700,
+            "1h": 3600,
+            "4h": 14_400,
+            "1d": 86_400,
+        }.get(value, 60)
 
     @staticmethod
     def _strategy_label(strategy_name: str) -> str:
