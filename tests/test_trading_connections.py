@@ -111,6 +111,49 @@ def test_stale_required_connection_secret_has_actionable_error(app) -> None:
     assert connection.verification_status == "action_needed"
 
 
+def test_verify_connection_reports_recovery_sqlite_live_blocker(app) -> None:
+    app.config["RECOVERY_SQLITE_ACTIVE"] = True
+    user = _create_user("recovery-live-blocker")
+    service = app.extensions["services"]["trading_connections"]
+    connection = service.create_or_update(
+        user_id=user.id,
+        provider="kucoin",
+        connection_type="cex_api_key",
+        api_key="kucoin-key",
+        api_secret="kucoin-secret",
+        passphrase="kucoin-passphrase",
+    )
+    db.session.commit()
+
+    result = service.verify_connection(user.id, connection.id)
+
+    assert result["ok"] is False
+    assert "recovery SQLite" in result["error"]
+    assert "ALGVAULT_RECOVERY_SQLITE_ENABLED=false" in result["error"]
+    assert connection.verification_status == "action_needed"
+
+
+def test_verify_connection_reports_disabled_live_trading_gate(app) -> None:
+    app.config["ENABLE_LIVE_TRADING"] = False
+    user = _create_user("disabled-live-gate")
+    service = app.extensions["services"]["trading_connections"]
+    connection = service.create_or_update(
+        user_id=user.id,
+        provider="kucoin",
+        connection_type="cex_api_key",
+        api_key="kucoin-key",
+        api_secret="kucoin-secret",
+        passphrase="kucoin-passphrase",
+    )
+    db.session.commit()
+
+    result = service.verify_connection(user.id, connection.id)
+
+    assert result["ok"] is False
+    assert result["error"] == "Live trading is disabled by server configuration. Set ENABLE_LIVE_TRADING=true only after live readiness is validated."
+    assert connection.verification_status == "action_needed"
+
+
 def test_stale_optional_hyperliquid_label_does_not_block_required_credentials(app) -> None:
     user = _create_user("stale-optional")
     service = app.extensions["services"]["trading_connections"]
@@ -887,8 +930,8 @@ def test_register_2fa_connection_onboarding_then_live_home(app, monkeypatch) -> 
 
     home = client.get("/")
     assert home.status_code == 200
-    assert b"Portfolio Balance" in home.data
-    assert b"Vault Pulse" in home.data
+    assert b"Total Wallet Balance" in home.data
+    assert b"Past Account P&amp;L" in home.data
 
 
 def test_unsupported_provider_does_not_satisfy_live_onboarding(app) -> None:

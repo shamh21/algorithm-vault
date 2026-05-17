@@ -80,6 +80,7 @@ def dashboard_performance():
         {
             "dashboard_cache": payload_service.get_cache_stats(),
             "opportunity_scanner": get_service("dashboard_opportunities").health_payload(),
+            "forecast_performance": get_service("forecast_performance").rolling_metrics(),
             "market_cache": get_service("market_data").cache_stats(),
             "strategy_loop": strategy_manager.get_loop_metrics(),
         }

@@ -2,23 +2,22 @@
 
 from __future__ import annotations
 
-import uuid
-import time
 import json
+import time
+import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from ..extensions import db
 from ..ml.decision_engine import MLDecisionEngine
 from ..ml.signal_model import MLSignalModel
 from ..models import AuditLog, Fill, Order, PositionSnapshot, Setting
+from .db_retry import commit_with_retry
 from .hyperliquid_client import HyperliquidClient
 from .market_data import MarketDataService
 from .risk_engine import RiskEngine
-from .db_retry import commit_with_retry
 from .trading_connections import TradingConnectionService
-
 
 OPEN_ORDER_STATUSES = {"open", "submitted", "pending"}
 
@@ -143,6 +142,25 @@ class OrderManager:
         if not decision.approved:
             order.status = "rejected"
             order.rejection_reason = decision.reason
+            commit_with_retry()
+            self._audit(
+                "trade_decision_blocked",
+                f"Order for {intent.symbol} blocked by server-side risk gate.",
+                {
+                    "order_id": order.id,
+                    "mode": intent.mode,
+                    "symbol": intent.symbol,
+                    "side": intent.side,
+                    "rule_name": decision.rule_name,
+                    "blocker_category": details.get("blocker_category"),
+                    "one_h10_vault": bool(intent.metadata.get("one_h10_vault")),
+                    "ml_horizon": intent.metadata.get("ml_horizon"),
+                    "vault_cycle_id": intent.metadata.get("vault_cycle_id"),
+                    "vault_leg_id": intent.metadata.get("vault_leg_id"),
+                    "user_id": intent.user_id,
+                    "trading_connection_id": intent.trading_connection_id,
+                },
+            )
             commit_with_retry()
             self.risk_engine.log_rejection(
                 decision,
@@ -283,7 +301,9 @@ class OrderManager:
             "symbol": symbol,
             "quantity": 0.0,
             "entry_price": 0.0,
-            "mark_price": 0.0 if mode == "live" else self._safe_market_price(symbol, mode, user_id=user_id, trading_connection_id=trading_connection_id),
+            "mark_price": 0.0
+            if mode == "live"
+            else self._safe_market_price(symbol, mode, user_id=user_id, trading_connection_id=trading_connection_id),
             "unrealized_pnl": 0.0,
             "leverage": 1.0,
         }
@@ -305,11 +325,7 @@ class OrderManager:
         source_query = Order.query.filter_by(symbol=symbol, mode=mode, reduce_only=False, user_id=user_id)
         if trading_connection_id is not None:
             source_query = source_query.filter_by(trading_connection_id=trading_connection_id)
-        source_order = (
-            source_query.filter(Order.status.in_(["filled", "open", "submitted"]))
-            .order_by(Order.created_at.desc())
-            .first()
-        )
+        source_order = source_query.filter(Order.status.in_(["filled", "open", "submitted"])).order_by(Order.created_at.desc()).first()
 
         if source_order is None:
             return None
@@ -436,7 +452,11 @@ class OrderManager:
 
     def _exchange_submit(self, order: Order, intent: OrderIntent) -> None:
         adaptive_payload = (intent.metadata or {}).get("adaptive_slippage")
-        adaptive_limit = self._safe_float(adaptive_payload.get("max_acceptable_pct"), intent.slippage_pct) if isinstance(adaptive_payload, dict) else intent.slippage_pct
+        adaptive_limit = (
+            self._safe_float(adaptive_payload.get("max_acceptable_pct"), intent.slippage_pct)
+            if isinstance(adaptive_payload, dict)
+            else intent.slippage_pct
+        )
         max_slippage = self._safe_float(
             (intent.metadata or {}).get("adaptive_slippage_pct"),
             adaptive_limit,
@@ -578,15 +598,19 @@ class OrderManager:
         if funding_fee is None:
             funding_fee = 0.0
 
-        exchange_order_id = str(
-            self._first_payload_value(payloads, ("exchange_order_id", "order_id", "orderId", "oid"))
-            or order.exchange_order_id
-            or ""
-        ).strip() or None
-        exchange_fill_id = str(
-            self._first_payload_value(payloads, ("exchange_fill_id", "fill_id", "fillId", "trade_id", "tradeId", "tid", "hash", "id"))
-            or ""
-        ).strip() or None
+        exchange_order_id = (
+            str(
+                self._first_payload_value(payloads, ("exchange_order_id", "order_id", "orderId", "oid")) or order.exchange_order_id or ""
+            ).strip()
+            or None
+        )
+        exchange_fill_id = (
+            str(
+                self._first_payload_value(payloads, ("exchange_fill_id", "fill_id", "fillId", "trade_id", "tradeId", "tid", "hash", "id"))
+                or ""
+            ).strip()
+            or None
+        )
         source_order_id = self._resolve_source_order_id(order)
 
         status = "reconciled"
@@ -672,7 +696,9 @@ class OrderManager:
             fill_price = self._safe_float(fill.get("price"))
             fill_quantity = self._safe_float(fill.get("size", fill.get("quantity")))
             price_matches = target_price <= 0 or fill_price <= 0 or abs(fill_price - target_price) / max(target_price, 1e-9) <= 0.0025
-            quantity_matches = target_quantity <= 0 or fill_quantity <= 0 or abs(fill_quantity - target_quantity) <= max(target_quantity * 0.01, 1e-9)
+            quantity_matches = (
+                target_quantity <= 0 or fill_quantity <= 0 or abs(fill_quantity - target_quantity) <= max(target_quantity * 0.01, 1e-9)
+            )
             if price_matches and quantity_matches:
                 fallback = fill
         return fallback
@@ -837,7 +863,7 @@ class OrderManager:
             unrealized_pnl=self._safe_float(position.get("unrealized_pnl")),
             leverage=self._safe_float(position.get("leverage"), 1.0),
             notional=abs(quantity) * mark_price,
-            snapshot_time=datetime.now(timezone.utc),
+            snapshot_time=datetime.now(UTC),
         )
 
         db.session.add(snapshot)
@@ -891,7 +917,9 @@ class OrderManager:
         raw = decision.get("raw") if isinstance(decision.get("raw"), dict) else {}
         if bool(decision.get("ready", False)) and self._safe_float(market_price) > 0:
             slippage = self._safe_float(raw.get("slippage_tolerance_pct"), intent.slippage_pct)
-            adaptive = self.risk_engine.adaptive_slippage_metrics({**metadata, "spread_bps": context.get("spread_bps", 0.0)}, slippage_pct=slippage)
+            adaptive = self.risk_engine.adaptive_slippage_metrics(
+                {**metadata, "spread_bps": context.get("spread_bps", 0.0)}, slippage_pct=slippage
+            )
             max_slippage = self._safe_float(adaptive.get("max_acceptable_pct"), slippage)
             if max_slippage > 0:
                 intent.slippage_pct = max(0.0, min(slippage, max_slippage))
@@ -1060,7 +1088,7 @@ class OrderManager:
             return None
         try:
             return self.trading_connections.connector_for_user(user_id, trading_connection_id)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None
 
     def _provider_for_connection(self, user_id: int | None, trading_connection_id: int | None) -> str:
@@ -1069,7 +1097,7 @@ class OrderManager:
         try:
             connection = self.trading_connections.get_for_user(user_id, trading_connection_id)
             return str(getattr(connection, "provider", "") or "")
-        except Exception:
+        except Exception:  # noqa: BLE001
             return ""
 
     @staticmethod

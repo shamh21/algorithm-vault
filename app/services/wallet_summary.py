@@ -13,7 +13,6 @@ from sqlalchemy.orm import joinedload
 from ..extensions import db
 from ..models import Order, Setting, TradingConnection, User, VaultCycle, WalletAddress, WalletBalance, WalletTransaction
 
-
 DEFAULT_WALLET_ASSETS = ("BTC", "ETH", "SOL", "USDC", "USDT", "XRP")
 ACTIVE_ORDER_STATUSES = ("submitted", "open", "partially_filled", "pending")
 
@@ -331,30 +330,49 @@ class WalletSummaryService:
             )
         by_asset = {record.asset.upper(): record for record in records}
         onchain_by_asset = self._onchain_snapshots(user_id)
+        if _recovery_sqlite_active():
+            onchain_by_asset = {
+                asset: snapshot for asset, snapshot in onchain_by_asset.items() if str(snapshot.get("status") or "") == "checked"
+            }
         assets = sorted(set(DEFAULT_WALLET_ASSETS) | set(by_asset))
         sync_status = self._sync_status_by_asset(user_id)
         views: list[WalletBalanceView] = []
         for asset in assets:
             record = by_asset.get(asset)
             onchain = onchain_by_asset.get(asset, {})
-            available = float(record.available_balance or 0.0) if record is not None else 0.0
-            locked = float(record.locked_balance or 0.0) if record is not None else 0.0
-            total = available + locked
+            stored_available = float(record.available_balance or 0.0) if record is not None else 0.0
+            stored_locked = float(record.locked_balance or 0.0) if record is not None else 0.0
             onchain_status = str(onchain.get("status") or "unavailable")
             onchain_balance = float(onchain.get("balance", 0.0) or 0.0) if onchain_status == "checked" else 0.0
+            if onchain_status == "checked":
+                locked = min(stored_locked, onchain_balance)
+                available = max(0.0, onchain_balance - locked)
+                estimated_usd_value = _verified_estimated_usd_value(asset, onchain_balance, record)
+            elif onchain:
+                available = 0.0
+                locked = 0.0
+                estimated_usd_value = 0.0
+            else:
+                available = stored_available
+                locked = stored_locked
+                estimated_usd_value = float(record.estimated_usd_value or 0.0) if record is not None else 0.0
+            total = available + locked
             onchain_delta = onchain_balance - total if onchain_status == "checked" else 0.0
+            onchain_reason = str(onchain.get("reason") or "")
+            if onchain and onchain_status != "checked" and not onchain_reason:
+                onchain_reason = "Awaiting verified on-chain balance."
             status = sync_status.get(asset, {"status": "not_configured", "reason": "", "checked_at": None, "on_chain_total": None})
             views.append(
                 WalletBalanceView(
                     asset=asset,
                     available_balance=available,
                     locked_balance=locked,
-                    estimated_usd_value=float(record.estimated_usd_value or 0.0) if record is not None else 0.0,
+                    estimated_usd_value=estimated_usd_value,
                     active_deposit_address=record.active_deposit_address if record is not None else None,
                     onchain_balance=onchain_balance,
                     onchain_checked_at=onchain.get("checked_at"),
                     onchain_status=onchain_status,
-                    onchain_reason=str(onchain.get("reason") or ""),
+                    onchain_reason=onchain_reason,
                     onchain_delta=onchain_delta,
                     onchain_mismatch_status=_onchain_mismatch_status(onchain_status, onchain_delta),
                     sync_status=str(status.get("status") or "not_configured"),
@@ -391,9 +409,7 @@ class WalletSummaryService:
                 row["balance"] = float(row["balance"] or 0.0) + max(0.0, float(record.onchain_balance or 0.0))
                 row["status"] = "checked"
                 row["checked_count"] = int(row["checked_count"] or 0) + 1
-                if record.onchain_checked_at is not None and (
-                    row["checked_at"] is None or record.onchain_checked_at > row["checked_at"]
-                ):
+                if record.onchain_checked_at is not None and (row["checked_at"] is None or record.onchain_checked_at > row["checked_at"]):
                     row["checked_at"] = record.onchain_checked_at
             else:
                 reason = str(record.onchain_reason or record.onchain_status or "unavailable")
@@ -409,6 +425,8 @@ class WalletSummaryService:
     def _sync_and_reconcile_custody(self, user_id: int) -> dict[str, Any]:
         if not has_app_context():
             return {"touched": False}
+        if _recovery_sqlite_active():
+            return {"touched": False}
         custody = current_app.extensions.get("services", {}).get("wallet_custody")
         if custody is None or not getattr(custody, "enabled", False):
             return {"touched": False}
@@ -418,12 +436,8 @@ class WalletSummaryService:
             touched = True
         except Exception as exc:  # noqa: BLE001
             current_app.logger.warning("Wallet summary custody sync failed for user %s: %s", user_id, exc)
-        assets = {
-            row.asset
-            for row in WalletBalance.query.filter_by(user_id=user_id).all()
-        } | {
-            row.asset
-            for row in WalletAddress.query.filter_by(user_id=user_id, status="active").all()
+        assets = {row.asset for row in WalletBalance.query.filter_by(user_id=user_id).all()} | {
+            row.asset for row in WalletAddress.query.filter_by(user_id=user_id, status="active").all()
         }
         for asset in assets:
             try:
@@ -436,6 +450,8 @@ class WalletSummaryService:
         return {"touched": touched}
 
     def _sync_status_by_asset(self, user_id: int) -> dict[str, dict[str, Any]]:
+        if _recovery_sqlite_active():
+            return self._recovery_sync_status_by_asset(user_id)
         rows = WalletAddress.query.filter_by(user_id=user_id, status="active").order_by(WalletAddress.asset.asc()).all()
         status_by_asset: dict[str, dict[str, Any]] = {}
         grouped: dict[str, list[WalletAddress]] = {}
@@ -490,6 +506,37 @@ class WalletSummaryService:
             }
         return status_by_asset
 
+    def _recovery_sync_status_by_asset(self, user_id: int) -> dict[str, dict[str, Any]]:
+        rows = WalletAddress.query.filter_by(user_id=user_id, status="active").order_by(WalletAddress.asset.asc()).all()
+        status_by_asset: dict[str, dict[str, Any]] = {}
+        grouped: dict[str, list[WalletAddress]] = {}
+        for row in rows:
+            grouped.setdefault(row.asset.upper(), []).append(row)
+        for asset, addresses in grouped.items():
+            checked = [row for row in addresses if str(row.onchain_status or "") == "checked"]
+            if not checked:
+                status_by_asset[asset] = {
+                    "status": "not_configured",
+                    "reason": "No verified recovery on-chain snapshot is available.",
+                    "checked_at": None,
+                    "on_chain_total": None,
+                }
+                continue
+            checked_total = sum(max(0.0, float(row.onchain_balance or 0.0)) for row in checked)
+            latest_checked_at = max((row.onchain_checked_at for row in checked if row.onchain_checked_at is not None), default=None)
+            complete = len(checked) == len(addresses)
+            status_by_asset[asset] = {
+                "status": "verified" if complete else "partial",
+                "reason": (
+                    "Verified from recovery on-chain snapshot."
+                    if complete
+                    else "Some active recovery wallet addresses have not been verified."
+                ),
+                "checked_at": _iso(latest_checked_at),
+                "on_chain_total": checked_total,
+            }
+        return status_by_asset
+
     def _active_cycles_count(self, user_id: int) -> int:
         return VaultCycle.query.filter(
             VaultCycle.user_id == user_id,
@@ -516,6 +563,10 @@ class WalletSummaryService:
 
 def _exchange_balance_snapshot_key(user_id: int) -> str:
     return f"exchange_balance_snapshot:{int(user_id)}"
+
+
+def _recovery_sqlite_active() -> bool:
+    return has_app_context() and bool(current_app.config.get("RECOVERY_SQLITE_ACTIVE", False))
 
 
 def _snapshot_rows(rows: Any, *, limit: int = 150) -> list[dict[str, Any]]:
@@ -593,11 +644,24 @@ def _iso(value: Any) -> str | None:
     return value.isoformat() if value is not None and hasattr(value, "isoformat") else None
 
 
+def _verified_estimated_usd_value(asset: str, onchain_total: float, record: WalletBalance | None) -> float:
+    amount = max(float(onchain_total or 0.0), 0.0)
+    if asset in {"USDC", "USDT", "USD"}:
+        return amount
+    if record is None:
+        return 0.0
+    stored_total = float(record.total_balance or 0.0)
+    stored_estimate = float(record.estimated_usd_value or 0.0)
+    if stored_total <= 0 or stored_estimate <= 0:
+        return 0.0
+    return max(0.0, amount * (stored_estimate / stored_total))
+
+
 def _onchain_mismatch_status(onchain_status: str, delta: float) -> str:
     if onchain_status != "checked":
         return "unavailable"
     if math_isclose(float(delta or 0.0), 0.0):
-        return "matched"
+        return "verified"
     return "surplus_onchain" if delta > 0 else "deficit_onchain"
 
 

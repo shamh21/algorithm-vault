@@ -1,12 +1,22 @@
 (() => {
+  if (window.__AlgVaultVaultInitialized) return;
+  window.__AlgVaultVaultInitialized = true;
+
   const countdowns = Array.from(document.querySelectorAll("[data-countdown]"));
   const activeCycleCards = Array.from(document.querySelectorAll("[data-vault-cycle-card]"));
   const settlementManuallyChanged = new WeakSet();
   const previewControllers = new WeakMap();
   const previewTimers = new WeakMap();
   const lastPreview = new WeakMap();
+  const cycleRefreshInFlight = new WeakSet();
+  const cycleRefreshAt = new WeakMap();
+  const startStatusTimers = new Map();
   const apiUrl = (path) => window.AlgVaultConfig?.apiUrl?.(path) || path;
   const vaultApiUrl = (path) => window.AlgVaultConfig?.vaultApiUrl?.(path) || apiUrl(path);
+  const CYCLE_STATUS_INTERVAL_MS = 20000;
+  const CYCLE_STATUS_MIN_AGE_MS = 12000;
+  const START_STATUS_INTERVAL_MS = 3000;
+  const START_STATUS_MAX_POLLS = 30;
   let timerId = null;
   let cycleStatusTimerId = null;
 
@@ -38,17 +48,22 @@
     });
   }
 
-  function startTimers() {
+  function refreshActiveCycleCards(options = {}) {
+    if (document.hidden) return;
+    activeCycleCards.forEach((card) => refreshCycleCard(card, options));
+  }
+
+  function startTimers(forceCycleRefresh = false) {
     if (document.hidden) return;
     if (countdowns.length && !timerId) {
       updateCountdowns();
       timerId = window.setInterval(updateCountdowns, 1000);
     }
     if (activeCycleCards.length && !cycleStatusTimerId) {
-      activeCycleCards.forEach((card) => refreshCycleCard(card));
+      refreshActiveCycleCards({ force: forceCycleRefresh });
       cycleStatusTimerId = window.setInterval(() => {
-        activeCycleCards.forEach((card) => refreshCycleCard(card));
-      }, 20000);
+        refreshActiveCycleCards();
+      }, CYCLE_STATUS_INTERVAL_MS);
     }
   }
 
@@ -116,10 +131,26 @@
     });
   }
 
+  function renderCycleTradeDecision(card, decision) {
+    const container = card.querySelector("[data-cycle-trade-decision]");
+    if (!container) return;
+    clearElement(container);
+    const label = decision?.label || "Trade decision";
+    const detail = decision?.reason || decision?.message || "Awaiting server-side order decision";
+    [label, detail].forEach((text) => {
+      const item = document.createElement("span");
+      item.textContent = String(text || "");
+      container.appendChild(item);
+    });
+    container.dataset.tradeDecisionStage = decision?.stage || "pending";
+  }
+
   function updateCycleCard(card, payload) {
     const status = payload?.cycle_status || {};
     const coherence = payload?.coherence_summary || {};
+    const tradeDecision = payload?.trade_decision || {};
     const readiness = coherence.automationReadiness || "caution";
+    const hasError = Boolean(status.error || payload?.ok === false);
     updateText(card, "[data-cycle-phase]", status.phaseLabel || titleCase(status.phase || "collectingData"));
     updateText(card, "[data-cycle-readiness]", `Automation readiness: ${readinessLabel(readiness)}`);
     updateText(card, "[data-cycle-direction]", directionLabel(coherence.overallDirection));
@@ -127,14 +158,27 @@
     updateText(card, "[data-cycle-coherence]", `${Math.round(numberValue(coherence.coherenceScore, 0))}%`);
     updateText(card, "[data-cycle-summary]", coherence.summary || status.statusMessage || "Market forecast updated.");
     updateText(card, "[data-cycle-next]", `Next evaluation ${status.nextScheduled1h10Cycle || "pending"}`);
+    renderCycleTradeDecision(card, tradeDecision);
     renderCycleRiskNotes(card, coherence.riskNotes || []);
     card.classList.toggle("is-stale", Boolean(status.stale));
-    card.classList.toggle("is-error", Boolean(status.error));
+    card.classList.toggle("is-error", hasError);
+    card.classList.remove("is-loading");
+    card.dataset.cycleRefreshState = hasError ? "error" : status.stale ? "stale" : "ready";
+    card.dataset.lastCycleRefresh = new Date().toISOString();
+    card.setAttribute("aria-busy", "false");
   }
 
-  async function refreshCycleCard(card) {
+  async function refreshCycleCard(card, options = {}) {
     const url = card.dataset.cycleStatusUrl;
     if (!url || document.hidden) return;
+    if (cycleRefreshInFlight.has(card)) return;
+    const now = Date.now();
+    const lastRefresh = cycleRefreshAt.get(card) || 0;
+    if (!options.force && now - lastRefresh < CYCLE_STATUS_MIN_AGE_MS) return;
+    cycleRefreshInFlight.add(card);
+    cycleRefreshAt.set(card, now);
+    card.classList.add("is-loading");
+    card.setAttribute("aria-busy", "true");
     try {
       const response = await window.fetch(vaultApiUrl(url), {
         credentials: "include",
@@ -144,8 +188,15 @@
       updateCycleCard(card, await response.json());
     } catch (error) {
       updateText(card, "[data-cycle-phase]", "Status unavailable");
+      updateText(card, "[data-cycle-summary]", "Cycle status refresh failed. Showing the last available state.");
       renderCycleRiskNotes(card, ["Cycle status update failed"]);
-      card.classList.add("is-error");
+      card.classList.add("is-error", "is-stale");
+      card.classList.remove("is-loading");
+      card.dataset.cycleRefreshState = "error";
+      card.setAttribute("aria-busy", "false");
+      console.warn("Vault cycle status refresh failed", error);
+    } finally {
+      cycleRefreshInFlight.delete(card);
     }
   }
 
@@ -278,6 +329,38 @@
     while (element.firstChild) element.removeChild(element.firstChild);
   }
 
+  function normalizeStateKey(value) {
+    return String(value || "blocked")
+      .trim()
+      .replace(/([a-z])([A-Z])/g, "$1-$2")
+      .replace(/[\s_]+/g, "-")
+      .toLowerCase();
+  }
+
+  function setRoutingBusy(form, busy) {
+    const preview = form?.querySelector("[data-routing-preview]");
+    form?.classList.toggle("is-routing-loading", Boolean(busy));
+    if (preview) {
+      preview.setAttribute("aria-busy", String(Boolean(busy)));
+      if (busy) preview.dataset.previewState = "loading";
+    }
+  }
+
+  function applyRoutingState(form, payload) {
+    if (!form) return;
+    const stateKey = normalizeStateKey(payload?.ready ? "success" : payload?.mode || payload?.state_label || "blocked");
+    const preview = form.querySelector("[data-routing-preview]");
+    form.dataset.vaultReadinessState = stateKey;
+    form.classList.toggle("is-routing-ready", stateKey === "success");
+    form.classList.toggle("is-routing-blocked", !payload?.ready && stateKey !== "loading");
+    form.classList.toggle("is-routing-error", stateKey === "unavailable" || stateKey === "error");
+    form.classList.toggle("is-routing-empty", stateKey === "empty" || stateKey === "exchange-setup-required");
+    if (preview) {
+      preview.dataset.previewState = stateKey;
+      preview.setAttribute("aria-busy", "false");
+    }
+  }
+
   function updateProviderCard(form, provider) {
     const key = provider.provider || provider.exchange;
     const card = form.querySelector(`[data-provider-card][data-provider="${key}"]`);
@@ -293,8 +376,11 @@
     card.classList.toggle("is-ready", status === "ready" || status === "ready_auto_funded");
     card.classList.toggle("is-auto-funded", status === "ready_auto_funded" || provider.funding_status === "auto_funded");
     card.classList.toggle("is-restricted", status === "geo_restricted");
+    card.classList.toggle("is-unavailable", status === "provider_unavailable");
+    card.classList.toggle("is-disconnected", status === "not_connected" || status === "needs_api_credentials" || status === "needs_wallet");
     card.classList.toggle("is-blocked", status === "blocked" || status === "not_connected" || status === "provider_unavailable" || status === "credential_error" || status === "transfer_failed");
     card.classList.toggle("is-disabled", !enabled);
+    card.dataset.providerState = status;
     const safeStatus = statusLabel({ ...provider, status });
     card.querySelector("[data-provider-status]").textContent = safeStatus;
     card.querySelector("[data-provider-score]").textContent = metricLabel(provider, status);
@@ -353,6 +439,7 @@
   function renderRoutingPreview(form, payload) {
     if (!form || !payload) return;
     lastPreview.set(form, payload);
+    applyRoutingState(form, payload);
     const providers = providersFromPayload(payload);
     providers.forEach((provider) => updateProviderCard(form, provider));
 
@@ -421,8 +508,8 @@
     return {
       ok: false,
       ready: false,
-      mode: "blocked",
-      state_label: "Blocked",
+      mode: "unavailable",
+      state_label: "Unavailable",
       ready_exchange_count: 0,
       total_exchange_count: state.providers.length,
       summary: {
@@ -463,7 +550,7 @@
           fix_hint: "Retry the preview after the server responds.",
         },
       ],
-      routing_preview: { notional_usd: 0, routes: [], summary: "Readiness unavailable." },
+      routing_preview: { notional_usd: 0, routes: [], summary: "Readiness unavailable. Retry when the server responds." },
     };
   }
 
@@ -472,7 +559,7 @@
     return {
       ok: false,
       ready: false,
-      mode: "blocked",
+      mode: "empty",
       state_label: "Exchange Setup Required",
       ready_exchange_count: 0,
       total_exchange_count: 0,
@@ -528,17 +615,17 @@
       return payload;
     }
 
-    const previous = previewControllers.get(form);
-    if (previous) previous.abort();
-    const controller = new AbortController();
-    previewControllers.set(form, controller);
-
     const state = formPreviewState(form);
     if (!state.providers.length) {
       const payload = noProviderPreview(form);
       renderRoutingPreview(form, payload);
       return payload;
     }
+    const previous = previewControllers.get(form);
+    if (previous) previous.abort();
+    const controller = new AbortController();
+    previewControllers.set(form, controller);
+
     const url = new URL(vaultApiUrl(previewUrl), window.location.origin);
     url.searchParams.set("cycle_type", "one_h10");
     url.searchParams.set("amount", String(state.amount));
@@ -546,7 +633,7 @@
     url.searchParams.set("settlement_asset", state.settlementAsset);
     url.searchParams.set("one_h10_live_ack", state.acknowledged ? "1" : "0");
     state.providers.forEach((provider) => url.searchParams.append("providers", provider));
-    form.classList.add("is-routing-loading");
+    setRoutingBusy(form, true);
     try {
       const response = await window.fetch(url, {
         credentials: "include",
@@ -565,7 +652,7 @@
     } finally {
       if (previewControllers.get(form) === controller) {
         previewControllers.delete(form);
-        form.classList.remove("is-routing-loading");
+        setRoutingBusy(form, false);
       }
     }
   }
@@ -574,6 +661,7 @@
     const sheet = form.closest(".vault-start-card")?.querySelector("[data-vault-result-sheet]");
     if (!sheet) return;
     sheet.hidden = false;
+    sheet.setAttribute("aria-live", ok ? "polite" : "assertive");
     sheet.classList.toggle("is-success", Boolean(ok));
     sheet.classList.toggle("is-error", !ok);
     sheet.querySelector("[data-vault-result-title]").textContent = title;
@@ -581,6 +669,84 @@
     window.setTimeout(() => {
       sheet.classList.add("is-visible");
     }, 20);
+  }
+
+  function cycleStartStatusUrl(payload) {
+    if (payload?.start_status_url) return payload.start_status_url;
+    if (payload?.job_id) return `/vault/start-status/${encodeURIComponent(payload.job_id)}`;
+    return "";
+  }
+
+  function cycleStatusUrl(payload) {
+    return payload?.next_status_url || payload?.cycle_status_url || (payload?.cycle_id ? `/api/vault/cycles/${encodeURIComponent(payload.cycle_id)}` : "");
+  }
+
+  function cycleStartMessage(payload) {
+    const queue = payload?.strategy_run_queue || "";
+    const workerMode = payload?.worker_mode || "web";
+    const runCount = Array.isArray(payload?.run_ids) ? payload.run_ids.length : 0;
+    if (payload?.status === "failed") return payload.error || "Vault Cycle worker startup failed.";
+    if (payload?.status === "complete") return "Worker startup completed. Watching the server-side trade decision path.";
+    if (queue === "dedicated_worker") {
+      return `${runCount || "Strategy"} run${runCount === 1 ? "" : "s"} queued for the dedicated worker (${workerMode}). No order can place until the worker starts the run.`;
+    }
+    return `${runCount || "Strategy"} run${runCount === 1 ? "" : "s"} started through the server-side Vault Cycle path.`;
+  }
+
+  async function fetchCycleJson(url) {
+    const response = await window.fetch(vaultApiUrl(url), {
+      credentials: "include",
+      headers: { Accept: "application/json" },
+    });
+    if (!response.ok) throw new Error(`Status check failed: ${response.status}`);
+    return response.json();
+  }
+
+  async function refreshStartedCycleMessage(form, payload) {
+    const url = cycleStatusUrl(payload);
+    if (!url) return;
+    const status = await fetchCycleJson(url);
+    const decision = status?.trade_decision || {};
+    const message = decision.reason || decision.message || status?.cycle_status?.statusMessage || cycleStartMessage(payload);
+    showResult(form, decision.label || "Vault Cycle status", message, status?.ok !== false);
+    refreshActiveCycleCards({ force: true });
+  }
+
+  function trackCycleStart(form, payload) {
+    const key = payload?.job_id || payload?.cycle_id || randomKey();
+    if (startStatusTimers.has(key)) window.clearInterval(startStatusTimers.get(key));
+    showResult(form, payload?.status === "queued" ? "Vault Cycle queued" : "Vault Cycle started", cycleStartMessage(payload), true);
+    refreshActiveCycleCards({ force: true });
+
+    const statusUrl = cycleStartStatusUrl(payload);
+    if (!statusUrl) {
+      refreshStartedCycleMessage(form, payload).catch((error) => console.warn("Vault cycle status check failed", error));
+      return;
+    }
+
+    let polls = 0;
+    const poll = async () => {
+      polls += 1;
+      try {
+        const status = await fetchCycleJson(statusUrl);
+        showResult(form, status.status === "failed" ? "Vault Cycle start failed" : "Vault Cycle status", cycleStartMessage(status), status.status !== "failed");
+        if (status.status === "complete" || status.status === "failed" || polls >= START_STATUS_MAX_POLLS) {
+          window.clearInterval(startStatusTimers.get(key));
+          startStatusTimers.delete(key);
+          if (status.status !== "failed") {
+            await refreshStartedCycleMessage(form, status);
+          }
+        }
+      } catch (error) {
+        if (polls >= START_STATUS_MAX_POLLS) {
+          window.clearInterval(startStatusTimers.get(key));
+          startStatusTimers.delete(key);
+        }
+        console.warn("Vault cycle start status check failed", error);
+      }
+    };
+    startStatusTimers.set(key, window.setInterval(poll, START_STATUS_INTERVAL_MS));
+    poll();
   }
 
   function setSubmitting(form, submitting) {
@@ -628,7 +794,8 @@
         setSubmitting(form, false);
         return;
       }
-      showResult(form, "Vault Cycle started", payload.duplicate ? "Existing cycle submission detected." : "1H10 cycle is starting with the verified route.", true);
+      trackCycleStart(form, payload);
+      setSubmitting(form, false);
     } catch (error) {
       showResult(form, "Start failed", error.message || "Start request failed.", false);
       setSubmitting(form, false);
@@ -649,6 +816,8 @@
   }
 
   function setupForm(form) {
+    if (form.dataset.vaultFormReady === "true") return;
+    form.dataset.vaultFormReady = "true";
     const idempotencyInput = form.querySelector("[data-vault-idempotency-key]");
     const amountInput = form.querySelector("[data-vault-amount]");
     const maxButton = form.querySelector("[data-vault-max]");
@@ -705,8 +874,8 @@
 
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) stopTimers();
-    else startTimers();
+    else startTimers(true);
   });
 
-  startTimers();
+  startTimers(true);
 })();

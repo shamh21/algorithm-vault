@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
+
+import pytest
 
 from app.backtesting.engine import BacktestConfig, BacktestEngine
 from app.strategies.base import Signal
@@ -83,7 +85,7 @@ class _MarketData:
 
 
 def _candles(count: int = 80) -> list[dict[str, Any]]:
-    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    start = datetime(2026, 1, 1, tzinfo=UTC)
     rows = []
     price = 100.0
     for index in range(count):
@@ -138,10 +140,68 @@ def test_backtest_tracks_short_term_metrics() -> None:
     assert "net_return_after_costs" in result
     assert "turnover_after_fees" in result
     assert "risk_event_count" in result
+    assert "closed_trade_count" in result
+    assert "open_trade_count" in result
+    assert "average_trade" in result
+    assert "net_pnl" in result
     assert result["cost_drag_bps"] >= 0
     assert result["max_favorable_excursion"] >= result["max_adverse_excursion"]
     assert result["equity_curve"]
     assert result["drawdown_curve"]
+
+
+def test_trade_ledger_includes_entry_fees_and_matches_realized_pnl() -> None:
+    engine = BacktestEngine({}, _Registry(), _MarketData())
+
+    result = engine.run(
+        _config(fee_bps=10.0, slippage_bps=0.0, position_size_fraction=0.5),
+        _candles(36),
+    )
+
+    assert result["trade_count"] > 0
+    assert result["closed_trade_count"] == result["trade_count"]
+    assert result["open_trade_count"] == 0
+    assert all(trade["entry_fee"] > 0 and trade["exit_fee"] > 0 for trade in result["trades"])
+    assert result["fees_paid"] == pytest.approx(sum(trade["fee"] for trade in result["trades"]))
+    assert result["realized_pnl"] == pytest.approx(sum(trade["pnl"] for trade in result["trades"]))
+    assert result["net_pnl"] == pytest.approx(result["realized_pnl"])
+    assert result["average_trade"] == pytest.approx(result["realized_pnl"] / result["trade_count"])
+
+
+def test_backtest_caps_close_settlement_at_zero_cash_without_margin() -> None:
+    engine = BacktestEngine({}, _CustomRegistry(_BuyAndHoldStrategy()), _MarketData())
+    rows = _candles(34)
+    for row in rows[26:]:
+        row["open"] = 0.01
+        row["high"] = 0.02
+        row["low"] = 0.01
+        row["close"] = 0.01
+
+    result = engine.run(
+        _config(
+            fee_bps=0.0,
+            slippage_bps=0.0,
+            stop_loss_pct=2.0,
+            take_profit_pct=2.0,
+            position_size_fraction=1.0,
+            leverage=3.0,
+            max_drawdown_pct=0.0,
+        ),
+        rows,
+    )
+
+    assert result["final_cash"] == pytest.approx(0.0)
+    assert result["final_equity"] == pytest.approx(0.0)
+    assert result["realized_pnl"] == pytest.approx(-1000.0)
+    assert any(event["rule"] == "balance_floor_applied" for event in result["risk_events"])
+    assert result["trades"][0]["balance_floor_applied"] is True
+
+
+def test_backtest_rejects_invalid_starting_balance() -> None:
+    engine = BacktestEngine({}, _Registry(), _MarketData())
+
+    with pytest.raises(ValueError, match="Starting balance"):
+        engine.run(_config(initial_balance=0.0), _candles())
 
 
 def test_signal_history_limit_bounds_strategy_and_feature_history() -> None:

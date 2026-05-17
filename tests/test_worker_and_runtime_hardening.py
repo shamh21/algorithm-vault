@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from cryptography.fernet import Fernet
 
+import app as app_module
 from app import create_app
 from app.extensions import db
 from app.models import (
@@ -349,7 +350,83 @@ def test_ops_status_redacts_and_reports_core_state(app) -> None:
     assert "workers" in payload
     assert "wallets" in payload
     assert "models" in payload
+    assert payload["live_operations"]["ready"] is False
+    assert any("live operations" in blocker for blocker in payload["live_operations"]["blockers"])
     assert "super-secret" not in body
+
+
+def test_ops_status_live_operations_call_out_recovery_mode(app, monkeypatch) -> None:
+    def fail_configured_postgres_probe(configured_url: str, *, timeout_seconds: float) -> None:
+        assert configured_url.startswith("postgresql+psycopg://")
+        assert timeout_seconds > 0
+        raise RuntimeError("planLimitReached")
+
+    monkeypatch.setattr(app_module, "_probe_configured_postgres", fail_configured_postgres_probe)
+    with app.app_context():
+        app.config.update(
+            {
+                "DEPLOYMENT_TARGET": "vercel",
+                "APP_MODE": "paper",
+                "SQLALCHEMY_DATABASE_URI": "sqlite:///recovery.db",
+                "CONFIGURED_DATABASE_URL": "postgresql+psycopg://bot:secret@db.prisma.io/postgres?sslmode=require",
+                "RECOVERY_SQLITE_ACTIVE": True,
+                "ENABLE_LIVE_TRADING": False,
+                "ENABLE_IN_PROCESS_WORKERS": False,
+                "WORKER_PROCESS_CONFIGURED": False,
+                "WALLET_CUSTODY_MODE": "local_dev",
+                "WALLET_WITHDRAWALS_ENABLED": False,
+            }
+        )
+        app.config["RUNTIME_CONFIG_VALIDATION"] = validate_runtime_config(app.config)
+
+        payload = app.test_client().get("/ops/status").get_json()
+
+    live_operations = payload["live_operations"]
+    database_recovery = payload["database_recovery"]
+    assert live_operations["ready"] is False
+    assert live_operations["database_backend"] == "sqlite"
+    assert "live operations require PostgreSQL DATABASE_URL" in live_operations["blockers"]
+    assert "recovery SQLite mode must be inactive for live operations" in live_operations["blockers"]
+    assert database_recovery["active"] is True
+    assert database_recovery["runtime_database"] == "sqlite"
+    assert database_recovery["trading_disabled"] is True
+    assert database_recovery["configured_postgres"]["host"] == "db.prisma.io"
+    assert database_recovery["configured_postgres"]["available"] is False
+    assert database_recovery["configured_postgres"]["error_category"] == "plan_limit_reached"
+
+
+def test_live_operations_status_warns_when_treasury_ready_but_unfunded(app) -> None:
+    app.config.update(
+        {
+            "DEPLOYMENT_TARGET": "vercel",
+            "APP_MODE": "live",
+        }
+    )
+
+    payload = app_module._live_operations_status(
+        app,
+        {
+            "live_trading_enabled": True,
+            "worker_process_configured": True,
+            "in_process_workers_enabled": False,
+            "database_backend": "postgres",
+            "database_recovery_mode": False,
+            "withdrawals_enabled": True,
+            "custody_mode": "mpc",
+            "blockers": [],
+        },
+        {
+            "ready": True,
+            "eth_balance": 0.0,
+            "reserve_health": {"state": "emergency"},
+            "blockers": [],
+        },
+    )
+
+    assert payload["ready"] is True
+    assert payload["withdrawals_ready"] is True
+    assert any("reserve health is emergency" in warning for warning in payload["warnings"])
+    assert any("0 ETH" in warning for warning in payload["warnings"])
 
 
 def test_thin_compatibility_entrypoints_register_cli_and_routes(app) -> None:
@@ -439,3 +516,37 @@ def test_wallet_withdrawals_auto_enable_keeps_production_safeguards_required() -
     assert any("production withdrawals require" in blocker for blocker in automatic_withdrawal_blockers(unsafe))
     assert wallet_withdrawals_enabled(safe) is True
     assert validate_runtime_config(safe).withdrawals_enabled is True
+
+
+def test_wallet_withdrawals_auto_enable_requires_mpc_signer() -> None:
+    config = {
+        "DEPLOYMENT_TARGET": "vercel",
+        "APP_MODE": "live",
+        "ENABLE_LIVE_TRADING": True,
+        "USE_REAL_ADDRESSES": True,
+        "WALLET_REAL_CUSTODY_ENABLED": True,
+        "WALLET_ALLOW_IN_APP_KEYGEN": True,
+        "WALLET_WITHDRAWALS_ENABLED": False,
+        "WALLET_AUTO_ENABLE_WITHDRAWALS": True,
+        "WALLET_CUSTODY_MODE": "mpc",
+        "WALLET_SIGNER_ISOLATION_CONFIRMED": True,
+        "WALLET_SDK_CHECKS_PASSED": True,
+        "WALLET_DAILY_WITHDRAWAL_LIMIT_BY_WALLET": 1.0,
+        "WALLET_DAILY_WITHDRAWAL_LIMIT_BY_ASSET": {"ETH": 1.0},
+        "WALLET_DAILY_WITHDRAWAL_LIMIT_BY_DESTINATION": 1.0,
+        "WALLET_DAILY_GLOBAL_WITHDRAWAL_LIMIT": 2.0,
+    }
+
+    blockers = automatic_withdrawal_blockers(config)
+
+    assert wallet_withdrawals_enabled(config) is False
+    assert "WALLET_MPC_SIGNER_URL is not configured" in blockers
+    assert "WALLET_MPC_SIGNER_TOKEN is not configured" in blockers
+
+    ready = {
+        **config,
+        "WALLET_MPC_SIGNER_URL": "https://signer.example.invalid",
+        "WALLET_MPC_SIGNER_TOKEN": "test-token",
+    }
+
+    assert wallet_withdrawals_enabled(ready) is True

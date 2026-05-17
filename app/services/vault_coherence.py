@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
-
 
 HORIZONS = ["1m", "5m", "15m", "45m", "1h", "4h", "1d", "7d"]
 PHASES = [
@@ -120,9 +119,7 @@ def calculate_coherence_summary(
     resolved_now = _aware(now)
     forecasts = [dict(item) for item in (horizon_forecasts or []) if isinstance(item, dict)]
     strategies = {
-        str(item.get("horizon")): dict(item)
-        for item in (horizon_strategy_scores or [])
-        if isinstance(item, dict) and item.get("horizon")
+        str(item.get("horizon")): dict(item) for item in (horizon_strategy_scores or []) if isinstance(item, dict) and item.get("horizon")
     }
     if not forecasts:
         return {
@@ -172,9 +169,7 @@ def calculate_coherence_summary(
         overall_direction = leading_direction
 
     aligned = [
-        item
-        for item in forecasts
-        if str(item.get("direction")) == overall_direction and str(item.get("dataQuality")) != "insufficient"
+        item for item in forecasts if str(item.get("direction")) == overall_direction and str(item.get("dataQuality")) != "insufficient"
     ]
     if overall_direction == "mixed":
         aligned = [item for item in forecasts if str(item.get("direction")) in {"bullish", "bearish"}]
@@ -206,7 +201,9 @@ def calculate_coherence_summary(
     if high_vol:
         risk_notes.append("Forecast confidence reduced due to volatility")
     if conflicting:
-        risk_notes.append("Higher-timeframe conflict detected" if _has_higher_timeframe_conflict(forecasts, conflicting) else "Mixed horizon signal")
+        risk_notes.append(
+            "Higher-timeframe conflict detected" if _has_higher_timeframe_conflict(forecasts, conflicting) else "Mixed horizon signal"
+        )
     if strategy_disagreements:
         risk_notes.append("Strategy and forecast disagreement reduced readiness")
 
@@ -277,7 +274,7 @@ def format_vault_cycle_status(
     now: datetime | None = None,
     error: str | None = None,
 ) -> dict[str, Any]:
-    """Format the 70-minute 1H10 evaluation cadence for UI reporting."""
+    """Format the 1-hour 1H10 evaluation cadence for UI reporting."""
 
     resolved_now = _aware(now)
     context = dict(context or {})
@@ -296,9 +293,11 @@ def format_vault_cycle_status(
             last_forecast,
         ]
     )
-    next_cycle = (last_completed or resolved_now) + timedelta(minutes=70)
+    next_cycle = (last_completed or resolved_now) + timedelta(minutes=60)
     stale = any(str(item.get("dataQuality")) == "stale" for item in forecasts)
-    insufficient_majority = bool(forecasts) and sum(1 for item in forecasts if str(item.get("dataQuality")) == "insufficient") >= max(1, len(forecasts) // 2)
+    insufficient_majority = bool(forecasts) and sum(1 for item in forecasts if str(item.get("dataQuality")) == "insufficient") >= max(
+        1, len(forecasts) // 2
+    )
     readiness = str(coherence.get("automationReadiness") or "")
 
     if error:
@@ -327,7 +326,7 @@ def format_vault_cycle_status(
         "lastMlForecast": _iso(last_forecast) if last_forecast else None,
         "lastCompletedVaultCycle": _iso(last_completed) if last_completed else None,
         "nextScheduled1h10Cycle": _iso(next_cycle),
-        "evaluationCadenceMinutes": 70,
+        "evaluationCadenceMinutes": 60,
         "stale": bool(stale),
         "error": str(error or ""),
         "statusMessage": _cycle_status_message(phase, coherence),
@@ -544,7 +543,9 @@ def _forecast_from_features(
         else:
             reasoning.append("Market structure leans bearish on this horizon")
     else:
-        reasoning.append("Higher-timeframe trend remains neutral" if horizon in {"4h", "1d", "7d"} else "Directional signal remains neutral")
+        reasoning.append(
+            "Higher-timeframe trend remains neutral" if horizon in {"4h", "1d", "7d"} else "Directional signal remains neutral"
+        )
 
     if components.get("range") == "compressed":
         reasoning.append("Range compression detected")
@@ -586,11 +587,7 @@ def _horizon_feature_map(features: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
     for horizon in get_available_horizons():
         prefix = f"tf_{horizon.replace(' ', '_')}_"
-        prefixed = {
-            key.removeprefix(prefix): value
-            for key, value in features.items()
-            if isinstance(key, str) and key.startswith(prefix)
-        }
+        prefixed = {key.removeprefix(prefix): value for key, value in features.items() if isinstance(key, str) and key.startswith(prefix)}
         if prefixed:
             rows.setdefault(horizon, {}).update(prefixed)
 
@@ -762,7 +759,9 @@ def _strategy_disagreements(forecasts: list[dict[str, Any]], strategies: dict[st
 
 def _has_higher_timeframe_conflict(forecasts: list[dict[str, Any]], conflicts: list[str]) -> bool:
     high = {"4h", "1d", "7d"}
-    return any(str(item) in high for item in conflicts) or any(str(item.get("horizon")) in high and str(item.get("direction")) in {"bullish", "bearish"} for item in forecasts)
+    return any(str(item) in high for item in conflicts) or any(
+        str(item.get("horizon")) in high and str(item.get("direction")) in {"bullish", "bearish"} for item in forecasts
+    )
 
 
 def _component_breadth(components: dict[str, Any]) -> float:
@@ -842,10 +841,10 @@ def _parse_datetime(value: Any) -> datetime | None:
 
 
 def _aware(value: datetime | None = None) -> datetime:
-    resolved = value or datetime.now(timezone.utc)
+    resolved = value or datetime.now(UTC)
     if resolved.tzinfo is None:
-        return resolved.replace(tzinfo=timezone.utc)
-    return resolved.astimezone(timezone.utc)
+        return resolved.replace(tzinfo=UTC)
+    return resolved.astimezone(UTC)
 
 
 def _iso(value: datetime) -> str:

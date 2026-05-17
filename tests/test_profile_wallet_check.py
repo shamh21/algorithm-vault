@@ -4,7 +4,6 @@ import json
 from datetime import datetime, timedelta
 
 import pyotp
-import pytest
 
 from app.auth import encrypt_totp_secret, password_hash
 from app.extensions import db
@@ -42,13 +41,9 @@ def _create_verified_connection(user: User, *, provider: str = "hyperliquid", ac
 
 def _patch_dashboard_market_data(app) -> None:
     market_data = app.extensions["services"]["market_data"]
-    candles = [
-        {"timestamp": i, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 1000.0}
-        for i in range(80)
-    ]
+    candles = [{"timestamp": i, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 1000.0} for i in range(80)]
     market_data.get_dashboard_market_summary = lambda symbols, timeframe, mode: [
-        {"symbol": symbol, "mid": 100.0, "recent_average": 100.0, "change_pct": 0.0}
-        for symbol in symbols
+        {"symbol": symbol, "mid": 100.0, "recent_average": 100.0, "change_pct": 0.0} for symbol in symbols
     ]
     market_data.get_candles = lambda symbol, timeframe, mode, limit: candles
 
@@ -77,8 +72,12 @@ def test_profile_wallet_check_reports_sufyanh_local_funds_and_warnings(app) -> N
     db.session.flush()
     db.session.add_all(
         [
-            WalletTransaction(user_id=user.id, vault_cycle_id=cycle.id, asset="USDC", amount=5.0, transaction_type="settlement", status="complete"),
-            WalletTransaction(user_id=user.id, vault_cycle_id=cycle.id, asset="USDC", amount=5.1, transaction_type="settlement", status="complete"),
+            WalletTransaction(
+                user_id=user.id, vault_cycle_id=cycle.id, asset="USDC", amount=5.0, transaction_type="settlement", status="complete"
+            ),
+            WalletTransaction(
+                user_id=user.id, vault_cycle_id=cycle.id, asset="USDC", amount=5.1, transaction_type="settlement", status="complete"
+            ),
         ]
     )
     _create_verified_connection(user, provider="hyperliquid", active=True)
@@ -97,6 +96,75 @@ def test_profile_wallet_check_reports_sufyanh_local_funds_and_warnings(app) -> N
     assert payload["activity"]["order_count"] == 0
     assert [item["provider"] for item in payload["trading_connections"]] == ["hyperliquid", "kucoin"]
     assert any("duplicate_complete_settlement_transactions" in item for item in payload["reconciliation_warnings"])
+
+    client = app.test_client()
+    _login(client, user)
+    home = client.get("/")
+
+    assert home.status_code == 200
+    assert b"duplicate_complete_settlement_transactions" not in home.data
+
+
+def test_recovery_wallet_summary_preserves_restored_local_balances(app) -> None:
+    app.config["RECOVERY_SQLITE_ACTIVE"] = True
+    user = _create_user()
+    db.session.add(WalletBalance(user_id=user.id, asset="USDT", available_balance=110.0, estimated_usd_value=110.0))
+    account = WalletAccount(user_id=user.id, provider="mpc", asset="USDT", network="Ethereum", status="active")
+    db.session.add(account)
+    db.session.flush()
+    db.session.add(
+        WalletAddress(
+            wallet_account_id=account.id,
+            user_id=user.id,
+            asset="USDT",
+            network="Ethereum",
+            address="0x0000000000000000000000000000000000000001",
+            status="active",
+            onchain_balance=0.0,
+            onchain_status="unknown",
+        )
+    )
+    db.session.commit()
+
+    result = app.extensions["services"]["wallet_summary"].profile_wallet_check(username="sufyanh")
+
+    balances = {item["asset"]: item for item in result["wallet"]["balances"]}
+    assert balances["USDT"]["available_balance"] == 110.0
+    assert balances["USDT"]["estimated_usd_value"] == 110.0
+    assert balances["USDT"]["onchain_status"] == "unavailable"
+    assert balances["USDT"]["sync_status"] == "not_configured"
+
+
+def test_recovery_wallet_summary_uses_verified_recovery_onchain_snapshot(app) -> None:
+    app.config["RECOVERY_SQLITE_ACTIVE"] = True
+    user = _create_user()
+    db.session.add(WalletBalance(user_id=user.id, asset="USDT", available_balance=110.0, estimated_usd_value=110.0))
+    account = WalletAccount(user_id=user.id, provider="mpc", asset="USDT", network="Ethereum", status="active")
+    db.session.add(account)
+    db.session.flush()
+    db.session.add(
+        WalletAddress(
+            wallet_account_id=account.id,
+            user_id=user.id,
+            asset="USDT",
+            network="Ethereum",
+            address="0x0000000000000000000000000000000000000001",
+            status="active",
+            onchain_balance=42.0,
+            onchain_status="checked",
+            onchain_reason="verified by recovery refresh",
+            onchain_checked_at=datetime.utcnow(),
+        )
+    )
+    db.session.commit()
+
+    result = app.extensions["services"]["wallet_summary"].profile_wallet_check(username="sufyanh")
+
+    balances = {item["asset"]: item for item in result["wallet"]["balances"]}
+    assert balances["USDT"]["available_balance"] == 42.0
+    assert balances["USDT"]["estimated_usd_value"] == 42.0
+    assert balances["USDT"]["onchain_status"] == "checked"
+    assert balances["USDT"]["sync_status"] == "verified"
 
 
 def test_profile_wallet_check_missing_user_exits_nonzero(app) -> None:
@@ -149,7 +217,7 @@ def test_wallet_exchange_snapshot_refresh_param_no_longer_renders_margin(app) ->
     assert b"Refresh Snapshot" not in response.data
 
 
-def test_wallet_summary_and_page_show_onchain_surplus_mismatch(app) -> None:
+def test_wallet_summary_and_page_use_verified_onchain_surplus(app) -> None:
     user = _create_user("onchainsurplus")
     _create_verified_connection(user)
     checked_at = datetime.utcnow()
@@ -199,20 +267,23 @@ def test_wallet_summary_and_page_show_onchain_surplus_mismatch(app) -> None:
 
     assert result.exit_code == 0
     assert usdt["onchain_balance"] == 110.0
-    assert usdt["onchain_delta"] == pytest.approx(9.0027310312)
-    assert usdt["onchain_mismatch_status"] == "surplus_onchain"
+    assert usdt["available_balance"] == 110.0
+    assert usdt["total_balance"] == 110.0
+    assert usdt["estimated_usd_value"] == 110.0
+    assert usdt["onchain_delta"] == 0.0
+    assert usdt["onchain_mismatch_status"] == "verified"
 
     client = app.test_client()
     _login(client, user)
     response = client.get("/wallet")
 
     assert response.status_code == 200
-    assert b"On-chain" in response.data
-    assert b"Surplus Onchain" in response.data
-    assert b"+9.002731" in response.data
+    assert b"Verified On-chain" in response.data
+    assert b"On-chain Verified" in response.data
+    assert b"110.000000" in response.data
 
 
-def test_wallet_summary_and_page_show_onchain_deficit_mismatch(app) -> None:
+def test_wallet_summary_and_page_do_not_display_stale_local_deficit(app) -> None:
     user = _create_user("onchaindeficit")
     _create_verified_connection(user)
     checked_at = datetime.utcnow()
@@ -261,13 +332,16 @@ def test_wallet_summary_and_page_show_onchain_deficit_mismatch(app) -> None:
 
     assert result.exit_code == 0
     assert usdc["onchain_balance"] == 0.0
-    assert usdc["onchain_delta"] == pytest.approx(-27.80265766)
-    assert usdc["onchain_mismatch_status"] == "deficit_onchain"
+    assert usdc["available_balance"] == 0.0
+    assert usdc["total_balance"] == 0.0
+    assert usdc["estimated_usd_value"] == 0.0
+    assert usdc["onchain_delta"] == 0.0
+    assert usdc["onchain_mismatch_status"] == "verified"
 
     client = app.test_client()
     _login(client, user)
     response = client.get("/wallet")
 
     assert response.status_code == 200
-    assert b"Deficit Onchain" in response.data
-    assert b"-27.802658" in response.data
+    assert b"On-chain Verified" in response.data
+    assert b"27.802658" not in response.data

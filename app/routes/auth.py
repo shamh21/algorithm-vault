@@ -21,7 +21,8 @@ from ..auth import (
     verify_totp,
 )
 from ..extensions import db
-from ..models import InviteCodeUsage, ReferralInviteCode, TradingConnection, User
+from ..models import InviteCodeUsage, ReferralInviteCode, TradingConnection, TreasuryReserveState, User
+from ..services.withdrawal_config import wallet_withdrawals_enabled
 
 auth_bp = Blueprint("auth", __name__)
 
@@ -101,10 +102,13 @@ def register_post():
 
 @auth_bp.get("/login")
 def login():
+    next_url = request.args.get("next", "")
     return render_template(
         "auth/login.html",
         username=_clean_username(request.args.get("username")),
-        next=request.args.get("next", ""),
+        next=next_url,
+        next_destination=_next_destination_label(next_url),
+        ops_snapshot=_login_ops_snapshot(),
     )
 
 
@@ -126,11 +130,27 @@ def login_post():
 
     if not code:
         flash("Enter your 6-digit authenticator code.", "warning")
-        return render_template("auth/login.html", username=username, require_2fa=True)
+        next_url = request.args.get("next", "")
+        return render_template(
+            "auth/login.html",
+            username=username,
+            require_2fa=True,
+            next=next_url,
+            next_destination=_next_destination_label(next_url),
+            ops_snapshot=_login_ops_snapshot(),
+        )
 
     if not verify_totp(user, code):
         flash("Invalid authenticator code. Try again.", "danger")
-        return render_template("auth/login.html", username=username, require_2fa=True)
+        next_url = request.args.get("next", "")
+        return render_template(
+            "auth/login.html",
+            username=username,
+            require_2fa=True,
+            next=next_url,
+            next_destination=_next_destination_label(next_url),
+            ops_snapshot=_login_ops_snapshot(),
+        )
 
     login_user(user, two_factor_verified=True)
     flash("Signed in.", "success")
@@ -231,3 +251,72 @@ def _safe_next_url(next_url: str | None) -> str:
         return url_for("consumer.home")
 
     return next_url
+
+
+def _next_destination_label(next_url: str | None) -> str:
+    parsed = urlparse(str(next_url or ""))
+    path = parsed.path.rstrip("/") or "/"
+    if path.startswith("/wallet"):
+        return "Wallet"
+    if path.startswith("/vault"):
+        return "Vault"
+    if path.startswith("/convert"):
+        return "Convert"
+    if path.startswith("/admin/backtests"):
+        return "Backtests"
+    if path.startswith("/admin/dashboard"):
+        return "Trading Ops"
+    if path.startswith("/admin"):
+        return "Admin"
+    return "Dashboard" if path and path != "/" else ""
+
+
+def _login_ops_snapshot() -> dict[str, object]:
+    validation = current_app.config.get("RUNTIME_CONFIG_VALIDATION")
+    backend = str(getattr(validation, "database_backend", "") or current_app.config.get("SQLALCHEMY_DATABASE_URI", "")).lower()
+    if "postgres" in backend:
+        database_label = "Postgres"
+    elif "sqlite" in backend:
+        database_label = "SQLite"
+    else:
+        database_label = "Other"
+
+    live_mode = str(current_app.config.get("APP_MODE", "paper") or "paper").lower() == "live" and bool(
+        current_app.config.get("ENABLE_LIVE_TRADING", False)
+    )
+    withdrawals_enabled = wallet_withdrawals_enabled(current_app.config)
+    treasury_enabled = bool(current_app.config.get("PLATFORM_GAS_TREASURY_ENABLED", False))
+    reserve_state = ""
+    reserve_balance: float | None = None
+    try:
+        state = TreasuryReserveState.query.filter_by(network="Ethereum").one_or_none()
+        if state is not None:
+            reserve_state = str(state.health_status or "").strip().lower()
+            reserve_balance = float(state.total_eth_balance or 0.0)
+    except Exception:  # noqa: BLE001
+        reserve_state = "unavailable"
+
+    tone = "ready"
+    message = "Live operations are online with approval-gated withdrawals."
+    if not live_mode:
+        tone = "attention"
+        message = "Live trading is not active for this runtime."
+    elif not withdrawals_enabled:
+        tone = "attention"
+        message = "Withdrawals are disabled by server-side readiness gates."
+    elif not treasury_enabled:
+        tone = "attention"
+        message = "Treasury gas funding is not enabled."
+    elif reserve_state in {"warning", "low", "critical", "emergency"} or reserve_balance == 0:
+        tone = "attention"
+        message = "Withdrawals are enabled; token gas top-ups may queue until treasury reserve is funded."
+
+    return {
+        "tone": tone,
+        "status_label": "Attention" if tone == "attention" else "Ready",
+        "database": database_label,
+        "mode": "Live" if live_mode else "Paper",
+        "withdrawals": "Enabled" if withdrawals_enabled else "Blocked",
+        "treasury": (reserve_state or "Ready").replace("_", " ").title() if treasury_enabled else "Disabled",
+        "message": message,
+    }

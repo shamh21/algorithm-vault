@@ -117,6 +117,43 @@ def test_amount_zero_creates_amount_required_blocker(app) -> None:
     assert payload["routing_preview"]["routes"] == []
 
 
+def test_readiness_payload_classifies_objective_and_recovery_blockers(app) -> None:
+    _confirm_live(app)
+    app.config["RECOVERY_SQLITE_ACTIVE"] = True
+    user = _user("recoveryblocked")
+    db.session.add(WalletBalance(user_id=user.id, asset="USDC", available_balance=30.0, estimated_usd_value=30.0))
+    db.session.commit()
+
+    payload = get_vault_cycle_readiness(user.id, amount=10, live_acknowledged=True, enabled_exchanges=["kucoin"])
+
+    hard_codes = {str(item.get("code")) for item in payload["hard_blockers"]}
+    clearable_codes = {str(item.get("code")) for item in payload["clearable_blockers"]}
+    assert payload["ready"] is False
+    assert payload["can_start"] is False
+    assert payload["objective"]["horizon_seconds"] == app.config["ONE_H10_HORIZON_SECONDS"]
+    assert payload["objective"]["target_multiplier"] == pytest.approx(10.0)
+    assert "recovery_database_mode" in hard_codes
+    assert "recovery_database_mode" not in clearable_codes
+
+
+def test_readiness_payload_hard_blocks_missing_live_execution_runtime(app) -> None:
+    _confirm_live(app)
+    app.config["WORKER_MODE"] = "web"
+    app.config["ENABLE_IN_PROCESS_WORKERS"] = False
+    app.config["WORKER_PROCESS_CONFIGURED"] = False
+    user = _user("runtimeblocked")
+    db.session.add(WalletBalance(user_id=user.id, asset="USDC", available_balance=30.0, estimated_usd_value=30.0))
+    db.session.commit()
+
+    payload = get_vault_cycle_readiness(user.id, amount=10, live_acknowledged=True, enabled_exchanges=["kucoin"])
+
+    hard_codes = {str(item.get("code")) for item in payload["hard_blockers"]}
+    clearable_codes = {str(item.get("code")) for item in payload["clearable_blockers"]}
+    assert payload["can_start"] is False
+    assert "live_execution_runtime_missing" in hard_codes
+    assert "live_execution_runtime_missing" not in clearable_codes
+
+
 def test_preview_route_max_uses_available_usdc_and_prices_at_one(app) -> None:
     _confirm_live(app)
     user = _user("maxpreview")
@@ -199,9 +236,11 @@ def test_kucoin_region_restriction_is_structured_and_redacted(app, monkeypatch) 
     monkeypatch.setattr(
         service,
         "account_snapshot",
-        lambda user_id, mode, connection_id=None: ClientSnapshot(mode, [], [], [], [], [raw_alert])
-        if connection_id == connection.id
-        else ClientSnapshot(mode, [], [], [], [], []),
+        lambda user_id, mode, connection_id=None: (
+            ClientSnapshot(mode, [], [], [], [], [raw_alert])
+            if connection_id == connection.id
+            else ClientSnapshot(mode, [], [], [], [], [])
+        ),
     )
 
     payload = get_vault_cycle_readiness(
@@ -360,7 +399,14 @@ def test_panic_lock_blocks_json_start(app, monkeypatch) -> None:
 
     response = client.post(
         "/vault/start-cycle",
-        json={"deposit_amount": 5, "deposit_asset": "USDC", "settlement_asset": "USDC", "lock_duration": "1", "providers": ["kucoin"], "one_h10_live_ack": "on"},
+        json={
+            "deposit_amount": 5,
+            "deposit_asset": "USDC",
+            "settlement_asset": "USDC",
+            "lock_duration": "1",
+            "providers": ["kucoin"],
+            "one_h10_live_ack": "on",
+        },
         headers={"Accept": "application/json"},
     )
 
@@ -381,7 +427,14 @@ def test_canary_preview_only_blocks_json_start(app, monkeypatch) -> None:
 
     response = client.post(
         "/vault/start-cycle",
-        json={"deposit_amount": 5, "deposit_asset": "USDC", "settlement_asset": "USDC", "lock_duration": "1", "providers": ["kucoin"], "one_h10_live_ack": "on"},
+        json={
+            "deposit_amount": 5,
+            "deposit_asset": "USDC",
+            "settlement_asset": "USDC",
+            "lock_duration": "1",
+            "providers": ["kucoin"],
+            "one_h10_live_ack": "on",
+        },
         headers={"Accept": "application/json"},
     )
 
@@ -397,13 +450,22 @@ def test_required_one_h10_ml_readiness_blocks_json_start(app, monkeypatch) -> No
     user = _user("mlblocked")
     _ready_kucoin(app, monkeypatch, user)
     engine = app.extensions["services"]["ml_decision_engine"]
-    monkeypatch.setattr(engine, "family_readiness", lambda family, horizon, provider="global": {"ready": False, "blockers": ["missing_promoted_model"]})
+    monkeypatch.setattr(
+        engine, "family_readiness", lambda family, horizon, provider="global": {"ready": False, "blockers": ["missing_promoted_model"]}
+    )
     client = app.test_client()
     _login(client, user)
 
     response = client.post(
         "/vault/start-cycle",
-        json={"deposit_amount": 5, "deposit_asset": "USDC", "settlement_asset": "USDC", "lock_duration": "1", "providers": ["kucoin"], "one_h10_live_ack": "on"},
+        json={
+            "deposit_amount": 5,
+            "deposit_asset": "USDC",
+            "settlement_asset": "USDC",
+            "lock_duration": "1",
+            "providers": ["kucoin"],
+            "one_h10_live_ack": "on",
+        },
         headers={"Accept": "application/json"},
     )
 
@@ -557,7 +619,9 @@ def test_kucoin_400302_maps_to_geo_restricted_without_enabling(app, monkeypatch)
     connection = _kucoin_connection(app, user)
     connection.verification_status = "geo_restricted"
     connection.is_active = False
-    connection.last_verification_error = '{"code":"400302","msg":"Sorry, the service is unavailable in your current area. IP: 98.84.12.34","detectedArea":"US"}'
+    connection.last_verification_error = (
+        '{"code":"400302","msg":"Sorry, the service is unavailable in your current area. IP: 98.84.12.34","detectedArea":"US"}'
+    )
     db.session.add(WalletBalance(user_id=user.id, asset="USDC", available_balance=30.0, estimated_usd_value=30.0))
     db.session.commit()
 
@@ -619,3 +683,8 @@ def test_routing_preview_providers_include_new_readiness_fields(app, monkeypatch
     assert provider["funding_status"] == "auto_funded"
     assert provider["funding_label"] == "Auto-funded during vault cycle"
     assert provider["funding_detail"] == "Collateral is transferred at cycle start and withdrawn after cycle completion."
+    assert payload["can_start"] is True
+    assert payload["objective"]["horizon_seconds"] == app.config["ONE_H10_HORIZON_SECONDS"]
+    assert "hard_blockers" in payload
+    assert "advisory_blockers" in payload
+    assert "clearable_blockers" in payload

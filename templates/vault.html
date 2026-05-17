@@ -116,7 +116,7 @@
             {% set blocker = (preview.state.blockers|default([])|first) %}
             {% set blocker_text = blocker.title|default(blocker.description|default(blocker.code|default(blocker|string))) if blocker else preview.state.funding_detail|default(preview.state.funding_label|default('')) %}
             <label class="vault-exchange-card is-enabled{% if is_ready %} is-ready{% endif %}{% if is_auto_funded %} is-auto-funded{% endif %}{% if is_restricted %} is-restricted{% endif %}{% if is_blocked %} is-blocked{% endif %}" data-provider-card data-provider="{{ provider.provider }}">
-              <input type="checkbox" name="providers" value="{{ provider.provider }}" checked data-provider-toggle>
+              <input type="checkbox" name="providers" value="{{ provider.provider }}" checked data-provider-toggle aria-label="Enable {{ provider.label }} for 1H10 routing" aria-describedby="provider-blocker-{{ provider.provider }}">
               <span class="vault-provider-mark" aria-hidden="true">{{ provider.short_label }}</span>
               <span class="vault-provider-copy">
                 <strong>{{ provider.label }}</strong>
@@ -127,13 +127,13 @@
                 <span data-provider-score>{{ metric_label }}</span>
                 <strong data-provider-allocation>{{ allocation_label }}</strong>
               </span>
-              <span class="vault-provider-blocker" data-provider-blocker{% if not blocker_text or provider_status == 'ready' %} hidden{% endif %}>{{ blocker_text }}</span>
+              <span class="vault-provider-blocker" id="provider-blocker-{{ provider.provider }}" data-provider-blocker{% if not blocker_text or provider_status == 'ready' %} hidden{% endif %}>{{ blocker_text }}</span>
             </label>
           {% endfor %}
         </div>
       </section>
 
-      <section class="vault-form-section vault-preview-module" data-routing-preview>
+      <section class="vault-form-section vault-preview-module" data-routing-preview role="status" aria-live="polite" aria-atomic="false" aria-busy="false">
         <div class="vault-section-label">
           <span>05</span>
           <strong>Routing Preview</strong>
@@ -177,8 +177,8 @@
           <input type="checkbox" name="one_h10_live_ack" value="on">
           <span>Confirm 1H10 live execution acknowledgement</span>
         </label>
-        <div class="vault-start-disabled-reason" data-start-disabled-reason>Enter an amount to continue.</div>
-        <button type="submit" class="primary vault-start-button" data-loading-label="Starting 1H10..." disabled>
+        <div class="vault-start-disabled-reason" id="vault-start-disabled-reason" data-start-disabled-reason role="status" aria-live="polite">Enter an amount to continue.</div>
+        <button type="submit" class="primary vault-start-button" data-loading-label="Starting 1H10..." aria-describedby="vault-start-disabled-reason" disabled>
           <span>Start 1H10 Cycle</span>
         </button>
       </div>
@@ -203,15 +203,18 @@
           {% set cycle_pnl = cycle.selection_metadata.get("total_pnl_usd", 0.0) %}
           {% set coherence = cycle.cycle_summary.get("coherence_summary", {}) %}
           {% set cycle_status = cycle.cycle_summary.get("cycle_status", {}) %}
+          {% set trade_decision = cycle.cycle_summary.get("trade_decision", {}) %}
           {% set readiness = coherence.get("automationReadiness", "caution") %}
           <article
             class="active-cycle-item vault-cycle-card"
             data-vault-cycle-card
             data-cycle-status-url="{{ url_for('consumer.vault_cycle_status', cycle_id=cycle.id) }}"
+            aria-busy="false"
+            aria-labelledby="vault-cycle-status-{{ cycle.id }}"
           >
             <div class="vault-cycle-card-head">
               <strong>{{ cycle.execution_substatus.replace("_", " ")|title }}</strong>
-              <span class="countdown-chip" data-countdown data-unlocks-at="{{ cycle.unlocks_at.isoformat() }}Z">Calculating...</span>
+              <span class="countdown-chip" data-countdown data-unlocks-at="{{ cycle.unlocks_at.isoformat() }}Z" aria-label="Time until cycle settlement">Calculating...</span>
             </div>
             <section class="vault-cycle-signal-mini" aria-labelledby="vault-cycle-status-{{ cycle.id }}">
               <div class="vault-cycle-signal-row">
@@ -240,6 +243,10 @@
               <p data-cycle-summary>
                 {{ coherence.get("summary") or cycle_status.get("statusMessage") or "Market forecast updated." }}
               </p>
+              <div class="vault-cycle-risk-mini" data-cycle-trade-decision>
+                <span>{{ trade_decision.get("label", "Trade decision") }}</span>
+                <span>{{ trade_decision.get("reason") or trade_decision.get("message") or "Awaiting server-side order decision" }}</span>
+              </div>
               {% set risk_notes = coherence.get("riskNotes", []) %}
               <div class="vault-cycle-risk-mini" data-cycle-risk-notes>
                 {% if risk_notes %}
@@ -286,7 +293,6 @@
       <span class="card-kicker">Vault Activity</span>
       <h2>Recent Cycles</h2>
     </div>
-    <a href="{{ url_for('consumer.activity') }}" class="text-link">Full History</a>
   </div>
 
   <div class="vault-cycle-card-list">
@@ -339,5 +345,5 @@
 {% endblock %}
 
 {% block page_scripts %}
-<script defer src="{{ url_for('static', filename='js/vault.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}-vault-readiness-3"></script>
+    <script defer src="{{ url_for('static', filename='js/vault.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}-vault-shell-polish-9"></script>
 {% endblock %}

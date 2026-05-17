@@ -79,11 +79,7 @@ class DashboardPayloadService:
             "dashboard-account",
         )
         active_connection = trading_connections.active_tradable_connection(user.id) if user else None
-        risk_status = risk_engine.status(
-            mode,
-            user_id=user.id if user else None,
-            trading_connection_id=active_connection.id if active_connection else None,
-        )
+        risk_status = self._safe_risk_status(risk_engine, mode, user, active_connection)
         positions = self._limit_rows(account_payload.get("positions"), 30)
         recent_trades = self._limit_rows(account_payload.get("recent_trades"), 30)
         open_orders = self._limit_rows(account_payload.get("open_orders"), 30)
@@ -169,11 +165,7 @@ class DashboardPayloadService:
         )
 
         active_connection = trading_connections.active_tradable_connection(user.id) if user else None
-        risk_status = risk_engine.status(
-            mode,
-            user_id=user.id if user else None,
-            trading_connection_id=active_connection.id if active_connection else None,
-        )
+        risk_status = self._safe_risk_status(risk_engine, mode, user, active_connection)
         pnl = _pnl(mode, order_manager, account_payload["positions"], account_payload["recent_trades"])
 
         payload = {
@@ -581,9 +573,7 @@ class DashboardPayloadService:
         last_error = getattr(connection, "last_verification_error", None) if connection is not None else None
         health_alerts = [str(item) for item in (cached_health.get("alerts") or [])]
         alerts = self._limit_rows([*snapshot_alerts, *health_alerts], 8)
-        failure_reason = self._clean_text(
-            cached_health.get("failure_reason") or last_error or (alerts[0] if alerts else "")
-        )
+        failure_reason = self._clean_text(cached_health.get("failure_reason") or last_error or (alerts[0] if alerts else ""))
         can_trade = bool(cached_health.get("can_trade")) or (account_status == "live" and not alerts)
 
         if connection is None and not provider:
@@ -851,6 +841,30 @@ class DashboardPayloadService:
             return list(rows)[: max(0, int(limit or 0))]
         except TypeError:
             return []
+
+    def _safe_risk_status(self, risk_engine: Any, mode: str, user: Any, active_connection: TradingConnection | None) -> dict[str, Any]:
+        try:
+            return dict(
+                risk_engine.status(
+                    mode,
+                    user_id=user.id if user else None,
+                    trading_connection_id=active_connection.id if active_connection else None,
+                )
+                or {}
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.app.logger.warning("Dashboard risk status unavailable; blocking live actions: %s", self._clean_text(exc))
+            return {
+                "status": "unavailable",
+                "panic_lock": False,
+                "live_trading_blocked": True,
+                "daily_realized_pnl": 0.0,
+                "daily_loss_limit": self.config.get("MAX_DAILY_LOSS", self.config.get("DAILY_LOSS_LIMIT", 0)),
+                "max_leverage": self.config.get("MAX_LEVERAGE", 1.0),
+                "adaptive_slippage": {},
+                "blockers": ["risk_status_unavailable"],
+                "error": self._clean_text(exc),
+            }
 
     @staticmethod
     def _safe_market_summary(market_data: Any, market_mode: str, config: dict[str, Any]) -> list[dict[str, Any]]:

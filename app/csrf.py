@@ -54,4 +54,6 @@ def _csrf_exempt_auth_request() -> bool:
     """
 
     path = request.path.rstrip("/") or "/"
+    if path.startswith("/_internal/mpc-signer/"):
+        return True
     return request.method == "POST" and path in {"/login", "/admin/api/sign-in"}

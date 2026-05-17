@@ -66,9 +66,9 @@
       ]
     },
     {
-      "name": "Vault",
-      "short_name": "Vault",
-      "url": "/vault/",
+      "name": "Convert assets",
+      "short_name": "Convert",
+      "url": "/convert/",
       "icons": [
         {
           "src": "/icons/icon-192.png",
@@ -78,9 +78,9 @@
       ]
     },
     {
-      "name": "Emergency controls",
-      "short_name": "Panic",
-      "url": "/admin/panic/",
+      "name": "Vault",
+      "short_name": "Vault",
+      "url": "/vault/",
       "icons": [
         {
           "src": "/icons/icon-192.png",

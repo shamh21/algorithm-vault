@@ -5,10 +5,10 @@ from __future__ import annotations
 import math
 import threading
 import uuid
-from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 
-from flask import Blueprint, current_app, flash, jsonify, redirect, render_template, request, url_for
+from flask import Blueprint, abort, current_app, flash, jsonify, redirect, render_template, request, url_for
 from sqlalchemy import or_
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import joinedload
@@ -19,6 +19,7 @@ from ...ml.online_ranker import ONE_H10_HORIZON, extract_features, horizon_from_
 from ...models import (
     AuditLog,
     DepositAddress,
+    Fill,
     LeveragedMarket,
     Order,
     Setting,
@@ -40,9 +41,21 @@ from ...services.connection_health import (
 )
 from ...services.db_retry import commit_with_retry, is_database_locked
 from ...services.market_scanner import ScoredCandidate
-from ...services.one_h10_quality import one_h10_forecast_live_blockers
+from ...services.one_h10_quality import ONE_H10_HORIZON_SECONDS, one_h10_forecast_live_blockers
 from ...services.provider_assets import normalize_provider, provider_collateral_asset, provider_feature_context
 from ...services.response_envelope import action_envelope, exception_envelope, readiness_envelope
+from ...services.vault_allocation_assets import (
+    BASE_VAULT_ALLOCATION_ASSETS,
+    DEFAULT_ASSET_NETWORKS,
+    allocation_asset_views,
+    default_vault_allocation_asset,
+    functional_wallet_network,
+    supported_vault_allocation_assets,
+    vault_asset_networks,
+)
+from ...services.vault_allocation_assets import (
+    asset_usd_price as shared_asset_usd_price,
+)
 from ...services.vault_coherence import cycle_coherence_payload_from_forecasts, extract_cycle_coherence_payload
 from ...services.vault_readiness import get_vault_cycle_readiness
 from ...services.wallet_addresses import generate_deposit_address, use_real_addresses, validate_withdraw_address
@@ -52,7 +65,7 @@ from ...utils import format_duration_seconds
 
 consumer_bp = Blueprint("consumer", __name__)
 
-SUPPORTED_WALLET_ASSETS = ("USDC", "USDT", "BTC", "ETH", "SOL", "XRP")
+SUPPORTED_WALLET_ASSETS = BASE_VAULT_ALLOCATION_ASSETS
 SETTLEMENT_ASSETS = ("ETH", "BTC", "USDT", "USDC")
 VAULT_UI_PROVIDERS = ("hyperliquid", "kucoin")
 VAULT_PROVIDER_LABELS = {
@@ -63,14 +76,7 @@ VAULT_PROVIDER_LABELS = {
     "dydx": "dYdX",
     "uniswap": "Uniswap",
 }
-ASSET_NETWORKS = {
-    "BTC": ("Bitcoin",),
-    "ETH": ("Ethereum",),
-    "SOL": ("Solana",),
-    "XRP": ("XRP Ledger",),
-    "USDC": ("Ethereum",),
-    "USDT": ("Ethereum",),
-}
+ASSET_NETWORKS = DEFAULT_ASSET_NETWORKS
 _CYCLE_START_JOBS: dict[str, dict[str, object]] = {}
 _CYCLE_START_IDEMPOTENCY: dict[tuple[int, str], str] = {}
 _CYCLE_START_SYNC_IDEMPOTENCY: dict[tuple[int, str], int] = {}
@@ -160,18 +166,26 @@ def _vault_live_api_deferred_for_request() -> bool:
 @consumer_bp.get("/")
 def home():
     user = current_user()
-    _sync_completed_cycles(user)
-    balances = _wallet_balances(user)
-    wallet_summary = get_service("wallet_summary").summary_for_user(user, balances=balances)
-    enabled_provider_states = _enabled_provider_states(user)
-    dashboard_payload = _home_command_center_payload(user, wallet_summary, balances, enabled_provider_states)
+    try:
+        _sync_completed_cycles(user)
+    except Exception as exc:  # noqa: BLE001
+        current_app.logger.warning("Home cycle sync skipped: %s", exc)
+
+    wallet_summary = None
+    wallet_error = ""
+    try:
+        balances = _wallet_balances(user)
+        wallet_summary = get_service("wallet_summary").summary_for_user(user, balances=balances)
+    except Exception as exc:  # noqa: BLE001
+        current_app.logger.exception("Home wallet balance unavailable: %s", exc)
+        wallet_error = "Total wallet balance is temporarily unavailable."
+
+    wallet_overview = _home_wallet_balance_payload(wallet_summary, wallet_error)
+    pnl_history = _home_account_pnl_payload(user)
     return render_template(
         "home.html",
-        portfolio_total=wallet_summary.portfolio_total_usd,
-        allocation_chart=_wallet_allocation_payload(wallet_summary),
-        portfolio_trend=_portfolio_trend_payload(user, wallet_summary),
-        enabled_provider_states=enabled_provider_states,
-        dashboard_payload=dashboard_payload,
+        wallet_overview=wallet_overview,
+        pnl_history=pnl_history,
     )
 
 
@@ -193,6 +207,55 @@ def wallet():
         transactions=activity_page.items,
         activity_page=activity_page,
         networks=ASSET_NETWORKS,
+    )
+
+
+@consumer_bp.route("/convert/", methods=["GET", "POST"], strict_slashes=False)
+def convert():
+    user = current_user()
+    balances = _wallet_balances(user)
+    assets = _wallet_convert_asset_rows(balances)
+    asset_keys = [row["asset"] for row in assets]
+    default_from = next(
+        (row["asset"] for row in assets if float(row["available_balance"] or 0.0) > 0), asset_keys[0] if asset_keys else "USDC"
+    )
+    default_to = next((asset for asset in asset_keys if asset != default_from), "USDT" if default_from != "USDT" else "USDC")
+    source = "form" if request.method == "POST" else "args"
+    form_values = {
+        "from_asset": _normalize_convert_asset(_request_value("from_asset", default_from, source=source), asset_keys, default_from),
+        "to_asset": _normalize_convert_asset(_request_value("to_asset", default_to, source=source), asset_keys, default_to),
+        "amount": str(_request_value("amount", "", source=source) or "").strip(),
+    }
+    errors: dict[str, str] = {}
+    quote = None
+    if form_values["amount"]:
+        quote, errors = _wallet_convert_quote(form_values, assets)
+    convert_state = _wallet_convert_state(form_values, assets, quote, errors)
+
+    if request.method == "POST":
+        if quote is not None and not errors:
+            try:
+                result = _execute_wallet_conversion(user, quote)
+                commit_with_retry()
+                flash(
+                    f"Converted {result['from_amount']:.8f} {result['from_asset']} to {result['to_amount']:.8f} {result['to_asset']}.",
+                    "success",
+                )
+                return redirect(url_for("consumer.convert", from_asset=result["to_asset"], to_asset=result["from_asset"]))
+            except ValueError as exc:
+                db.session.rollback()
+                errors["form"] = str(exc)
+                convert_state = _wallet_convert_state(form_values, assets, quote, errors)
+        for message in dict.fromkeys(errors.values()):
+            flash(message, "danger")
+
+    return render_template(
+        "convert.html",
+        assets=assets,
+        quote=quote,
+        errors=errors,
+        form_values=form_values,
+        convert_state=convert_state,
     )
 
 
@@ -371,7 +434,7 @@ def withdraw(asset: str):
                 )
                 commit_with_retry()
                 flash("Withdrawal queued until treasury gas reserve coverage recovers. Funds remain locked for the workflow.", "warning")
-                return redirect(url_for("consumer.activity"))
+                return redirect(url_for("consumer.wallet"))
             if real_wallet_mode and bool(current_app.config.get("WALLET_REQUIRE_WITHDRAWAL_APPROVAL", True)):
                 db.session.add(
                     WalletTransaction(
@@ -387,7 +450,7 @@ def withdraw(asset: str):
                 )
                 commit_with_retry()
                 flash("Withdrawal request submitted for admin approval. Funds are locked until approval or rejection.", "success")
-                return redirect(url_for("consumer.activity"))
+                return redirect(url_for("consumer.wallet"))
             withdrawal = wallet_service.submit_withdrawal(withdrawal, mode=get_current_mode())
             if withdrawal.status.startswith("failed"):
                 if reserved:
@@ -426,9 +489,13 @@ def withdraw(asset: str):
                     )
                 )
                 commit_with_retry()
-                message = "Withdrawal broadcast. Waiting for confirmation." if withdrawal.status == "submitted" else f"Withdrawal status: {withdrawal.status.replace('_', ' ')}."
+                message = (
+                    "Withdrawal broadcast. Waiting for confirmation."
+                    if withdrawal.status == "submitted"
+                    else f"Withdrawal status: {withdrawal.status.replace('_', ' ')}."
+                )
                 flash(message, "success")
-                return redirect(url_for("consumer.activity"))
+                return redirect(url_for("consumer.wallet"))
         else:
             for message in dict.fromkeys(errors.values()):
                 flash(message, "danger")
@@ -455,11 +522,7 @@ def vault():
     active_cycles = _active_cycles(user, refresh=not defer_live_api)
     recovered_run_ids = [] if defer_live_api else _recover_active_one_h10_cycles(active_cycles)
     for cycle in active_cycles:
-        cycle.cycle_summary = (
-            get_service("vault_cycle_reporting").status_payload(cycle)
-            if defer_live_api
-            else _cycle_summary(cycle)
-        )
+        cycle.cycle_summary = get_service("vault_cycle_reporting").status_payload(cycle) if defer_live_api else _cycle_summary(cycle)
     cycle_page = get_service("vault_activity").page_for_user(user.id, page=_vault_cycle_page_number())
     initial_routing_preview = (
         _deferred_live_api_routing_preview_payload(
@@ -506,7 +569,7 @@ def start_cycle():
         existing_job = _existing_cycle_start_job(user.id, idempotency_key)
         if existing_job is not None:
             if _wants_start_json_response():
-                return jsonify(existing_job), 202
+                return jsonify(_with_cycle_start_runtime_metadata(existing_job)), 202
             flash("Cycle start already queued. Refresh cycle status in a moment.", "info")
             return redirect(url_for("consumer.vault"))
     if not async_enabled and idempotency_key:
@@ -519,9 +582,13 @@ def start_cycle():
                         code="vault_cycle_duplicate",
                         message="Cycle start already submitted. Showing the existing cycle.",
                         ready=True,
-                        cycle_id=existing_cycle.id,
                         created=False,
                         duplicate=True,
+                        **_cycle_start_runtime_metadata(
+                            cycle_id=existing_cycle.id,
+                            run_ids=[leg.strategy_run_id for leg in existing_cycle.allocation_legs if leg.strategy_run_id],
+                            status="duplicate",
+                        ),
                     )
                 ), 200
             flash("Cycle start already submitted. Showing the existing cycle.", "info")
@@ -590,7 +657,9 @@ def start_cycle():
         return _vault_start_error_response(
             "verified_connection_missing",
             "Verified connection missing",
-            "Connect and verify at least one trading account before starting 1H10." if is_one_h10 else "Connect your trading account before starting a live vault cycle.",
+            "Connect and verify at least one trading account before starting 1H10."
+            if is_one_h10
+            else "Connect your trading account before starting a live vault cycle.",
         )
     if is_one_h10:
         one_h10_block = _one_h10_live_start_block_reason()
@@ -639,7 +708,10 @@ def start_cycle():
     if not is_one_h10:
         live_block_reason = _fresh_live_connection_block_reason(user, connection)
     elif _live_connection_required() and not connections:
-        live_block_reason = str((connection_blockers[0] if connection_blockers else {}).get("reason") or "No verified 1H10 trading connection is currently healthy enough for live execution.")
+        live_block_reason = str(
+            (connection_blockers[0] if connection_blockers else {}).get("reason")
+            or "No verified 1H10 trading connection is currently healthy enough for live execution."
+        )
     if live_block_reason:
         flash(live_block_reason, "danger")
         if connection is not None:
@@ -790,9 +862,7 @@ def start_cycle():
     for index, leg in enumerate(legs):
         leg_parameters = dict(leg.get("parameters") or selection.parameters)
         leg_parameters.update(common_parameters)
-        include_pair_metadata = not (
-            is_one_h10 and bool((leg.get("parameters") or {}).get("one_h10_all_pairs"))
-        )
+        include_pair_metadata = not (is_one_h10 and bool((leg.get("parameters") or {}).get("one_h10_all_pairs")))
         leg_parameters.update(
             {
                 "allocation_cap_usd": float(leg.get("allocation_cap_usd", starting_value_usd) or 0.0),
@@ -812,7 +882,8 @@ def start_cycle():
                 "cap_limit_reason": leg.get("cap_limit_reason", ""),
                 "duration_bucket": selection.metadata.get("duration_bucket"),
                 "ml_rank_score": float(leg.get("ml_rank_score", 0.0) or 0.0),
-                "multi_timeframe_confluence": leg.get("multi_timeframe_confluence") or selection.metadata.get("multi_timeframe_confluence", {}),
+                "multi_timeframe_confluence": leg.get("multi_timeframe_confluence")
+                or selection.metadata.get("multi_timeframe_confluence", {}),
                 "confluence_score": float(leg.get("confluence_score", selection.metadata.get("confluence_score", 0.0)) or 0.0),
                 "fib_confluence": leg.get("fib_confluence") or selection.metadata.get("fib_confluence", {}),
                 "fibonacci_confluence": leg.get("fib_confluence") or selection.metadata.get("fib_confluence", {}),
@@ -824,17 +895,25 @@ def start_cycle():
                 "pair_forced_side": (leg.get("parameters") or {}).get("pair_forced_side") if include_pair_metadata else None,
                 "hedge_ratio": (leg.get("hedge_ratio") or selection.metadata.get("hedge_ratio")) if include_pair_metadata else None,
                 "spread_zscore": (leg.get("spread_zscore") or selection.metadata.get("spread_zscore")) if include_pair_metadata else None,
-                "spread_half_life": (leg.get("spread_half_life") or selection.metadata.get("spread_half_life")) if include_pair_metadata else None,
+                "spread_half_life": (leg.get("spread_half_life") or selection.metadata.get("spread_half_life"))
+                if include_pair_metadata
+                else None,
                 "pair_score": (leg.get("pair_score") or selection.metadata.get("pair_score")) if include_pair_metadata else None,
                 "correlation": (leg.get("correlation") or selection.metadata.get("correlation")) if include_pair_metadata else None,
                 "pair_signal": (leg.get("pair_signal") or selection.metadata.get("pair_signal", {})) if include_pair_metadata else {},
-                "pair_skip_reason": (leg.get("pair_skip_reason") or selection.metadata.get("pair_skip_reason", "")) if include_pair_metadata else "",
+                "pair_skip_reason": (leg.get("pair_skip_reason") or selection.metadata.get("pair_skip_reason", ""))
+                if include_pair_metadata
+                else "",
                 "skip_reason": leg.get("skip_reason", ""),
                 "leverage": float(leg.get("leverage", leg_parameters.get("leverage", 1.0)) or 1.0),
                 "provider": leg.get("provider", leg_parameters.get("provider", selection.metadata.get("provider"))),
-                "execution_venue": leg.get("execution_venue", leg_parameters.get("execution_venue", selection.metadata.get("execution_venue"))),
+                "execution_venue": leg.get(
+                    "execution_venue", leg_parameters.get("execution_venue", selection.metadata.get("execution_venue"))
+                ),
                 "trading_connection_id": leg.get("trading_connection_id", leg_parameters.get("trading_connection_id")),
-                "collateral_asset": leg.get("collateral_asset", leg_parameters.get("collateral_asset", selection.metadata.get("collateral_asset"))),
+                "collateral_asset": leg.get(
+                    "collateral_asset", leg_parameters.get("collateral_asset", selection.metadata.get("collateral_asset"))
+                ),
                 "settlement_asset": leg.get("settlement_asset", leg_parameters.get("settlement_asset", settlement_asset)),
                 "allocation_weight": float(leg.get("allocation_weight", leg_parameters.get("allocation_weight", 0.0)) or 0.0),
                 "available_margin_usd": float(leg.get("available_margin_usd", leg_parameters.get("available_margin_usd", 0.0)) or 0.0),
@@ -941,6 +1020,9 @@ def start_cycle():
             "market_status": leg_parameters.get("market_status"),
             "one_h10_scanner_score": leg_parameters.get("one_h10_scanner_score"),
             "one_h10_scanner_source": leg_parameters.get("one_h10_scanner_source"),
+            "one_h10_allocation_score": leg_parameters.get("one_h10_allocation_score"),
+            "one_h10_allocation_method": leg_parameters.get("one_h10_allocation_method"),
+            "allocation_score": leg_parameters.get("one_h10_allocation_score"),
             "scanner_score_breakdown": leg_parameters.get("scanner_score_breakdown"),
             "scanner_features": leg_parameters.get("scanner_features"),
             "one_h10_forecast": leg_parameters.get("one_h10_forecast"),
@@ -955,6 +1037,9 @@ def start_cycle():
             "forecast_suggested_order_type": leg_parameters.get("forecast_suggested_order_type"),
             "forecast_suggested_stop_loss_pct": leg_parameters.get("forecast_suggested_stop_loss_pct"),
             "forecast_suggested_take_profit_pct": leg_parameters.get("forecast_suggested_take_profit_pct"),
+            "forecast_profitability_score": leg_parameters.get("forecast_profitability_score"),
+            "forecast_allocation_score": leg_parameters.get("forecast_allocation_score"),
+            "forecast_execution_adjusted_net_return_bps": leg_parameters.get("forecast_execution_adjusted_net_return_bps"),
             "ml_horizon": leg_parameters.get("ml_horizon"),
             "one_h10_vault": leg_parameters.get("one_h10_vault"),
             "objective": leg_parameters.get("objective"),
@@ -1001,6 +1086,7 @@ def start_cycle():
             "cycle_id": cycle.id,
             "run_ids": run_ids,
         }
+        payload = _with_cycle_start_runtime_metadata(payload)
         if _wants_start_json_response():
             return jsonify(payload), 202
         flash("Vault cycle queued. Strategy workers are starting in the background.", "success")
@@ -1014,9 +1100,8 @@ def start_cycle():
                 code="vault_cycle_started",
                 message="Vault cycle started.",
                 ready=True,
-                cycle_id=cycle.id,
                 created=True,
-                run_ids=run_ids,
+                **_cycle_start_runtime_metadata(cycle_id=cycle.id, run_ids=run_ids, status="started"),
             )
         ), 201
     flash("Vault cycle started.", "success")
@@ -1084,9 +1169,7 @@ def create_vault_cycle():
     except Exception as exc:  # noqa: BLE001
         db.session.rollback()
         if _wants_json_response():
-            return jsonify(
-                exception_envelope(exc, default_code="vault_cycle_start_failed")
-            ), 400
+            return jsonify(exception_envelope(exc, default_code="vault_cycle_start_failed")), 400
         flash(str(exc), "danger")
         return redirect(url_for("consumer.vault"))
 
@@ -1100,14 +1183,19 @@ def create_vault_cycle():
                 message="Vault Cycle started with dynamic exchange allocation."
                 if created
                 else "Cycle start already submitted. Showing the existing cycle.",
-                cycle_id=cycle.id,
                 created=created,
                 duplicate=not created,
-                run_ids=result.get("run_ids", []),
+                **_cycle_start_runtime_metadata(
+                    cycle_id=cycle.id,
+                    run_ids=result.get("run_ids", []),
+                    status="started" if created else "duplicate",
+                ),
             )
         ), 201 if created else 200
     flash(
-        "Vault Cycle started with dynamic exchange allocation." if created else "Cycle start already submitted. Showing the existing cycle.",
+        "Vault Cycle started with dynamic exchange allocation."
+        if created
+        else "Cycle start already submitted. Showing the existing cycle.",
         "success" if created else "info",
     )
     return redirect(url_for("consumer.cycle_detail", cycle_id=cycle.id))
@@ -1175,9 +1263,7 @@ def _start_vault_cycle_engine_from_route(
     except Exception as exc:  # noqa: BLE001
         db.session.rollback()
         if wants_start_response and _wants_start_json_response():
-            return jsonify(
-                exception_envelope(exc, default_code="vault_cycle_start_failed")
-            ), 400
+            return jsonify(exception_envelope(exc, default_code="vault_cycle_start_failed")), 400
         flash(str(exc), "danger")
         return redirect(url_for("consumer.vault"))
 
@@ -1191,10 +1277,13 @@ def _start_vault_cycle_engine_from_route(
                 code="vault_cycle_started" if created else "vault_cycle_duplicate",
                 message=success_message if created else "Cycle start already submitted. Showing the existing cycle.",
                 ready=True,
-                cycle_id=cycle.id,
                 created=created,
                 duplicate=not created,
-                run_ids=run_ids,
+                **_cycle_start_runtime_metadata(
+                    cycle_id=cycle.id,
+                    run_ids=run_ids,
+                    status="started" if created else "duplicate",
+                ),
             )
         ), 201 if created else 200
     flash(success_message if created else "Cycle start already submitted. Showing the existing cycle.", "success" if created else "info")
@@ -1249,7 +1338,11 @@ def _vault_readiness_payload_from_request(*, source: str) -> dict[str, object]:
 def vault_readiness():
     payload = _vault_readiness_payload_from_request(source="args")
     blocker_count = len(list(payload.get("active_blockers") or []))
-    payload["message"] = "1H10 vault cycle is ready." if payload.get("ready") else f"Vault cycle is blocked by {blocker_count} live gate{'s' if blocker_count != 1 else ''}."
+    payload["message"] = (
+        "1H10 vault cycle is ready."
+        if payload.get("ready")
+        else f"Vault cycle is blocked by {blocker_count} live gate{'s' if blocker_count != 1 else ''}."
+    )
     return jsonify(readiness_envelope(payload, code="vault_cycle_readiness", message=str(payload.get("message") or "")))
 
 
@@ -1257,8 +1350,17 @@ def vault_readiness():
 def vault_preview_route():
     payload = _vault_readiness_payload_from_request(source="form")
     blocker_count = len(list(payload.get("active_blockers") or []))
-    payload["message"] = "1H10 vault cycle is ready." if payload.get("ready") else f"Vault cycle is blocked by {blocker_count} live gate{'s' if blocker_count != 1 else ''}."
-    status_code = 200 if payload.get("ready") or any(item.get("code") == "amount_required" for item in list(payload.get("active_blockers") or []) if isinstance(item, dict)) else 200
+    payload["message"] = (
+        "1H10 vault cycle is ready."
+        if payload.get("ready")
+        else f"Vault cycle is blocked by {blocker_count} live gate{'s' if blocker_count != 1 else ''}."
+    )
+    status_code = (
+        200
+        if payload.get("ready")
+        or any(item.get("code") == "amount_required" for item in list(payload.get("active_blockers") or []) if isinstance(item, dict))
+        else 200
+    )
     return jsonify(readiness_envelope(payload, code="vault_cycle_readiness", message=str(payload.get("message") or ""))), status_code
 
 
@@ -1298,6 +1400,20 @@ def vault_cycle_status(cycle_id: int):
         _refresh_cycle_performance(cycle)
         commit_with_retry()
     payload = get_service("vault_cycle_reporting").status_payload(cycle)
+    orders = _cycle_orders(cycle)
+    order_summaries = [_order_summary(order) for order in orders]
+    legs = [_leg_summary(leg) for leg in cycle.allocation_legs]
+    runtime_notice = _cycle_one_h10_runtime_notice(cycle)
+    payload["trade_decision_legs"] = _cycle_trade_decision_legs(cycle, order_summaries, legs)
+    payload["trade_decision"] = _cycle_trade_decision(
+        cycle,
+        order_summaries,
+        payload["trade_decision_legs"],
+        runtime_notice,
+    )
+    payload["worker"] = _cycle_worker_status(cycle, payload["trade_decision_legs"])
+    payload["live_order_path"] = payload["worker"]["live_order_path"]
+    payload["runtime_notice"] = runtime_notice
     payload["ok"] = True
     return jsonify(payload)
 
@@ -1311,25 +1427,12 @@ def cycle_start_status(job_id: str):
         return jsonify({"ok": False, "error": "job_not_found", "job_id": job_id}), 404
     if int(job.get("user_id") or 0) != int(user.id):
         return jsonify({"ok": False, "error": "job_not_found", "job_id": job_id}), 404
-    return jsonify(job)
+    return jsonify(_with_cycle_start_runtime_metadata(job))
 
 
 @consumer_bp.get("/activity/", strict_slashes=False)
 def activity():
-    user = current_user()
-    _sync_completed_cycles(user)
-    activity_service = get_service("wallet_activity")
-    vault_activity_service = get_service("vault_activity")
-    activity_page = activity_service.page_for_user(user.id, page=_wallet_activity_page_number())
-    cycle_page = vault_activity_service.page_for_user(user.id, page=_vault_cycle_page_number())
-    commit_with_retry()
-    return render_template(
-        "activity.html",
-        transactions=activity_page.items,
-        cycles=cycle_page.items,
-        activity_page=activity_page,
-        cycle_page=cycle_page,
-    )
+    return redirect(url_for("consumer.home"))
 
 
 @consumer_bp.get("/vault/cycles/<int:cycle_id>")
@@ -1339,7 +1442,7 @@ def cycle_detail(cycle_id: int):
     cycle = VaultCycle.query.filter_by(id=cycle_id, user_id=user.id).one_or_none()
     if cycle is None:
         flash("Vault cycle was not found.", "danger")
-        return redirect(url_for("consumer.activity"))
+        return redirect(url_for("consumer.vault"))
     performance = None
     if cycle.status in {"active", "settling"} and not _vault_live_api_deferred_for_request():
         performance = _refresh_cycle_performance(cycle)
@@ -1349,7 +1452,11 @@ def cycle_detail(cycle_id: int):
     if cycle.status in {"active", "settling"} and _vault_live_api_deferred_for_request():
         summary = get_service("vault_cycle_reporting").status_payload(cycle)
     else:
-        summary = _cycle_summary(cycle, performance=performance) if cycle.status in {"active", "settling"} else cycle.cycle_summary or _cycle_summary(cycle)
+        summary = (
+            _cycle_summary(cycle, performance=performance)
+            if cycle.status in {"active", "settling"}
+            else cycle.cycle_summary or _cycle_summary(cycle)
+        )
     summary["chart_payload"] = _cycle_chart_payload(cycle, summary)
     return render_template(
         "cycle_detail.html",
@@ -1385,12 +1492,199 @@ def legacy_backtests_optimize():
 
 @consumer_bp.route("/panic/", methods=["GET"], strict_slashes=False)
 def legacy_panic():
-    return redirect(url_for("panic.index"))
+    abort(404)
 
 
 @consumer_bp.post("/panic/activate")
 def legacy_panic_activate():
-    return redirect(url_for("panic.activate"), code=307)
+    abort(404)
+
+
+def _wallet_convert_asset_rows(balances: list[WalletBalance]) -> list[dict[str, object]]:
+    by_asset = {str(balance.asset or "").upper(): balance for balance in balances}
+    rows: list[dict[str, object]] = []
+    for asset in _wallet_assets():
+        balance = by_asset.get(asset)
+        available = max(0.0, _safe_float(getattr(balance, "available_balance", 0.0)))
+        locked = max(0.0, _safe_float(getattr(balance, "locked_balance", 0.0)))
+        total = available + locked
+        price = max(0.0, _asset_usd_price(asset))
+        estimated = total * price if price > 0 else max(0.0, _safe_float(getattr(balance, "estimated_usd_value", 0.0)))
+        rows.append(
+            {
+                "asset": asset,
+                "available_balance": available,
+                "locked_balance": locked,
+                "total_balance": total,
+                "estimated_usd_value": estimated,
+                "price_usd": price,
+                "available_usd": available * price if price > 0 else 0.0,
+                "price_available": price > 0,
+            }
+        )
+    return rows
+
+
+def _normalize_convert_asset(value: object, asset_keys: list[str], default: str) -> str:
+    asset = str(value or "").strip().upper()
+    return asset if asset in set(asset_keys) else default
+
+
+def _wallet_convert_state(
+    form_values: dict[str, object],
+    assets: list[dict[str, object]],
+    quote: dict[str, object] | None,
+    errors: dict[str, str],
+) -> dict[str, object]:
+    by_asset = {str(row["asset"]): row for row in assets}
+    from_asset = str(form_values.get("from_asset") or "").upper()
+    to_asset = str(form_values.get("to_asset") or "").upper()
+    from_row = by_asset.get(from_asset, {})
+    to_row = by_asset.get(to_asset, {})
+    funded_assets = [row for row in assets if float(row.get("available_balance") or 0.0) > 0 and bool(row.get("price_available"))]
+    priced_assets = [row for row in assets if bool(row.get("price_available"))]
+    can_convert = len(funded_assets) > 0 and len(priced_assets) > 1
+    amount_value = str(form_values.get("amount") or "").strip()
+    return {
+        "can_convert": can_convert,
+        "funded_count": len(funded_assets),
+        "priced_count": len(priced_assets),
+        "from_available": float(from_row.get("available_balance") or 0.0),
+        "from_available_usd": float(from_row.get("available_usd") or 0.0),
+        "from_price": float(from_row.get("price_usd") or 0.0),
+        "to_price": float(to_row.get("price_usd") or 0.0),
+        "has_amount": bool(amount_value),
+        "has_quote": quote is not None and not errors,
+        "has_errors": bool(errors),
+    }
+
+
+def _wallet_convert_quote(
+    form_values: dict[str, object], assets: list[dict[str, object]]
+) -> tuple[dict[str, object] | None, dict[str, str]]:
+    errors: dict[str, str] = {}
+    by_asset = {str(row["asset"]): row for row in assets}
+    from_asset = str(form_values.get("from_asset") or "").upper()
+    to_asset = str(form_values.get("to_asset") or "").upper()
+    from_row = by_asset.get(from_asset)
+    to_row = by_asset.get(to_asset)
+    if from_row is None:
+        errors["from_asset"] = "Choose a supported source asset."
+    if to_row is None:
+        errors["to_asset"] = "Choose a supported destination asset."
+    if from_asset and to_asset and from_asset == to_asset:
+        errors["to_asset"] = "Choose two different assets."
+
+    amount = _positive_decimal(form_values.get("amount"))
+    if amount is None:
+        errors["amount"] = "Enter an amount greater than zero."
+    if errors:
+        return None, errors
+
+    from_price = Decimal(str(from_row.get("price_usd") or 0))
+    to_price = Decimal(str(to_row.get("price_usd") or 0))
+    if from_price <= 0:
+        errors["from_asset"] = f"{from_asset} price is unavailable."
+    if to_price <= 0:
+        errors["to_asset"] = f"{to_asset} price is unavailable."
+    available = Decimal(str(from_row.get("available_balance") or 0))
+    if amount is not None and amount > available + Decimal("0.000000000001"):
+        errors["amount"] = f"Amount exceeds available {from_asset} balance."
+    if errors or amount is None:
+        return None, errors
+
+    usd_value = amount * from_price
+    converted_amount = usd_value / to_price
+    if converted_amount <= 0:
+        errors["amount"] = "Conversion amount is too small."
+        return None, errors
+    rate = from_price / to_price
+    return (
+        {
+            "from_asset": from_asset,
+            "to_asset": to_asset,
+            "from_amount": float(amount),
+            "to_amount": float(converted_amount),
+            "usd_value": float(usd_value),
+            "from_price": float(from_price),
+            "to_price": float(to_price),
+            "rate": float(rate),
+            "fee_usd": 0.0,
+        },
+        {},
+    )
+
+
+def _execute_wallet_conversion(user, quote: dict[str, object]) -> dict[str, object]:
+    from_asset = str(quote.get("from_asset") or "").upper()
+    to_asset = str(quote.get("to_asset") or "").upper()
+    amount = Decimal(str(quote.get("from_amount") or 0))
+    converted_amount = Decimal(str(quote.get("to_amount") or 0))
+    if amount <= 0 or converted_amount <= 0:
+        raise ValueError("Conversion amount is invalid.")
+    source_balance = WalletBalance.query.filter_by(user_id=user.id, asset=from_asset).one_or_none()
+    destination_balance = WalletBalance.query.filter_by(user_id=user.id, asset=to_asset).one_or_none()
+    if source_balance is None:
+        raise ValueError(f"{from_asset} balance is unavailable.")
+    if destination_balance is None:
+        destination_balance = WalletBalance(user_id=user.id, asset=to_asset, available_balance=0.0, locked_balance=0.0)
+        db.session.add(destination_balance)
+        db.session.flush()
+    source_available = Decimal(str(source_balance.available_balance or 0))
+    if amount > source_available + Decimal("0.000000000001"):
+        raise ValueError(f"Amount exceeds available {from_asset} balance.")
+
+    source_balance.available_balance = float(max(Decimal("0"), source_available - amount))
+    destination_balance.available_balance = float(Decimal(str(destination_balance.available_balance or 0)) + converted_amount)
+    _refresh_wallet_balance_estimate(source_balance)
+    _refresh_wallet_balance_estimate(destination_balance)
+
+    conversion_id = f"wallet-convert-{uuid.uuid4().hex[:12]}"
+    note = (
+        f"{conversion_id}: converted {float(amount):.8f} {from_asset} to {float(converted_amount):.8f} {to_asset} "
+        f"at ${float(quote.get('from_price') or 0):.8f}/${float(quote.get('to_price') or 0):.8f}; internal ledger conversion."
+    )
+    db.session.add(
+        WalletTransaction(
+            user_id=user.id,
+            asset=from_asset,
+            amount=-float(amount),
+            transaction_type="conversion",
+            status="complete",
+            network="internal",
+            note=note,
+        )
+    )
+    db.session.add(
+        WalletTransaction(
+            user_id=user.id,
+            asset=to_asset,
+            amount=float(converted_amount),
+            transaction_type="conversion",
+            status="complete",
+            network="internal",
+            note=note,
+        )
+    )
+    return {
+        "from_asset": from_asset,
+        "to_asset": to_asset,
+        "from_amount": float(amount),
+        "to_amount": float(converted_amount),
+    }
+
+
+def _refresh_wallet_balance_estimate(balance: WalletBalance) -> None:
+    price = _asset_usd_price(balance.asset)
+    balance.estimated_usd_value = max(0.0, balance.total_balance * price) if price > 0 else 0.0
+
+
+def _positive_decimal(value: object) -> Decimal | None:
+    try:
+        amount = Decimal(str(value or "").strip())
+    except (InvalidOperation, ValueError):
+        return None
+    return amount if amount > 0 and amount.is_finite() else None
 
 
 def _wallet_balances(user) -> list[WalletBalance]:
@@ -1455,14 +1749,13 @@ def _wallet_balances(user) -> list[WalletBalance]:
 
 
 def _default_vault_asset(balances: list[WalletBalance]) -> str:
-    positive = [balance for balance in balances if float(balance.available_balance or 0.0) > 0]
-    for asset in ("USDC", "USDT"):
-        match = next((balance for balance in positive if balance.asset == asset), None)
-        if match is not None:
-            return match.asset
-    if positive:
-        return positive[0].asset
-    return balances[0].asset if balances else "USDC"
+    return default_vault_allocation_asset(
+        allocation_asset_views(
+            balances=balances,
+            configured_assets=_configured_wallet_assets(),
+            configured_networks=_configured_asset_networks,
+        )
+    )
 
 
 def _sync_real_wallet_balances(user) -> None:
@@ -1540,6 +1833,7 @@ def _portfolio_total(balances: list[WalletBalance]) -> float:
 def _wallet_allocation_payload(wallet_summary) -> dict[str, object]:
     total = max(float(wallet_summary.portfolio_total_usd or 0.0), 0.0)
     rows: list[dict[str, object]] = []
+    palette = ("#38bdf8", "#34d399", "#f59e0b", "#a78bfa", "#f43f5e", "#facc15", "#818cf8")
     for balance in wallet_summary.balances:
         value = max(float(balance.estimated_usd_value or 0.0), 0.0)
         rows.append(
@@ -1553,21 +1847,31 @@ def _wallet_allocation_payload(wallet_summary) -> dict[str, object]:
             }
         )
     rows = sorted(rows, key=lambda item: float(item["value"]), reverse=True)
+    gradient_segments: list[str] = []
+    cursor = 0.0
+    positive_rows = [row for row in rows if float(row["pct"]) > 0]
+    for index, row in enumerate(rows):
+        color = palette[index % len(palette)]
+        row["color"] = color
+        pct = max(float(row["pct"]), 0.0)
+        if pct <= 0:
+            continue
+        end = 100.0 if index == len(positive_rows) - 1 else min(100.0, cursor + pct)
+        gradient_segments.append(f"{color} {cursor:.2f}% {end:.2f}%")
+        cursor = end
     return {
         "total": round(total, 2),
         "rows": rows,
-        "summary": "Vault allocation is weighted by current estimated wallet value." if total > 0 else "No wallet balances are available yet.",
+        "gradient": ", ".join(gradient_segments) if gradient_segments else "rgba(148, 163, 184, 0.18) 0% 100%",
+        "summary": "Vault allocation is weighted by current estimated wallet value."
+        if total > 0
+        else "No wallet balances are available yet.",
         "empty": total <= 0,
     }
 
 
 def _portfolio_trend_payload(user, wallet_summary) -> dict[str, object]:
-    cycles = (
-        VaultCycle.query.filter_by(user_id=user.id)
-        .order_by(VaultCycle.started_at.desc())
-        .limit(8)
-        .all()
-    )
+    cycles = VaultCycle.query.filter_by(user_id=user.id).order_by(VaultCycle.started_at.desc()).limit(8).all()
     points: list[dict[str, object]] = []
     for cycle in reversed(cycles):
         starting = max(float(cycle.starting_value_usd or 0.0), 0.0)
@@ -1587,9 +1891,137 @@ def _portfolio_trend_payload(user, wallet_summary) -> dict[str, object]:
         points.append({"t": datetime.utcnow().isoformat(), "value": round(current_total, 2)})
     return {
         "points": points[-16:],
-        "summary": "Recent vault value path from started and settled cycle snapshots." if len(points) >= 2 else "Portfolio trend appears after vault cycles generate value snapshots.",
+        "summary": "Recent vault value path from started and settled cycle snapshots."
+        if len(points) >= 2
+        else "Portfolio trend appears after vault cycles generate value snapshots.",
         "empty": len(points) < 2,
     }
+
+
+def _home_wallet_balance_payload(wallet_summary, error: str = "") -> dict[str, object]:
+    if error or wallet_summary is None:
+        return {
+            "total_usd": 0.0,
+            "state": "error",
+            "error": error or "Total wallet balance is temporarily unavailable.",
+            "sync_label": "Balance service unavailable",
+        }
+
+    total = max(_safe_float(getattr(wallet_summary, "portfolio_total_usd", 0.0)), 0.0)
+    snapshot = getattr(wallet_summary, "cached_exchange_snapshot", {}) or {}
+    sync_label = _home_sync_label(snapshot.get("synced_at") if isinstance(snapshot, dict) else "")
+    return {
+        "total_usd": round(total, 2),
+        "state": "empty" if total <= 0 else "ready",
+        "error": "",
+        "sync_label": sync_label,
+        "warning": "",
+    }
+
+
+def _home_sync_label(value: object) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return "Local wallet ledger"
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return "Latest wallet snapshot"
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(UTC).replace(tzinfo=None)
+    return f"Updated {parsed.strftime('%b %d, %H:%M')} UTC"
+
+
+def _home_account_pnl_payload(user) -> dict[str, object]:
+    try:
+        points, source = _home_fill_pnl_points(user)
+        if len(points) < 2:
+            points, source = _home_cycle_pnl_points(user)
+    except Exception as exc:  # noqa: BLE001
+        current_app.logger.exception("Home account PnL unavailable: %s", exc)
+        return {
+            "points": [],
+            "total_pnl": 0.0,
+            "state": "error",
+            "tone": "danger",
+            "source": "unavailable",
+            "summary": "",
+            "error": "Past account P&L is temporarily unavailable.",
+            "empty": False,
+        }
+
+    total_pnl = round(_safe_float(points[-1]["value"]) if points else 0.0, 2)
+    empty = len(points) < 2
+    return {
+        "points": points,
+        "total_pnl": total_pnl,
+        "state": "empty" if empty else "ready",
+        "tone": _money_tone(total_pnl),
+        "source": source,
+        "summary": _home_pnl_summary(source, empty),
+        "error": "",
+        "empty": empty,
+    }
+
+
+def _home_fill_pnl_points(user) -> tuple[list[dict[str, object]], str]:
+    mode = get_current_mode()
+    fills = (
+        Fill.query.join(Fill.order)
+        .filter(Order.user_id == user.id)
+        .filter(Order.mode == mode)
+        .filter(Fill.simulated == (mode == "paper"))
+        .filter(Fill.realized_pnl_known.is_(True))
+        .order_by(Fill.fill_time.desc(), Fill.id.desc())
+        .limit(120)
+        .all()
+    )
+    fills = list(reversed(fills))
+    if not fills:
+        return [], "trade_fills"
+
+    first_time = fills[0].fill_time or datetime.utcnow()
+    points = [_home_pnl_point(first_time - timedelta(minutes=1), 0.0, 0.0)]
+    running = 0.0
+    for fill in fills:
+        delta = _safe_float(fill.pnl) - _safe_float(fill.fee) - _safe_float(getattr(fill, "funding_fee", 0.0))
+        running += delta
+        points.append(_home_pnl_point(fill.fill_time or datetime.utcnow(), running, delta))
+    return points[-121:], "trade_fills"
+
+
+def _home_cycle_pnl_points(user) -> tuple[list[dict[str, object]], str]:
+    cycles = VaultCycle.query.filter_by(user_id=user.id).order_by(VaultCycle.started_at.desc(), VaultCycle.id.desc()).limit(80).all()
+    cycles = sorted(cycles, key=lambda cycle: cycle.started_at or cycle.created_at or datetime.utcnow())
+    if not cycles:
+        return [], "vault_cycles"
+
+    first_time = cycles[0].started_at or cycles[0].created_at or datetime.utcnow()
+    points = [_home_pnl_point(first_time - timedelta(minutes=1), 0.0, 0.0)]
+    running = 0.0
+    for cycle in cycles:
+        delta = _cycle_pnl_value(cycle)
+        running += delta
+        timestamp = cycle.settled_at or cycle.updated_at or cycle.unlocks_at or cycle.started_at or datetime.utcnow()
+        points.append(_home_pnl_point(timestamp, running, delta))
+    return points[-81:], "vault_cycles"
+
+
+def _home_pnl_point(timestamp: datetime, value: float, pnl: float) -> dict[str, object]:
+    return {
+        "label": timestamp.strftime("%b %d"),
+        "timestamp": timestamp.isoformat(),
+        "value": round(_safe_float(value), 2),
+        "pnl": round(_safe_float(pnl), 2),
+    }
+
+
+def _home_pnl_summary(source: str, empty: bool) -> str:
+    if empty:
+        return "No account P&L history yet."
+    if source == "trade_fills":
+        return "Realized account P&L from reconciled fills."
+    return "Account P&L from vault cycle snapshots."
 
 
 def _live_connection_required() -> bool:
@@ -1617,7 +2049,9 @@ def _enabled_provider_states(user) -> list[dict[str, object]]:
     ]
 
 
-def _home_command_center_payload(user, wallet_summary, balances: list[WalletBalance], enabled_provider_states: list[dict[str, object]]) -> dict[str, object]:
+def _home_command_center_payload(
+    user, wallet_summary, balances: list[WalletBalance], enabled_provider_states: list[dict[str, object]]
+) -> dict[str, object]:
     """Build the read-only mobile command center from existing product data."""
 
     now = datetime.utcnow()
@@ -1819,7 +2253,9 @@ def _home_bot_summary(rankings: list[StrategyRanking], strategy_runs: list[Strat
     }
 
 
-def _home_insights(cycles: list[VaultCycle], active_cycles: list[VaultCycle], risk_status: dict[str, object], exposure_pct: float) -> dict[str, object]:
+def _home_insights(
+    cycles: list[VaultCycle], active_cycles: list[VaultCycle], risk_status: dict[str, object], exposure_pct: float
+) -> dict[str, object]:
     pnl_values = [_cycle_pnl_value(cycle) for cycle in cycles]
     drawdown = min(pnl_values) if pnl_values else 0.0
     wins = sum(1 for value in pnl_values if value > 0)
@@ -1901,13 +2337,14 @@ def _status_tone(status: str) -> str:
 
 
 def _vault_cycle_options() -> list[dict[str, object]]:
+    horizon_seconds = _one_h10_horizon_seconds()
     return [
         {
             "key": "one_h10",
             "label": "1H10",
-            "duration_hours": 1,
-            "duration_seconds": 3600,
-            "summary": "One hour smart execution",
+            "duration_hours": max(1, math.ceil(horizon_seconds / 3600)),
+            "duration_seconds": horizon_seconds,
+            "summary": "1 hour / 10x target objective",
             "enabled": True,
         }
     ]
@@ -1918,7 +2355,9 @@ def _vault_provider_options() -> list[dict[str, str]]:
         {
             "provider": provider,
             "label": VAULT_PROVIDER_LABELS.get(provider, provider.title()),
-            "short_label": "".join(part[:1] for part in VAULT_PROVIDER_LABELS.get(provider, provider).replace("-", " ").split()).upper()[:3],
+            "short_label": "".join(part[:1] for part in VAULT_PROVIDER_LABELS.get(provider, provider).replace("-", " ").split()).upper()[
+                :3
+            ],
         }
         for provider in VAULT_UI_PROVIDERS
     ]
@@ -1989,6 +2428,8 @@ def _deferred_live_api_routing_preview_payload(
     settlement_asset: str,
     providers: list[str] | None = None,
 ) -> dict[str, object]:
+    horizon_seconds = _one_h10_horizon_seconds()
+    objective = _one_h10_objective_payload()
     requested = [provider for provider in dict.fromkeys(providers or list(VAULT_UI_PROVIDERS)) if provider in VAULT_UI_PROVIDERS]
     requested = requested or list(VAULT_UI_PROVIDERS)
     amount = max(0.0, float(amount or 0.0))
@@ -2014,15 +2455,19 @@ def _deferred_live_api_routing_preview_payload(
         }
         for option in _vault_provider_options()
     ]
-    active_blockers = [
-        {
-            "code": "amount_required",
-            "title": "Amount required",
-            "description": "Enter an amount greater than 0 before starting a 1H10 vault cycle.",
-            "severity": "blocker",
-            "fix_hint": "Use MAX or enter an amount within your available balance.",
-        }
-    ] if amount <= 0 else []
+    active_blockers = (
+        [
+            {
+                "code": "amount_required",
+                "title": "Amount required",
+                "description": "Enter an amount greater than 0 before starting a 1H10 vault cycle.",
+                "severity": "blocker",
+                "fix_hint": "Use MAX or enter an amount within your available balance.",
+            }
+        ]
+        if amount <= 0
+        else []
+    )
     return {
         "ok": False,
         "ready": False,
@@ -2031,9 +2476,10 @@ def _deferred_live_api_routing_preview_payload(
         "cycle": {
             "type": "one_h10",
             "label": "1H10",
-            "duration_seconds": 3600,
+            "duration_seconds": horizon_seconds,
             "duration_label": "1 hour",
         },
+        "objective": objective,
         "providers": provider_rows,
         "summary": {
             "amount": amount,
@@ -2051,6 +2497,10 @@ def _deferred_live_api_routing_preview_payload(
         "blockers": active_blockers,
         "active_blockers": active_blockers,
         "exchange_blockers": [],
+        "hard_blockers": active_blockers,
+        "advisory_blockers": [],
+        "clearable_blockers": active_blockers,
+        "can_start": False,
         "warnings": [],
         "exchange_status": {},
         "routing_preview": {
@@ -2073,6 +2523,7 @@ def _vault_routing_preview_payload(
     settlement_asset: str,
     providers: list[str] | None = None,
 ) -> dict[str, object]:
+    horizon_seconds = _one_h10_horizon_seconds()
     requested = [provider for provider in dict.fromkeys(providers or list(VAULT_UI_PROVIDERS)) if provider in VAULT_UI_PROVIDERS]
     requested = requested or list(VAULT_UI_PROVIDERS)
     amount = max(0.0, float(amount or 0.0))
@@ -2087,9 +2538,7 @@ def _vault_routing_preview_payload(
         enforce_ml_gate=False,
     )
     exchange_status = {
-        str(key).lower(): value
-        for key, value in dict(readiness.get("exchange_status") or {}).items()
-        if isinstance(value, dict)
+        str(key).lower(): value for key, value in dict(readiness.get("exchange_status") or {}).items() if isinstance(value, dict)
     }
     rows: list[dict[str, object]] = []
     for option in _vault_provider_options():
@@ -2140,9 +2589,10 @@ def _vault_routing_preview_payload(
         "cycle": {
             "type": "one_h10",
             "label": "1H10",
-            "duration_seconds": 3600,
+            "duration_seconds": horizon_seconds,
             "duration_label": "1 hour",
         },
+        "objective": readiness.get("objective", _one_h10_objective_payload()),
         "providers": rows,
         "summary": {
             "amount": amount,
@@ -2160,6 +2610,10 @@ def _vault_routing_preview_payload(
         "blockers": blockers,
         "active_blockers": readiness.get("active_blockers", []),
         "exchange_blockers": readiness.get("exchange_blockers", []),
+        "hard_blockers": readiness.get("hard_blockers", []),
+        "advisory_blockers": readiness.get("advisory_blockers", []),
+        "clearable_blockers": readiness.get("clearable_blockers", []),
+        "can_start": bool(readiness.get("can_start", readiness.get("ready", False))),
         "warnings": readiness.get("warnings", []),
         "exchange_status": readiness.get("exchange_status", {}),
         "routing_preview": readiness.get("routing_preview", {}),
@@ -2167,11 +2621,31 @@ def _vault_routing_preview_payload(
 
 
 def _is_one_h10_duration(duration_seconds: int, duration_hours: int) -> bool:
-    return int(duration_seconds or 0) == 3600 and int(duration_hours or 0) == 1
+    horizon_seconds = _one_h10_horizon_seconds()
+    return int(duration_seconds or 0) == horizon_seconds and int(duration_hours or 0) == max(1, math.ceil(horizon_seconds / 3600))
+
+
+def _one_h10_horizon_seconds() -> int:
+    return max(60, int(current_app.config.get("ONE_H10_HORIZON_SECONDS", ONE_H10_HORIZON_SECONDS) or ONE_H10_HORIZON_SECONDS))
+
+
+def _one_h10_objective_payload() -> dict[str, object]:
+    target_roi_pct = _one_h10_float(current_app.config.get("ONE_H10_TARGET_ROI_PCT", 1000.0), 1000.0)
+    return {
+        "name": "1 hour / 10x target",
+        "profile": "1H10",
+        "target_multiplier": max(1.0, target_roi_pct / 100.0),
+        "target_roi_pct": target_roi_pct,
+        "horizon_seconds": _one_h10_horizon_seconds(),
+        "horizon_label": "1 hour",
+        "disclaimer": "Optimization target only. Live execution remains risk-gated.",
+    }
 
 
 def _one_h10_live_acknowledged() -> bool:
     value = str(_request_value("one_h10_live_ack", "")).strip().lower()
+    if request.method == "GET":
+        value = str(request.args.get("one_h10_live_ack", value)).strip().lower()
     return value in {"1", "true", "yes", "on", "acknowledged"}
 
 
@@ -2289,7 +2763,9 @@ def _one_h10_live_context(user) -> dict[str, object]:
         "ack_required": True,
         "target_copy": "1H10 high-upside objective",
         "providers": providers,
-        "enabled_provider_count": sum(1 for item in providers if bool(item.get("can_trade")) and float(item.get("available_margin_usd", 0.0) or 0.0) > 0),
+        "enabled_provider_count": sum(
+            1 for item in providers if bool(item.get("can_trade")) and float(item.get("available_margin_usd", 0.0) or 0.0) > 0
+        ),
         "total_free_margin_usd": total_free_margin,
         "max_dynamic_allocation_usd": total_free_margin,
         "ml_readiness": ml_readiness,
@@ -2332,24 +2808,21 @@ def _normalized_cycle_leg_identity(
     fallback_connection_id: int | None = None,
 ) -> dict[str, object]:
     provider = normalize_provider(
-        parameters.get("provider")
-        or leg.get("provider")
-        or getattr(selection, "metadata", {}).get("provider")
-        or "global"
+        parameters.get("provider") or leg.get("provider") or getattr(selection, "metadata", {}).get("provider") or "global"
     )
-    execution_venue = normalize_provider(
-        parameters.get("execution_venue")
-        or leg.get("execution_venue")
-        or provider
+    execution_venue = normalize_provider(parameters.get("execution_venue") or leg.get("execution_venue") or provider)
+    app_symbol = (
+        str(
+            parameters.get("app_symbol")
+            or leg.get("app_symbol")
+            or leg.get("symbol")
+            or parameters.get("symbol")
+            or getattr(selection, "symbol", "")
+            or "BTC"
+        )
+        .strip()
+        .upper()
     )
-    app_symbol = str(
-        parameters.get("app_symbol")
-        or leg.get("app_symbol")
-        or leg.get("symbol")
-        or parameters.get("symbol")
-        or getattr(selection, "symbol", "")
-        or "BTC"
-    ).strip().upper()
     if not app_symbol:
         app_symbol = "BTC"
     raw_venue = (
@@ -2409,6 +2882,42 @@ def _recover_active_one_h10_cycles(cycles: list[VaultCycle]) -> list[int]:
     return list(dict.fromkeys(start_run_ids))
 
 
+def _is_one_h10_run_record(run: StrategyRun | None) -> bool:
+    if run is None:
+        return False
+    params = run.parameters if isinstance(run.parameters, dict) else {}
+    markers = {
+        str(params.get("algorithm_profile") or "").strip().lower(),
+        str(params.get("vault_cycle_name") or "").strip().lower(),
+        str(params.get("ml_horizon") or "").strip().lower(),
+        str(params.get("objective") or "").strip().lower(),
+    }
+    return bool(params.get("one_h10_vault")) or bool(markers & {"1h10", "one_h10", "one_hour_10x"})
+
+
+def _mark_run_trade_decision(run: StrategyRun, *, stage: str, reason: str, message: str) -> None:
+    payload = dict(run.last_signal or {}) if isinstance(run.last_signal, dict) else {}
+    metadata = dict(payload.get("metadata") or {}) if isinstance(payload.get("metadata"), dict) else {}
+    metadata.update(
+        {
+            "trade_decision_stage": stage,
+            "no_trade_reason": reason,
+            "decision_reason_code": reason,
+            "one_h10_vault": True,
+            "ml_horizon": ONE_H10_HORIZON,
+        }
+    )
+    run.last_signal = {
+        "action": payload.get("action") or "hold",
+        "rationale": payload.get("rationale") or message,
+        "timeframe": payload.get("timeframe") or run.timeframe,
+        "stop_loss": payload.get("stop_loss"),
+        "take_profit": payload.get("take_profit"),
+        "position_fraction": payload.get("position_fraction", 0.0),
+        "metadata": metadata,
+    }
+
+
 def _start_strategy_runs(run_ids: list[int]) -> None:
     if not run_ids:
         return
@@ -2421,6 +2930,13 @@ def _start_strategy_runs(run_ids: list[int]) -> None:
             run.manual_enabled = True
             if run.status not in {"running", "starting"}:
                 run.status = "queued"
+            if _is_one_h10_run_record(run):
+                _mark_run_trade_decision(
+                    run,
+                    stage="queued_for_worker",
+                    reason="strategy_worker_pending",
+                    message="1H10 strategy run is queued for the dedicated worker before signals can place orders.",
+                )
             queued_ids.append(int(run.id))
         if queued_ids:
             audit = AuditLog(
@@ -2452,6 +2968,62 @@ def _wants_json_response() -> bool:
 
 def _wants_start_json_response() -> bool:
     return request.path.rstrip("/").endswith("/vault/start-cycle") or _wants_json_response()
+
+
+def _cycle_start_runtime_metadata(
+    *,
+    cycle_id: int | None,
+    run_ids: list[int] | tuple[int, ...] | None,
+    job_id: str | None = None,
+    status: str | None = None,
+) -> dict[str, object]:
+    run_id_list = [int(run_id) for run_id in dict.fromkeys(run_ids or []) if run_id]
+    cycle_id_value = int(cycle_id) if cycle_id else None
+    job_id_value = str(job_id or "").strip()
+    in_process = in_process_workers_enabled(current_app.config)
+    worker_mode = str(current_app.config.get("WORKER_MODE", "web") or "web").strip().lower()
+    metadata: dict[str, object] = {
+        "status": status or ("queued" if job_id_value else "started"),
+        "cycle_id": cycle_id_value,
+        "run_ids": run_id_list,
+        "worker_mode": worker_mode,
+        "worker_process_configured": bool(current_app.config.get("WORKER_PROCESS_CONFIGURED", False)),
+        "in_process_workers_enabled": bool(in_process),
+        "strategy_run_queue": "in_process" if in_process else "dedicated_worker",
+        "live_order_path": "VaultCycle -> StrategyRun -> Worker -> RiskEngine -> OrderManager",
+    }
+    if cycle_id_value:
+        status_url = url_for("consumer.vault_cycle_status", cycle_id=cycle_id_value)
+        detail_url = url_for("consumer.cycle_detail", cycle_id=cycle_id_value)
+        metadata.update(
+            {
+                "cycle_status_url": status_url,
+                "next_status_url": status_url,
+                "cycle_detail_url": detail_url,
+            }
+        )
+    if job_id_value:
+        metadata["job_id"] = job_id_value
+        metadata["start_status_url"] = url_for("consumer.cycle_start_status", job_id=job_id_value)
+    return metadata
+
+
+def _with_cycle_start_runtime_metadata(payload: dict[str, object]) -> dict[str, object]:
+    enriched = dict(payload or {})
+    try:
+        cycle_id = int(enriched.get("cycle_id") or 0) or None
+    except (TypeError, ValueError):
+        cycle_id = None
+    run_ids = [int(item) for item in list(enriched.get("run_ids") or []) if item]
+    enriched.update(
+        _cycle_start_runtime_metadata(
+            cycle_id=cycle_id,
+            run_ids=run_ids,
+            job_id=str(enriched.get("job_id") or ""),
+            status=str(enriched.get("status") or ""),
+        )
+    )
+    return enriched
 
 
 def _simple_start_blocker(code: str, title: str, description: str, *, severity: str = "blocker", fix_hint: str = "") -> dict[str, object]:
@@ -2573,7 +3145,7 @@ def _run_cycle_start_job(app, job_id: str) -> None:
         if not job:
             job = _load_cycle_start_job(job_id)
         if not job:
-                return
+            return
         job = dict(job)
         job["status"] = "running"
         job["started_at"] = datetime.utcnow().isoformat()
@@ -2753,7 +3325,9 @@ def _refresh_one_h10_cycle_ml_state(cycle: VaultCycle) -> bool:
         for history_leg in provider_row.get("legs", []) or []:
             if isinstance(history_leg, dict) and isinstance(history_leg.get("forecast"), dict):
                 forecasts.append(history_leg["forecast"])
-    missing_coherence = any(metadata.get(key) is None for key in ("cycle_status", "horizon_forecasts", "horizon_strategy_scores", "coherence_summary"))
+    missing_coherence = any(
+        metadata.get(key) is None for key in ("cycle_status", "horizon_forecasts", "horizon_strategy_scores", "coherence_summary")
+    )
     if forecasts and (changed or missing_coherence):
         coherence_payload = cycle_coherence_payload_from_forecasts(forecasts)
         for key, value in coherence_payload.items():
@@ -2784,9 +3358,9 @@ def _resume_one_h10_active_runs(cycle: VaultCycle) -> list[int]:
         run = leg.strategy_run
         status = str(run.status or "").lower()
         heartbeat_at = run.last_heartbeat_at
-        heartbeat_stale = heartbeat_at is None or (
-            datetime.utcnow() - heartbeat_at
-        ).total_seconds() > max(60.0, float(current_app.config.get("ONE_H10_POLL_SECONDS", 1.0) or 1.0) * 5.0)
+        heartbeat_stale = heartbeat_at is None or (datetime.utcnow() - heartbeat_at).total_seconds() > max(
+            60.0, float(current_app.config.get("ONE_H10_POLL_SECONDS", 1.0) or 1.0) * 5.0
+        )
         if run.manual_enabled and status in {"running", "starting"} and not heartbeat_stale:
             continue
         run.manual_enabled = True
@@ -2931,10 +3505,7 @@ def _one_h10_ml_readiness(provider: str = "global") -> dict[str, object]:
     )
     try:
         engine = get_service("ml_decision_engine")
-        families = {
-            family: dict(engine.family_readiness(family, ONE_H10_HORIZON, provider=provider))
-            for family in required_families
-        }
+        families = {family: dict(engine.family_readiness(family, ONE_H10_HORIZON, provider=provider)) for family in required_families}
         blockers: list[str] = []
         for family, payload in families.items():
             blockers.extend(f"{family}:{item}" for item in payload.get("blockers", []) or [])
@@ -3043,7 +3614,7 @@ def _one_h10_provider_legs(
     settlement_asset: str,
     allowed_symbols: list[str],
     connection_blockers: list[dict[str, object]],
-    ) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]]:
+) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]]:
     trading_connections = get_service("trading_connections")
     market_service = get_service("leveraged_markets")
     scanner = get_service("market_scanner")
@@ -3084,11 +3655,7 @@ def _one_h10_provider_legs(
         )
         diagnostics = dict(getattr(scanner, "last_scan_diagnostics", {}) or {})
         if not ranked:
-            fallback_symbols = [
-                str(leg.get("symbol") or "").upper()
-                for leg in base_legs
-                if str(leg.get("symbol") or "").strip()
-            ]
+            fallback_symbols = [str(leg.get("symbol") or "").upper() for leg in base_legs if str(leg.get("symbol") or "").strip()]
             fallback_symbols.extend(str(symbol or "").upper() for symbol in allowed_symbols if str(symbol or "").strip())
             fallback_symbols.extend(
                 str(symbol or "").upper()
@@ -3161,9 +3728,6 @@ def _one_h10_provider_legs(
         available = float(provider_allocation["available_margin_usd"] or 0.0)
         provider_cap = min(available, starting_value_usd * (available / total_available))
         ranked = list(provider_allocation.get("ranked") or [])
-        score_total = sum(max(float(candidate.score or 0.0), 0.0) for candidate in ranked)
-        if score_total <= 0:
-            score_total = float(len(ranked) or 1)
         markets = list(provider_allocation.get("markets") or [])
         market_by_id = {int(market.id): market for market in markets if isinstance(market, LeveragedMarket) and market.id is not None}
         market_by_venue_symbol = {
@@ -3185,14 +3749,11 @@ def _one_h10_provider_legs(
             "scanner_diagnostics": provider_allocation.get("scanner_diagnostics", {}),
             "legs": [],
         }
+        accepted_rows: list[dict[str, object]] = []
         for candidate in ranked:
             candidate_symbol = str(candidate.symbol or selection.symbol).upper()
             template_leg = next(
-                (
-                    dict(item)
-                    for item in base_legs
-                    if str(item.get("symbol") or "").upper() == candidate_symbol
-                ),
+                (dict(item) for item in base_legs if str(item.get("symbol") or "").upper() == candidate_symbol),
                 dict(base_legs[0] if base_legs else {}),
             )
             leg = dict(template_leg)
@@ -3213,9 +3774,8 @@ def _one_h10_provider_legs(
                 if len(symbol_matches) == 1:
                     market = symbol_matches[0]
             if market is None:
-                bootstrap_fallback = (
-                    str(candidate.source or "") == "one_h10_bootstrap_fallback"
-                    and bool(current_app.config.get("ONE_H10_BOOTSTRAP_LIVE_ENABLED", True))
+                bootstrap_fallback = str(candidate.source or "") == "one_h10_bootstrap_fallback" and bool(
+                    current_app.config.get("ONE_H10_BOOTSTRAP_LIVE_ENABLED", True)
                 )
                 if not bootstrap_fallback:
                     provider_history["legs"].append(
@@ -3246,21 +3806,13 @@ def _one_h10_provider_legs(
             symbol = str(getattr(market, "symbol", leg_symbol) or leg_symbol).upper()
             venue_symbol = str(getattr(market, "venue_symbol", venue_symbol) or venue_symbol or symbol).strip()
             market_status = getattr(market, "status", "fallback_configured") if market is not None else "fallback_configured"
-            weight = max(float(candidate.score or 0.0), 0.0) / score_total if score_total > 0 else 0.0
-            if weight <= 0:
-                weight = 1.0 / max(len(ranked), 1)
-            allocation_cap = provider_cap * weight
-            if allocation_cap <= 0:
-                continue
-            params = dict(leg.get("parameters") or selection.parameters)
-            provider_context = provider_feature_context(provider)
             forecast = {}
             if forecast_service is not None:
                 forecast = forecast_service.forecast(
                     candidate_features,
                     provider=provider,
                     symbol=symbol,
-                    allocation_cap_usd=allocation_cap,
+                    allocation_cap_usd=provider_cap,
                     available_margin_usd=available,
                     market=market,
                 )
@@ -3296,6 +3848,91 @@ def _one_h10_provider_legs(
                     }
                 )
                 continue
+            allocation_score = _one_h10_float(forecast.get("allocation_score") if isinstance(forecast, dict) else 0.0)
+            if allocation_score <= 0:
+                allocation_score = _one_h10_float(forecast.get("profitability_score") if isinstance(forecast, dict) else 0.0)
+            if allocation_score <= 0:
+                allocation_score = _one_h10_float(candidate_features.get("allocation_score"))
+            if allocation_score <= 0:
+                allocation_score = _one_h10_float(candidate.score)
+            accepted_rows.append(
+                {
+                    "candidate": candidate,
+                    "leg": leg,
+                    "symbol": symbol,
+                    "venue_symbol": venue_symbol,
+                    "market": market,
+                    "market_status": market_status,
+                    "candidate_features": candidate_features,
+                    "forecast": forecast,
+                    "allocation_score": allocation_score,
+                }
+            )
+
+        allocation_score_total = sum(max(_one_h10_float(row.get("allocation_score")), 0.0) for row in accepted_rows)
+        if accepted_rows and allocation_score_total <= 0:
+            allocation_score_total = float(len(accepted_rows))
+
+        for row in accepted_rows:
+            candidate = row["candidate"]
+            leg = dict(row["leg"] if isinstance(row.get("leg"), dict) else {})
+            symbol = str(row.get("symbol") or selection.symbol).upper()
+            venue_symbol = str(row.get("venue_symbol") or symbol)
+            market = row.get("market")
+            market_status = str(row.get("market_status") or "fallback_configured")
+            candidate_features = dict(row.get("candidate_features") or {})
+            allocation_score = max(_one_h10_float(row.get("allocation_score")), 0.0)
+            weight = allocation_score / allocation_score_total if allocation_score_total > 0 else 0.0
+            if weight <= 0:
+                weight = 1.0 / max(len(accepted_rows), 1)
+            allocation_cap = provider_cap * weight
+            if allocation_cap <= 0:
+                continue
+            forecast = dict(row.get("forecast") or {})
+            if forecast_service is not None:
+                forecast = forecast_service.forecast(
+                    candidate_features,
+                    provider=provider,
+                    symbol=symbol,
+                    allocation_cap_usd=allocation_cap,
+                    available_margin_usd=available,
+                    market=market if isinstance(market, LeveragedMarket) else None,
+                )
+                candidate_features["one_h10_forecast"] = forecast
+            live_blockers = _one_h10_forecast_live_blockers(forecast)
+            if live_blockers:
+                reason = "one_h10_forecast_blocked:" + ",".join(live_blockers)
+                provider_history["legs"].append(
+                    {
+                        "symbol": symbol,
+                        "app_symbol": symbol,
+                        "venue_symbol": venue_symbol,
+                        "provider_symbol": venue_symbol,
+                        "allocation_cap_usd": 0.0,
+                        "strategy_name": leg.get("strategy_name") or selection.strategy_name,
+                        "market_id": getattr(market, "id", None),
+                        "market_status": market_status,
+                        "scanner_score": getattr(candidate, "score", 0.0),
+                        "scanner_source": getattr(candidate, "source", ""),
+                        "allocation_score": allocation_score,
+                        "score_breakdown": getattr(candidate, "score_breakdown", {}) or {},
+                        "forecast": forecast,
+                        "skip_reason": reason,
+                    }
+                )
+                blockers.append(
+                    {
+                        "provider": provider,
+                        "trading_connection_id": connection_id,
+                        "symbol": symbol,
+                        "venue_symbol": venue_symbol,
+                        "reason": reason,
+                        "forecast_blockers": live_blockers,
+                    }
+                )
+                continue
+            params = dict(leg.get("parameters") or selection.parameters)
+            provider_context = provider_feature_context(provider)
             params.update(
                 {
                     **provider_context,
@@ -3325,6 +3962,8 @@ def _one_h10_provider_legs(
                     "one_h10_all_pairs": True,
                     "one_h10_scanner_score": candidate.score,
                     "one_h10_scanner_source": candidate.source,
+                    "one_h10_allocation_score": allocation_score,
+                    "one_h10_allocation_method": "net_expectancy",
                     "scanner_score_breakdown": candidate.score_breakdown or {},
                     "scanner_features": candidate_features,
                     "one_h10_forecast": forecast,
@@ -3339,6 +3978,11 @@ def _one_h10_provider_legs(
                     "forecast_suggested_order_type": forecast.get("suggested_order_type") if isinstance(forecast, dict) else None,
                     "forecast_suggested_stop_loss_pct": forecast.get("suggested_stop_loss_pct") if isinstance(forecast, dict) else None,
                     "forecast_suggested_take_profit_pct": forecast.get("suggested_take_profit_pct") if isinstance(forecast, dict) else None,
+                    "forecast_profitability_score": forecast.get("profitability_score") if isinstance(forecast, dict) else None,
+                    "forecast_allocation_score": forecast.get("allocation_score") if isinstance(forecast, dict) else None,
+                    "forecast_execution_adjusted_net_return_bps": forecast.get("execution_adjusted_net_return_bps")
+                    if isinstance(forecast, dict)
+                    else None,
                     "liquidity_usd": candidate_features.get("liquidity_usd", getattr(market, "liquidity_usd", 0.0)),
                     "spread_bps": candidate_features.get("spread_bps", getattr(market, "spread_bps", 0.0)),
                     "funding_rate": candidate_features.get("funding_rate", getattr(market, "funding_rate", 0.0)),
@@ -3359,11 +4003,10 @@ def _one_h10_provider_legs(
                     "allocation_weight": allocation_cap / max(starting_value_usd, 1.0),
                     "parameters": params,
                     "market_id": getattr(market, "id", None),
-                    "venue_symbol": venue_symbol,
-                    "app_symbol": symbol,
                     "market_status": market_status,
                     "scanner_score": candidate.score,
                     "scanner_source": candidate.source,
+                    "allocation_score": allocation_score,
                     "forecast": forecast,
                 }
             )
@@ -3381,6 +4024,8 @@ def _one_h10_provider_legs(
                     "market_status": market_status,
                     "scanner_score": candidate.score,
                     "scanner_source": candidate.source,
+                    "allocation_score": allocation_score,
+                    "allocation_method": "net_expectancy",
                     "score_breakdown": candidate.score_breakdown or {},
                     "forecast": forecast,
                 }
@@ -3454,8 +4099,8 @@ def _connection_health_backoff_active(health: dict[str, object], backoff_seconds
     except ValueError:
         return False
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    age_seconds = (datetime.now(timezone.utc) - parsed).total_seconds()
+        parsed = parsed.replace(tzinfo=UTC)
+    age_seconds = (datetime.now(UTC) - parsed).total_seconds()
     return age_seconds < backoff_seconds
 
 
@@ -3612,11 +4257,7 @@ def _sync_completed_cycles(user) -> None:
         db.session.rollback()
         current_app.logger.warning("Deferred Vault Cycle engine settlement: %s", exc)
     cycles = VaultCycle.query.filter_by(user_id=user.id).filter(VaultCycle.status == "active", VaultCycle.unlocks_at <= now).all()
-    cycles = [
-        cycle
-        for cycle in cycles
-        if not get_service("vault_cycle_settlement").is_vault_cycle_engine_cycle(cycle)
-    ]
+    cycles = [cycle for cycle in cycles if not get_service("vault_cycle_settlement").is_vault_cycle_engine_cycle(cycle)]
     if not cycles:
         return
     manager = get_service("strategy_manager")
@@ -3654,9 +4295,7 @@ def _sync_completed_cycles(user) -> None:
         _refresh_cycle_performance(cycle)
         settlement_price = _asset_usd_price(cycle.settlement_asset)
         cycle.final_settlement_amount = (
-            cycle.current_estimated_value_usd / settlement_price
-            if settlement_price > 0
-            else cycle.deposit_amount
+            cycle.current_estimated_value_usd / settlement_price if settlement_price > 0 else cycle.deposit_amount
         )
         settlement_balance.available_balance = float(settlement_balance.available_balance or 0.0) + cycle.final_settlement_amount
         if settlement_price > 0:
@@ -3693,29 +4332,29 @@ def _selected_network(asset: str) -> str:
 
 
 def _asset_networks(asset: str) -> tuple[str, ...]:
-    configured = tuple(get_service("wallet_address_service").configured_networks(asset))
-    networks = tuple(dict.fromkeys((*ASSET_NETWORKS.get(asset, ("native",)), *configured)))
-    functional = tuple(network for network in networks if _functional_wallet_network(asset, network))
-    return functional or ASSET_NETWORKS.get(asset, ("native",))
+    return vault_asset_networks(asset, _configured_asset_networks(asset))
 
 
 def _functional_wallet_network(asset: str, network: str) -> bool:
-    asset_key = asset.upper().strip()
-    network_key = "".join(ch for ch in str(network or "").upper() if ch.isalnum())
-    if asset_key in {"ETH", "USDC", "USDT"}:
-        return network_key in {"ETHEREUM", "ARBITRUM", "OPTIMISM", "BASE", "POLYGON", "AVALANCHE", "BSC"}
-    if asset_key == "BTC":
-        return network_key == "BITCOIN"
-    if asset_key == "SOL":
-        return network_key == "SOLANA"
-    if asset_key == "XRP":
-        return network_key == "XRPLEDGER"
-    return False
+    return functional_wallet_network(asset, network)
 
 
 def _wallet_assets() -> tuple[str, ...]:
-    configured = tuple(get_service("wallet_address_service").configured_assets())
-    return tuple(dict.fromkeys((*SUPPORTED_WALLET_ASSETS, *configured)))
+    return supported_vault_allocation_assets(_configured_wallet_assets())
+
+
+def _configured_wallet_assets() -> tuple[str, ...]:
+    try:
+        return tuple(get_service("wallet_address_service").configured_assets())
+    except Exception:  # noqa: BLE001
+        return ()
+
+
+def _configured_asset_networks(asset: str) -> tuple[str, ...]:
+    try:
+        return tuple(get_service("wallet_address_service").configured_networks(asset))
+    except Exception:  # noqa: BLE001
+        return ()
 
 
 def _is_supported_wallet_asset(asset: str) -> bool:
@@ -3748,11 +4387,7 @@ def _new_deposit_address(
     network: str,
     rotated_from: DepositAddress | None = None,
 ) -> DepositAddress | None:
-    latest = (
-        DepositAddress.query.filter_by(user_id=user_id, asset=asset, network=network)
-        .order_by(DepositAddress.version.desc())
-        .first()
-    )
+    latest = DepositAddress.query.filter_by(user_id=user_id, asset=asset, network=network).order_by(DepositAddress.version.desc()).first()
     version = (latest.version if latest is not None else 0) + 1
     try:
         configured_address = generate_deposit_address(asset, user_id, network, force_new=rotated_from is not None)
@@ -3825,19 +4460,18 @@ def _deactivate_wallet_address_for_deposit(deposit_address: DepositAddress) -> N
     if wallet_address is not None:
         wallet_address.status = "inactive"
 
+
 def _asset_usd_price(asset: str) -> float:
-    asset = asset.upper()
-    if asset in {"USDC", "USDT"}:
-        return 1.0
-    try:
-        price = float(get_service("market_data").get_mid_price(asset, market_mode_for(get_current_mode())))
-    except Exception:  # noqa: BLE001
-        return 0.0
-    return price if price > 0 else 0.0
+    return shared_asset_usd_price(
+        asset,
+        lambda asset_key: float(get_service("market_data").get_mid_price(asset_key, market_mode_for(get_current_mode())) or 0.0),
+    )
 
 
 def _requested_duration_seconds() -> int:
     value = str(_request_value("lock_duration", "24"))
+    if value.strip().lower() in {"1", "1h10", "one_h10"}:
+        return _one_h10_horizon_seconds()
     if value == "custom":
         raw_value = _request_value("custom_duration_value", "") or _request_value("custom_duration_hours", "24")
         unit = str(_request_value("custom_duration_unit", "hours"))
@@ -3897,8 +4531,7 @@ def _refresh_cycle_performance(cycle: VaultCycle) -> dict[str, float | bool]:
     performance = _cycle_performance(cycle)
     if _cycle_live_data_backoff_active(cycle):
         cycle.current_estimated_value_usd = max(
-            float(cycle.current_estimated_value_usd or 0.0)
-            or float(cycle.starting_value_usd or 0.0) + float(performance["total_pnl"]),
+            float(cycle.current_estimated_value_usd or 0.0) or float(cycle.starting_value_usd or 0.0) + float(performance["total_pnl"]),
             0.0,
         )
     else:
@@ -4061,8 +4694,7 @@ def _cycle_realized_totals(cycle_orders: list[Order]) -> tuple[float, dict[int, 
     symbol_totals: dict[str, float] = {}
     for order in cycle_orders:
         order_pnl = sum(
-            float(fill.pnl or 0.0) - float(fill.fee or 0.0) - float(getattr(fill, "funding_fee", 0.0) or 0.0)
-            for fill in order.fills
+            float(fill.pnl or 0.0) - float(fill.fee or 0.0) - float(getattr(fill, "funding_fee", 0.0) or 0.0) for fill in order.fills
         )
         realized += order_pnl
         leg_id = _order_vault_leg_id(order)
@@ -4274,11 +4906,7 @@ def _cycle_orders(cycle: VaultCycle) -> list[Order]:
     if cycle.execution_mode:
         query = query.filter_by(mode=cycle.execution_mode)
     query = query.filter(or_(Order.vault_cycle_id == cycle.id, Order.vault_cycle_id.is_(None)))
-    return [
-        order
-        for order in query.order_by(Order.created_at.asc()).all()
-        if _order_vault_cycle_id(order) == cycle.id
-    ]
+    return [order for order in query.order_by(Order.created_at.asc()).all() if _order_vault_cycle_id(order) == cycle.id]
 
 
 def _order_vault_cycle_id(order: Order) -> int | None:
@@ -4308,9 +4936,7 @@ def _cycle_summary(cycle: VaultCycle, *, performance: dict[str, float | bool] | 
     fills = [fill for order in orders for fill in order.fills]
     fees = sum(float(fill.fee or 0.0) + float(getattr(fill, "funding_fee", 0.0) or 0.0) for fill in fills)
     slippage_values = [
-        float(order.details.get("slippage_bps", 0.0) or 0.0)
-        for order in orders
-        if order.details.get("slippage_bps") is not None
+        float(order.details.get("slippage_bps", 0.0) or 0.0) for order in orders if order.details.get("slippage_bps") is not None
     ]
     legs = [_leg_summary(leg) for leg in cycle.allocation_legs]
     leverages = [float(leg.get("leverage", 1.0) or 1.0) for leg in legs]
@@ -4338,13 +4964,12 @@ def _cycle_summary(cycle: VaultCycle, *, performance: dict[str, float | bool] | 
     ml_readiness = _cycle_effective_ml_readiness(cycle)
     blocker_categories = _cycle_blocker_categories(cycle, orders)
     ranked_candidates = _cycle_ranked_candidates(cycle)
-    rejected_intents = [
-        order
-        for order in order_summaries
-        if str(order.get("status") or "").lower() in {"rejected", "failed"}
-    ]
+    rejected_intents = [order for order in order_summaries if str(order.get("status") or "").lower() in {"rejected", "failed"}]
     repairable_no_order = _cycle_repairable_no_order(cycle, orders)
     runtime_notice = _cycle_one_h10_runtime_notice(cycle)
+    trade_decision_legs = _cycle_trade_decision_legs(cycle, order_summaries, legs)
+    trade_decision = _cycle_trade_decision(cycle, order_summaries, trade_decision_legs, runtime_notice)
+    worker_status = _cycle_worker_status(cycle, trade_decision_legs)
     raw_no_order_reason = cycle.selection_metadata.get("no_order_failure_reason") or cycle.validation_failure_reason
     no_order_failure_reason = _sanitize_cycle_reason(raw_no_order_reason) if repairable_no_order else None
     summary = {
@@ -4354,6 +4979,10 @@ def _cycle_summary(cycle: VaultCycle, *, performance: dict[str, float | bool] | 
         "no_order_failure_reason": no_order_failure_reason,
         "repairable_no_order": repairable_no_order,
         "runtime_notice": runtime_notice,
+        "trade_decision": trade_decision,
+        "trade_decision_legs": trade_decision_legs,
+        "worker": worker_status,
+        "live_order_path": worker_status["live_order_path"],
         "deposit_asset": cycle.deposit_asset,
         "deposit_amount": float(cycle.deposit_amount or 0.0),
         "settlement_asset": cycle.settlement_asset,
@@ -4384,11 +5013,13 @@ def _cycle_summary(cycle: VaultCycle, *, performance: dict[str, float | bool] | 
         "avg_leverage": sum(leverages) / len(leverages),
         "risk_reward": (sum(reward_risks) / len(reward_risks)) if reward_risks else 0.0,
         "drawdown": float(cycle.selection_metadata.get("max_drawdown", 0.0) or 0.0),
-        "slippage_bps": (sum(slippage_values) / len(slippage_values)) if slippage_values else float(
-            cycle.selection_metadata.get("estimated_slippage_bps", 0.0) or 0.0
-        ),
+        "slippage_bps": (sum(slippage_values) / len(slippage_values))
+        if slippage_values
+        else float(cycle.selection_metadata.get("estimated_slippage_bps", 0.0) or 0.0),
         "execution_styles": sorted({str(leg.get("execution_style") or "") for leg in legs if leg.get("execution_style")}),
-        "provider_allocation_history": cycle.selection_metadata.get("provider_allocation_history", cycle.selection_metadata.get("exchange_allocation_history", [])),
+        "provider_allocation_history": cycle.selection_metadata.get(
+            "provider_allocation_history", cycle.selection_metadata.get("exchange_allocation_history", [])
+        ),
         "exchange_allocation_history": cycle.selection_metadata.get("exchange_allocation_history", []),
         "provider_skip_reasons": cycle.selection_metadata.get("provider_skip_reasons", []),
         "market_discovery": cycle.selection_metadata.get("market_discovery", []),
@@ -4402,7 +5033,9 @@ def _cycle_summary(cycle: VaultCycle, *, performance: dict[str, float | bool] | 
         "ranked_candidates": ranked_candidates,
         "skipped_symbols": _cycle_skipped_symbols(cycle),
         "rejected_intents": rejected_intents,
-        "submitted_order_count": sum(1 for order in order_summaries if str(order.get("status") or "").lower() in {"submitted", "open", "filled"}),
+        "submitted_order_count": sum(
+            1 for order in order_summaries if str(order.get("status") or "").lower() in {"submitted", "open", "filled"}
+        ),
         "failed_order_count": sum(1 for order in order_summaries if str(order.get("status") or "").lower() == "failed"),
         "rejected_order_count": sum(1 for order in order_summaries if str(order.get("status") or "").lower() == "rejected"),
         "orders": order_summaries,
@@ -4422,7 +5055,9 @@ def _cycle_summary(cycle: VaultCycle, *, performance: dict[str, float | bool] | 
 
 def _cycle_ranked_candidates(cycle: VaultCycle) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
-    for provider in cycle.selection_metadata.get("provider_allocation_history", cycle.selection_metadata.get("exchange_allocation_history", [])) or []:
+    for provider in (
+        cycle.selection_metadata.get("provider_allocation_history", cycle.selection_metadata.get("exchange_allocation_history", [])) or []
+    ):
         if not isinstance(provider, dict):
             continue
         for leg in provider.get("legs", []) or []:
@@ -4523,6 +5158,224 @@ def _cycle_repairable_no_order(cycle: VaultCycle, orders: list[Order]) -> bool:
     return status in {"complete", "failed"} or substatus in {"limited", "failed_no_execution", "error"}
 
 
+def _cycle_worker_status(cycle: VaultCycle, leg_decisions: list[dict[str, object]]) -> dict[str, object]:
+    statuses = [str(leg.strategy_run.status or "").lower() for leg in cycle.allocation_legs if leg.strategy_run is not None]
+    queued_count = sum(1 for status in statuses if status == "queued")
+    starting_count = sum(1 for status in statuses if status == "starting")
+    running_count = sum(1 for status in statuses if status == "running")
+    decision_queued_count = sum(1 for row in leg_decisions if row.get("stage") == "queued_for_worker")
+    in_process = in_process_workers_enabled(current_app.config)
+    queue = "in_process" if in_process else "dedicated_worker"
+    return {
+        "worker_mode": str(current_app.config.get("WORKER_MODE", "web") or "web"),
+        "worker_process_configured": bool(current_app.config.get("WORKER_PROCESS_CONFIGURED", False)),
+        "in_process_workers_enabled": bool(in_process),
+        "strategy_run_queue": queue,
+        "strategy_run_count": len(statuses),
+        "queued_run_count": max(queued_count, decision_queued_count),
+        "starting_run_count": starting_count,
+        "running_run_count": running_count,
+        "live_order_path": "VaultCycle -> StrategyRun -> Worker -> RiskEngine -> OrderManager",
+    }
+
+
+def _cycle_trade_decision(
+    cycle: VaultCycle,
+    order_summaries: list[dict[str, object]],
+    leg_decisions: list[dict[str, object]],
+    runtime_notice: dict[str, object] | None = None,
+) -> dict[str, object]:
+    if str(cycle.algorithm_profile or "").upper() != "1H10":
+        return {
+            "stage": "not_applicable",
+            "label": "Standard cycle",
+            "mode": cycle.execution_mode,
+            "status": str(cycle.status or ""),
+            "message": "Trade decision diagnostics are available for 1H10 cycles.",
+        }
+    runtime_notice = runtime_notice or {}
+    stages = [str(row.get("stage") or "") for row in leg_decisions]
+    submitted = [row for row in order_summaries if str(row.get("status") or "").lower() in {"submitted", "open", "filled"}]
+    failed = [row for row in order_summaries if str(row.get("status") or "").lower() == "failed"]
+    rejected = [row for row in order_summaries if str(row.get("status") or "").lower() == "rejected"]
+    if submitted:
+        stage = "placed"
+    elif failed:
+        stage = "failed"
+    elif rejected or "blocked" in stages:
+        stage = "blocked"
+    elif "signal_generated" in stages:
+        stage = "signal_generated"
+    elif "skipped" in stages:
+        stage = "skipped"
+    elif "queued_for_worker" in stages:
+        stage = "queued_for_worker"
+    elif "waiting_for_signal" in stages:
+        stage = "waiting_for_signal"
+    elif runtime_notice:
+        stage = "blocked"
+    else:
+        stage = "pending"
+
+    reason = ""
+    for row in [*leg_decisions, *order_summaries]:
+        reason = str(row.get("reason") or row.get("risk_rejection_reason") or row.get("last_signal_reason") or "").strip()
+        if reason:
+            break
+    if not reason and runtime_notice:
+        reason = str(runtime_notice.get("message") or runtime_notice.get("blocker_category") or "")
+    reason = _sanitize_cycle_reason(reason)
+    labels = {
+        "placed": "Order placed",
+        "failed": "Order failed",
+        "blocked": "Blocked by gate",
+        "signal_generated": "Signal generated",
+        "skipped": "Signal skipped",
+        "queued_for_worker": "Queued for worker",
+        "waiting_for_signal": "Waiting for signal",
+        "pending": "Collecting data",
+    }
+    messages = {
+        "placed": "At least one 1H10 order reached the broker submission path.",
+        "failed": "A 1H10 order failed and live trading remains blocked until review.",
+        "blocked": "A server-side risk, readiness, forecast, or market-data gate blocked order placement.",
+        "signal_generated": "A directional signal exists and is awaiting server-side order/risk handling.",
+        "skipped": "The latest 1H10 signal resolved to no trade.",
+        "queued_for_worker": "The run is queued for the dedicated strategy worker; no signal can place an order until the worker starts it.",
+        "waiting_for_signal": "The strategy worker is active and waiting for an actionable 1H10 signal.",
+        "pending": "The cycle has not reached an order decision yet.",
+    }
+    return {
+        "stage": stage,
+        "label": labels.get(stage, "Trade decision"),
+        "mode": cycle.execution_mode,
+        "status": "success" if stage == "placed" else "error" if stage == "failed" else "blocked" if stage == "blocked" else "pending",
+        "message": messages.get(stage, ""),
+        "reason": reason,
+        "order_count": len(order_summaries),
+        "submitted_order_count": len(submitted),
+        "rejected_order_count": len(rejected),
+        "failed_order_count": len(failed),
+        "leg_count": len(leg_decisions),
+        "queued_run_count": sum(1 for row in leg_decisions if row.get("stage") == "queued_for_worker"),
+        "signal_count": sum(1 for row in leg_decisions if row.get("has_signal")),
+        "broker_order_submitted": bool(submitted),
+        "runtime_notice": runtime_notice,
+    }
+
+
+def _cycle_trade_decision_legs(
+    cycle: VaultCycle,
+    order_summaries: list[dict[str, object]],
+    legs: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    if str(cycle.algorithm_profile or "").upper() != "1H10":
+        return []
+    rows: list[dict[str, object]] = []
+    for leg in legs:
+        orders = _orders_for_trade_decision_leg(leg, order_summaries)
+        order_statuses = [str(order.get("status") or "").lower() for order in orders]
+        signal = leg.get("last_signal") if isinstance(leg.get("last_signal"), dict) else {}
+        signal_action = str(leg.get("last_signal_action") or signal.get("action") or "").lower()
+        signal_metadata = signal.get("metadata") if isinstance(signal.get("metadata"), dict) else {}
+        explicit_stage = str(signal_metadata.get("trade_decision_stage") or "").strip()
+        run_status = str(leg.get("run_status") or leg.get("strategy_run_status") or "").lower()
+        if not run_status and leg.get("strategy_run_id"):
+            run = db.session.get(StrategyRun, int(leg["strategy_run_id"]))
+            run_status = str(run.status or "").lower() if run else ""
+        runtime_backoff = leg.get("runtime_backoff") if isinstance(leg.get("runtime_backoff"), dict) else {}
+        forecast_blockers = [str(item) for item in (leg.get("forecast_blockers") or []) if str(item)]
+        if any(status in {"submitted", "open", "filled"} for status in order_statuses):
+            stage = "placed"
+            reason = ""
+        elif "failed" in order_statuses:
+            stage = "failed"
+            reason = _first_order_reason(orders)
+        elif "rejected" in order_statuses:
+            stage = "blocked"
+            reason = _first_order_reason(orders)
+        elif explicit_stage in {"queued_for_worker", "waiting_for_signal", "signal_generated", "skipped", "blocked", "failed"}:
+            stage = explicit_stage
+            reason = str(signal_metadata.get("no_trade_reason") or leg.get("last_signal_reason") or "")
+        elif runtime_backoff:
+            stage = "blocked"
+            reason = runtime_backoff.get("message") or runtime_backoff.get("blocker_category") or "market_data_backoff"
+        elif run_status == "queued":
+            stage = "queued_for_worker"
+            reason = "strategy_worker_pending"
+        elif run_status == "error":
+            stage = "failed"
+            reason = str(leg.get("last_signal_reason") or "strategy_run_error")
+        elif signal_action in {"buy", "sell", "reduce"}:
+            stage = "signal_generated"
+            reason = str(signal.get("rationale") or "")
+        elif signal_action == "hold" and (signal_metadata.get("no_trade_reason") or leg.get("last_signal_reason")):
+            stage = "skipped"
+            reason = str(signal_metadata.get("no_trade_reason") or leg.get("last_signal_reason") or "")
+        elif forecast_blockers:
+            stage = "blocked"
+            reason = ",".join(forecast_blockers)
+        elif run_status in {"running", "starting"}:
+            stage = "waiting_for_signal"
+            reason = ""
+        else:
+            stage = "pending"
+            reason = ""
+        rows.append(
+            {
+                "stage": stage,
+                "status": "success"
+                if stage == "placed"
+                else "error"
+                if stage == "failed"
+                else "blocked"
+                if stage == "blocked"
+                else "pending",
+                "reason": _sanitize_cycle_reason(reason),
+                "symbol": leg.get("symbol"),
+                "provider": leg.get("provider"),
+                "strategy_run_id": leg.get("strategy_run_id"),
+                "strategy_name": leg.get("strategy_name"),
+                "timeframe": leg.get("timeframe"),
+                "run_status": run_status,
+                "has_signal": bool(signal_action),
+                "signal_action": signal_action or "pending",
+                "forecast_blockers": forecast_blockers,
+                "order_count": len(orders),
+                "order_statuses": list(dict.fromkeys(order_statuses)),
+            }
+        )
+    return rows
+
+
+def _orders_for_trade_decision_leg(leg: dict[str, object], orders: list[dict[str, object]]) -> list[dict[str, object]]:
+    leg_id = leg.get("id")
+    strategy_run_id = leg.get("strategy_run_id")
+    symbol = str(leg.get("symbol") or "").upper()
+    provider = str(leg.get("provider") or "").lower()
+    matched = []
+    for order in orders:
+        if leg_id and order.get("vault_leg_id") == leg_id:
+            matched.append(order)
+            continue
+        if strategy_run_id and order.get("strategy_run_id") == strategy_run_id:
+            matched.append(order)
+            continue
+        order_symbol = str(order.get("symbol") or "").upper()
+        order_provider = str(order.get("provider") or "").lower()
+        if symbol and order_symbol == symbol and (not provider or not order_provider or provider == order_provider):
+            matched.append(order)
+    return matched
+
+
+def _first_order_reason(orders: list[dict[str, object]]) -> str:
+    for order in orders:
+        reason = str(order.get("risk_rejection_reason") or order.get("exchange_error") or "").strip()
+        if reason:
+            return reason
+    return ""
+
+
 def _cycle_one_h10_runtime_notice(cycle: VaultCycle) -> dict[str, object]:
     if str(cycle.algorithm_profile or "").upper() != "1H10":
         return {}
@@ -4539,12 +5392,16 @@ def _cycle_one_h10_runtime_notice(cycle: VaultCycle) -> dict[str, object]:
     error = cycle.selection_metadata.get("one_h10_market_data_error")
     if not blocker and not error:
         return {}
-    return {
-        "kind": "market_data_backoff",
-        "message": _sanitize_cycle_reason(error or blocker),
-        "blocker_category": blocker or _blocker_category(error),
-        "retry_after": backoff_until,
-    } if not _runtime_notice_expired({"retry_after": backoff_until}) else {}
+    return (
+        {
+            "kind": "market_data_backoff",
+            "message": _sanitize_cycle_reason(error or blocker),
+            "blocker_category": blocker or _blocker_category(error),
+            "retry_after": backoff_until,
+        }
+        if not _runtime_notice_expired({"retry_after": backoff_until})
+        else {}
+    )
 
 
 def _runtime_notice_expired(notice: dict[str, object]) -> bool:
@@ -4585,12 +5442,7 @@ def _cycle_feature_diagnostics(cycle: VaultCycle) -> dict[str, object]:
         "features_attempted": sum(int(row.get("features_attempted", 0) or 0) for row in discovery),
         "features_skipped": sum(int(row.get("features_skipped", 0) or 0) for row in discovery),
         "feature_skip_reasons": list(
-            dict.fromkeys(
-                str(reason)
-                for row in discovery
-                for reason in (row.get("feature_skip_reasons", []) or [])
-                if str(reason)
-            )
+            dict.fromkeys(str(reason) for row in discovery for reason in (row.get("feature_skip_reasons", []) or []) if str(reason))
         ),
     }
 
@@ -4600,7 +5452,9 @@ def _cycle_forecast_blockers(cycle: VaultCycle) -> list[str]:
     for leg in cycle.allocation_legs:
         details = leg.details
         blockers.extend(_hard_forecast_blockers(details.get("forecast_blockers", []) or [], cycle))
-    for provider in cycle.selection_metadata.get("provider_allocation_history", cycle.selection_metadata.get("exchange_allocation_history", [])) or []:
+    for provider in (
+        cycle.selection_metadata.get("provider_allocation_history", cycle.selection_metadata.get("exchange_allocation_history", [])) or []
+    ):
         if not isinstance(provider, dict):
             continue
         for leg in provider.get("legs", []) or []:
@@ -4617,7 +5471,9 @@ def _cycle_forecast_advisory_blockers(cycle: VaultCycle) -> list[str]:
         details = leg.details
         blockers.extend(str(item) for item in (details.get("forecast_advisory_blockers", []) or []) if str(item))
         blockers.extend(_advisory_forecast_blockers(details.get("forecast_blockers", []) or [], cycle))
-    for provider in cycle.selection_metadata.get("provider_allocation_history", cycle.selection_metadata.get("exchange_allocation_history", [])) or []:
+    for provider in (
+        cycle.selection_metadata.get("provider_allocation_history", cycle.selection_metadata.get("exchange_allocation_history", [])) or []
+    ):
         if not isinstance(provider, dict):
             continue
         for leg in provider.get("legs", []) or []:
@@ -4650,7 +5506,9 @@ def _one_h10_advisory_blocker_set(cycle: VaultCycle) -> set[str]:
 
 def _cycle_skipped_symbols(cycle: VaultCycle) -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
-    for provider in cycle.selection_metadata.get("provider_allocation_history", cycle.selection_metadata.get("exchange_allocation_history", [])) or []:
+    for provider in (
+        cycle.selection_metadata.get("provider_allocation_history", cycle.selection_metadata.get("exchange_allocation_history", [])) or []
+    ):
         if not isinstance(provider, dict):
             continue
         diagnostics = provider.get("scanner_diagnostics", {}) if isinstance(provider.get("scanner_diagnostics"), dict) else {}
@@ -4732,7 +5590,10 @@ def _blocker_category(reason: object) -> str:
         return ""
     checks = [
         ("rate_limited", ("429", "rate limit", "too many request")),
-        ("provider_market_data_unavailable", ("provider_market_data_unavailable", "provider-specific market data", "market data unavailable")),
+        (
+            "provider_market_data_unavailable",
+            ("provider_market_data_unavailable", "provider-specific market data", "market data unavailable"),
+        ),
         ("provider_unhealthy", ("provider_unhealthy", "blocked live trading", "cannot trade", "unhealthy", "action needed")),
         ("insufficient_margin", ("insufficient_free_margin", "insufficient margin", "insufficient balance", "wallet_balance_insufficient")),
         ("no_active_markets", ("no_active_markets", "no ranked", "no_ranked_markets", "market unavailable")),
@@ -4748,6 +5609,7 @@ def _blocker_category(reason: object) -> str:
         ("missing_stop_take_profit", ("stop loss", "take profit", "missing_exit")),
         ("exchange_rejected", ("exchange rejected", "rejected")),
         ("connector_error", ("connector", "api", "timeout", "network", "failed")),
+        ("worker_pending", ("strategy_worker_pending", "queued for dedicated worker", "worker startup")),
     ]
     for category, markers in checks:
         if any(marker in text for marker in markers):
@@ -4763,10 +5625,7 @@ def _order_summary(order: Order) -> dict[str, object]:
     if average_fill <= 0 and fill_quantity > 0:
         average_fill = weighted_fill / fill_quantity
     fees = sum(float(fill.fee or 0.0) + float(getattr(fill, "funding_fee", 0.0) or 0.0) for fill in fills)
-    realized = sum(
-        float(fill.pnl or 0.0) - float(fill.fee or 0.0) - float(getattr(fill, "funding_fee", 0.0) or 0.0)
-        for fill in fills
-    )
+    realized = sum(float(fill.pnl or 0.0) - float(fill.fee or 0.0) - float(getattr(fill, "funding_fee", 0.0) or 0.0) for fill in fills)
     risk_reward = _risk_reward_ratio(order, average_fill)
     return {
         "id": order.id,
@@ -4791,8 +5650,11 @@ def _order_summary(order: Order) -> dict[str, object]:
         "take_profit": float(order.take_profit or 0.0),
         "risk_reward": risk_reward,
         "risk_rejection_reason": order.details.get("risk_rejection_reason") or order.rejection_reason,
-        "blocker_category": order.details.get("blocker_category") or _blocker_category(order.details.get("risk_rejection_reason") or order.rejection_reason),
-        "ml_policy_authority": (order.details.get("risk_decision", {}).get("details", {}) if isinstance(order.details.get("risk_decision"), dict) else {}).get("ml_policy_authority"),
+        "blocker_category": order.details.get("blocker_category")
+        or _blocker_category(order.details.get("risk_rejection_reason") or order.rejection_reason),
+        "ml_policy_authority": (
+            order.details.get("risk_decision", {}).get("details", {}) if isinstance(order.details.get("risk_decision"), dict) else {}
+        ).get("ml_policy_authority"),
         "ml_policy_decisions": order.details.get("ml_policy_decisions", {}),
         "exchange_error": order.details.get("exchange_error"),
         "exchange_latency_ms": float(order.details.get("exchange_latency_ms", 0.0) or 0.0),
@@ -4842,9 +5704,7 @@ def _leg_summary(leg: VaultAllocationLeg) -> dict[str, object]:
     signal_metadata = last_signal.get("metadata") if isinstance(last_signal.get("metadata"), dict) else {}
     run_status = str(leg.strategy_run.status or "").lower() if leg.strategy_run else ""
     stop = float(
-        forecast.get("suggested_stop_loss_pct")
-        or parameters.get("stop_loss_pct", parameters.get("fallback_stop_loss_pct", 0.0))
-        or 0.0
+        forecast.get("suggested_stop_loss_pct") or parameters.get("stop_loss_pct", parameters.get("fallback_stop_loss_pct", 0.0)) or 0.0
     )
     take = float(
         forecast.get("suggested_take_profit_pct")
@@ -4867,6 +5727,7 @@ def _leg_summary(leg: VaultAllocationLeg) -> dict[str, object]:
         "allocation_cap_usd": float(leg.allocation_cap_usd or 0.0),
         "leverage": leverage,
         "status": leg.status,
+        "run_status": run_status,
         "realized_pnl_usd": float(leg.realized_pnl_usd or 0.0),
         "unrealized_pnl_usd": float(leg.unrealized_pnl_usd or 0.0),
         "stop_loss_pct": stop,

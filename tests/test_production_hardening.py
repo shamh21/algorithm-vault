@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from app import create_app
+from app import _should_load_repo_dotenv, create_app
 from app.auth import password_hash, password_matches
 from app.extensions import db
 from app.models import User
@@ -54,14 +54,37 @@ def test_static_cache_headers_distinguish_assets_from_pwa_control_files(app) -> 
 def test_vercel_static_assets_are_allowlisted_from_committed_static_tree() -> None:
     config = json.loads(Path("vercel.json").read_text(encoding="utf-8"))
     builds = config["builds"]
+    headers = {item["source"]: {header["key"]: header["value"] for header in item["headers"]} for item in config["headers"]}
     rewrites = {item["source"]: item["destination"] for item in config["rewrites"]}
 
     assert {"src": "static/**/*", "use": "@vercel/static"} in builds
     assert not any(str(item["src"]).startswith("public/") for item in builds)
+    assert headers["/static/css/(.*)"]["Cache-Control"] == "public, max-age=31536000, immutable"
+    assert headers["/static/js/app-shell.js"]["Cache-Control"] == "public, max-age=31536000, immutable"
+    assert headers["/static/js/vendor/(.*)"]["Cache-Control"] == "public, max-age=31536000, immutable"
+    assert headers["/static/js/sw.js"]["Cache-Control"] == "public, max-age=0, must-revalidate"
     assert rewrites["/sw.js"] == "/static/js/sw.js"
     assert rewrites["/icons/(.*)"] == "/static/icons/$1"
     assert rewrites["/manifest.json"] == "/static/manifest.json"
     assert all(not destination.startswith("/public/") for destination in rewrites.values())
+
+
+def test_render_blueprint_declares_live_mpc_worker_placeholders() -> None:
+    blueprint = Path("render.yaml").read_text(encoding="utf-8")
+
+    assert "name: algorithm-vault-worker" in blueprint
+    assert "startCommand: python -m app.workers.runner" in blueprint
+    for key in (
+        "WALLET_CUSTODY_MODE",
+        "WALLET_MPC_SIGNER_URL",
+        "WALLET_MPC_SIGNER_TOKEN",
+        "WALLET_SIGNER_ISOLATION_CONFIRMED",
+        "WALLET_SDK_CHECKS_PASSED",
+        "WALLET_DAILY_WITHDRAWAL_LIMIT_BY_ASSET_JSON",
+        "PLATFORM_GAS_TREASURY_ENABLED",
+        "TREASURY_ENCRYPTION_KEY",
+    ):
+        assert f"key: {key}" in blueprint
 
 
 def test_dynamic_auth_responses_are_not_edge_cached(app) -> None:
@@ -100,7 +123,7 @@ def test_intro_loader_replaces_any_in_app_connection_warning_copy(app) -> None:
 
     assert 'class="app-body app-starting' in shell
     assert 'data-component="AlgVaultLaunchAnimation"' in shell
-    assert 'data-intro-loader data-component="AlgVaultLaunchAnimation" aria-hidden="true"' in shell
+    assert 'data-intro-loader data-component="AlgVaultLaunchAnimation" role="status" aria-live="polite" aria-hidden="false"' in shell
     assert "Opening your vault" in shell
     assert "This connection is not private" not in shell
     assert "connection is not private" not in shell.lower()
@@ -187,6 +210,15 @@ def test_database_url_uses_psycopg_driver_for_hosted_postgres(monkeypatch, raw_u
 
         assert normalized == reloaded.BaseConfig.SQLALCHEMY_DATABASE_URI
     importlib.reload(config_module)
+
+
+def test_repo_dotenv_is_skipped_for_vercel_and_production_runtime() -> None:
+    assert _should_load_repo_dotenv({"VERCEL": "1"}, pytest_loaded=False) is False
+    assert _should_load_repo_dotenv({"DEPLOYMENT_TARGET": "vercel"}, pytest_loaded=False) is False
+    assert _should_load_repo_dotenv({"DEPLOYMENT_TARGET": "production"}, pytest_loaded=False) is False
+    assert _should_load_repo_dotenv({"APP_ENV": "production"}, pytest_loaded=False) is False
+    assert _should_load_repo_dotenv({"FLASK_RUN_FROM_CLI": "true"}, pytest_loaded=False) is False
+    assert _should_load_repo_dotenv({}, pytest_loaded=False) is True
 
 
 def test_vercel_server_entrypoint_exposes_flask_app(monkeypatch) -> None:
@@ -374,7 +406,8 @@ def test_pwa_manifest_has_ios_install_shape(app) -> None:
     }
     assert any("maskable" in icon["purpose"] and icon["sizes"] == "192x192" for icon in payload["icons"])
     assert any("maskable" in icon["purpose"] and icon["sizes"] == "512x512" for icon in payload["icons"])
-    assert {shortcut["short_name"] for shortcut in payload["shortcuts"]} >= {"Wallet", "Vault"}
+    assert {shortcut["short_name"] for shortcut in payload["shortcuts"]} >= {"Wallet", "Convert", "Vault"}
+    assert "/admin/panic/" not in {shortcut["url"] for shortcut in payload["shortcuts"]}
 
 
 def test_ios_pwa_head_tags_target_algvault(app) -> None:
@@ -387,14 +420,15 @@ def test_ios_pwa_head_tags_target_algvault(app) -> None:
     assert '<meta name="color-scheme" content="dark">' in shell
     assert '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">' in shell
     assert '<link rel="apple-touch-icon" href="/icons/algvault-ios-180.png">' in shell
-    assert "data-theme-toggle" in shell
+    assert "data-theme-toggle" not in shell
+    assert "data-theme-toggle" in Path("templates/settings.html").read_text(encoding="utf-8")
     assert '<link rel="manifest" href="/manifest.json">' in shell
 
 
 def test_service_worker_clears_old_algvault_and_tradingbot_caches(app) -> None:
     worker = app.test_client().get("/static/js/sw.js").get_data(as_text=True)
 
-    assert 'const CACHE_VERSION = "algvault-v9-command-center-dark"' in worker
+    assert 'const CACHE_VERSION = "algvault-v21-vault-shell-polish-9"' in worker
     assert 'name.startsWith("algvault-") || name.startsWith("tradingbot-")' in worker
     assert "self.clients.claim()" in worker
     assert "/manifest.json" in worker

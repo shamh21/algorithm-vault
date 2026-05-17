@@ -14,3 +14,9 @@ python-dotenv==1.2.2
 qrcode==8.2
 requests==2.33.1
 websocket-client==1.9.0
+
+# Required when production withdrawals are enabled for BTC, SOL, and XRP.
+bitcoinlib==0.7.8
+solders==0.27.1
+solana==0.36.11
+xrpl-py==4.5.0

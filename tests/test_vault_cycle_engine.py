@@ -470,14 +470,27 @@ def test_vault_start_routes_share_vault_cycle_orchestrator(app) -> None:
         headers={"Accept": "application/json"},
     )
 
+    start_payload = start_response.get_json()
+    duplicate_payload = duplicate_response.get_json()
+    cycles_payload = cycles_response.get_json()
+    cycles_duplicate_payload = cycles_duplicate_response.get_json()
+
     assert start_response.status_code == 201
-    assert start_response.get_json()["code"] == "vault_cycle_started"
+    assert start_payload["code"] == "vault_cycle_started"
+    assert start_payload["cycle_status_url"] == f"/api/vault/cycles/{start_payload['cycle_id']}"
+    assert start_payload["next_status_url"] == start_payload["cycle_status_url"]
+    assert start_payload["strategy_run_queue"] in {"in_process", "dedicated_worker"}
+    assert start_payload["live_order_path"] == "VaultCycle -> StrategyRun -> Worker -> RiskEngine -> OrderManager"
     assert duplicate_response.status_code == 200
-    assert duplicate_response.get_json()["code"] == "vault_cycle_duplicate"
+    assert duplicate_payload["code"] == "vault_cycle_duplicate"
+    assert duplicate_payload["cycle_status_url"] == start_payload["cycle_status_url"]
     assert cycles_response.status_code == 201
-    assert cycles_response.get_json()["code"] == "vault_cycle_started"
+    assert cycles_payload["code"] == "vault_cycle_started"
+    assert cycles_payload["cycle_status_url"] == f"/api/vault/cycles/{cycles_payload['cycle_id']}"
+    assert cycles_payload["live_order_path"] == "VaultCycle -> StrategyRun -> Worker -> RiskEngine -> OrderManager"
     assert cycles_duplicate_response.status_code == 200
-    assert cycles_duplicate_response.get_json()["code"] == "vault_cycle_duplicate"
+    assert cycles_duplicate_payload["code"] == "vault_cycle_duplicate"
+    assert cycles_duplicate_payload["cycle_status_url"] == cycles_payload["cycle_status_url"]
     cycles = VaultCycle.query.filter_by(user_id=user.id, algorithm_profile="VaultCycle").order_by(VaultCycle.id.asc()).all()
     assert len(cycles) == 2
     assert all(cycle.selection_metadata["vault_cycle_engine"] is True for cycle in cycles)

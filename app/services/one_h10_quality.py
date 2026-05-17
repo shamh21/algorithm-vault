@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-ONE_H10_HORIZON_SECONDS = 70 * 60
+ONE_H10_HORIZON_SECONDS = 60 * 60
 
 ONE_H10_HARD_BLOCKERS = frozenset(
     {
@@ -21,6 +21,7 @@ ONE_H10_HARD_BLOCKERS = frozenset(
         "poor_execution_quality",
         "poor_risk_reward",
         "low_liquidity_capacity",
+        "low_profitability_score",
         "stale_market_data",
         "features_stale",
         "missing_fibonacci_features",
@@ -42,6 +43,7 @@ ONE_H10_REASON_CODES = {
     "poor_execution_quality": "HIGH_SLIPPAGE",
     "poor_risk_reward": "POOR_RISK_REWARD",
     "low_liquidity_capacity": "LOW_LIQUIDITY",
+    "low_profitability_score": "BELOW_EDGE_THRESHOLD",
     "stale_market_data": "STALE_MARKET_DATA",
     "features_stale": "STALE_MARKET_DATA",
     "missing_fibonacci_features": "STALE_MARKET_DATA",
@@ -53,6 +55,7 @@ ONE_H10_REASON_CODES = {
 
 def one_h10_quality_thresholds(config: dict[str, Any] | None) -> dict[str, float]:
     payload = config or {}
+    horizon_seconds = max(60.0, _safe_float(payload.get("ONE_H10_HORIZON_SECONDS"), float(ONE_H10_HORIZON_SECONDS)))
     min_edge_default = _safe_float(payload.get("NET_ROI_MIN_EDGE_BPS"), 4.0)
     max_cost_default = _safe_float(payload.get("AGGRESSIVE_1H_MAX_COST_DRAG_BPS"), 18.0)
     min_rr_default = _safe_float(payload.get("MIN_REWARD_RISK"), 1.0)
@@ -71,7 +74,7 @@ def one_h10_quality_thresholds(config: dict[str, Any] | None) -> dict[str, float
         ),
         "max_signal_age_seconds": max(
             0.0,
-            _safe_float(payload.get("ONE_H10_MAX_SIGNAL_AGE_SECONDS"), float(ONE_H10_HORIZON_SECONDS)),
+            _safe_float(payload.get("ONE_H10_MAX_SIGNAL_AGE_SECONDS"), horizon_seconds),
         ),
         "min_execution_quality": max(
             0.0,
@@ -94,6 +97,80 @@ def one_h10_quality_thresholds(config: dict[str, Any] | None) -> dict[str, float
                 _safe_float(payload.get("VAULT_MAX_SLIPPAGE_BPS"), 20.0),
             ),
         ),
+        "min_profitability_score": max(
+            0.0,
+            min(_safe_float(payload.get("ONE_H10_MIN_PROFITABILITY_SCORE"), 0.35), 1.0),
+        ),
+    }
+
+
+def one_h10_profitability_payload(payload: dict[str, Any] | None, config: dict[str, Any] | None = None) -> dict[str, float]:
+    """Return cost-aware profitability and allocation scores for 1H10 candidates."""
+
+    row = payload or {}
+    thresholds = one_h10_quality_thresholds(config)
+    min_edge = max(thresholds["min_edge_after_cost_bps"], 1.0)
+    min_rr = max(thresholds["min_risk_reward"], 1.0)
+
+    net_edge = _safe_float(
+        row.get("execution_adjusted_net_return_bps"),
+        _safe_float(row.get("net_expected_return_bps"), _safe_float(row.get("expected_return_bps"))),
+    )
+    raw_net_edge = _safe_float(row.get("net_expected_return_bps"), _safe_float(row.get("expected_return_bps"), net_edge))
+    execution_quality = _bounded(
+        _safe_float(row.get("expected_execution_quality"), _safe_float(row.get("execution_quality"), 0.0)),
+        0.0,
+        1.0,
+    )
+    risk_reward = _safe_float(row.get("risk_reward"), 0.0)
+    capital_efficiency = _bounded(
+        _safe_float(
+            row.get("capital_efficiency_score"),
+            _safe_float(row.get("capacity_multiple"), 0.0) / 10.0 if row.get("capacity_multiple") is not None else 1.0,
+        ),
+        0.0,
+        1.0,
+    )
+    model_agreement = _bounded(
+        _safe_float(
+            row.get("ml_agreement_score"),
+            _safe_float(row.get("ml_consensus_multiplier"), 1.0),
+        ),
+        0.0,
+        1.0,
+    )
+    target_progress = _bounded(_safe_float(row.get("target_progress"), 0.0), 0.0, 1.0)
+
+    edge_quality = _bounded(max(net_edge, 0.0) / max(min_edge * 8.0, 1.0), 0.0, 1.0)
+    raw_edge_quality = _bounded(max(raw_net_edge, 0.0) / max(min_edge * 8.0, 1.0), 0.0, 1.0)
+    risk_reward_quality = _bounded(risk_reward / max(min_rr * 3.0, 1.0), 0.0, 1.0)
+    profitability_score = _bounded(
+        edge_quality * 0.34
+        + execution_quality * 0.24
+        + risk_reward_quality * 0.16
+        + capital_efficiency * 0.12
+        + model_agreement * 0.08
+        + target_progress * 0.06,
+        0.0,
+        1.0,
+    )
+    allocation_weight = _bounded(
+        0.45 + edge_quality * 0.35 + execution_quality * 0.12 + risk_reward_quality * 0.08,
+        0.0,
+        1.0,
+    )
+    allocation_score = _bounded(profitability_score * allocation_weight * 100.0, 0.0, 100.0)
+    return {
+        "profitability_score": profitability_score,
+        "allocation_score": allocation_score,
+        "profitability_edge_quality": edge_quality,
+        "profitability_raw_edge_quality": raw_edge_quality,
+        "profitability_execution_quality": execution_quality,
+        "profitability_risk_reward_quality": risk_reward_quality,
+        "profitability_liquidity_quality": capital_efficiency,
+        "profitability_model_agreement": model_agreement,
+        "profitability_target_progress": target_progress,
+        "min_profitability_score": thresholds["min_profitability_score"],
     }
 
 
@@ -154,6 +231,13 @@ def one_h10_forecast_live_blockers(
     risk_reward = _forecast_risk_reward(forecast)
     if actionable and thresholds["min_risk_reward"] > 0 and (risk_reward is None or risk_reward < thresholds["min_risk_reward"]):
         blockers.append("poor_risk_reward")
+
+    if bool((config or {}).get("ONE_H10_PROFIT_OPTIMIZER_ENABLED", True)) and actionable:
+        profitability_score = _optional_float(forecast.get("profitability_score"))
+        if profitability_score is None:
+            profitability_score = one_h10_profitability_payload(forecast, config)["profitability_score"]
+        if profitability_score < thresholds["min_profitability_score"]:
+            blockers.append("low_profitability_score")
 
     if _safe_float(forecast.get("suggested_notional_usd"), 0.0) <= 0:
         blockers.append("forecast_zero_sizing")
@@ -221,3 +305,7 @@ def _optional_float(value: Any) -> float | None:
 def _safe_float(value: Any, default: float = 0.0) -> float:
     parsed = _optional_float(value)
     return default if parsed is None else parsed
+
+
+def _bounded(value: float, floor: float, ceiling: float) -> float:
+    return max(floor, min(value, ceiling))

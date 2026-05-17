@@ -15,6 +15,7 @@ from ..ml.online_ranker import extract_features, horizon_from_duration
 from ..models import AuditLog, LeveragedMarket, LeveragedMarketFeature, Setting
 from .market_data import MarketDataService
 from .net_roi import net_roi_diagnostics, net_roi_v2_diagnostics, one_hour_edge_v2_diagnostics
+from .one_h10_quality import one_h10_profitability_payload
 from .tradability import (
     best_bid_ask,
     book_liquidity_usd,
@@ -181,9 +182,7 @@ class MarketScannerService:
         else:
             hot_lookup = {item["symbol"]: item for item in self.hot_tokens(mode=mode, timeframe=timeframe)}
             universe_lookup = {
-                item.symbol: item.as_dict()
-                for item in self.universe_service.liquid_universe(mode, timeframe)
-                if hasattr(item, "as_dict")
+                item.symbol: item.as_dict() for item in self.universe_service.liquid_universe(mode, timeframe) if hasattr(item, "as_dict")
             }
         pair_lookup = self._pair_lookup(
             list(normalized),
@@ -297,16 +296,14 @@ class MarketScannerService:
                 "market_structure": tradability["market_structure_score"] * 1.5,
                 "ml": float(self.config.get("ML_SCORE_WEIGHT", 0.15) or 0.15) * ml_score,
                 "offline_ml": (
-                    float(self.config.get("ML_OFFLINE_SCORE_WEIGHT", 0.15) or 0.15)
-                    * float(offline_payload.get("prediction", 0.0) or 0.0)
+                    float(self.config.get("ML_OFFLINE_SCORE_WEIGHT", 0.15) or 0.15) * float(offline_payload.get("prediction", 0.0) or 0.0)
                     if bool(offline_payload.get("blend_enabled", False)) and offline_payload.get("status") == "promoted"
                     else 0.0
                 ),
                 "volume_persistence": min(high_upside_metrics["volume_impulse_persistence"], 5.0) * 0.45,
                 "sustained_volume": min(high_upside_metrics["sustained_volume_impulse"], 5.0) * 0.35,
                 "volatility_transition": (
-                    high_upside_metrics["volatility_compression"] * 0.35
-                    + min(high_upside_metrics["volatility_expansion"], 5.0) * 0.18
+                    high_upside_metrics["volatility_compression"] * 0.35 + min(high_upside_metrics["volatility_expansion"], 5.0) * 0.18
                 ),
                 "volatility_expansion_after_compression": min(high_upside_metrics["volatility_expansion_after_compression"], 5.0) * 0.18,
                 "breakout_proximity": max(0.0, 1.0 - high_upside_metrics["breakout_proximity_bps"] / 150.0) * 1.1,
@@ -319,20 +316,20 @@ class MarketScannerService:
             }
             upside_screen_score = sum(score_breakdown.values())
             roi_context = {
-                    **features,
-                    **pair_payload,
-                    "score": upside_screen_score,
-                    "edge_score": high_upside_metrics["cost_adjusted_expected_move"],
-                    "expected_move_bps": high_upside_metrics["cost_adjusted_expected_move"] + tradability["cost_drag_bps"],
-                    "cost_drag_bps": tradability["cost_drag_bps"],
-                    "spread_bps": tradability["spread_bps"],
-                    "liquidity_usd": tradability["liquidity_usd"],
-                    "liquidity_capacity_usd": high_upside_metrics["liquidity_capacity"],
-                    "market_structure_score": tradability["market_structure_score"],
-                    "recent_1h_return": high_upside_metrics["momentum_acceleration"],
-                    "offline_ml_prediction": features["offline_ml_prediction"],
-                    "window_stability": high_upside_metrics["depth_stability"],
-                    "volatility_regime": features["volatility_regime"],
+                **features,
+                **pair_payload,
+                "score": upside_screen_score,
+                "edge_score": high_upside_metrics["cost_adjusted_expected_move"],
+                "expected_move_bps": high_upside_metrics["cost_adjusted_expected_move"] + tradability["cost_drag_bps"],
+                "cost_drag_bps": tradability["cost_drag_bps"],
+                "spread_bps": tradability["spread_bps"],
+                "liquidity_usd": tradability["liquidity_usd"],
+                "liquidity_capacity_usd": high_upside_metrics["liquidity_capacity"],
+                "market_structure_score": tradability["market_structure_score"],
+                "recent_1h_return": high_upside_metrics["momentum_acceleration"],
+                "offline_ml_prediction": features["offline_ml_prediction"],
+                "window_stability": high_upside_metrics["depth_stability"],
+                "volatility_regime": features["volatility_regime"],
             }
             roi_payload = net_roi_diagnostics(
                 roi_context,
@@ -373,8 +370,7 @@ class MarketScannerService:
             features["offline_ml_blend_enabled"] = offline_payload.get("blend_enabled", False)
             features["offline_ml_explanation"] = offline_payload
             score_breakdown["offline_ml"] = (
-                float(self.config.get("ML_OFFLINE_SCORE_WEIGHT", 0.15) or 0.15)
-                * float(offline_payload.get("prediction", 0.0) or 0.0)
+                float(self.config.get("ML_OFFLINE_SCORE_WEIGHT", 0.15) or 0.15) * float(offline_payload.get("prediction", 0.0) or 0.0)
                 if bool(offline_payload.get("blend_enabled", False)) and offline_payload.get("status") == "promoted"
                 else 0.0
             )
@@ -475,9 +471,7 @@ class MarketScannerService:
 
         market_ids = [int(market.id) for market in active_markets if getattr(market, "id", None)]
         feature_rows = (
-            LeveragedMarketFeature.query.filter(LeveragedMarketFeature.leveraged_market_id.in_(market_ids)).all()
-            if market_ids
-            else []
+            LeveragedMarketFeature.query.filter(LeveragedMarketFeature.leveraged_market_id.in_(market_ids)).all() if market_ids else []
         )
         features_by_market: dict[int, list[LeveragedMarketFeature]] = {}
         for row in feature_rows:
@@ -485,7 +479,9 @@ class MarketScannerService:
 
         scored: list[ScoredCandidate] = []
         rejected: list[dict[str, Any]] = []
-        min_liquidity = self._float(self.config.get("ONE_H10_MIN_LIQUIDITY_USD"), self._float(self.config.get("VAULT_MIN_LIQUIDITY_USD"), 1_000.0))
+        min_liquidity = self._float(
+            self.config.get("ONE_H10_MIN_LIQUIDITY_USD"), self._float(self.config.get("VAULT_MIN_LIQUIDITY_USD"), 1_000.0)
+        )
         max_spread = self._float(self.config.get("ONE_H10_MAX_SLIPPAGE_BPS"), self._float(self.config.get("VAULT_MAX_SLIPPAGE_BPS"), 20.0))
         for market in active_markets:
             rows = features_by_market.get(int(market.id or 0), [])
@@ -616,13 +612,7 @@ class MarketScannerService:
         imbalance_bps = min(abs(self._float(features.get("order_book_imbalance"))) * 18.0, 18.0)
         volatility_bps = min(max(self._float(features.get("volatility")), self._float(features.get("atr_pct"))) * 10_000.0, 150.0)
         gross_expected = max(
-            trend_bps * 0.35
-            + ema_bps * 0.20
-            + macd_bps * 0.18
-            + fib_bps
-            + volume_bps
-            + imbalance_bps
-            + volatility_bps * 0.12,
+            trend_bps * 0.35 + ema_bps * 0.20 + macd_bps * 0.18 + fib_bps + volume_bps + imbalance_bps + volatility_bps * 0.12,
             0.0,
         )
         implied_cost = cost_drag_bps(
@@ -633,32 +623,66 @@ class MarketScannerService:
         configured_cost = self._float(features.get("cost_drag_bps"), -1.0)
         drag = max(configured_cost, implied_cost) if configured_cost >= 0 else implied_cost
         net_expected = gross_expected - drag
-        min_edge = max(0.0, self._float(self.config.get("ONE_H10_MIN_EDGE_AFTER_COST_BPS"), self._float(self.config.get("NET_ROI_MIN_EDGE_BPS"), 4.0)))
-        max_cost = max(1.0, self._float(self.config.get("ONE_H10_MAX_COST_DRAG_BPS"), self._float(self.config.get("AGGRESSIVE_1H_MAX_COST_DRAG_BPS"), 18.0)))
-        min_liquidity = max(1.0, self._float(self.config.get("ONE_H10_MIN_LIQUIDITY_USD"), self._float(self.config.get("VAULT_MIN_LIQUIDITY_USD"), 1_000.0)))
-        max_spread = max(1.0, self._float(self.config.get("ONE_H10_MAX_SLIPPAGE_BPS"), self._float(self.config.get("VAULT_MAX_SLIPPAGE_BPS"), 20.0)))
+        min_edge = max(
+            0.0, self._float(self.config.get("ONE_H10_MIN_EDGE_AFTER_COST_BPS"), self._float(self.config.get("NET_ROI_MIN_EDGE_BPS"), 4.0))
+        )
+        max_cost = max(
+            1.0,
+            self._float(
+                self.config.get("ONE_H10_MAX_COST_DRAG_BPS"), self._float(self.config.get("AGGRESSIVE_1H_MAX_COST_DRAG_BPS"), 18.0)
+            ),
+        )
+        min_liquidity = max(
+            1.0, self._float(self.config.get("ONE_H10_MIN_LIQUIDITY_USD"), self._float(self.config.get("VAULT_MIN_LIQUIDITY_USD"), 1_000.0))
+        )
+        max_spread = max(
+            1.0, self._float(self.config.get("ONE_H10_MAX_SLIPPAGE_BPS"), self._float(self.config.get("VAULT_MAX_SLIPPAGE_BPS"), 20.0))
+        )
         capacity_multiple = max(liquidity, 0.0) / min_liquidity
         capital_efficiency = max(0.0, min(capacity_multiple / 12.0, 1.0))
         cost_quality = max(0.0, min(1.0 - max(drag - min_edge, 0.0) / max(max_cost * 2.0, 1.0), 1.0))
         spread_quality = max(0.0, min(1.0 - max(spread_bps, 0.0) / max_spread, 1.0))
         edge_quality = max(0.0, min(net_expected / max(min_edge * 8.0, 1.0), 1.0))
-        execution_quality = max(0.0, min(cost_quality * 0.35 + spread_quality * 0.20 + capital_efficiency * 0.25 + edge_quality * 0.20, 1.0))
-        return {
+        execution_quality = max(
+            0.0, min(cost_quality * 0.35 + spread_quality * 0.20 + capital_efficiency * 0.25 + edge_quality * 0.20, 1.0)
+        )
+        execution_adjusted_edge = net_expected * execution_quality
+        risk_reward = max(execution_adjusted_edge, 0.0) / max(drag, 1.0)
+        target_roi_pct = max(
+            0.0,
+            self._float(
+                self.config.get("ML_TARGET_ROI_1H10_PCT"),
+                self._float(self.config.get("ONE_H10_TARGET_ROI_PCT"), 1000.0),
+            ),
+        )
+        target_return_bps = max(target_roi_pct * 100.0, 1.0)
+        target_progress = max(0.0, min(execution_adjusted_edge / target_return_bps, 1.0))
+        payload = {
             "expected_move_bps": gross_expected,
             "gross_expected_return_bps": gross_expected,
             "net_expected_return_bps": net_expected,
+            "execution_adjusted_net_return_bps": execution_adjusted_edge,
             "edge_after_cost_bps": net_expected,
             "cost_drag_bps": drag,
+            "risk_reward": risk_reward,
             "estimated_fee_bps": self._float(self.config.get("FEE_BPS"), 5.0),
             "estimated_slippage_bps": self._float(self.config.get("SIM_SLIPPAGE_BPS"), 8.0),
             "min_expected_edge_after_cost_bps": min_edge,
             "max_cost_drag_bps": max_cost,
             "expected_execution_quality": execution_quality,
+            "target_roi_pct": target_roi_pct,
+            "target_multiplier": max(1.0, target_roi_pct / 100.0),
+            "target_return_bps": target_return_bps,
+            "target_progress": target_progress,
+            "target_gap_pct": max((1.0 - target_progress) * 100.0, 0.0),
+            "after_cost_pnl_per_100_usd": execution_adjusted_edge / 100.0,
             "capital_efficiency_score": capital_efficiency,
             "capacity_multiple": capacity_multiple,
             "cost_efficiency_score": cost_quality,
             "net_edge_quality": edge_quality,
         }
+        payload.update(one_h10_profitability_payload(payload, self.config))
+        return payload
 
     def _one_h10_market_score(self, features: dict[str, Any], *, liquidity: float, spread_bps: float) -> tuple[float, dict[str, float]]:
         rsi = self._float(features.get("rsi"), 50.0)
@@ -677,12 +701,30 @@ class MarketScannerService:
         funding_penalty = abs(self._float(features.get("funding_rate"))) * 10_000.0
         imbalance_score = min(abs(self._float(features.get("order_book_imbalance"))) * 2.0, 2.0)
         net_edge = self._float(features.get("net_expected_return_bps"))
+        execution_adjusted_edge = self._float(features.get("execution_adjusted_net_return_bps"), net_edge)
         execution_quality = self._float(features.get("expected_execution_quality"))
         cost_drag = self._float(features.get("cost_drag_bps"))
-        max_cost = max(1.0, self._float(self.config.get("AGGRESSIVE_1H_MAX_COST_DRAG_BPS"), 18.0))
-        net_edge_score = max(min(net_edge / 35.0, 6.0), -6.0)
-        execution_score = execution_quality * 4.0
-        cost_drag_penalty = max(cost_drag - max_cost, 0.0) / 4.0 + max(-net_edge, 0.0) / 18.0
+        target_progress = self._float(features.get("target_progress"))
+        risk_reward = self._float(features.get("risk_reward"))
+        profitability_score = self._float(features.get("profitability_score"))
+        allocation_score = self._float(features.get("allocation_score"))
+        max_cost = max(
+            1.0,
+            self._float(
+                self.config.get("ONE_H10_MAX_COST_DRAG_BPS"), self._float(self.config.get("AGGRESSIVE_1H_MAX_COST_DRAG_BPS"), 18.0)
+            ),
+        )
+        min_edge = max(
+            1.0, self._float(self.config.get("ONE_H10_MIN_EDGE_AFTER_COST_BPS"), self._float(self.config.get("NET_ROI_MIN_EDGE_BPS"), 4.0))
+        )
+        net_edge_score = max(min(net_edge / max(min_edge * 5.0, 1.0), 8.0), -8.0)
+        execution_adjusted_edge_score = max(min(execution_adjusted_edge / max(min_edge * 5.0, 1.0), 10.0), -10.0)
+        execution_score = execution_quality * 5.0
+        profitability_component = profitability_score * 8.0
+        allocation_component = min(max(allocation_score, 0.0), 10.0) * 0.8
+        target_score = target_progress * 3.0
+        risk_reward_score = min(risk_reward, 6.0) * 0.45
+        cost_drag_penalty = max(cost_drag - max_cost, 0.0) / 2.5 + max(-net_edge, 0.0) / 12.0
         breakdown = {
             "rsi": rsi_score,
             "trend": trend_score,
@@ -694,7 +736,12 @@ class MarketScannerService:
             "liquidity": liquidity_score,
             "order_book_imbalance": imbalance_score,
             "net_expected_edge": net_edge_score,
+            "execution_adjusted_net_edge": execution_adjusted_edge_score,
             "execution_quality": execution_score,
+            "profitability_score": profitability_component,
+            "allocation_score": allocation_component,
+            "target_progress": target_score,
+            "risk_reward": risk_reward_score,
             "spread_penalty": -spread_penalty,
             "funding_penalty": -funding_penalty,
             "cost_drag_penalty": -cost_drag_penalty,
@@ -832,12 +879,7 @@ class MarketScannerService:
         pullback_depth = (recent_high - recent_low) / recent_high if recent_high > 0 else 0.0
         pullback_quality = max(0.0, min(1.0, 1.0 - abs(pullback_depth - 0.012) / 0.05)) if closes else 0.0
         breakout_retest_success = (
-            1.0
-            if closes
-            and prior_high > 0
-            and max(closes[-8:]) >= prior_high
-            and min(closes[-4:]) >= prior_high * 0.995
-            else 0.0
+            1.0 if closes and prior_high > 0 and max(closes[-8:]) >= prior_high and min(closes[-4:]) >= prior_high * 0.995 else 0.0
         )
         max_spread = self._float(self.config.get("UNIVERSE_MAX_SPREAD_BPS"), 15.0)
         min_liquidity = self._float(self.config.get("UNIVERSE_MIN_LIQUIDITY_USD"), 25_000.0)
@@ -943,9 +985,13 @@ class MarketScannerService:
             and self._float(metrics.get("net_roi_score")) <= 0.0
         ):
             return "low_net_roi_edge"
-        if high_upside_enabled and self._float(metrics.get("expected_fill_quality"), 1.0) < self._float(self.config.get("NET_ROI_MIN_FILL_QUALITY"), 0.55):
+        if high_upside_enabled and self._float(metrics.get("expected_fill_quality"), 1.0) < self._float(
+            self.config.get("NET_ROI_MIN_FILL_QUALITY"), 0.55
+        ):
             return "low_expected_fill_quality"
-        if high_upside_enabled and self._float(metrics.get("churn_penalty")) > self._float(self.config.get("NET_ROI_MAX_CHURN_PENALTY"), 0.35):
+        if high_upside_enabled and self._float(metrics.get("churn_penalty")) > self._float(
+            self.config.get("NET_ROI_MAX_CHURN_PENALTY"), 0.35
+        ):
             return "excessive_churn"
         if high_upside_enabled and score <= 0:
             return "non_positive_upside_score"
@@ -1171,11 +1217,7 @@ class MarketScannerService:
         return max(time.time() - timestamp, 0.0)
 
     def _return_volatility(self, closes: list[float]) -> float:
-        returns = [
-            abs((closes[index] - closes[index - 1]) / closes[index - 1])
-            for index in range(1, len(closes))
-            if closes[index - 1] > 0
-        ]
+        returns = [abs((closes[index] - closes[index - 1]) / closes[index - 1]) for index in range(1, len(closes)) if closes[index - 1] > 0]
         return mean(returns) if returns else 0.0
 
     def _pair_lookup(

@@ -26,7 +26,14 @@ from app.models import (
     WalletWithdrawal,
 )
 from app.services import wallet_custody as wallet_custody_module
-from app.services.wallet_custody import BroadcastResult, EvmWalletAdapter, GeneratedWallet, RealWalletCustodyService, SignerWallet, WalletBalanceSnapshot
+from app.services.wallet_custody import (
+    BroadcastResult,
+    EvmWalletAdapter,
+    GeneratedWallet,
+    RealWalletCustodyService,
+    SignerWallet,
+    WalletBalanceSnapshot,
+)
 
 
 def _create_user(username: str = "custody") -> tuple[User, str]:
@@ -339,6 +346,48 @@ def test_mpc_generation_fails_closed_without_signer_configuration(app) -> None:
         custody.get_or_create_address(user_id=user.id, asset="ETH", network="Ethereum")
 
 
+def test_internal_mpc_signer_requires_bearer_and_stores_encrypted_key(app) -> None:
+    with app.app_context():
+        app.config.update(
+            {
+                "WTF_CSRF_ENABLED": True,
+                "WALLET_INTERNAL_MPC_SIGNER_ENABLED": True,
+                "WALLET_MPC_SIGNER_TOKEN": "test-signer-token",
+                "WALLET_MPC_SIGNER_ENCRYPTION_KEY": Fernet.generate_key().decode("utf-8"),
+            }
+        )
+        user, _ = _create_user("internal-signer")
+        db.session.commit()
+        user_id = user.id
+
+    client = app.test_client()
+    unauthorized = client.post(
+        "/_internal/mpc-signer/wallets",
+        json={"user_id": user_id, "asset": "ETH", "network": "Ethereum"},
+    )
+    assert unauthorized.status_code == 401
+
+    response = client.post(
+        "/_internal/mpc-signer/wallets",
+        headers={"Authorization": "Bearer test-signer-token"},
+        json={"user_id": user_id, "asset": "ETH", "network": "Ethereum"},
+    )
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["address"].startswith("0x")
+    assert payload["signer_key_id"].startswith("signer_")
+    assert "private_key" not in payload
+
+    with app.app_context():
+        store = Setting.get_json("internal_mpc_signer_keys_v1")
+        stored = store["keys"][payload["signer_key_id"]]
+        assert stored["address"] == payload["address"]
+        assert stored["encrypted_private_key"]
+        assert stored["encrypted_private_key"] != payload["address"]
+
+
 def test_real_wallet_generation_fails_closed_when_keygen_disabled(app) -> None:
     _enable_generated_wallets(app)
     app.config["WALLET_ALLOW_IN_APP_KEYGEN"] = False
@@ -523,6 +572,31 @@ def test_sync_persists_onchain_snapshot_when_completed_ledger_exceeds_chain(app)
     assert wallet_address.onchain_checked_at is not None
     assert balance.available_balance == pytest.approx(100.9972689688)
     assert WalletTransaction.query.filter_by(user_id=user.id, transaction_type="deposit").count() == 0
+
+
+def test_reconcile_custody_balance_stores_verified_onchain_total(app) -> None:
+    _enable_generated_wallets(app)
+    app.config["WALLET_REQUIRED_CONFIRMATIONS"] = {"ethereum": 12}
+    fake = _FakeAdapter(amount=0.0, confirmations=0)
+    custody = RealWalletCustodyService(app.config, adapters=[fake])
+    app.extensions["services"]["wallet_custody"] = custody
+    user, _ = _create_user("exactchain")
+    wallet_address = custody.get_or_create_address(user_id=user.id, asset="USDC", network="Ethereum")
+    db.session.add(WalletBalance(user_id=user.id, asset="USDC", available_balance=27.80265766, estimated_usd_value=27.80265766))
+    db.session.commit()
+
+    custody.sync_address(wallet_address)
+    result = custody.reconcile_custody_balance(user.id, "USDC")
+    db.session.flush()
+    balance = WalletBalance.query.filter_by(user_id=user.id, asset="USDC").one()
+
+    assert result["changed"] is True
+    assert result["on_chain_checked"] is True
+    assert result["on_chain_total"] == 0.0
+    assert balance.available_balance == 0.0
+    assert balance.locked_balance == 0.0
+    assert balance.estimated_usd_value == 0.0
+    assert wallet_address.encrypted_metadata["last_sync_status"] == "checked"
 
 
 def test_verified_spendable_amount_deficit_uses_onchain_balance(app) -> None:
@@ -1050,10 +1124,7 @@ def test_withdrawal_preflight_prefers_source_with_token_and_gas(app) -> None:
 
     class _AddressAwareAdapter(_FakeAdapter):
         def get_balance(self, address: str, asset: str, network: str) -> WalletBalanceSnapshot:
-            if asset.upper() == "ETH":
-                amount = 0.0 if address == no_gas.address else 0.01
-            else:
-                amount = 5.0
+            amount = (0.0 if address == no_gas.address else 0.01) if asset.upper() == "ETH" else 5.0
             return WalletBalanceSnapshot(amount=amount, asset=asset, checked=True, confirmations=12)
 
     custody = RealWalletCustodyService(app.config, adapters=[_AddressAwareAdapter()])

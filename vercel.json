@@ -1,6 +1,15 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "version": 2,
+  "env": {
+    "WALLET_REAL_CUSTODY_ENABLED": "true",
+    "WALLET_EVM_NETWORKS_JSON": "{\"ETHEREUM\":{\"rpc_url\":\"https://ethereum.publicnode.com\",\"chain_id\":1}}",
+    "WALLET_EVM_TOKEN_CONTRACTS_JSON": "{\"ETHEREUM\":{\"USDC\":\"0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48\",\"USDC_DECIMALS\":6,\"USDT\":\"0xdAC17F958D2ee523a2206206994597C13D831ec7\",\"USDT_DECIMALS\":6}}",
+    "WALLET_BTC_INDEXER_URL": "https://mempool.space/api",
+    "WALLET_SOLANA_RPC_URL": "https://api.mainnet-beta.solana.com",
+    "WALLET_XRP_RPC_URL": "https://s1.ripple.com:51234/",
+    "WALLET_REQUIRED_CONFIRMATIONS_JSON": "{\"ethereum\":12,\"bitcoin\":2,\"solana\":32,\"xrpledger\":1}"
+  },
   "builds": [
     {
       "src": "static/**/*",
@@ -65,6 +74,132 @@
         {
           "key": "Cache-Control",
           "value": "public, max-age=0, must-revalidate"
+        }
+      ]
+    },
+    {
+      "source": "/static/css/(.*)",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=31536000, immutable"
+        }
+      ]
+    },
+    {
+      "source": "/static/js/app-shell.js",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=31536000, immutable"
+        }
+      ]
+    },
+    {
+      "source": "/static/js/backtests.js",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=31536000, immutable"
+        }
+      ]
+    },
+    {
+      "source": "/static/js/command-center.js",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=31536000, immutable"
+        }
+      ]
+    },
+    {
+      "source": "/static/js/convert.js",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=31536000, immutable"
+        }
+      ]
+    },
+    {
+      "source": "/static/js/dashboard-chart.js",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=31536000, immutable"
+        }
+      ]
+    },
+    {
+      "source": "/static/js/dashboard.js",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=31536000, immutable"
+        }
+      ]
+    },
+    {
+      "source": "/static/js/mini-charts.js",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=31536000, immutable"
+        }
+      ]
+    },
+    {
+      "source": "/static/js/responsive-tables.js",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=31536000, immutable"
+        }
+      ]
+    },
+    {
+      "source": "/static/js/risk.js",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=31536000, immutable"
+        }
+      ]
+    },
+    {
+      "source": "/static/js/treasury.js",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=31536000, immutable"
+        }
+      ]
+    },
+    {
+      "source": "/static/js/vault.js",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=31536000, immutable"
+        }
+      ]
+    },
+    {
+      "source": "/static/js/wallet.js",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=31536000, immutable"
+        }
+      ]
+    },
+    {
+      "source": "/static/js/vendor/(.*)",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=31536000, immutable"
         }
       ]
     },

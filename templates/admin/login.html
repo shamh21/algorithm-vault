@@ -8,7 +8,7 @@
     <span class="card-kicker">Advanced / Admin</span>
     <h1>Admin Access</h1>
     {% if admin_configured %}
-      <p class="muted">Sign in to access strategy runs, risk diagnostics, backtests, open orders, panic controls, and validation tools.</p>
+      <p class="muted">Sign in to access strategy runs, risk diagnostics, backtests, open orders, and validation tools.</p>
       <form method="post" action="{{ url_for('admin.login_post', next=request.args.get('next', '')) }}" class="form-grid" data-disable-on-submit>
         {{ csrf_input()|safe }}
         <label>Username

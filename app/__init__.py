@@ -1,8 +1,10 @@
 """Flask application factory."""
 
+# ruff: noqa: E402,I001
 from __future__ import annotations
 
 from collections import defaultdict, deque
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 import json
 import logging
@@ -14,15 +16,39 @@ from typing import Any
 
 from dotenv import load_dotenv
 from flask import Flask, Response, jsonify, request, send_from_directory
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import NullPool
 from werkzeug.exceptions import HTTPException
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 _DOTENV_PATH = Path(__file__).resolve().parent.parent / ".env"
-_FLASK_CLI_WILL_LOAD_DOTENV = os.getenv("FLASK_RUN_FROM_CLI", "").strip().lower() == "true" and not os.getenv("FLASK_SKIP_DOTENV")
-if "pytest" not in sys.modules and not _FLASK_CLI_WILL_LOAD_DOTENV:
+_PRODUCTION_DOTENV_TARGETS = {"vps", "production", "prod", "postgres", "staging", "vercel"}
+
+
+def _env_flag(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _should_load_repo_dotenv(environ: Mapping[str, str | None] = os.environ, *, pytest_loaded: bool | None = None) -> bool:
+    if pytest_loaded is None:
+        pytest_loaded = "pytest" in sys.modules
+    if pytest_loaded:
+        return False
+    flask_cli_will_load_dotenv = _env_flag(environ.get("FLASK_RUN_FROM_CLI")) and not environ.get("FLASK_SKIP_DOTENV")
+    if flask_cli_will_load_dotenv:
+        return False
+    if _env_flag(environ.get("VERCEL")):
+        return False
+    deployment_target = str(environ.get("DEPLOYMENT_TARGET") or "").strip().lower()
+    if deployment_target in _PRODUCTION_DOTENV_TARGETS:
+        return False
+    app_env = str(environ.get("APP_ENV") or environ.get("FLASK_ENV") or environ.get("FLASK_CONFIG") or "").strip().lower()
+    return app_env not in {"production", "prod"}
+
+
+if _should_load_repo_dotenv():
     load_dotenv(_DOTENV_PATH)
 
 from .backtesting.engine import BacktestEngine
@@ -60,7 +86,7 @@ from .services.execution import HyperliquidVenue
 from .routes.backtests import backtests_bp
 from .routes.consumer import consumer_bp
 from .routes.dashboard import dashboard_bp
-from .routes.panic import panic_bp
+from .routes.internal_mpc_signer import internal_mpc_signer_bp
 from .routes.settings import settings_bp
 from .services.chart_stream import ChartStreamService
 from .services.hyperliquid_client import HyperliquidClient
@@ -72,6 +98,9 @@ from .services.market_universe import MarketUniverseService
 from .services.market_data import MarketDataService
 from .services.model_registry import ModelRegistryService
 from .services.dashboard_service import DashboardPayloadService
+from .services.dashboard_prediction import DashboardPredictionService
+from .services.forecast_performance import ForecastPerformanceService
+from .services.market_data_quality import MarketDataQualityService
 from .services.ml_projection_engine import MLProjectionEngine
 from .services.opportunity_scanner import DashboardOpportunityScanner
 from .services.order_manager import OrderManager
@@ -151,6 +180,9 @@ def create_app(test_config: dict | None = None) -> Flask:
     ml_decision_engine.feature_factory = ml_feature_factory
     model_registry = ModelRegistryService(app.config)
     vault_coherence = VaultCoherenceService(app.config)
+    market_data_quality = MarketDataQualityService(app.config)
+    dashboard_prediction = DashboardPredictionService(app.config)
+    forecast_performance = ForecastPerformanceService(app.config)
     one_h10_forecast = OneH10ForecastService(app.config, ml_decision_engine, vault_coherence)
     market_scanner.online_ranker = online_ranker
     market_scanner.offline_ranker = offline_ranker
@@ -158,13 +190,21 @@ def create_app(test_config: dict | None = None) -> Flask:
     pair_screening = PairScreeningService(app.config, market_data, market_universe, market_structure, online_ranker)
     market_scanner.pair_screening = pair_screening
     leveraged_markets = LeveragedMarketDiscoveryService(app.config, market_data, trading_connections, ml_feature_factory)
-    ml_projection_engine = MLProjectionEngine(app.config, market_data, feature_engine, one_h10_forecast)
+    ml_projection_engine = MLProjectionEngine(
+        app.config,
+        market_data,
+        feature_engine,
+        one_h10_forecast,
+        market_data_quality,
+        dashboard_prediction,
+    )
     dashboard_opportunities = DashboardOpportunityScanner(
         app.config,
         leveraged_markets,
         market_scanner,
         ml_projection_engine,
         trading_connections,
+        forecast_performance,
     )
     order_manager = OrderManager(app.config, hyperliquid_client, market_data, risk_engine, trading_connections)
     dashboard_payload = DashboardPayloadService(app, app.config)
@@ -178,7 +218,9 @@ def create_app(test_config: dict | None = None) -> Flask:
         order_manager,
         leveraged_markets,
     )
-    backtest_engine = BacktestEngine(app.config, strategy_registry, market_data, ml_decision_engine=ml_decision_engine, ml_feature_factory=ml_feature_factory)
+    backtest_engine = BacktestEngine(
+        app.config, strategy_registry, market_data, ml_decision_engine=ml_decision_engine, ml_feature_factory=ml_feature_factory
+    )
     backtest_vault_simulator = VaultBacktestSimulator(
         app.config,
         strategy_registry,
@@ -275,6 +317,9 @@ def create_app(test_config: dict | None = None) -> Flask:
         "market_data": market_data,
         "realtime_market": realtime_market,
         "dashboard_payload": dashboard_payload,
+        "market_data_quality": market_data_quality,
+        "dashboard_prediction": dashboard_prediction,
+        "forecast_performance": forecast_performance,
         "market_structure": market_structure,
         "market_universe": market_universe,
         "market_scanner": market_scanner,
@@ -326,8 +371,8 @@ def create_app(test_config: dict | None = None) -> Flask:
     app.register_blueprint(profit_share_api_bp)
     app.register_blueprint(dashboard_bp)
     app.register_blueprint(settings_bp)
-    app.register_blueprint(panic_bp)
     app.register_blueprint(backtests_bp)
+    app.register_blueprint(internal_mpc_signer_bp)
     register_cli(app)
 
     _register_operational_routes(app)
@@ -517,9 +562,16 @@ def _register_operational_routes(app: Flask) -> None:
             checks["config_blockers"] = validation_blockers
             status = 503
         if deployment_target in {"vps", "production", "postgres", "vercel"} and db_backend != "postgres":
-            checks["config"] = False
-            checks["config_warning"] = "production target expects postgres"
-            status = 503
+            if bool(app.config.get("RECOVERY_SQLITE_ACTIVE", False)):
+                recovery = _database_recovery_status(app)
+                checks["database_recovery_mode"] = True
+                checks["configured_postgres"] = recovery["configured_postgres"]
+                checks["trading_disabled"] = recovery["trading_disabled"]
+                checks["database_recovery_message"] = recovery["message"]
+            else:
+                checks["config"] = False
+                checks["config_warning"] = "production target expects postgres"
+                status = 503
 
         return jsonify({"ok": status == 200, "checks": checks, "deployment_target": deployment_target, "database": db_backend}), status
 
@@ -534,8 +586,7 @@ def _register_error_handlers(app: Flask) -> None:
         if _prefers_json_response():
             return jsonify({"ok": False, "error": exc.name, "status": exc.code}), exc.code
         return (
-            f"<!doctype html><title>{exc.code} {exc.name}</title>"
-            f"<main><h1>{exc.name}</h1><p>{exc.description}</p></main>",
+            f"<!doctype html><title>{exc.code} {exc.name}</title><main><h1>{exc.name}</h1><p>{exc.description}</p></main>",
             exc.code,
             {"Content-Type": "text/html; charset=utf-8"},
         )
@@ -570,23 +621,220 @@ def _operational_status(app: Flask) -> dict[str, Any]:
         "runtime_config": {
             "ok": bool(getattr(validation, "ok", True)),
             "blockers": list(getattr(validation, "blockers", ())),
+            "app_mode": app.config.get("APP_MODE", "paper"),
             "database_backend": getattr(validation, "database_backend", _database_backend(app)),
+            "database_recovery_mode": bool(app.config.get("RECOVERY_SQLITE_ACTIVE", False)),
+            "live_trading_enabled": bool(app.config.get("ENABLE_LIVE_TRADING", False)),
             "custody_mode": app.config.get("WALLET_CUSTODY_MODE", "local_dev"),
             "withdrawals_enabled": wallet_withdrawals_enabled(app.config),
+            "worker_process_configured": bool(app.config.get("WORKER_PROCESS_CONFIGURED", False)),
             "in_process_workers_enabled": bool(app.config.get("ENABLE_IN_PROCESS_WORKERS", False)),
         },
     }
+    payload["database_recovery"] = _database_recovery_status(app)
     payload["workers"] = _worker_status(now)
     payload["trading"] = _trading_status(now, app)
     payload["wallets"] = _wallet_status()
     payload["models"] = _model_status()
     payload["treasury"] = _treasury_status(app)
+    payload["live_operations"] = _live_operations_status(app, payload["runtime_config"], payload["treasury"])
     payload["observability"] = {
         "provider_failure_count_24h": _audit_count("provider", "failed"),
         "order_rejection_count_24h": _order_rejection_count(),
         "chart_refresh_lag_seconds": _chart_refresh_lag(app, now),
     }
     return payload
+
+
+def _database_recovery_status(app: Flask) -> dict[str, Any]:
+    active = bool(app.config.get("RECOVERY_SQLITE_ACTIVE", False))
+    runtime_database = _database_backend(app)
+    configured_postgres = _configured_postgres_status(app, probe=active)
+    trading_disabled = active or not bool(app.config.get("ENABLE_LIVE_TRADING", False))
+    if active and configured_postgres.get("available") is False:
+        message = "Recovery SQLite is active because configured Postgres is unavailable; live trading remains disabled."
+    elif active and configured_postgres.get("available") is True:
+        message = "Recovery SQLite is active; complete the Postgres cutover checklist before disabling recovery mode."
+    elif active:
+        message = "Recovery SQLite is active; live trading remains disabled until a healthy Postgres cutover is verified."
+    else:
+        message = "Recovery SQLite is inactive."
+    return {
+        "active": active,
+        "runtime_database": runtime_database,
+        "configured_postgres": configured_postgres,
+        "trading_disabled": trading_disabled,
+        "message": message,
+    }
+
+
+def _configured_postgres_status(app: Flask, *, probe: bool) -> dict[str, Any]:
+    configured_url = str(app.config.get("CONFIGURED_DATABASE_URL") or app.config.get("SQLALCHEMY_DATABASE_URI") or "").strip()
+    backend = _database_backend_from_uri(configured_url)
+    parsed = _safe_database_url(configured_url)
+    status: dict[str, Any] = {
+        "configured": bool(configured_url),
+        "backend": backend,
+        "host": parsed.host if parsed is not None else "",
+        "available": None,
+        "status": "not_configured" if not configured_url else "not_postgres",
+        "error_category": "",
+        "message": "",
+    }
+    if not configured_url:
+        status["message"] = "DATABASE_URL is not configured."
+        return status
+    if backend != "postgres":
+        status["message"] = "Configured DATABASE_URL is not PostgreSQL."
+        return status
+    if not probe:
+        status["status"] = "skipped"
+        status["message"] = "Configured Postgres probe skipped because recovery SQLite is inactive."
+        return status
+
+    now = time.monotonic()
+    ttl_seconds = max(float(app.config.get("RECOVERY_POSTGRES_PROBE_TTL_SECONDS", 60.0) or 60.0), 0.0)
+    cache = app.config.get("_RECOVERY_POSTGRES_PROBE_CACHE")
+    if isinstance(cache, dict) and cache.get("url") == configured_url and float(cache.get("expires_at", 0.0) or 0.0) > now:
+        cached_status = dict(cache.get("status") or {})
+        if cached_status:
+            return cached_status
+
+    timeout_seconds = max(min(float(app.config.get("RECOVERY_POSTGRES_PROBE_TIMEOUT_SECONDS", 2.0) or 2.0), 10.0), 0.5)
+    try:
+        _probe_configured_postgres(configured_url, timeout_seconds=timeout_seconds)
+    except Exception as exc:  # noqa: BLE001
+        category = _classify_postgres_probe_error(exc)
+        status.update(
+            {
+                "available": False,
+                "status": "unavailable",
+                "error_category": category,
+                "message": f"Configured Postgres probe failed ({category}); recovery SQLite remains active.",
+            }
+        )
+    else:
+        status.update(
+            {
+                "available": True,
+                "status": "healthy",
+                "message": "Configured Postgres probe succeeded; complete migrations and cutover checks before disabling recovery SQLite.",
+            }
+        )
+    app.config["_RECOVERY_POSTGRES_PROBE_CACHE"] = {"url": configured_url, "expires_at": now + ttl_seconds, "status": dict(status)}
+    return status
+
+
+def _safe_database_url(configured_url: str):
+    if not configured_url:
+        return None
+    try:
+        return make_url(configured_url)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _probe_configured_postgres(configured_url: str, *, timeout_seconds: float) -> None:
+    engine = create_engine(
+        configured_url,
+        connect_args={"connect_timeout": max(int(timeout_seconds), 1)},
+        future=True,
+        poolclass=NullPool,
+        pool_pre_ping=True,
+    )
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1")).scalar()
+    finally:
+        engine.dispose()
+
+
+def _classify_postgres_probe_error(exc: BaseException) -> str:
+    message = " ".join(str(item).lower() for item in _exception_chain(exc))
+    if "planlimitreached" in message or "plan limit" in message or "plan_limit" in message:
+        return "plan_limit_reached"
+    if "suspended" in message or "suspend" in message:
+        return "suspended"
+    if "timeout" in message or "timed out" in message:
+        return "timeout"
+    if "password authentication failed" in message or "authentication failed" in message:
+        return "authentication_failed"
+    if "could not translate host" in message or "name or service not known" in message:
+        return "dns_failed"
+    return "connection_failed"
+
+
+def _live_operations_status(app: Flask, runtime_config: dict[str, Any], treasury: dict[str, Any]) -> dict[str, Any]:
+    blockers: list[str] = []
+    warnings: list[str] = []
+    target = str(app.config.get("DEPLOYMENT_TARGET", "local") or "local").strip().lower()
+    app_mode = str(app.config.get("APP_MODE", "paper") or "paper").strip().lower()
+    db_backend = str(runtime_config.get("database_backend") or _database_backend(app))
+    custody_mode = (
+        str(runtime_config.get("custody_mode") or app.config.get("WALLET_CUSTODY_MODE", "local_dev") or "local_dev").strip().lower()
+    )
+
+    if target not in {"vercel", "production", "prod", "vps", "postgres", "staging"}:
+        blockers.append("DEPLOYMENT_TARGET must be production-like for live operations")
+    if db_backend != "postgres":
+        blockers.append("live operations require PostgreSQL DATABASE_URL")
+    if bool(runtime_config.get("database_recovery_mode", False)):
+        blockers.append("recovery SQLite mode must be inactive for live operations")
+    if app_mode != "live":
+        blockers.append("APP_MODE must be live")
+    if not bool(runtime_config.get("live_trading_enabled", False)):
+        blockers.append("ENABLE_LIVE_TRADING must be enabled")
+    if bool(runtime_config.get("in_process_workers_enabled", False)):
+        blockers.append("in-process workers must stay disabled for Vercel web")
+    if not bool(runtime_config.get("worker_process_configured", False)):
+        blockers.append("dedicated worker process must be configured")
+    if custody_mode not in {"kms", "hsm", "mpc"}:
+        blockers.append("production custody mode must be kms, hsm, or mpc")
+    if not bool(runtime_config.get("withdrawals_enabled", False)):
+        blockers.append("wallet withdrawals are not enabled by server-side readiness gates")
+    if treasury.get("ready") is not True:
+        blockers.append("platform gas treasury is not ready")
+
+    blockers.extend(str(blocker) for blocker in runtime_config.get("blockers", ()) if str(blocker))
+    blockers.extend(str(blocker) for blocker in treasury.get("blockers", ()) if str(blocker))
+    blockers = list(dict.fromkeys(blockers))
+
+    reserve_health = treasury.get("reserve_health") if isinstance(treasury, dict) else {}
+    reserve_state = str((reserve_health or {}).get("state") or "").strip().lower()
+    if treasury.get("ready") is True and reserve_state in {"warning", "low", "critical", "emergency"}:
+        warnings.append(f"platform treasury reserve health is {reserve_state}; gas-sponsored withdrawals may queue until funded")
+    try:
+        treasury_eth_balance = float(treasury.get("eth_balance") or 0.0)
+    except (TypeError, ValueError):
+        treasury_eth_balance = 0.0
+    if treasury.get("ready") is True and treasury_eth_balance <= 0:
+        warnings.append("platform treasury has 0 ETH available for gas top-ups")
+    warnings = list(dict.fromkeys(warnings))
+
+    trading_ready = (
+        app_mode == "live"
+        and bool(runtime_config.get("live_trading_enabled", False))
+        and bool(runtime_config.get("worker_process_configured", False))
+        and not bool(runtime_config.get("in_process_workers_enabled", False))
+        and db_backend == "postgres"
+        and not bool(runtime_config.get("database_recovery_mode", False))
+    )
+    withdrawals_ready = (
+        bool(runtime_config.get("withdrawals_enabled", False))
+        and custody_mode in {"kms", "hsm", "mpc"}
+        and treasury.get("ready") is True
+        and not blockers
+    )
+    return {
+        "ready": not blockers,
+        "trading_ready": trading_ready and not blockers,
+        "withdrawals_ready": withdrawals_ready,
+        "deployment_target": target,
+        "database_backend": db_backend,
+        "custody_mode": custody_mode,
+        "blockers": blockers,
+        "warnings": warnings,
+    }
 
 
 def _safe_scalar(statement: str) -> Any:
@@ -772,9 +1020,7 @@ def _wallet_audit_count(action: str) -> int | None:
 def _prefers_json_response() -> bool:
     if request.path.startswith(("/api/", "/admin/api/")) or request.path in {"/healthz", "/readyz", "/ops/status"}:
         return True
-    if request.accept_mimetypes["application/json"] >= request.accept_mimetypes["text/html"]:
-        return True
-    return False
+    return request.accept_mimetypes["application/json"] >= request.accept_mimetypes["text/html"]
 
 
 def _block_when_database_startup_failed(app: Flask) -> Response | None:
@@ -944,6 +1190,10 @@ def _set_response_headers(app: Flask, response: Response) -> Response:
 
 def _database_backend(app: Flask) -> str:
     uri = str(app.config.get("SQLALCHEMY_DATABASE_URI", ""))
+    return _database_backend_from_uri(uri)
+
+
+def _database_backend_from_uri(uri: str) -> str:
     if uri.startswith(("postgresql://", "postgresql+", "postgres://")):
         return "postgres"
     if uri.startswith("sqlite"):
@@ -1026,10 +1276,7 @@ def _is_missing_schema_error(exc: BaseException) -> bool:
     for item in _exception_chain(exc):
         message = str(item).lower()
         if "alembic_version" in message and (
-            "no such table" in message
-            or "does not exist" in message
-            or "undefinedtable" in message
-            or "undefined table" in message
+            "no such table" in message or "does not exist" in message or "undefinedtable" in message or "undefined table" in message
         ):
             return True
     return False
@@ -1045,9 +1292,7 @@ def _schema_bootstrap_allowed(app: Flask) -> bool:
     deployment_target = str(app.config.get("DEPLOYMENT_TARGET", "local") or "local").strip().lower()
     production_target = deployment_target in {"vps", "production", "prod", "postgres", "vercel"}
     if production_target:
-        return bool(app.config.get("ALLOW_PRODUCTION_SCHEMA_BOOTSTRAP", False)) and bool(
-            app.config.get("SCHEMA_BOOTSTRAP_ENABLED", False)
-        )
+        return bool(app.config.get("ALLOW_PRODUCTION_SCHEMA_BOOTSTRAP", False)) and bool(app.config.get("SCHEMA_BOOTSTRAP_ENABLED", False))
     return bool(app.config.get("SCHEMA_BOOTSTRAP_ENABLED", True))
 
 
@@ -1345,11 +1590,11 @@ def _ensure_indexes() -> None:
         "CREATE INDEX IF NOT EXISTS ix_strategy_run_user_status_created ON strategy_run (user_id, status, created_at)",
         "CREATE INDEX IF NOT EXISTS ix_strategy_run_status_updated ON strategy_run (status, updated_at)",
         "CREATE INDEX IF NOT EXISTS ix_strategy_run_connection_status_created ON strategy_run (trading_connection_id, status, created_at)",
-        "CREATE INDEX IF NOT EXISTS ix_order_user_mode_created ON \"order\" (user_id, mode, created_at)",
-        "CREATE INDEX IF NOT EXISTS ix_order_user_mode_status_created ON \"order\" (user_id, mode, status, created_at)",
-        "CREATE INDEX IF NOT EXISTS ix_order_cycle_mode_created ON \"order\" (vault_cycle_id, mode, created_at)",
-        "CREATE INDEX IF NOT EXISTS ix_order_leg_status_created ON \"order\" (vault_leg_id, status, created_at)",
-        "CREATE INDEX IF NOT EXISTS ix_order_connection_status_created ON \"order\" (trading_connection_id, status, created_at)",
+        'CREATE INDEX IF NOT EXISTS ix_order_user_mode_created ON "order" (user_id, mode, created_at)',
+        'CREATE INDEX IF NOT EXISTS ix_order_user_mode_status_created ON "order" (user_id, mode, status, created_at)',
+        'CREATE INDEX IF NOT EXISTS ix_order_cycle_mode_created ON "order" (vault_cycle_id, mode, created_at)',
+        'CREATE INDEX IF NOT EXISTS ix_order_leg_status_created ON "order" (vault_leg_id, status, created_at)',
+        'CREATE INDEX IF NOT EXISTS ix_order_connection_status_created ON "order" (trading_connection_id, status, created_at)',
         "CREATE INDEX IF NOT EXISTS ix_vault_cycle_user_status_started ON vault_cycle (user_id, status, started_at)",
         "CREATE INDEX IF NOT EXISTS ix_vault_cycle_user_unlocks ON vault_cycle (user_id, unlocks_at)",
         "CREATE INDEX IF NOT EXISTS ix_vault_cycle_connection_status_started ON vault_cycle (trading_connection_id, status, started_at)",
@@ -1480,14 +1725,8 @@ def _crypto_rail_assets() -> list[dict]:
     balances = {}
     try:
         query = WalletBalance.query.filter(WalletBalance.asset.in_(symbols))
-        if user is not None:
-            query = query.filter_by(user_id=user.id)
-        else:
-            query = query.filter_by(user_id=-1)
-        balances = {
-            balance.asset: balance
-            for balance in query.all()
-        }
+        query = query.filter_by(user_id=user.id) if user is not None else query.filter_by(user_id=-1)
+        balances = {balance.asset: balance for balance in query.all()}
     except Exception:  # noqa: BLE001
         balances = {}
     return [

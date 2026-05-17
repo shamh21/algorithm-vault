@@ -16,12 +16,11 @@
     <meta name="apple-mobile-web-app-title" content="AlgVault">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="msapplication-TileColor" content="#050607">
-    {% set asset_v = current_app.config.get('ASSET_VERSION', '1') ~ '-algvault-command-center-dark-2' %}
+    {% set asset_v = current_app.config.get('ASSET_VERSION', '1') ~ '-algvault-vault-shell-polish-9' %}
     <script>
       try {
         const storedTheme = window.localStorage.getItem("av-color-theme");
-        document.documentElement.dataset.theme = "dark";
-        if (storedTheme !== "dark") window.localStorage.setItem("av-color-theme", "dark");
+        document.documentElement.dataset.theme = storedTheme === "light" ? "light" : "dark";
         if (window.sessionStorage.getItem("av-bottom-nav-switch") === "true") {
           document.documentElement.classList.add("bottom-nav-switching");
         }
@@ -54,6 +53,12 @@
       <symbol id="icon-wallet" viewBox="0 0 24 24">
         <path d="M19 7V6a2 2 0 0 0-2-2H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6"></path>
         <path d="M16 13h.01"></path>
+      </symbol>
+      <symbol id="icon-convert" viewBox="0 0 24 24">
+        <path d="M7 7h11"></path>
+        <path d="m15 4 3 3-3 3"></path>
+        <path d="M17 17H6"></path>
+        <path d="m9 14-3 3 3 3"></path>
       </symbol>
       <symbol id="icon-vault" viewBox="0 0 24 24">
         <rect x="4" y="5" width="16" height="14" rx="2"></rect>
@@ -141,10 +146,6 @@
       </a>
 
       <div class="topbar-actions">
-        <button class="theme-toggle secondary" type="button" data-theme-toggle aria-label="Switch color theme" aria-pressed="true">
-          <svg class="topnav-icon" aria-hidden="true"><use href="#icon-theme"></use></svg>
-          <span class="sr-only" data-theme-toggle-label>Dark mode</span>
-        </button>
         <div class="mode-chip mode-chip-{{ nav_mode|default('live') }}" aria-label="Current app mode">
           <span class="mode-dot" aria-hidden="true"></span>
           <span>{{ nav_mode|default('live')|replace('_', ' ')|upper }}</span>
@@ -174,15 +175,15 @@
             </a>
             <a href="{{ url_for('consumer.wallet') }}" class="nav-link {% if request.endpoint == 'consumer.wallet' %}active{% endif %}" {% if request.endpoint == 'consumer.wallet' %}aria-current="page"{% endif %}>
               <svg class="topnav-icon" aria-hidden="true"><use href="#icon-wallet"></use></svg>
-              <span class="nav-link-copy"><strong>Wallet</strong><small>Balances and funding</small></span>
+              <span class="nav-link-copy"><strong>Wallet</strong><small>Verified funds</small></span>
+            </a>
+            <a href="{{ url_for('consumer.convert') }}" class="nav-link {% if request.endpoint == 'consumer.convert' %}active{% endif %}" {% if request.endpoint == 'consumer.convert' %}aria-current="page"{% endif %}>
+              <svg class="topnav-icon" aria-hidden="true"><use href="#icon-convert"></use></svg>
+              <span class="nav-link-copy"><strong>Convert</strong><small>Asset exchange</small></span>
             </a>
             <a href="{{ url_for('consumer.vault') }}" class="nav-link {% if request.endpoint in ['consumer.vault', 'consumer.start_cycle'] %}active{% endif %}" {% if request.endpoint in ['consumer.vault', 'consumer.start_cycle'] %}aria-current="page"{% endif %}>
               <svg class="topnav-icon" aria-hidden="true"><use href="#icon-vault"></use></svg>
               <span class="nav-link-copy"><strong>Vault</strong><small>Automated allocation</small></span>
-            </a>
-            <a href="{{ url_for('consumer.activity') }}" class="nav-link {% if request.endpoint == 'consumer.activity' %}active{% endif %}" {% if request.endpoint == 'consumer.activity' %}aria-current="page"{% endif %}>
-              <svg class="topnav-icon" aria-hidden="true"><use href="#icon-activity"></use></svg>
-              <span class="nav-link-copy"><strong>Activity</strong><small>Wallet and cycle feed</small></span>
             </a>
           </div>
           {% if admin_authenticated %}
@@ -195,10 +196,6 @@
               <a href="{{ url_for('backtests.index') }}" class="nav-link advanced-only {% if request.endpoint and request.endpoint.startswith('backtests') %}active{% endif %}" {% if request.endpoint and request.endpoint.startswith('backtests') %}aria-current="page"{% endif %}>
                 <svg class="topnav-icon" aria-hidden="true"><use href="#icon-lab"></use></svg>
                 <span class="nav-link-copy"><strong>Backtests</strong><small>Strategy research</small></span>
-              </a>
-              <a href="{{ url_for('panic.index') }}" class="nav-link advanced-only {% if request.endpoint and request.endpoint.startswith('panic') %}active{% endif %}" {% if request.endpoint and request.endpoint.startswith('panic') %}aria-current="page"{% endif %}>
-                <svg class="topnav-icon" aria-hidden="true"><use href="#icon-alert"></use></svg>
-                <span class="nav-link-copy"><strong>Panic</strong><small>Emergency controls</small></span>
               </a>
               <a href="{{ url_for('admin.risk') }}" class="nav-link advanced-only {% if request.endpoint == 'admin.risk' %}active{% endif %}" {% if request.endpoint == 'admin.risk' %}aria-current="page"{% endif %}>
                 <svg class="topnav-icon" aria-hidden="true"><use href="#icon-shield"></use></svg>
@@ -274,25 +271,27 @@
 
     {% if current_user %}
       <nav class="bottom-nav" aria-label="Mobile navigation">
-        <a href="{{ url_for('consumer.home') }}#dashboard" class="bottom-nav-item {% if request.endpoint == 'consumer.home' %}active{% endif %}" data-bottom-nav-section="dashboard" {% if request.endpoint == 'consumer.home' %}aria-current="page"{% endif %}>
+        {% set bottom_dashboard_href = url_for('dashboard.index') if admin_authenticated else url_for('consumer.home') ~ '#dashboard' %}
+        {% set bottom_dashboard_active = (request.endpoint and request.endpoint.startswith('dashboard')) or request.endpoint == 'consumer.home' %}
+        <a href="{{ bottom_dashboard_href }}" class="bottom-nav-item {% if bottom_dashboard_active %}active{% endif %}" data-bottom-nav-section="dashboard" {% if bottom_dashboard_active %}aria-current="page"{% endif %}>
           <svg class="nav-icon" aria-hidden="true"><use href="#icon-dashboard"></use></svg>
           <span class="nav-item-label">Dashboard</span>
+        </a>
+        <a href="{{ url_for('consumer.wallet') }}" class="bottom-nav-item {% if request.endpoint == 'consumer.wallet' %}active{% endif %}" data-bottom-nav-section="wallet" {% if request.endpoint == 'consumer.wallet' %}aria-current="page"{% endif %}>
+          <svg class="nav-icon" aria-hidden="true"><use href="#icon-wallet"></use></svg>
+          <span class="nav-item-label">Wallet</span>
+        </a>
+        <a href="{{ url_for('consumer.convert') }}" class="bottom-nav-item {% if request.endpoint == 'consumer.convert' %}active{% endif %}" data-bottom-nav-section="convert" {% if request.endpoint == 'consumer.convert' %}aria-current="page"{% endif %}>
+          <svg class="nav-icon" aria-hidden="true"><use href="#icon-convert"></use></svg>
+          <span class="nav-item-label">Convert</span>
         </a>
         <a href="{{ url_for('consumer.vault') }}" class="bottom-nav-item {% if request.endpoint in ['consumer.vault', 'consumer.start_cycle'] %}active{% endif %}" data-bottom-nav-section="vault" {% if request.endpoint in ['consumer.vault', 'consumer.start_cycle'] %}aria-current="page"{% endif %}>
           <svg class="nav-icon" aria-hidden="true"><use href="#icon-vault"></use></svg>
           <span class="nav-item-label">Vault</span>
         </a>
-        <a href="{{ url_for('consumer.home') }}#bots" class="bottom-nav-item" data-bottom-nav-section="bots">
-          <svg class="nav-icon" aria-hidden="true"><use href="#icon-lab"></use></svg>
-          <span class="nav-item-label">Bots</span>
-        </a>
-        <a href="{{ url_for('consumer.home') }}#markets" class="bottom-nav-item" data-bottom-nav-section="markets">
-          <svg class="nav-icon" aria-hidden="true"><use href="#icon-markets"></use></svg>
-          <span class="nav-item-label">Markets</span>
-        </a>
-        <a href="{{ url_for('consumer.home') }}#insights" class="bottom-nav-item" data-bottom-nav-section="insights">
-          <svg class="nav-icon" aria-hidden="true"><use href="#icon-activity"></use></svg>
-          <span class="nav-item-label">Insights</span>
+        <a href="{{ url_for('settings.index') }}" class="bottom-nav-item {% if request.endpoint and request.endpoint.startswith('settings') %}active{% endif %}" data-bottom-nav-section="settings" {% if request.endpoint and request.endpoint.startswith('settings') %}aria-current="page"{% endif %}>
+          <svg class="nav-icon" aria-hidden="true"><use href="#icon-settings"></use></svg>
+          <span class="nav-item-label">Settings</span>
         </a>
       </nav>
     {% endif %}

@@ -11,6 +11,8 @@ from dataclasses import asdict, dataclass
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal, InvalidOperation
 from typing import Any
 
+import requests
+
 logger = logging.getLogger(__name__)
 
 HYPERLIQUID_TESTNET_API_URL = "https://api.hyperliquid-testnet.xyz"
@@ -62,9 +64,7 @@ class HyperliquidClient:
             return self._normalize_base_url(self.config.get("HL_MAINNET_BASE_URL") or HYPERLIQUID_MAINNET_API_URL)
 
         return self._normalize_base_url(
-            self.config.get("HYPERLIQUID_BASE_URL")
-            or self.config.get("HL_TESTNET_BASE_URL")
-            or HYPERLIQUID_TESTNET_API_URL
+            self.config.get("HYPERLIQUID_BASE_URL") or self.config.get("HL_TESTNET_BASE_URL") or HYPERLIQUID_TESTNET_API_URL
         )
 
     def has_account_address(self) -> bool:
@@ -162,8 +162,20 @@ class HyperliquidClient:
         info = self._get_public_info(mode)
         address = self._account_address()
 
-        user_state = self._retry(lambda: info.user_state(address), f"{mode} user_state", attempts=self.retry_attempts if retry else 1, log_warnings=retry, wrap_error=retry)
-        spot_state = self._retry(lambda: info.spot_user_state(address), f"{mode} spot_user_state", attempts=self.retry_attempts if retry else 1, log_warnings=retry, wrap_error=retry)
+        user_state = self._retry(
+            lambda: info.user_state(address),
+            f"{mode} user_state",
+            attempts=self.retry_attempts if retry else 1,
+            log_warnings=retry,
+            wrap_error=retry,
+        )
+        spot_state = self._retry(
+            lambda: info.spot_user_state(address),
+            f"{mode} spot_user_state",
+            attempts=self.retry_attempts if retry else 1,
+            log_warnings=retry,
+            wrap_error=retry,
+        )
 
         margin_summary = user_state.get("marginSummary", {})
 
@@ -192,7 +204,13 @@ class HyperliquidClient:
         info = self._get_public_info(mode)
         address = self._account_address()
 
-        user_state = self._retry(lambda: info.user_state(address), f"{mode} positions", attempts=self.retry_attempts if retry else 1, log_warnings=retry, wrap_error=retry)
+        user_state = self._retry(
+            lambda: info.user_state(address),
+            f"{mode} positions",
+            attempts=self.retry_attempts if retry else 1,
+            log_warnings=retry,
+            wrap_error=retry,
+        )
         positions: list[dict[str, Any]] = []
 
         for item in user_state.get("assetPositions", []):
@@ -218,7 +236,13 @@ class HyperliquidClient:
         info = self._get_public_info(mode)
         address = self._account_address()
 
-        orders = self._retry(lambda: info.open_orders(address), f"{mode} open_orders", attempts=self.retry_attempts if retry else 1, log_warnings=retry, wrap_error=retry)
+        orders = self._retry(
+            lambda: info.open_orders(address),
+            f"{mode} open_orders",
+            attempts=self.retry_attempts if retry else 1,
+            log_warnings=retry,
+            wrap_error=retry,
+        )
 
         return [
             {
@@ -238,7 +262,13 @@ class HyperliquidClient:
         info = self._get_public_info(mode)
         address = self._account_address()
 
-        fills = self._retry(lambda: info.user_fills(address), f"{mode} user_fills", attempts=self.retry_attempts if retry else 1, log_warnings=retry, wrap_error=retry)
+        fills = self._retry(
+            lambda: info.user_fills(address),
+            f"{mode} user_fills",
+            attempts=self.retry_attempts if retry else 1,
+            log_warnings=retry,
+            wrap_error=retry,
+        )
 
         return [
             {
@@ -259,38 +289,59 @@ class HyperliquidClient:
         ]
 
     def get_all_mids(self, mode: str, *, retry: bool = True) -> dict[str, float]:
-        info = self._get_public_info(mode)
-        mids = self._retry(
-            lambda: info.all_mids(),
-            f"{mode} all_mids",
-            attempts=self.retry_attempts if retry else 1,
-            log_warnings=retry,
-            wrap_error=retry,
-        )
+        try:
+            info = self._get_public_info(mode)
+            mids = self._retry(
+                lambda: info.all_mids(),
+                f"{mode} all_mids",
+                attempts=self.retry_attempts if retry else 1,
+                log_warnings=retry,
+                wrap_error=retry,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Hyperliquid SDK all_mids failed for %s; trying direct info fallback: %s", mode, self._sanitize_error_message(exc)
+            )
+            mids = self._public_info_post(
+                mode,
+                {"type": "allMids"},
+                context=f"{mode} direct allMids",
+                attempts=self.retry_attempts if retry else 1,
+                log_warnings=retry,
+            )
 
-        return {
-            str(symbol): price
-            for symbol, raw_price in mids.items()
-            if (price := self._safe_float(raw_price)) > 0
-        }
+        return {str(symbol): price for symbol, raw_price in mids.items() if (price := self._safe_float(raw_price)) > 0}
 
     def get_perp_meta(self, mode: str) -> dict[str, Any]:
         """Return Hyperliquid perpetual metadata from the official info endpoint."""
 
-        info = self._get_public_info(mode)
-        if not hasattr(info, "meta"):
-            return {}
-        payload = self._retry(lambda: info.meta(), f"{mode} meta")
+        payload: Any = None
+        try:
+            info = self._get_public_info(mode)
+            if hasattr(info, "meta"):
+                payload = self._retry(lambda: info.meta(), f"{mode} meta")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Hyperliquid SDK meta failed for %s; trying direct info fallback: %s", mode, self._sanitize_error_message(exc))
+        if payload is None:
+            payload = self._public_info_post(mode, {"type": "meta"}, context=f"{mode} direct meta")
         return payload if isinstance(payload, dict) else {}
 
     def get_perp_meta_and_asset_contexts(self, mode: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Return perpetual metadata and asset contexts when supported by the SDK."""
 
-        info = self._get_public_info(mode)
-        if not hasattr(info, "meta_and_asset_ctxs"):
-            meta = self.get_perp_meta(mode)
-            return meta, []
-        payload = self._retry(lambda: info.meta_and_asset_ctxs(), f"{mode} meta_and_asset_ctxs")
+        payload: Any = None
+        try:
+            info = self._get_public_info(mode)
+            if hasattr(info, "meta_and_asset_ctxs"):
+                payload = self._retry(lambda: info.meta_and_asset_ctxs(), f"{mode} meta_and_asset_ctxs")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Hyperliquid SDK meta_and_asset_ctxs failed for %s; trying direct info fallback: %s",
+                mode,
+                self._sanitize_error_message(exc),
+            )
+        if payload is None:
+            payload = self._public_info_post(mode, {"type": "metaAndAssetCtxs"}, context=f"{mode} direct metaAndAssetCtxs")
         if isinstance(payload, (list, tuple)) and len(payload) >= 2:
             meta = payload[0] if isinstance(payload[0], dict) else {}
             contexts = payload[1] if isinstance(payload[1], list) else []
@@ -384,8 +435,7 @@ class HyperliquidClient:
         )
         if max_notional > 0 and max_notional + 1e-9 < min_notional:
             raise RuntimeError(
-                "hyperliquid_test_max_notional_too_small: "
-                f"HYPERLIQUID_LIVE_TEST_MAX_NOTIONAL_USD must be at least {min_notional:.6f}."
+                f"hyperliquid_test_max_notional_too_small: HYPERLIQUID_LIVE_TEST_MAX_NOTIONAL_USD must be at least {min_notional:.6f}."
             )
         if max_notional > 0 and notional > max_notional + max(mid * 1e-12, 1e-9):
             raise RuntimeError(
@@ -438,15 +488,40 @@ class HyperliquidClient:
         if start_ms >= end_ms:
             raise ValueError("start_ms must be before end_ms")
 
-        info = self._get_public_info(mode)
-
-        candles = self._retry(
-            lambda: info.candles_snapshot(symbol, timeframe, start_ms, end_ms),
-            f"{mode} candles_snapshot {symbol} {timeframe}",
-            attempts=self.retry_attempts if retry else 1,
-            log_warnings=retry,
-            wrap_error=retry,
-        )
+        try:
+            info = self._get_public_info(mode)
+            candles = self._retry(
+                lambda: info.candles_snapshot(symbol, timeframe, start_ms, end_ms),
+                f"{mode} candles_snapshot {symbol} {timeframe}",
+                attempts=self.retry_attempts if retry else 1,
+                log_warnings=retry,
+                wrap_error=retry,
+            )
+        except Exception as exc:  # noqa: BLE001
+            if not retry:
+                raise
+            logger.warning(
+                "Hyperliquid SDK candles_snapshot failed for %s %s %s; trying direct info fallback: %s",
+                mode,
+                symbol,
+                timeframe,
+                self._sanitize_error_message(exc),
+            )
+            candles = self._public_info_post(
+                mode,
+                {
+                    "type": "candleSnapshot",
+                    "req": {
+                        "coin": symbol,
+                        "interval": timeframe,
+                        "startTime": start_ms,
+                        "endTime": end_ms,
+                    },
+                },
+                context=f"{mode} direct candleSnapshot {symbol} {timeframe}",
+                attempts=self.retry_attempts if retry else 1,
+                log_warnings=retry,
+            )
 
         return candles if isinstance(candles, list) else []
 
@@ -780,6 +855,35 @@ class HyperliquidClient:
             raise last_error
         raise RuntimeError(f"Hyperliquid call failed after retries: {context}") from last_error
 
+    def _public_info_post(
+        self,
+        mode: str,
+        payload: dict[str, Any],
+        *,
+        context: str,
+        attempts: int | None = None,
+        log_warnings: bool = True,
+    ) -> Any:
+        return self._retry(
+            lambda: self._public_info_once(mode, payload),
+            context,
+            attempts=attempts or self.retry_attempts,
+            log_warnings=log_warnings,
+            wrap_error=True,
+        )
+
+    def _public_info_once(self, mode: str, payload: dict[str, Any]) -> Any:
+        self._validate_mode(mode)
+        if mode == "testnet":
+            self._ensure_testnet_public_base_url()
+        response = requests.post(
+            f"{self.base_url_for_mode(mode)}/info",
+            json=payload,
+            timeout=self._safe_float(self.config.get("HL_TIMEOUT_SECONDS"), 10.0),
+        )
+        response.raise_for_status()
+        return response.json()
+
     def _get_public_info(self, mode: str) -> Any:
         self._validate_mode(mode)
         if mode == "testnet":
@@ -833,8 +937,7 @@ class HyperliquidClient:
         base_url = self.base_url_for_mode("testnet")
         if base_url != HYPERLIQUID_TESTNET_API_URL:
             raise RuntimeError(
-                "hyperliquid_testnet_base_url_invalid: refusing to use non-testnet Hyperliquid URL "
-                f"for testnet mode ({base_url})."
+                f"hyperliquid_testnet_base_url_invalid: refusing to use non-testnet Hyperliquid URL for testnet mode ({base_url})."
             )
 
     @staticmethod

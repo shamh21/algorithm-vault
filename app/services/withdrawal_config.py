@@ -7,7 +7,6 @@ from typing import Any
 
 from .wallet_addresses import use_real_addresses
 
-
 PRODUCTION_TARGETS = {"vps", "production", "prod", "postgres", "staging", "vercel"}
 APPROVED_PRODUCTION_CUSTODY_MODES = {"kms", "hsm", "mpc"}
 
@@ -40,6 +39,11 @@ def automatic_withdrawal_blockers(config: Mapping[str, Any]) -> list[str]:
     if deployment_target in PRODUCTION_TARGETS:
         if custody_mode not in APPROVED_PRODUCTION_CUSTODY_MODES:
             blockers.append("production withdrawals require kms, hsm, or mpc custody mode")
+        if custody_mode == "mpc":
+            if not str(config.get("WALLET_MPC_SIGNER_URL", "") or "").strip():
+                blockers.append("WALLET_MPC_SIGNER_URL is not configured")
+            if not str(config.get("WALLET_MPC_SIGNER_TOKEN", "") or "").strip():
+                blockers.append("WALLET_MPC_SIGNER_TOKEN is not configured")
         if bool(config.get("WALLET_SIGNER_ISOLATION_REQUIRED", True)) and not bool(
             config.get("WALLET_SIGNER_ISOLATION_CONFIRMED", False)
         ):

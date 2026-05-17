@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 
@@ -13,11 +13,21 @@ class MLProjectionEngine:
 
     PUBLIC_TIMEFRAMES = ("live", "1m", "5m", "15m", "45m", "4h", "1d")
 
-    def __init__(self, config: dict[str, Any], market_data: Any, feature_engine: Any, forecast_service: Any | None = None) -> None:
+    def __init__(
+        self,
+        config: dict[str, Any],
+        market_data: Any,
+        feature_engine: Any,
+        forecast_service: Any | None = None,
+        data_quality: Any | None = None,
+        prediction_quality: Any | None = None,
+    ) -> None:
         self.config = config
         self.market_data = market_data
         self.feature_engine = feature_engine
         self.forecast_service = forecast_service
+        self.data_quality = data_quality
+        self.prediction_quality = prediction_quality
 
     def normalize_timeframe(self, timeframe: str | None) -> str:
         value = str(timeframe or "live").strip().lower()
@@ -58,13 +68,24 @@ class MLProjectionEngine:
         limit: int | None = None,
     ) -> dict[str, Any]:
         public_timeframe = self.normalize_timeframe(timeframe)
-        candles = self.candles(
+        candle_payload = self._candles_payload(
             venue_symbol or symbol,
             public_timeframe,
             mode=mode,
             limit=limit or int(self.config.get("DASHBOARD_CHART_CANDLE_LIMIT", 150) or 150),
         )
-        overlays = self.overlays(candles, forecast or {}, features or {})
+        candles = candle_payload["candles"]
+        enriched_forecast = self.enrich_forecast(
+            forecast or {},
+            features or {},
+            candles=candles,
+            timeframe=public_timeframe,
+            provider=provider,
+            symbol=symbol,
+            data_quality=candle_payload["data_quality"],
+        )
+        overlays = self.overlays(candles, enriched_forecast, features or {})
+        expires_at = datetime.utcnow() + timedelta(seconds=max(60, int(self._safe_float(enriched_forecast.get("horizon_seconds"), 3600.0))))
         return {
             "provider": str(provider or "global"),
             "symbol": str(symbol or "").upper(),
@@ -72,12 +93,29 @@ class MLProjectionEngine:
             "timeframe": public_timeframe,
             "source_timeframe": self.candle_timeframe(public_timeframe),
             "candles": candles[-150:],
-            "forecast": forecast or {},
+            "forecast": enriched_forecast,
             "overlays": overlays,
+            "data_quality": candle_payload["data_quality"],
+            "provider_quality": {
+                "provider": str(provider or "global"),
+                "latency_ms": candle_payload["data_quality"].get("provider_latency_ms"),
+                "last_sync_age_seconds": candle_payload["data_quality"].get("last_sync_age_seconds"),
+                "candle_completeness": candle_payload["data_quality"].get("candle_completeness"),
+                "market_volatility_state": candle_payload["data_quality"].get("market_volatility_state"),
+                "signal_freshness": candle_payload["data_quality"].get("signal_freshness"),
+            },
+            "forecast_explanation": enriched_forecast.get("explanation", {}),
+            "expiry": {
+                "expires_at": expires_at.isoformat(),
+                "seconds": max(60, int(self._safe_float(enriched_forecast.get("horizon_seconds"), 3600.0))),
+            },
             "updated_at": datetime.utcnow().isoformat(),
         }
 
     def candles(self, symbol: str, timeframe: str, *, mode: str, limit: int = 150) -> list[dict[str, Any]]:
+        return self._candles_payload(symbol, timeframe, mode=mode, limit=limit)["candles"]
+
+    def _candles_payload(self, symbol: str, timeframe: str, *, mode: str, limit: int = 150) -> dict[str, Any]:
         public_timeframe = self.normalize_timeframe(timeframe)
         source_timeframe = self.candle_timeframe(public_timeframe)
         source_limit = min(max(int(limit or 150), 1), 150)
@@ -94,7 +132,23 @@ class MLProjectionEngine:
             normalized = self._aggregate_candles(normalized, group_size=3)
         if public_timeframe == "1d":
             normalized = self._aggregate_candles(normalized, group_size=6)
-        return normalized[-source_limit:]
+        normalized = normalized[-source_limit:]
+        if self.data_quality is None:
+            return {
+                "candles": normalized,
+                "data_quality": {
+                    "score": 100 if normalized else 0,
+                    "state": "good" if normalized else "insufficient",
+                    "issues": [] if normalized else ["insufficient_candles"],
+                    "candle_count": len(normalized),
+                    "candle_completeness": 1.0 if normalized else 0.0,
+                    "market_volatility_state": "normal",
+                    "signal_freshness": "fresh" if normalized else "stale",
+                    "last_sync_age_seconds": None,
+                },
+            }
+        checked = self.data_quality.validate_candles(normalized, timeframe=public_timeframe)
+        return {"candles": checked["candles"][-source_limit:], "data_quality": checked["quality"]}
 
     def forecast_from_features(
         self,
@@ -130,7 +184,50 @@ class MLProjectionEngine:
                 "source": "dashboard_forecast_error",
             }
 
-    def price_levels(self, candles: list[dict[str, Any]], forecast: dict[str, Any], features: dict[str, Any] | None = None) -> dict[str, float]:
+    def enrich_forecast(
+        self,
+        forecast: dict[str, Any],
+        features: dict[str, Any] | None = None,
+        *,
+        candles: list[dict[str, Any]] | None = None,
+        timeframe: str = "1m",
+        provider: str = "global",
+        symbol: str = "",
+        data_quality: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        features = features or {}
+        if self.data_quality is not None:
+            safe_forecast = self.data_quality.sanitize_forecast_payload(forecast)
+            quality = data_quality or self.data_quality.score_data_quality(
+                candles or [],
+                features=features,
+                forecast=safe_forecast,
+                timeframe=timeframe,
+            )
+        else:
+            safe_forecast = dict(forecast or {})
+            quality = data_quality or {"score": 70, "state": "degraded", "issues": []}
+        if self.prediction_quality is None:
+            return {**safe_forecast, "data_quality": quality}
+        enriched = self.prediction_quality.enrich_forecast(features=features, forecast=safe_forecast, data_quality=quality)
+        blockers = [str(item) for item in (safe_forecast.get("blockers", []) or []) if str(item)]
+        advisory = [str(item) for item in (safe_forecast.get("advisory_blockers", []) or []) if str(item)]
+        if quality.get("state") not in {"good", None}:
+            advisory.append(f"data_quality_{quality.get('state')}")
+        if enriched.get("confidence", 0.0) < self._safe_float(safe_forecast.get("confidence"), 0.0):
+            advisory.append("confidence_degraded")
+        return {
+            **safe_forecast,
+            **enriched,
+            "provider": str(provider or safe_forecast.get("provider") or "global"),
+            "symbol": str(symbol or safe_forecast.get("symbol") or "").upper(),
+            "blockers": list(dict.fromkeys(blockers)),
+            "advisory_blockers": list(dict.fromkeys(item for item in advisory if item)),
+        }
+
+    def price_levels(
+        self, candles: list[dict[str, Any]], forecast: dict[str, Any], features: dict[str, Any] | None = None
+    ) -> dict[str, float]:
         latest = self._latest_close(candles, features or {})
         if latest <= 0:
             latest = 1.0
@@ -199,14 +296,39 @@ class MLProjectionEngine:
             for ratio in (0.236, 0.382, 0.5, 0.618, 0.786, 1.0)
         ]
         reversal = path[min(max(int(round((1.0 - confidence) * 7)), 0), len(path) - 1)] if path else {}
+        stop_band_width = max(entry * volatility * 0.75, abs(entry - levels["stop_loss"]) * 0.18)
+        invalidation_price = levels["stop_loss"] if side in {"buy", "sell"} else entry
+        uncertainty = max(0.0, min(1.0 - confidence, 1.0))
         return {
             "path": path,
             "confidence_band": {"upper": upper, "lower": lower},
             "volatility_cone": cone,
+            "projected_range": {
+                "upper": upper,
+                "lower": lower,
+                "label": "Projected range",
+            },
+            "uncertainty_shading": {
+                "intensity": uncertainty,
+                "quality": forecast.get("data_quality", {}).get("state") if isinstance(forecast.get("data_quality"), dict) else None,
+            },
             "zones": {
                 "entry": {"price": levels["entry"]},
                 "exit": {"price": levels["exit"]},
                 "stop_loss": {"price": levels["stop_loss"]},
+            },
+            "invalidation_zone": {
+                "price": invalidation_price,
+                "label": "Invalidation",
+            },
+            "stop_loss_band": {
+                "upper": levels["stop_loss"] + stop_band_width,
+                "lower": max(levels["stop_loss"] - stop_band_width, 0.0),
+                "label": "Stop risk band",
+            },
+            "volatility_expansion": {
+                "state": forecast.get("market_regime", {}).get("state") if isinstance(forecast.get("market_regime"), dict) else "normal",
+                "volatility": volatility,
             },
             "markers": [
                 {"time": float(last_time), "price": entry, "type": "buy" if side == "buy" else "sell" if side == "sell" else "hold"},
@@ -214,6 +336,11 @@ class MLProjectionEngine:
             "fibonacci_time_zones": fib_markers,
             "reversal_points": [reversal] if reversal else [],
             "forecast_horizon": {"start": float(last_time), "end": float(last_time + horizon_seconds), "seconds": horizon_seconds},
+            "trend_continuation_probability": self._safe_float(forecast.get("trend_continuation_probability"), confidence * 100.0),
+            "forecast_expiry": {
+                "seconds": horizon_seconds,
+                "expires_at": (datetime.utcnow() + timedelta(seconds=horizon_seconds)).isoformat(),
+            },
             "strategy_agreement_score": self._safe_float(
                 forecast.get("ml_agreement_score"),
                 forecast.get("strategy_consensus", forecast.get("confidence", 0.0)),
@@ -224,7 +351,7 @@ class MLProjectionEngine:
     def _safe_candles(self, symbol: str, timeframe: str, mode: str, limit: int) -> list[dict[str, Any]]:
         try:
             return list(self.market_data.get_candles(symbol, timeframe, mode=mode, limit=limit) or [])
-        except Exception:
+        except Exception:  # noqa: BLE001
             return []
 
     def _aggregate_candles(self, candles: list[dict[str, Any]], *, group_size: int) -> list[dict[str, Any]]:

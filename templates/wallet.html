@@ -1,17 +1,17 @@
 {% extends "base.html" %}
 {% from "components/crypto_icon.html" import crypto_icon %}
-{% from "partials/_ui.html" import page_header, empty_state %}
+{% from "partials/_ui.html" import empty_state %}
 
 {% block title %}Wallet · Algorithm Vault{% endblock %}
 
 {% block content %}
 <section class="wallet-exchange-shell">
-  {{ page_header('Wallet', 'Balances and funding', 'Available balances, funding status, and recent wallet activity. Sensitive identifiers are masked.', 'Synced', 'success') }}
   <article class="wallet-total-card">
-    <span class="card-kicker">Total Portfolio Value · Available balance</span>
+    <span class="card-kicker">Verified On-chain Value</span>
     <strong class="hero-value">${{ "%.2f"|format(portfolio_total) }}</strong>
     <div class="wallet-actions">
       <a href="{{ url_for('consumer.vault') }}" class="button-link primary">Allocate</a>
+      <a href="{{ url_for('consumer.convert') }}" class="button-link secondary">Convert</a>
       <a href="{{ url_for('settings.connections') }}" class="button-link secondary">Providers</a>
     </div>
   </article>
@@ -43,23 +43,34 @@
   <div class="wallet-section-heading">
     <div>
       <span class="card-kicker">Allocation</span>
-      <h2 id="wallet-allocation-title">Asset Mix</h2>
+      <h2 id="wallet-allocation-title">Verified Asset Mix</h2>
     </div>
     <span class="wallet-count">{{ allocation_chart.rows|length }} assets</span>
   </div>
-  <div class="allocation-bars" role="list">
-    {% for row in allocation_chart.rows %}
-      <div class="allocation-bar-row" role="listitem">
-        <div class="allocation-row-label">
-          <strong>{{ row.asset }}</strong>
-          <span>{{ "%.6f"|format(row.total_balance) }} total</span>
+  <div class="wallet-allocation-body">
+    <div
+      class="wallet-allocation-donut"
+      style="--allocation-gradient: {{ allocation_chart.gradient }}"
+      role="img"
+      aria-label="{{ allocation_chart.summary }}"
+    >
+      <span>${{ "%.2f"|format(allocation_chart.total) }}</span>
+      <small>On-chain</small>
+    </div>
+    <div class="allocation-bars wallet-allocation-list" role="list">
+      {% for row in allocation_chart.rows %}
+        <div class="allocation-bar-row wallet-allocation-row" role="listitem">
+          <div class="allocation-row-label">
+            <strong><i style="--asset-color: {{ row.color }}"></i>{{ row.asset }}</strong>
+            <span>{{ "%.6f"|format(row.total_balance) }} verified</span>
+          </div>
+          <div class="allocation-track" aria-hidden="true"><span style="width: {{ [row.pct, 100]|min }}%; --asset-color: {{ row.color }}"></span></div>
+          <span class="allocation-pct">${{ "%.2f"|format(row.value) }} · {{ "%.1f"|format(row.pct) }}%</span>
         </div>
-        <div class="allocation-track" aria-hidden="true"><span style="width: {{ [row.pct, 100]|min }}%"></span></div>
-        <span class="allocation-pct">${{ "%.2f"|format(row.value) }} · {{ "%.1f"|format(row.pct) }}%</span>
-      </div>
-    {% else %}
-      <div class="compact-state">No wallet balances are available yet.</div>
-    {% endfor %}
+      {% else %}
+        <div class="compact-state">No verified on-chain balances are available yet.</div>
+      {% endfor %}
+    </div>
   </div>
 </section>
 
@@ -80,13 +91,13 @@
         {{ crypto_icon(balance.asset, "wallet-coin") }}
         <div>
           <h2>{{ balance.asset }}</h2>
-          <span>Wallet Balance</span>
+          <span>Verified On-chain</span>
         </div>
         <strong class="wallet-usd">${{ "%.2f"|format(balance.estimated_usd_value) }}</strong>
       </div>
 
       <div class="wallet-balance-main">
-        <span>Total</span>
+        <span>Verified Total</span>
         <strong class="balance-amount">{{ "%.6f"|format(balance.total_balance) }}</strong>
       </div>
 
@@ -100,12 +111,12 @@
           <dd>{{ "%.6f"|format(balance.locked_balance) }}</dd>
         </div>
         <div>
-          <dt>On-chain</dt>
+          <dt>Status</dt>
           <dd>
             {% if balance.onchain_status == "checked" %}
-              {{ "%.6f"|format(balance.onchain_balance) }}
+              Verified
             {% else %}
-              Unavailable
+              Pending
             {% endif %}
           </dd>
         </div>
@@ -114,11 +125,11 @@
       <div class="wallet-onchain-row">
         {% if balance.onchain_status == "checked" %}
           <span class="status-pill wallet-onchain-status {{ balance.onchain_mismatch_status }}">
-            {{ balance.onchain_mismatch_status|replace("_", " ")|title }}
+            On-chain Verified
           </span>
-          <span>{{ "%+.6f"|format(balance.onchain_delta) }} {{ balance.asset }}</span>
+          {% if balance.onchain_checked_at %}<span>Checked {{ balance.onchain_checked_at.strftime("%b %d, %H:%M") if balance.onchain_checked_at.strftime else balance.onchain_checked_at }}</span>{% endif %}
         {% else %}
-          <span class="status-pill wallet-onchain-status unavailable">On-chain Unavailable</span>
+          <span class="status-pill wallet-onchain-status unavailable">Verification Pending</span>
           {% if balance.onchain_reason %}<span>{{ balance.onchain_reason }}</span>{% endif %}
         {% endif %}
       </div>
@@ -126,6 +137,7 @@
       <div class="wallet-card-actions wallet-action-row">
         <a href="{{ url_for('consumer.deposit', asset=balance.asset) }}" class="button-link primary">Deposit</a>
         <a href="{{ url_for('consumer.withdraw', asset=balance.asset) }}" class="button-link secondary">Withdraw</a>
+        <a href="{{ url_for('consumer.convert', from_asset=balance.asset) }}" class="button-link secondary">Convert</a>
       </div>
 
       <div class="wallet-address-row">
@@ -149,7 +161,6 @@
       <span class="card-kicker">Wallet Activity</span>
       <h2>Recent Transactions</h2>
     </div>
-    <a href="{{ url_for('consumer.activity') }}" class="text-link">Full History</a>
   </div>
 
   <div class="wallet-activity-list">

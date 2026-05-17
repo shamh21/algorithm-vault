@@ -358,7 +358,7 @@ class RealWalletCustodyService:
             return {"credited": 0.0, "checked": False}
 
         required = int(self._duration_map_value("WALLET_REQUIRED_CONFIRMATIONS", wallet_address.network, 1))
-        if snapshot.confirmations < required:
+        if snapshot.confirmations < required and float(snapshot.amount or 0.0) > 1e-12:
             metadata = wallet_address.encrypted_metadata
             metadata["last_sync_status"] = "unconfirmed"
             metadata["last_sync_reason"] = f"waiting for {required} confirmation(s)"
@@ -1062,30 +1062,43 @@ class RealWalletCustodyService:
                 status="complete",
             ).all()
         )
-        locked = max(0.0, float(balance.locked_balance or 0.0))
-        ledger_available = max(0.0, deposit_total - completed_withdrawal_total - locked)
+        locked_before = max(0.0, float(balance.locked_balance or 0.0))
+        ledger_available = max(0.0, deposit_total - completed_withdrawal_total - locked_before)
         on_chain = self._last_checked_on_chain_total(user_id, asset_key)
         before = float(balance.available_balance or 0.0)
+        before_estimated_usd = float(balance.estimated_usd_value or 0.0)
+        before_total = before + locked_before
         has_ledger_basis = deposit_total > 0 or completed_withdrawal_total > 0
         expected_available = ledger_available if has_ledger_basis else before
+        expected_locked = locked_before
         if on_chain["checked"]:
-            on_chain_available = max(0.0, float(on_chain["total"] or 0.0) - locked)
-            expected_available = min(ledger_available if has_ledger_basis else before, on_chain_available)
+            on_chain_total = max(0.0, float(on_chain["total"] or 0.0))
+            expected_locked = min(locked_before, on_chain_total)
+            expected_available = max(0.0, on_chain_total - expected_locked)
         balance.available_balance = expected_available
+        balance.locked_balance = expected_locked
+        expected_total = expected_available + expected_locked
         if asset_key in {"USDC", "USDT", "USD"}:
-            balance.estimated_usd_value = expected_available + locked
+            balance.estimated_usd_value = expected_total
+        elif before_total > 0 and before_estimated_usd > 0:
+            balance.estimated_usd_value = expected_total * (before_estimated_usd / before_total)
+        elif expected_total <= 0:
+            balance.estimated_usd_value = 0.0
         self._audit(
             user_id=user_id,
             action="wallet_balance_reconciled",
             status="complete",
-            message=f"Reconciled {asset_key} custody balance from completed wallet ledger events.",
+            message=f"Reconciled {asset_key} custody balance from verified on-chain wallet totals.",
             metadata={
                 "asset": asset_key,
                 "before_available": before,
                 "after_available": expected_available,
+                "before_estimated_usd_value": before_estimated_usd,
+                "after_estimated_usd_value": float(balance.estimated_usd_value or 0.0),
                 "deposit_total": deposit_total,
                 "completed_withdrawal_total": completed_withdrawal_total,
-                "locked_balance": locked,
+                "locked_balance": locked_before,
+                "after_locked_balance": expected_locked,
                 "on_chain_checked": bool(on_chain["checked"]),
                 "on_chain_total": float(on_chain["total"] or 0.0),
                 "on_chain_failures": on_chain["failures"],
@@ -1097,13 +1110,14 @@ class RealWalletCustodyService:
             "asset": asset_key,
             "before_available": before,
             "available_balance": expected_available,
-            "locked_balance": locked,
+            "locked_balance": expected_locked,
             "deposit_total": deposit_total,
             "completed_withdrawal_total": completed_withdrawal_total,
             "on_chain_checked": bool(on_chain["checked"]),
             "on_chain_total": float(on_chain["total"] or 0.0),
             "on_chain_failures": on_chain["failures"],
-            "changed": not math.isclose(before, expected_available, rel_tol=1e-12, abs_tol=1e-12),
+            "changed": not math.isclose(before, expected_available, rel_tol=1e-12, abs_tol=1e-12)
+            or not math.isclose(locked_before, expected_locked, rel_tol=1e-12, abs_tol=1e-12),
         }
 
     @staticmethod

@@ -25,14 +25,14 @@ def test_vault_template_is_minimal_one_h10_flow() -> None:
     source = Path("templates/vault.html").read_text()
 
     assert 'name="one_h10_live_ack"' in source
-    assert 'data-vault-max' in source
-    assert 'data-settlement-asset' in source
+    assert "data-vault-max" in source
+    assert "data-settlement-asset" in source
     assert 'name="lock_duration"' in source
     assert "cycle.duration_hours" in source
-    assert source.count('data-vault-routing-form') == 1
-    assert source.count('data-settlement-asset') == 1
+    assert source.count("data-vault-routing-form") == 1
+    assert source.count("data-settlement-asset") == 1
     assert source.count('type="submit"') == 1
-    assert 'url_for(\'consumer.start_cycle\')' in source
+    assert "url_for('consumer.start_cycle')" in source
     assert 'name="providers"' in source
     assert "Enabled Exchanges" in source
     assert "Routing Preview" in source
@@ -40,7 +40,7 @@ def test_vault_template_is_minimal_one_h10_flow() -> None:
     assert "KuCoin" not in source
     assert "Vault Activity" in source
     assert "Recent Cycles" in source
-    assert "Full History" in source
+    assert "Full History" not in source
     assert "1H10 Vault Cycle Status" in source
     assert "Next-Move Forecast" in source
     assert "Automation readiness" in source
@@ -110,9 +110,9 @@ def test_vault_assets_use_explicit_readiness_cache_busters() -> None:
     base_source = Path("templates/base.html").read_text()
     sw_source = Path("static/js/sw.js").read_text()
 
-    assert "vault-readiness-3" in vault_source
-    assert "algvault-command-center-dark" in base_source
-    assert "algvault-v9-command-center-dark" in sw_source
+    assert "vault-shell-polish-9" in vault_source
+    assert "algvault-vault-shell-polish-9" in base_source
+    assert "algvault-v21-vault-shell-polish-9" in sw_source
 
 
 def test_pwa_shell_keeps_heavy_chart_libraries_off_precache_path() -> None:

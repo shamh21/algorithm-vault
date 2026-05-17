@@ -5,9 +5,8 @@ Revises:
 Create Date: 2026-05-11 20:43:42.538059
 
 """
-from alembic import op
 import sqlalchemy as sa
-
+from alembic import op
 
 # revision identifiers, used by Alembic.
 revision = '0e600c2583a0'
@@ -431,7 +430,6 @@ def upgrade():
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('expired_at', sa.DateTime(), nullable=True),
     sa.Column('rotated_from_id', sa.Integer(), nullable=True),
-    sa.ForeignKeyConstraint(['rotated_from_id'], ['deposit_address.id'], ),
     sa.ForeignKeyConstraint(['user_id'], ['user.id'], ),
     sa.PrimaryKeyConstraint('id'),
     sa.UniqueConstraint('address')
@@ -442,6 +440,14 @@ def upgrade():
         batch_op.create_index(batch_op.f('ix_deposit_address_is_active'), ['is_active'], unique=False)
         batch_op.create_index(batch_op.f('ix_deposit_address_network'), ['network'], unique=False)
         batch_op.create_index(batch_op.f('ix_deposit_address_user_id'), ['user_id'], unique=False)
+
+    op.create_foreign_key(
+        'fk_deposit_address_rotated_from_id',
+        'deposit_address',
+        'deposit_address',
+        ['rotated_from_id'],
+        ['id'],
+    )
 
     op.create_table('platform_treasury_wallet',
     sa.Column('id', sa.Integer(), nullable=False),
@@ -456,7 +462,6 @@ def upgrade():
     sa.Column('updated_at', sa.DateTime(), nullable=False),
     sa.Column('rotated_at', sa.DateTime(), nullable=True),
     sa.ForeignKeyConstraint(['created_by_user_id'], ['user.id'], ),
-    sa.ForeignKeyConstraint(['rotated_from_wallet_id'], ['platform_treasury_wallet.id'], ),
     sa.PrimaryKeyConstraint('id'),
     sa.UniqueConstraint('address')
     )
@@ -465,6 +470,14 @@ def upgrade():
         batch_op.create_index(batch_op.f('ix_platform_treasury_wallet_created_by_user_id'), ['created_by_user_id'], unique=False)
         batch_op.create_index(batch_op.f('ix_platform_treasury_wallet_is_active'), ['is_active'], unique=False)
         batch_op.create_index(batch_op.f('ix_platform_treasury_wallet_network'), ['network'], unique=False)
+
+    op.create_foreign_key(
+        'fk_platform_treasury_wallet_rotated_from_id',
+        'platform_treasury_wallet',
+        'platform_treasury_wallet',
+        ['rotated_from_wallet_id'],
+        ['id'],
+    )
 
     op.create_table('rapid_ml_session',
     sa.Column('id', sa.Integer(), nullable=False),
@@ -703,7 +716,6 @@ def upgrade():
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.Column('updated_at', sa.DateTime(), nullable=False),
     sa.ForeignKeyConstraint(['deposit_address_id'], ['deposit_address.id'], ),
-    sa.ForeignKeyConstraint(['rotated_from_id'], ['wallet_address.id'], ),
     sa.ForeignKeyConstraint(['user_id'], ['user.id'], ),
     sa.ForeignKeyConstraint(['wallet_account_id'], ['wallet_account.id'], ),
     sa.PrimaryKeyConstraint('id')
@@ -717,6 +729,14 @@ def upgrade():
         batch_op.create_index(batch_op.f('ix_wallet_address_status'), ['status'], unique=False)
         batch_op.create_index(batch_op.f('ix_wallet_address_user_id'), ['user_id'], unique=False)
         batch_op.create_index(batch_op.f('ix_wallet_address_wallet_account_id'), ['wallet_account_id'], unique=False)
+
+    op.create_foreign_key(
+        'fk_wallet_address_rotated_from_id',
+        'wallet_address',
+        'wallet_address',
+        ['rotated_from_id'],
+        ['id'],
+    )
 
     op.create_table('wallet_balance',
     sa.Column('id', sa.Integer(), nullable=False),

@@ -1,10 +1,14 @@
 (() => {
+  if (window.__AlgVaultAppShellBootstrapped) return;
+  window.__AlgVaultAppShellBootstrapped = true;
+
   let shellInitialized = false;
   let startupFailed = false;
   let startupComplete = false;
+  let startupTimeout = 0;
   const startupStartedAt = window.performance?.now?.() || Date.now();
   const STARTUP_MIN_VISIBLE_MS = 160;
-  const STARTUP_TIMEOUT_MS = 4500;
+  const STARTUP_TIMEOUT_MS = 7000;
   const BOTTOM_NAV_SWITCH_KEY = "av-bottom-nav-switch";
   const THEME_STORAGE_KEY = "av-color-theme";
 
@@ -27,12 +31,17 @@
     const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
     const delay = skipDelay || reduceMotion ? 0 : Math.max(0, STARTUP_MIN_VISIBLE_MS - elapsed);
     window.setTimeout(() => {
-      const { loader } = startupNodes();
+      const { loader, retry } = startupNodes();
       document.body.classList.remove("app-starting", "app-startup-failed");
       document.body.classList.add("app-ready");
       if (loader) {
         loader.setAttribute("aria-busy", "false");
         loader.setAttribute("aria-hidden", "true");
+      }
+      if (retry) {
+        retry.hidden = true;
+        retry.disabled = false;
+        retry.textContent = "Retry";
       }
     }, delay);
   };
@@ -40,6 +49,7 @@
   const showStartupFailure = (error) => {
     if (startupComplete || startupFailed) return;
     startupFailed = true;
+    window.clearTimeout(startupTimeout);
     if (error) {
       console.error("Application startup failed", error);
     }
@@ -49,14 +59,13 @@
     loader?.setAttribute("aria-hidden", "false");
     loader?.setAttribute("role", "status");
     loader?.setAttribute("aria-live", "polite");
-    if (title) title.textContent = "Startup needs attention";
-    if (detail) detail.textContent = "The app shell did not finish initializing. Retry when your connection is available.";
+    if (title) title.textContent = "Startup paused";
+    if (detail) detail.textContent = "The app shell did not finish loading. Check your connection and retry.";
     if (retry) retry.hidden = false;
   };
 
-  const startupTimeout = window.setTimeout(() => {
-    console.warn("AlgVault startup timed out; releasing intro screen.");
-    finishStartupLoader(true);
+  startupTimeout = window.setTimeout(() => {
+    showStartupFailure(new Error("Application startup timed out."));
   }, STARTUP_TIMEOUT_MS);
 
   const finishStartupAfterRouteReady = (skipDelay = false) => {
@@ -64,9 +73,18 @@
       finishStartupLoader(skipDelay);
       return;
     }
-    const finishAfterPaint = () => window.setTimeout(() => finishStartupLoader(false), 0);
+    let finishQueued = false;
+    const finishAfterPaint = () => {
+      if (finishQueued) return;
+      finishQueued = true;
+      window.setTimeout(() => finishStartupLoader(false), 0);
+    };
     if (window.requestAnimationFrame) {
-      window.requestAnimationFrame(() => window.requestAnimationFrame(finishAfterPaint));
+      const fallback = window.setTimeout(finishAfterPaint, 500);
+      window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+        window.clearTimeout(fallback);
+        finishAfterPaint();
+      }));
       return;
     }
     finishAfterPaint();
@@ -92,33 +110,57 @@
     const nav = document.querySelector("[data-primary-nav]");
     const backdrop = document.querySelector("[data-nav-backdrop]");
     const topbar = document.querySelector("[data-app-topbar]");
-    const themeToggle = document.querySelector("[data-theme-toggle]");
-    const themeToggleLabel = themeToggle?.querySelector("[data-theme-toggle-label]");
+    const themeToggles = Array.from(document.querySelectorAll("[data-theme-toggle]"));
+    const themeCurrentLabels = Array.from(document.querySelectorAll("[data-theme-current-label]"));
     const themeMeta = document.querySelector('meta[name="theme-color"]:not([media])');
+    const colorSchemeMeta = document.querySelector('meta[name="color-scheme"]');
 
-    document.body.classList.toggle("reduced-motion", prefersReducedMotion);
+    const syncReducedMotion = () => {
+      document.body.classList.toggle("reduced-motion", reducedMotionQuery.matches);
+    };
+    syncReducedMotion();
+    if (reducedMotionQuery.addEventListener) {
+      reducedMotionQuery.addEventListener("change", syncReducedMotion);
+    } else {
+      reducedMotionQuery.addListener?.(syncReducedMotion);
+    }
 
-    const applyTheme = () => {
-      const nextTheme = "dark";
-      document.documentElement.dataset.theme = nextTheme;
-      themeToggle?.setAttribute("aria-pressed", String(nextTheme === "dark"));
-      if (themeToggleLabel) {
-        themeToggleLabel.textContent = "Dark mode";
+    const storedTheme = () => {
+      try {
+        const value = window.localStorage.getItem(THEME_STORAGE_KEY);
+        return value === "light" ? "light" : "dark";
+      } catch {
+        return "dark";
       }
-      if (themeToggle) {
-        themeToggle.title = "Dark mode";
-      }
-      themeMeta?.setAttribute("content", "#050607");
     };
 
-    applyTheme(document.documentElement.dataset.theme || "dark");
+    const applyTheme = (theme = "dark") => {
+      const nextTheme = theme === "light" ? "light" : "dark";
+      document.documentElement.dataset.theme = nextTheme;
+      const label = nextTheme === "dark" ? "Dark mode" : "Light mode";
+      themeToggles.forEach((themeToggle) => {
+        themeToggle.setAttribute("aria-pressed", String(nextTheme === "dark"));
+        themeToggle.setAttribute("title", label);
+        themeToggle.querySelectorAll("[data-theme-toggle-label]").forEach((node) => {
+          node.textContent = label;
+        });
+      });
+      themeCurrentLabels.forEach((node) => {
+        node.textContent = label;
+      });
+      themeMeta?.setAttribute("content", nextTheme === "dark" ? "#050607" : "#f8fbff");
+      colorSchemeMeta?.setAttribute("content", nextTheme === "dark" ? "dark" : "light");
+    };
 
-    themeToggle?.addEventListener("click", () => {
-      applyTheme("dark");
+    applyTheme(document.documentElement.dataset.theme || storedTheme());
+
+    themeToggles.forEach((themeToggle) => themeToggle.addEventListener("click", () => {
+      const nextTheme = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+      applyTheme(nextTheme);
       try {
-        window.localStorage.setItem(THEME_STORAGE_KEY, "dark");
+        window.localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
       } catch {}
-    });
+    }));
 
     const closeNav = () => {
       if (!toggle || !nav) return;
@@ -231,11 +273,14 @@
       if (resizeFrame) return;
       resizeFrame = window.requestAnimationFrame(() => {
         resizeFrame = 0;
-        document.documentElement.style.setProperty("--app-vh", `${window.innerHeight * 0.01}px`);
+        const viewportHeight = window.visualViewport?.height || window.innerHeight;
+        document.documentElement.style.setProperty("--app-vh", `${viewportHeight * 0.01}px`);
       });
     };
     handleResize();
     window.addEventListener("resize", handleResize, { passive: true });
+    window.visualViewport?.addEventListener("resize", handleResize, { passive: true });
+    window.addEventListener("orientationchange", handleResize, { passive: true });
 
     document.querySelectorAll("[data-disable-on-submit]").forEach((form) => {
       form.addEventListener("submit", () => {
@@ -347,12 +392,19 @@
   };
 
   const { retry } = startupNodes();
-  retry?.addEventListener("click", () => {
-    window.location.reload();
-  });
+  if (retry && retry.dataset.retryBound !== "true") {
+    retry.dataset.retryBound = "true";
+    retry.addEventListener("click", () => {
+      retry.disabled = true;
+      retry.textContent = "Retrying...";
+      window.location.reload();
+    });
+  }
 
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", runInitShell, { once: true });
+    window.addEventListener("load", runInitShell, { once: true });
+    window.setTimeout(runInitShell, 1200);
   } else {
     runInitShell();
   }

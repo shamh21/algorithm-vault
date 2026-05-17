@@ -107,10 +107,7 @@ def test_live_strategy_candle_fetch_uses_single_attempt_before_provider_backoff(
 
     def fake_candles(symbol, timeframe, mode="live", limit=None, retry=True):
         captured.update({"symbol": symbol, "timeframe": timeframe, "mode": mode, "limit": limit, "retry": retry})
-        return [
-            {"timestamp": index, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 1.0}
-            for index in range(3)
-        ]
+        return [{"timestamp": index, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0, "volume": 1.0} for index in range(3)]
 
     monkeypatch.setattr(manager.market_data, "get_candles", fake_candles)
 
@@ -175,6 +172,34 @@ def test_live_mids_failure_backoff_prevents_repeated_provider_calls() -> None:
 
     assert calls == [False]
     assert market_data.cache_stats()["failure_backoffs"] == 1
+
+
+def test_dashboard_market_summary_uses_candles_when_live_mids_fail() -> None:
+    class FakeClient:
+        def get_all_mids(self, mode, *, retry=True):
+            raise RuntimeError("Hyperliquid all_mids unavailable")
+
+        def get_candles(self, mode, symbol, timeframe, start_ms, end_ms, *, retry=True):
+            return [
+                {"t": 1, "o": "100", "h": "101", "l": "99", "c": "100", "v": "10"},
+                {"t": 2, "o": "100", "h": "102", "l": "99", "c": "101", "v": "11"},
+            ]
+
+    market_data = MarketDataService(
+        {
+            "MARKET_DATA_LIVE_CANDLE_CACHE_SECONDS": 1.0,
+            "MARKET_DATA_LIVE_MIDS_CACHE_SECONDS": 1.0,
+            "DASHBOARD_CANDLE_LIMIT": 200,
+        },
+        FakeClient(),
+    )
+
+    rows = market_data.get_dashboard_market_summary(["BTC"], "1m", "live")
+
+    assert rows[0]["symbol"] == "BTC"
+    assert rows[0]["mid"] == 101
+    assert rows[0]["status"] == "partial"
+    assert rows[0]["candle_count"] == 2
 
 
 def test_trading_connection_snapshot_cache_prevents_repeated_live_position_calls(app, monkeypatch) -> None:

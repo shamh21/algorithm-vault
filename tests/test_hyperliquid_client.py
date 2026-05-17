@@ -81,6 +81,45 @@ def test_hyperliquid_testnet_exchange_uses_main_account_address_not_signer(monke
     assert captured["secret"] == "0x" + ("2" * 64)
 
 
+def test_hyperliquid_public_methods_use_direct_info_fallback(monkeypatch) -> None:
+    class FakeInfo:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def all_mids(self):
+            raise RuntimeError("sdk all mids failed")
+
+        def candles_snapshot(self, *args):
+            raise RuntimeError("sdk candles failed")
+
+        def meta_and_asset_ctxs(self):
+            raise RuntimeError("sdk meta failed")
+
+    direct_calls: list[str] = []
+
+    def direct_info(mode, payload, **kwargs):
+        direct_calls.append(payload["type"])
+        if payload["type"] == "allMids":
+            return {"BTC": "100.5"}
+        if payload["type"] == "candleSnapshot":
+            return [{"t": 1, "o": "100", "h": "101", "l": "99", "c": "100.5", "v": "1"}]
+        if payload["type"] == "metaAndAssetCtxs":
+            return [{"universe": [{"name": "BTC"}]}, [{"markPx": "100.5"}]]
+        raise AssertionError(payload)
+
+    monkeypatch.setattr(hl_module, "_load_info_class", lambda: FakeInfo)
+    client = HyperliquidClient(_guard_config())
+    monkeypatch.setattr(client, "_public_info_post", direct_info)
+
+    assert client.get_all_mids("live") == {"BTC": 100.5}
+    assert client.get_candles("live", "BTC", "1m", 1, 2) == [{"t": 1, "o": "100", "h": "101", "l": "99", "c": "100.5", "v": "1"}]
+    meta, contexts = client.get_perp_meta_and_asset_contexts("live")
+
+    assert meta["universe"][0]["name"] == "BTC"
+    assert contexts[0]["markPx"] == "100.5"
+    assert direct_calls == ["allMids", "candleSnapshot", "metaAndAssetCtxs"]
+
+
 def test_hyperliquid_order_accepts_alo_tif_and_client_order_id(monkeypatch) -> None:
     captured = {}
 
@@ -178,9 +217,7 @@ def test_hyperliquid_live_test_plan_uses_metadata_and_fails_closed_without_funds
 
 
 def test_hyperliquid_sanitizes_and_classifies_provider_errors() -> None:
-    sanitized = HyperliquidClient._sanitize_error_message(
-        "signature=0xabcdef private=0x" + ("1" * 64) + " account=0x" + ("2" * 40)
-    )
+    sanitized = HyperliquidClient._sanitize_error_message("signature=0xabcdef private=0x" + ("1" * 64) + " account=0x" + ("2" * 40))
 
     assert "0x" + ("1" * 64) not in sanitized
     assert "0x" + ("2" * 40) not in sanitized

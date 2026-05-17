@@ -5,12 +5,15 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import shutil
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 try:
     from hyperliquid.utils import constants as hl_constants
 except ImportError:  # pragma: no cover - import fallback for environments without the SDK
+
     class _FallbackConstants:
         TESTNET_API_URL = "https://api.hyperliquid-testnet.xyz"
         MAINNET_API_URL = "https://api.hyperliquid.xyz"
@@ -53,6 +56,33 @@ def _normalize_database_url(value: str | None, default: str) -> str:
     if raw.startswith("postgresql://"):
         return "postgresql+psycopg://" + raw.removeprefix("postgresql://")
     return raw
+
+
+def _prepare_recovery_sqlite_database_url(default_url: str) -> tuple[str, bool]:
+    if not _as_bool(os.getenv("ALGVAULT_RECOVERY_SQLITE_ENABLED"), default=False):
+        return default_url, False
+
+    bundle_raw = os.getenv("ALGVAULT_RECOVERY_SQLITE_BUNDLE", "app/recovery/algvault_sufyanh.seed").strip()
+    runtime_raw = os.getenv("ALGVAULT_RECOVERY_SQLITE_PATH", "/tmp/algvault_sufyanh_recovery.sqlite").strip()
+    bundle_path = Path(bundle_raw)
+    if not bundle_path.is_absolute():
+        bundle_path = Path(__file__).resolve().parents[1] / bundle_path
+    runtime_path = Path(runtime_raw)
+    if not runtime_path.is_absolute():
+        runtime_path = Path("/tmp") / runtime_path
+
+    if not bundle_path.exists():
+        raise RuntimeError(f"Recovery SQLite bundle is missing: {bundle_path}")
+
+    runtime_path.parent.mkdir(parents=True, exist_ok=True)
+    should_copy = not runtime_path.exists()
+    if not should_copy:
+        bundle_stat = bundle_path.stat()
+        runtime_stat = runtime_path.stat()
+        should_copy = runtime_stat.st_size != bundle_stat.st_size or runtime_stat.st_mtime < bundle_stat.st_mtime
+    if should_copy:
+        shutil.copy2(bundle_path, runtime_path)
+    return f"sqlite:///{runtime_path}", True
 
 
 def _is_local_or_private_hostname(hostname: str) -> bool:
@@ -224,18 +254,21 @@ class BaseConfig:
     SIGNUP_INVITE_CODE = os.getenv("SIGNUP_INVITE_CODE", "").strip()
     TOTP_ENCRYPTION_KEY = os.getenv("TOTP_ENCRYPTION_KEY", "").strip()
     DEPOSIT_ADDRESS_BOOK = _parse_deposit_address_book(os.getenv("DEPOSIT_ADDRESSES_JSON"))
-    SQLALCHEMY_DATABASE_URI = _normalize_database_url(os.getenv("DATABASE_URL"), "sqlite:///hyperliquid_dashboard.db")
+    CONFIGURED_DATABASE_URL = _normalize_database_url(os.getenv("DATABASE_URL"), "sqlite:///hyperliquid_dashboard.db")
+    SQLALCHEMY_DATABASE_URI, RECOVERY_SQLITE_ACTIVE = _prepare_recovery_sqlite_database_url(CONFIGURED_DATABASE_URL)
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     SQLITE_BUSY_TIMEOUT_MS = _as_int(os.getenv("SQLITE_BUSY_TIMEOUT_MS"), 10_000)
     SQLITE_ENABLE_WAL = _as_bool(os.getenv("SQLITE_ENABLE_WAL"), default=True)
-    SCHEMA_BOOTSTRAP_ENABLED = _as_bool(os.getenv("SCHEMA_BOOTSTRAP_ENABLED"), default=True)
+    RECOVERY_POSTGRES_PROBE_TIMEOUT_SECONDS = _as_float(os.getenv("RECOVERY_POSTGRES_PROBE_TIMEOUT_SECONDS"), 2.0)
+    RECOVERY_POSTGRES_PROBE_TTL_SECONDS = _as_float(os.getenv("RECOVERY_POSTGRES_PROBE_TTL_SECONDS"), 60.0)
+    SCHEMA_BOOTSTRAP_ENABLED = False if RECOVERY_SQLITE_ACTIVE else _as_bool(os.getenv("SCHEMA_BOOTSTRAP_ENABLED"), default=True)
     ALLOW_PRODUCTION_SCHEMA_BOOTSTRAP = _as_bool(os.getenv("ALLOW_PRODUCTION_SCHEMA_BOOTSTRAP"), default=False)
     DEFER_DATABASE_STARTUP_ERRORS = _as_bool(
         os.getenv("DEFER_DATABASE_STARTUP_ERRORS"),
         default=_as_bool(os.getenv("VERCEL"), default=False),
     )
 
-    ENABLE_LIVE_TRADING = _as_bool(os.getenv("ENABLE_LIVE_TRADING"), default=False)
+    ENABLE_LIVE_TRADING = False if RECOVERY_SQLITE_ACTIVE else _as_bool(os.getenv("ENABLE_LIVE_TRADING"), default=False)
     APP_MODE = _normalize_mode(os.getenv("APP_MODE", "paper"), enable_live=ENABLE_LIVE_TRADING)
     HL_TESTNET_BASE_URL = hl_constants.TESTNET_API_URL
     HL_MAINNET_BASE_URL = hl_constants.MAINNET_API_URL
@@ -445,7 +478,9 @@ class BaseConfig:
     LIVE_MICRO_CANARY_MIN_NOTIONAL_BUFFER_USD = _as_float(os.getenv("LIVE_MICRO_CANARY_MIN_NOTIONAL_BUFFER_USD"), 0.50)
     LIVE_MICRO_CANARY_MAX_DAILY_LIVE_ORDERS = _as_int(os.getenv("LIVE_MICRO_CANARY_MAX_DAILY_LIVE_ORDERS"), 1)
     LIVE_MICRO_CANARY_REQUIRE_EXACT_CONFIRMATION = _as_bool(os.getenv("LIVE_MICRO_CANARY_REQUIRE_EXACT_CONFIRMATION"), default=True)
-    LIVE_MICRO_CANARY_EXACT_CONFIRMATION = os.getenv("LIVE_MICRO_CANARY_EXACT_CONFIRMATION", "LIVE-CANARY-TRADE").strip() or "LIVE-CANARY-TRADE"
+    LIVE_MICRO_CANARY_EXACT_CONFIRMATION = (
+        os.getenv("LIVE_MICRO_CANARY_EXACT_CONFIRMATION", "LIVE-CANARY-TRADE").strip() or "LIVE-CANARY-TRADE"
+    )
     LIVE_MICRO_CANARY_ALLOW_MIN_NOTIONAL_ORDER = _as_bool(os.getenv("LIVE_MICRO_CANARY_ALLOW_MIN_NOTIONAL_ORDER"), default=False)
     LIVE_MICRO_CANARY_ORDER_BUDGET_USD = _as_float(os.getenv("LIVE_MICRO_CANARY_ORDER_BUDGET_USD"), 10.0)
     LIVE_MICRO_CANARY_DEFAULT_MIN_NOTIONAL_USD = _as_float(os.getenv("LIVE_MICRO_CANARY_DEFAULT_MIN_NOTIONAL_USD"), 10.0)
@@ -487,6 +522,7 @@ class BaseConfig:
     ONE_H10_LIVE_ENABLED = _as_bool(os.getenv("ONE_H10_LIVE_ENABLED"), default=False)
     ONE_H10_EXACT_CONFIRMATION = os.getenv("ONE_H10_EXACT_CONFIRMATION", "ONE-H10-LIVE").strip() or "ONE-H10-LIVE"
     ONE_H10_TARGET_ROI_PCT = _as_float(os.getenv("ONE_H10_TARGET_ROI_PCT"), 1000.0)
+    ONE_H10_HORIZON_SECONDS = max(60, _as_int(os.getenv("ONE_H10_HORIZON_SECONDS"), 3600))
     ONE_H10_POLL_SECONDS = max(1.0, _as_float(os.getenv("ONE_H10_POLL_SECONDS"), 1.0))
     ONE_H10_REBALANCE_SECONDS = max(5.0, _as_float(os.getenv("ONE_H10_REBALANCE_SECONDS"), 15.0))
     ONE_H10_AUTO_RESUME_ACTIVE_RUNS = _as_bool(os.getenv("ONE_H10_AUTO_RESUME_ACTIVE_RUNS"), default=True)
@@ -506,7 +542,9 @@ class BaseConfig:
         os.getenv("ONE_H10_ALLOW_BOOTSTRAP_WITHOUT_PROMOTED_ML"),
         default=False,
     )
-    ONE_H10_REQUIRE_PROMOTED_ML = _as_bool(os.getenv("ONE_H10_REQUIRE_PROMOTED_ML"), default=True) or not ONE_H10_ALLOW_BOOTSTRAP_WITHOUT_PROMOTED_ML
+    ONE_H10_REQUIRE_PROMOTED_ML = (
+        _as_bool(os.getenv("ONE_H10_REQUIRE_PROMOTED_ML"), default=True) or not ONE_H10_ALLOW_BOOTSTRAP_WITHOUT_PROMOTED_ML
+    )
     ONE_H10_BOOTSTRAP_LIVE_ENABLED = _as_bool(os.getenv("ONE_H10_BOOTSTRAP_LIVE_ENABLED"), default=True)
     ONE_H10_MAX_PROVIDER_LEGS = _as_int(os.getenv("ONE_H10_MAX_PROVIDER_LEGS"), 3)
     ONE_H10_MAX_LEVERAGE = _as_float(os.getenv("ONE_H10_MAX_LEVERAGE"), MAX_LEVERAGE)
@@ -524,7 +562,10 @@ class BaseConfig:
         _as_float(os.getenv("AGGRESSIVE_1H_MAX_COST_DRAG_BPS"), 18.0),
     )
     ONE_H10_MIN_RISK_REWARD = _as_float(os.getenv("ONE_H10_MIN_RISK_REWARD"), MIN_REWARD_RISK)
-    ONE_H10_MAX_SIGNAL_AGE_SECONDS = _as_float(os.getenv("ONE_H10_MAX_SIGNAL_AGE_SECONDS"), 70.0 * 60.0)
+    ONE_H10_MAX_SIGNAL_AGE_SECONDS = _as_float(
+        os.getenv("ONE_H10_MAX_SIGNAL_AGE_SECONDS"),
+        float(ONE_H10_HORIZON_SECONDS),
+    )
     ONE_H10_MIN_EXECUTION_QUALITY = _as_float(
         os.getenv("ONE_H10_MIN_EXECUTION_QUALITY"),
         ONE_HOUR_MIN_EXECUTION_QUALITY,
@@ -533,6 +574,9 @@ class BaseConfig:
     ONE_H10_MIN_BOOTSTRAP_CONFIDENCE = max(_as_float(os.getenv("ONE_H10_MIN_BOOTSTRAP_CONFIDENCE"), 0.15), 0.15)
     ONE_H10_DIRECTIONAL_THRESHOLD = _as_float(os.getenv("ONE_H10_DIRECTIONAL_THRESHOLD"), 0.04)
     ONE_H10_MIN_POSITION_FRACTION = _as_float(os.getenv("ONE_H10_MIN_POSITION_FRACTION"), 0.20)
+    ONE_H10_MAX_POSITION_FRACTION = _as_float(os.getenv("ONE_H10_MAX_POSITION_FRACTION"), 0.75)
+    ONE_H10_PROFIT_OPTIMIZER_ENABLED = _as_bool(os.getenv("ONE_H10_PROFIT_OPTIMIZER_ENABLED"), default=True)
+    ONE_H10_MIN_PROFITABILITY_SCORE = _as_float(os.getenv("ONE_H10_MIN_PROFITABILITY_SCORE"), 0.35)
     ONE_H10_FIBONACCI_MIN_CONFIDENCE = max(_as_float(os.getenv("ONE_H10_FIBONACCI_MIN_CONFIDENCE"), 0.15), 0.15)
     ONE_H10_REJECT_ZERO_SPREAD = _as_bool(os.getenv("ONE_H10_REJECT_ZERO_SPREAD"), default=True)
     ONE_H10_ML_FORECAST_FAMILIES = _parse_csv(
@@ -643,10 +687,13 @@ class BaseConfig:
     EXPERIMENTAL_DURATION_ENSEMBLE_ENABLED = _as_bool(os.getenv("EXPERIMENTAL_DURATION_ENSEMBLE_ENABLED"), default=False)
     EXPERIMENTAL_DURATION_ENSEMBLE_LIVE_ELIGIBLE = _as_bool(os.getenv("EXPERIMENTAL_DURATION_ENSEMBLE_LIVE_ELIGIBLE"), default=False)
     EXPERIMENTAL_DURATION_ENSEMBLE_MAX_LEGS = _as_int(os.getenv("EXPERIMENTAL_DURATION_ENSEMBLE_MAX_LEGS"), 5)
-    EXPERIMENTAL_DURATION_ENSEMBLE_PRIMARY_METRIC = os.getenv(
-        "EXPERIMENTAL_DURATION_ENSEMBLE_PRIMARY_METRIC",
-        "net_return_after_costs",
-    ).strip() or "net_return_after_costs"
+    EXPERIMENTAL_DURATION_ENSEMBLE_PRIMARY_METRIC = (
+        os.getenv(
+            "EXPERIMENTAL_DURATION_ENSEMBLE_PRIMARY_METRIC",
+            "net_return_after_costs",
+        ).strip()
+        or "net_return_after_costs"
+    )
     EXPERIMENTAL_LIVE_CAP_USDC_BY_DURATION = _parse_float_map(os.getenv("EXPERIMENTAL_LIVE_CAP_USDC_BY_DURATION"))
     EXPERIMENTAL_LIVE_CAP_PCT_BY_DURATION = _parse_float_map(os.getenv("EXPERIMENTAL_LIVE_CAP_PCT_BY_DURATION"))
     MAX_RETURN_OPTIMIZER_ENABLED = _as_bool(os.getenv("MAX_RETURN_OPTIMIZER_ENABLED"), default=False)
@@ -685,9 +732,7 @@ class BaseConfig:
         default=False,
     )
     VAULT_CYCLE_PROVIDERS = _parse_csv(os.getenv("VAULT_CYCLE_PROVIDERS"), ["hyperliquid", "kucoin"])
-    VAULT_CYCLE_ALLOWED_WITHDRAWAL_ADDRESSES = _parse_deposit_address_book(
-        os.getenv("VAULT_CYCLE_ALLOWED_WITHDRAWAL_ADDRESSES_JSON")
-    )
+    VAULT_CYCLE_ALLOWED_WITHDRAWAL_ADDRESSES = _parse_deposit_address_book(os.getenv("VAULT_CYCLE_ALLOWED_WITHDRAWAL_ADDRESSES_JSON"))
     VAULT_CYCLE_MAX_TRANSFER_USD = _as_float(os.getenv("VAULT_CYCLE_MAX_TRANSFER_USD"), 100.0)
     VAULT_CYCLE_DAILY_WITHDRAWAL_CAP_USD = _as_float(os.getenv("VAULT_CYCLE_DAILY_WITHDRAWAL_CAP_USD"), 100.0)
     VAULT_CYCLE_MAX_EXCHANGE_ALLOCATION_PCT = _as_float(os.getenv("VAULT_CYCLE_MAX_EXCHANGE_ALLOCATION_PCT"), 0.80)
@@ -702,9 +747,7 @@ class BaseConfig:
     VAULT_CYCLE_CONVERSION_PROVIDER = os.getenv("VAULT_CYCLE_CONVERSION_PROVIDER", "kucoin").strip().lower() or "kucoin"
     VAULT_CYCLE_STABLECOIN_MAX_SLIPPAGE_BPS = _as_float(os.getenv("VAULT_CYCLE_STABLECOIN_MAX_SLIPPAGE_BPS"), 10.0)
     VAULT_CYCLE_REQUIRE_EXCHANGE_RESERVE = _as_bool(os.getenv("VAULT_CYCLE_REQUIRE_EXCHANGE_RESERVE"), default=True)
-    VAULT_CYCLE_DEFAULT_NETWORK_BY_ASSET = _parse_json_object(
-        os.getenv("VAULT_CYCLE_DEFAULT_NETWORK_BY_ASSET_JSON")
-    )
+    VAULT_CYCLE_DEFAULT_NETWORK_BY_ASSET = _parse_json_object(os.getenv("VAULT_CYCLE_DEFAULT_NETWORK_BY_ASSET_JSON"))
     VAULT_CYCLE_ACTIVITY_ENFORCEMENT_ENABLED = _as_bool(os.getenv("VAULT_CYCLE_ACTIVITY_ENFORCEMENT_ENABLED"), default=True)
     VAULT_CYCLE_MAX_IDLE_SECONDS = _as_float(os.getenv("VAULT_CYCLE_MAX_IDLE_SECONDS"), 300.0)
     VAULT_CYCLE_RESCREEN_SECONDS = _as_float(os.getenv("VAULT_CYCLE_RESCREEN_SECONDS"), 180.0)
@@ -828,10 +871,7 @@ class BaseConfig:
     ML_TARGET_ROI_1W_PCT = _as_float(os.getenv("ML_TARGET_ROI_1W_PCT"), 100.0)
     ML_ONE_H10_MIN_TRAINING_ROWS = _as_int(os.getenv("ML_ONE_H10_MIN_TRAINING_ROWS"), 20)
     ML_AUTO_VAULT_LIVE_ENABLED = _as_bool(os.getenv("ML_AUTO_VAULT_LIVE_ENABLED"), default=False)
-    ML_AUTO_VAULT_EXACT_CONFIRMATION = (
-        os.getenv("ML_AUTO_VAULT_EXACT_CONFIRMATION", "ML-AUTO-VAULT-LIVE").strip()
-        or "ML-AUTO-VAULT-LIVE"
-    )
+    ML_AUTO_VAULT_EXACT_CONFIRMATION = os.getenv("ML_AUTO_VAULT_EXACT_CONFIRMATION", "ML-AUTO-VAULT-LIVE").strip() or "ML-AUTO-VAULT-LIVE"
     ML_HISTORY_BACKFILL_ENABLED = _as_bool(os.getenv("ML_HISTORY_BACKFILL_ENABLED"), default=False)
     ML_HISTORY_BACKFILL_MAX_SYMBOLS = _as_int(os.getenv("ML_HISTORY_BACKFILL_MAX_SYMBOLS"), 50)
     ML_HISTORY_BACKFILL_LOOKBACK_DAYS = _as_int(os.getenv("ML_HISTORY_BACKFILL_LOOKBACK_DAYS"), 90)
@@ -862,8 +902,7 @@ class BaseConfig:
     ML_LIVE_VAULT_MAX_DAILY_LOSS_USDC = _as_float(os.getenv("ML_LIVE_VAULT_MAX_DAILY_LOSS_USDC"), 0.50)
     ML_LIVE_VAULT_PREVIEW_MAX_AGE_SECONDS = _as_float(os.getenv("ML_LIVE_VAULT_PREVIEW_MAX_AGE_SECONDS"), 600.0)
     ML_LIVE_VAULT_EXACT_CONFIRMATION = (
-        os.getenv("ML_LIVE_VAULT_EXACT_CONFIRMATION", "ML-LIVE-VAULT-10USDC").strip()
-        or "ML-LIVE-VAULT-10USDC"
+        os.getenv("ML_LIVE_VAULT_EXACT_CONFIRMATION", "ML-LIVE-VAULT-10USDC").strip() or "ML-LIVE-VAULT-10USDC"
     )
     ML_MIN_SIGNAL_CONFIDENCE = _as_float(os.getenv("ML_MIN_SIGNAL_CONFIDENCE"), 0.60)
     ML_MIN_FIB_CONFIDENCE = _as_float(os.getenv("ML_MIN_FIB_CONFIDENCE"), 0.55)
@@ -909,12 +948,16 @@ class BaseConfig:
     REALTIME_MARKET_CONNECT_TIMEOUT_SECONDS = _as_float(os.getenv("REALTIME_MARKET_CONNECT_TIMEOUT_SECONDS"), 3.0)
     REALTIME_MARKET_MAX_STALE_SECONDS = _as_float(os.getenv("REALTIME_MARKET_MAX_STALE_SECONDS"), 15.0)
     WALLET_PROVIDER = os.getenv("WALLET_PROVIDER", "self_custody").strip() or "self_custody"
-    WALLET_CUSTODY_MODE = os.getenv("WALLET_CUSTODY_MODE", "local_dev").strip().lower() or "local_dev"
+    WALLET_CUSTODY_MODE = (
+        "local_dev" if RECOVERY_SQLITE_ACTIVE else os.getenv("WALLET_CUSTODY_MODE", "local_dev").strip().lower() or "local_dev"
+    )
     WALLET_SIGNER_ISOLATION_REQUIRED = _as_bool(os.getenv("WALLET_SIGNER_ISOLATION_REQUIRED"), default=True)
     WALLET_SIGNER_ISOLATION_CONFIRMED = _as_bool(os.getenv("WALLET_SIGNER_ISOLATION_CONFIRMED"), default=False)
     WALLET_SDK_CHECKS_PASSED = _as_bool(os.getenv("WALLET_SDK_CHECKS_PASSED"), default=False)
     WALLET_MPC_SIGNER_URL = os.getenv("WALLET_MPC_SIGNER_URL", "").strip()
     WALLET_MPC_SIGNER_TOKEN = os.getenv("WALLET_MPC_SIGNER_TOKEN", "").strip()
+    WALLET_INTERNAL_MPC_SIGNER_ENABLED = _as_bool(os.getenv("WALLET_INTERNAL_MPC_SIGNER_ENABLED"), default=False)
+    WALLET_MPC_SIGNER_ENCRYPTION_KEY = os.getenv("WALLET_MPC_SIGNER_ENCRYPTION_KEY", "").strip()
     WALLET_SIGNER_TIMEOUT_SECONDS = _as_float(os.getenv("WALLET_SIGNER_TIMEOUT_SECONDS"), 10.0)
     WALLET_EMERGENCY_STOP = _as_bool(os.getenv("WALLET_EMERGENCY_STOP"), default=False)
     USE_REAL_ADDRESSES = _as_bool(os.getenv("USE_REAL_ADDRESSES"), default=False)
@@ -922,7 +965,7 @@ class BaseConfig:
     WALLET_SELF_CUSTODY_ENABLED = _as_bool(os.getenv("WALLET_SELF_CUSTODY_ENABLED"), default=False)
     WALLET_ALLOW_IN_APP_KEYGEN = _as_bool(os.getenv("WALLET_ALLOW_IN_APP_KEYGEN"), default=False)
     WALLET_REQUIRE_WITHDRAWAL_APPROVAL = _as_bool(os.getenv("WALLET_REQUIRE_WITHDRAWAL_APPROVAL"), default=True)
-    WALLET_WITHDRAWALS_ENABLED = _as_bool(os.getenv("WALLET_WITHDRAWALS_ENABLED"), default=False)
+    WALLET_WITHDRAWALS_ENABLED = False if RECOVERY_SQLITE_ACTIVE else _as_bool(os.getenv("WALLET_WITHDRAWALS_ENABLED"), default=False)
     WALLET_AUTO_ENABLE_WITHDRAWALS = _as_bool(os.getenv("WALLET_AUTO_ENABLE_WITHDRAWALS"), default=True)
     WALLET_AUTO_SWEEP_ENABLED = _as_bool(os.getenv("WALLET_AUTO_SWEEP_ENABLED"), default=False)
     WALLET_SWEEP_DESTINATION_ETH = os.getenv(
@@ -1042,6 +1085,7 @@ class BaseConfig:
             "SCHEMA_BOOTSTRAP_ENABLED": cls.SCHEMA_BOOTSTRAP_ENABLED,
             "ALLOW_PRODUCTION_SCHEMA_BOOTSTRAP": cls.ALLOW_PRODUCTION_SCHEMA_BOOTSTRAP,
             "DEFER_DATABASE_STARTUP_ERRORS": cls.DEFER_DATABASE_STARTUP_ERRORS,
+            "RECOVERY_SQLITE_ACTIVE": cls.RECOVERY_SQLITE_ACTIVE,
             "APP_MODE": cls.APP_MODE,
             "ENABLE_LIVE_TRADING": cls.ENABLE_LIVE_TRADING,
             "SQLITE_BUSY_TIMEOUT_MS": cls.SQLITE_BUSY_TIMEOUT_MS,
@@ -1233,6 +1277,7 @@ class BaseConfig:
             "ONE_H10_LIVE_ENABLED": cls.ONE_H10_LIVE_ENABLED,
             "ONE_H10_EXACT_CONFIRMATION": cls.ONE_H10_EXACT_CONFIRMATION,
             "ONE_H10_TARGET_ROI_PCT": cls.ONE_H10_TARGET_ROI_PCT,
+            "ONE_H10_HORIZON_SECONDS": cls.ONE_H10_HORIZON_SECONDS,
             "ONE_H10_POLL_SECONDS": cls.ONE_H10_POLL_SECONDS,
             "ONE_H10_REBALANCE_SECONDS": cls.ONE_H10_REBALANCE_SECONDS,
             "ONE_H10_AUTO_RESUME_ACTIVE_RUNS": cls.ONE_H10_AUTO_RESUME_ACTIVE_RUNS,
@@ -1259,6 +1304,9 @@ class BaseConfig:
             "ONE_H10_MIN_BOOTSTRAP_CONFIDENCE": cls.ONE_H10_MIN_BOOTSTRAP_CONFIDENCE,
             "ONE_H10_DIRECTIONAL_THRESHOLD": cls.ONE_H10_DIRECTIONAL_THRESHOLD,
             "ONE_H10_MIN_POSITION_FRACTION": cls.ONE_H10_MIN_POSITION_FRACTION,
+            "ONE_H10_MAX_POSITION_FRACTION": cls.ONE_H10_MAX_POSITION_FRACTION,
+            "ONE_H10_PROFIT_OPTIMIZER_ENABLED": cls.ONE_H10_PROFIT_OPTIMIZER_ENABLED,
+            "ONE_H10_MIN_PROFITABILITY_SCORE": cls.ONE_H10_MIN_PROFITABILITY_SCORE,
             "ONE_H10_FIBONACCI_MIN_CONFIDENCE": cls.ONE_H10_FIBONACCI_MIN_CONFIDENCE,
             "ONE_H10_REJECT_ZERO_SPREAD": cls.ONE_H10_REJECT_ZERO_SPREAD,
             "ONE_H10_ML_FORECAST_FAMILIES": list(cls.ONE_H10_ML_FORECAST_FAMILIES),
@@ -1627,8 +1675,12 @@ class ProductionConfig(BaseConfig):
     LOG_FORMAT = os.getenv("LOG_FORMAT", "json").strip().lower() or "json"
     WEB_CONCURRENCY = _as_int(os.getenv("WEB_CONCURRENCY") or os.getenv("GUNICORN_WORKERS"), 1)
     GUNICORN_THREADS = _as_int(os.getenv("GUNICORN_THREADS"), 4)
-    SCHEMA_BOOTSTRAP_ENABLED = _as_bool(os.getenv("SCHEMA_BOOTSTRAP_ENABLED"), default=False)
-    ENABLE_IN_PROCESS_WORKERS = _as_bool(os.getenv("ENABLE_IN_PROCESS_WORKERS"), default=False)
+    SCHEMA_BOOTSTRAP_ENABLED = (
+        False if BaseConfig.RECOVERY_SQLITE_ACTIVE else _as_bool(os.getenv("SCHEMA_BOOTSTRAP_ENABLED"), default=False)
+    )
+    ENABLE_IN_PROCESS_WORKERS = (
+        False if BaseConfig.RECOVERY_SQLITE_ACTIVE else _as_bool(os.getenv("ENABLE_IN_PROCESS_WORKERS"), default=False)
+    )
 
 
 def selected_config_class() -> type[BaseConfig]:

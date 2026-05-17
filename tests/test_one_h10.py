@@ -35,6 +35,7 @@ from app.routes.consumer import (
     _resume_one_h10_active_runs,
 )
 from app.services.hyperliquid_client import ClientSnapshot
+from app.services.one_h10_quality import one_h10_forecast_live_blockers, one_h10_profitability_payload
 from app.services.order_manager import OrderIntent
 from app.strategies.base import Signal
 
@@ -163,13 +164,32 @@ def test_leveraged_market_discovery_persists_hyperliquid_and_kucoin(app, monkeyp
         if connection_id == hyperliquid.id:
             return FakeConnector(
                 [
-                    {"name": "BTC", "maxLeverage": 50, "szDecimals": 3, "_asset_context": {"funding": "0.0001", "markPx": "100", "openInterest": "200"}},
+                    {
+                        "name": "BTC",
+                        "maxLeverage": 50,
+                        "szDecimals": 3,
+                        "_asset_context": {"funding": "0.0001", "markPx": "100", "openInterest": "200"},
+                    },
                     {"name": "#50", "maxLeverage": 3, "szDecimals": 2, "_asset_context": {"markPx": "1", "openInterest": "100"}},
                     {"name": "@149", "maxLeverage": 3, "szDecimals": 2, "_asset_context": {"markPx": "1", "openInterest": "100"}},
                 ]
             )
         if connection_id == kucoin.id:
-            return FakeConnector([{"symbol": "ETHUSDTM", "baseCurrency": "ETH", "quoteCurrency": "USDT", "settleCurrency": "USDT", "maxLeverage": 75, "multiplier": "0.01", "tickSize": "0.01", "fundingFeeRate": "0.0002", "turnoverOf24h": "1000000"}])
+            return FakeConnector(
+                [
+                    {
+                        "symbol": "ETHUSDTM",
+                        "baseCurrency": "ETH",
+                        "quoteCurrency": "USDT",
+                        "settleCurrency": "USDT",
+                        "maxLeverage": 75,
+                        "multiplier": "0.01",
+                        "tickSize": "0.01",
+                        "fundingFeeRate": "0.0002",
+                        "turnoverOf24h": "1000000",
+                    }
+                ]
+            )
         return FakeConnector([])
 
     monkeypatch.setattr(service, "connector_for_user", connector_for_user)
@@ -243,6 +263,7 @@ def test_leveraged_market_discovery_scopes_feature_snapshots_to_allowed_symbols(
     market_data = app.extensions["services"]["market_data"]
     candle_calls: list[str] = []
     book_calls: list[str] = []
+
     class FakeConnector:
         def discover_leveraged_markets(self, mode: str) -> list[dict[str, Any]]:
             return [
@@ -293,9 +314,9 @@ def test_hyperliquid_k_prefixed_markets_use_case_sensitive_venue_symbol_for_feat
 
     monkeypatch.setattr(service, "connector_for_user", lambda user_id, connection_id=None: FakeConnector())
     market_data.get_candles = lambda symbol, timeframe, mode, limit, **kwargs: candle_calls.append(symbol) or _candles(limit)
-    market_data.get_order_book = lambda symbol, mode, **kwargs: book_calls.append(symbol) or {
-        "levels": [[{"px": "0.0099", "sz": "100"}], [{"px": "0.0101", "sz": "80"}]]
-    }
+    market_data.get_order_book = lambda symbol, mode, **kwargs: (
+        book_calls.append(symbol) or {"levels": [[{"px": "0.0099", "sz": "100"}], [{"px": "0.0101", "sz": "80"}]]}
+    )
 
     results = markets.sync_for_user(user.id, feature_symbols=["KPEPE"])
 
@@ -355,9 +376,7 @@ def test_one_h10_backfill_cli_requires_confirmation_and_syncs_all_markets(app, m
     market_data.get_order_book = lambda symbol, mode, **kwargs: {"levels": [[{"px": "0.99", "sz": "100"}], [{"px": "1.01", "sz": "80"}]]}
 
     denied = app.test_cli_runner().invoke(args=["one-h10-backfill", "--user-id", str(user.id)])
-    accepted = app.test_cli_runner().invoke(
-        args=["one-h10-backfill", "--user-id", str(user.id), "--confirm", "BACKFILL-1H10-FEATURES"]
-    )
+    accepted = app.test_cli_runner().invoke(args=["one-h10-backfill", "--user-id", str(user.id), "--confirm", "BACKFILL-1H10-FEATURES"])
 
     assert denied.exit_code != 0
     assert accepted.exit_code == 0
@@ -507,8 +526,26 @@ def test_one_h10_scanner_rejects_zero_spread_features(app) -> None:
 
 def test_one_h10_ml_training_rows_use_persisted_feature_namespace(app) -> None:
     app.config["ML_ONE_H10_MIN_TRAINING_ROWS"] = 2
-    btc = LeveragedMarket(provider="hyperliquid", venue_symbol="BTC", symbol="BTC", status="active", settlement_asset="USDC", max_leverage=50, liquidity_usd=100_000, spread_bps=2.0)
-    eth = LeveragedMarket(provider="kucoin", venue_symbol="ETHUSDTM", symbol="ETH", status="active", settlement_asset="USDT", max_leverage=20, liquidity_usd=250_000, spread_bps=2.0)
+    btc = LeveragedMarket(
+        provider="hyperliquid",
+        venue_symbol="BTC",
+        symbol="BTC",
+        status="active",
+        settlement_asset="USDC",
+        max_leverage=50,
+        liquidity_usd=100_000,
+        spread_bps=2.0,
+    )
+    eth = LeveragedMarket(
+        provider="kucoin",
+        venue_symbol="ETHUSDTM",
+        symbol="ETH",
+        status="active",
+        settlement_asset="USDT",
+        max_leverage=20,
+        liquidity_usd=250_000,
+        spread_bps=2.0,
+    )
     db.session.add_all([btc, eth])
     db.session.flush()
     _feature(btc, score=1.2)
@@ -558,8 +595,26 @@ def test_one_h10_provider_decision_can_use_global_promoted_model(app, tmp_path) 
 
 def test_one_h10_scanner_ranks_all_persisted_markets_not_allowed_symbols_only(app) -> None:
     app.config["ALLOWED_SYMBOLS"] = ["BTC"]
-    btc = LeveragedMarket(provider="hyperliquid", venue_symbol="BTC", symbol="BTC", status="active", settlement_asset="USDC", max_leverage=50, liquidity_usd=100_000, spread_bps=2.0)
-    doge = LeveragedMarket(provider="hyperliquid", venue_symbol="DOGE", symbol="DOGE", status="active", settlement_asset="USDC", max_leverage=20, liquidity_usd=250_000, spread_bps=2.0)
+    btc = LeveragedMarket(
+        provider="hyperliquid",
+        venue_symbol="BTC",
+        symbol="BTC",
+        status="active",
+        settlement_asset="USDC",
+        max_leverage=50,
+        liquidity_usd=100_000,
+        spread_bps=2.0,
+    )
+    doge = LeveragedMarket(
+        provider="hyperliquid",
+        venue_symbol="DOGE",
+        symbol="DOGE",
+        status="active",
+        settlement_asset="USDC",
+        max_leverage=20,
+        liquidity_usd=250_000,
+        spread_bps=2.0,
+    )
     db.session.add_all([btc, doge])
     db.session.flush()
     _feature(btc, score=0.5, liquidity=100_000)
@@ -643,10 +698,145 @@ def test_one_h10_provider_legs_skip_forecast_blocked_candidates(app, monkeypatch
     assert any("cost_drag_above_threshold" in str(row.get("reason")) for row in blockers)
 
 
+def test_one_h10_provider_legs_weight_accepted_forecasts_by_allocation_score(app, monkeypatch) -> None:
+    user, _ = _create_user("allocationweights")
+    connection = _connection(app, user, "hyperliquid", active=True)
+    app.config["ONE_H10_MAX_PROVIDER_LEGS"] = 3
+    markets = [
+        LeveragedMarket(
+            provider="hyperliquid",
+            venue_symbol=symbol,
+            symbol=symbol,
+            status="active",
+            settlement_asset="USDC",
+            max_leverage=20,
+            liquidity_usd=1_000_000,
+            spread_bps=1.0,
+            trading_connection_id=connection.id,
+        )
+        for symbol in ("DOGE", "BTC", "SKIP")
+    ]
+    db.session.add_all(markets)
+    db.session.flush()
+    for market in markets:
+        feature = _feature(market, score=1.0, liquidity=1_000_000)
+        feature.features = {
+            **feature.features,
+            "spread_bps": 1.0,
+            "cost_drag_bps": 4.0,
+            "one_h10_feature_updated_at": datetime.utcnow().isoformat(),
+        }
+    db.session.commit()
+    service = app.extensions["services"]["trading_connections"]
+    monkeypatch.setattr(
+        service,
+        "account_snapshot",
+        lambda user_id, mode, connection_id=None: ClientSnapshot(
+            mode,
+            [{"asset": "USDC", "type": "margin", "value": 100.0, "withdrawable": 100.0}],
+            [],
+            [],
+            [],
+            [],
+        ),
+    )
+
+    class AllocationForecast:
+        scores = {"DOGE": 9.0, "BTC": 1.0, "SKIP": 0.01}
+
+        def forecast(self, features, *, provider, symbol, allocation_cap_usd=0.0, available_margin_usd=0.0, market=None):
+            score = self.scores[str(symbol)]
+            return {
+                "predicted_side": "buy",
+                "action": "buy",
+                "confidence": 0.9,
+                "expected_return_bps": 80.0,
+                "gross_expected_return_bps": 90.0,
+                "net_expected_return_bps": 72.0,
+                "execution_adjusted_net_return_bps": 64.8,
+                "cost_drag_bps": 8.0,
+                "estimated_slippage_bps": 1.0,
+                "spread_bps": 1.0,
+                "execution_quality": 0.9,
+                "expected_execution_quality": 0.9,
+                "capital_efficiency_score": 1.0,
+                "risk_reward": 3.0,
+                "expected_net_edge_passed": True,
+                "profitability_score": 0.9 if symbol != "SKIP" else 0.1,
+                "allocation_score": score,
+                "suggested_notional_usd": min(float(allocation_cap_usd or 0.0), float(available_margin_usd or 0.0)),
+                "suggested_leverage": 1.0,
+                "suggested_order_type": "limit",
+                "suggested_stop_loss_pct": 0.01,
+                "suggested_take_profit_pct": 0.03,
+                "blockers": ["low_profitability_score"] if symbol == "SKIP" else [],
+                "advisory_blockers": [],
+                "ml_namespace": "1h10",
+                "ml_horizon": "1h10",
+                "source": "one_h10_ml_profit_suite",
+                "ml_ready": True,
+            }
+
+    monkeypatch.setitem(app.extensions["services"], "one_h10_forecast", AllocationForecast())
+    selection = SimpleNamespace(
+        strategy_name="scalping",
+        symbol="DOGE",
+        timeframe="1m",
+        parameters={"leverage": 1.0},
+        metadata={"target_roi_pct": 1000.0},
+        legs=[
+            {
+                "strategy_name": "scalping",
+                "symbol": "DOGE",
+                "timeframe": "1m",
+                "parameters": {"leverage": 1.0},
+                "allocation_cap_usd": 100.0,
+                "leverage": 1.0,
+            }
+        ],
+    )
+
+    legs, history, blockers = consumer_module._one_h10_provider_legs(
+        user=user,
+        selection=selection,
+        connections=[connection],
+        starting_value_usd=100.0,
+        settlement_asset="USDC",
+        allowed_symbols=[],
+        connection_blockers=[],
+    )
+
+    allocations = {leg["symbol"]: leg["allocation_cap_usd"] for leg in legs}
+    assert set(allocations) == {"DOGE", "BTC"}
+    assert allocations["DOGE"] == pytest.approx(90.0)
+    assert allocations["BTC"] == pytest.approx(10.0)
+    assert all(leg["allocation_score"] > 0 for leg in legs)
+    assert any(row["skip_reason"].endswith("low_profitability_score") for row in history[0]["legs"] if row.get("symbol") == "SKIP")
+    assert any("low_profitability_score" in str(row.get("reason")) for row in blockers)
+
+
 def test_one_h10_scanner_prefers_net_edge_after_costs(app) -> None:
     app.config["ONE_H10_MAX_SLIPPAGE_BPS"] = 30.0
-    cheap = LeveragedMarket(provider="hyperliquid", venue_symbol="CHEAP", symbol="CHEAP", status="active", settlement_asset="USDC", max_leverage=20, liquidity_usd=250_000, spread_bps=0.5)
-    costly = LeveragedMarket(provider="hyperliquid", venue_symbol="COSTLY", symbol="COSTLY", status="active", settlement_asset="USDC", max_leverage=20, liquidity_usd=250_000, spread_bps=16.0)
+    cheap = LeveragedMarket(
+        provider="hyperliquid",
+        venue_symbol="CHEAP",
+        symbol="CHEAP",
+        status="active",
+        settlement_asset="USDC",
+        max_leverage=20,
+        liquidity_usd=250_000,
+        spread_bps=0.5,
+    )
+    costly = LeveragedMarket(
+        provider="hyperliquid",
+        venue_symbol="COSTLY",
+        symbol="COSTLY",
+        status="active",
+        settlement_asset="USDC",
+        max_leverage=20,
+        liquidity_usd=250_000,
+        spread_bps=16.0,
+    )
     db.session.add_all([cheap, costly])
     db.session.flush()
     cheap_feature = _feature(cheap, score=2.6, liquidity=250_000)
@@ -661,8 +851,44 @@ def test_one_h10_scanner_prefers_net_edge_after_costs(app) -> None:
     assert ranked[0].features["net_expected_return_bps"] > 0
     assert ranked[0].features["cost_drag_bps"] < ranked[1].features["cost_drag_bps"]
     assert ranked[0].features["expected_execution_quality"] > ranked[1].features["expected_execution_quality"]
+    assert ranked[0].features["target_progress"] >= ranked[1].features["target_progress"]
+    assert ranked[0].features["risk_reward"] > ranked[1].features["risk_reward"]
+    assert ranked[0].features["profitability_score"] > ranked[1].features["profitability_score"]
+    assert ranked[0].features["allocation_score"] > ranked[1].features["allocation_score"]
     assert "net_expected_edge" in ranked[0].score_breakdown
+    assert "profitability_score" in ranked[0].score_breakdown
+    assert "allocation_score" in ranked[0].score_breakdown
     assert "cost_drag_penalty" in ranked[0].score_breakdown
+    assert "target_progress" in ranked[0].score_breakdown
+
+
+def test_one_h10_low_profitability_score_blocks_live_forecast(app) -> None:
+    forecast = {
+        "predicted_side": "buy",
+        "action": "buy",
+        "confidence": 0.9,
+        "net_expected_return_bps": 6.0,
+        "execution_adjusted_net_return_bps": 0.6,
+        "cost_drag_bps": 10.0,
+        "estimated_slippage_bps": 1.0,
+        "spread_bps": 1.0,
+        "execution_quality": 0.20,
+        "expected_execution_quality": 0.20,
+        "risk_reward": 0.5,
+        "capital_efficiency_score": 0.1,
+        "suggested_notional_usd": 10.0,
+        "suggested_stop_loss_pct": 0.02,
+        "suggested_take_profit_pct": 0.01,
+        "created_at": datetime.utcnow().isoformat(),
+        "blockers": [],
+        "advisory_blockers": [],
+    }
+    forecast.update(one_h10_profitability_payload(forecast, app.config))
+
+    blockers = one_h10_forecast_live_blockers(forecast, app.config)
+
+    assert forecast["profitability_score"] < app.config["ONE_H10_MIN_PROFITABILITY_SCORE"]
+    assert "low_profitability_score" in blockers
 
 
 def test_one_h10_forecast_service_uses_1h10_namespace_and_bootstrap_blocker(app) -> None:
@@ -690,12 +916,18 @@ def test_one_h10_forecast_service_uses_1h10_namespace_and_bootstrap_blocker(app)
     assert forecast["ml_namespace"] == "1h10"
     assert forecast["ml_horizon"] == "1h10"
     assert forecast["objective"] == "one_h10"
-    assert forecast["horizon_seconds"] == 70 * 60
+    assert forecast["horizon_seconds"] == app.config["ONE_H10_HORIZON_SECONDS"]
     assert forecast["predicted_side"] in {"buy", "sell"}
     assert forecast["suggested_stop_loss_pct"] > 0
     assert forecast["suggested_take_profit_pct"] > 0
     assert forecast["estimated_fee_bps"] >= 0
     assert forecast["estimated_slippage_bps"] >= 0
+    assert forecast["expected_execution_quality"] == pytest.approx(forecast["execution_quality"])
+    assert forecast["target_multiplier"] == pytest.approx(10.0)
+    assert 0 <= forecast["target_progress"] <= 1
+    assert forecast["after_cost_pnl_estimate_usd"] == pytest.approx(
+        forecast["suggested_notional_usd"] * forecast["net_expected_return_bps"] / 10_000.0
+    )
     assert forecast["risk_reward"] >= app.config["ONE_H10_MIN_RISK_REWARD"]
     assert forecast["confidence_kind"] == "heuristic_confidence"
     assert forecast["confidence_calibrated"] is False
@@ -784,6 +1016,55 @@ def test_one_h10_forecast_cost_adjusts_bootstrap_confidence_and_sizing(app) -> N
     assert costly["suggested_order_type"] == "limit"
     assert "cost_drag_above_threshold" in costly["blockers"]
     assert "low_edge_after_costs" in costly["blockers"]
+
+
+def test_one_h10_aggressive_sizing_requires_profitable_execution_quality(app) -> None:
+    app.config["ONE_H10_REQUIRE_PROMOTED_ML"] = False
+    app.config["ONE_H10_BOOTSTRAP_LIVE_ENABLED"] = True
+    app.config["MAX_LEVERAGE"] = 4.0
+    app.config["ONE_H10_MAX_LEVERAGE"] = 4.0
+    app.config["ONE_H10_MAX_COST_DRAG_BPS"] = 25.0
+    app.config["ONE_H10_MAX_POSITION_FRACTION"] = 0.75
+    service = app.extensions["services"]["one_h10_forecast"]
+    base_features = {
+        "symbol": "DOGE",
+        "close": 100.0,
+        "rsi": 54.0,
+        "ema_trend": 2.0,
+        "trend_strength": 0.05,
+        "macd_histogram": 0.75,
+        "volatility": 0.02,
+        "order_book_imbalance": 0.35,
+        "one_h10_feature_timeframes": ["15m", "1h", "4h"],
+        "fibonacci_confluence": {"score": 1.2},
+        "fibonacci_levels": {"retracements": {"61.8": 100.0}},
+        "fibonacci_timing": {"range_position": 0.35},
+        "liquidity_usd": 2_000_000.0,
+        "max_leverage": 4.0,
+    }
+
+    strong = service.forecast(
+        {**base_features, "spread_bps": 0.5, "cost_drag_bps": 4.0},
+        provider="hyperliquid",
+        symbol="DOGE",
+        allocation_cap_usd=100.0,
+        available_margin_usd=100.0,
+    )
+    weak = service.forecast(
+        {**base_features, "spread_bps": 19.0, "cost_drag_bps": 80.0},
+        provider="hyperliquid",
+        symbol="DOGE",
+        allocation_cap_usd=100.0,
+        available_margin_usd=100.0,
+    )
+
+    assert strong["position_fraction"] > 0.25
+    assert strong["position_fraction"] <= 0.75
+    assert strong["suggested_leverage"] > 1.0
+    assert strong["profitability_score"] >= app.config["ONE_H10_MIN_PROFITABILITY_SCORE"]
+    assert weak["position_fraction"] <= 0.25
+    assert weak["suggested_leverage"] == 1.0
+    assert "cost_drag_above_threshold" in weak["blockers"]
 
 
 def test_one_h10_forecast_rebuilds_zero_stored_cost_drag(app) -> None:
@@ -921,9 +1202,19 @@ class _OneH10DisagreementSuite:
         self.calls.append((family, horizon))
         if self.conflicting:
             raw_by_family = {
-                "pytorch_fibonacci": {"target_zone_quality": 0.90, "predicted_side": "buy", "suggested_stop_loss_pct": 0.012, "suggested_take_profit_pct": 0.06},
+                "pytorch_fibonacci": {
+                    "target_zone_quality": 0.90,
+                    "predicted_side": "buy",
+                    "suggested_stop_loss_pct": 0.012,
+                    "suggested_take_profit_pct": 0.06,
+                },
                 "pytorch_roi_target": {"target_probability": 0.90, "projected_roi_pct": 800.0, "predicted_side": "buy"},
-                "pytorch_extreme_upside": {"extreme_upside_probability": 0.10, "projected_roi_pct": 900.0, "predicted_side": "sell", "uncertainty": 0.85},
+                "pytorch_extreme_upside": {
+                    "extreme_upside_probability": 0.10,
+                    "projected_roi_pct": 900.0,
+                    "predicted_side": "sell",
+                    "uncertainty": 0.85,
+                },
                 "pytorch_cap_policy": {"suggested_notional_usdc": 80.0, "suggested_leverage": 3.0},
                 "pytorch_exit_policy": {"suggested_stop_loss_pct": 0.012, "suggested_take_profit_pct": 0.08},
                 "pytorch_execution_policy": {"order_type_suggestion": "limit"},
@@ -934,7 +1225,12 @@ class _OneH10DisagreementSuite:
             uncertainty = 0.85 if family in {"pytorch_risk_policy", "pytorch_extreme_upside"} else 0.10
         else:
             raw_by_family = {
-                "pytorch_fibonacci": {"target_zone_quality": 0.90, "predicted_side": "buy", "suggested_stop_loss_pct": 0.012, "suggested_take_profit_pct": 0.06},
+                "pytorch_fibonacci": {
+                    "target_zone_quality": 0.90,
+                    "predicted_side": "buy",
+                    "suggested_stop_loss_pct": 0.012,
+                    "suggested_take_profit_pct": 0.06,
+                },
                 "pytorch_roi_target": {"target_probability": 0.90, "projected_roi_pct": 800.0, "predicted_side": "buy"},
                 "pytorch_extreme_upside": {"extreme_upside_probability": 0.88, "projected_roi_pct": 900.0, "predicted_side": "buy"},
                 "pytorch_cap_policy": {"suggested_notional_usdc": 80.0, "suggested_leverage": 3.0},
@@ -984,11 +1280,19 @@ class _PassingOneH10Forecast:
             "expected_return_bps": 42.0,
             "gross_expected_return_bps": 54.0,
             "net_expected_return_bps": 28.0,
+            "execution_adjusted_net_return_bps": 25.2,
             "cost_drag_bps": 8.0,
             "spread_bps": 1.0,
             "execution_quality": 0.9,
+            "expected_execution_quality": 0.9,
             "capital_efficiency_score": 1.0,
             "expected_net_edge_passed": True,
+            "risk_reward": 3.0,
+            "profitability_score": 0.85,
+            "allocation_score": 0.85,
+            "target_progress": 0.01,
+            "target_gap_pct": 99.0,
+            "after_cost_pnl_estimate_usd": suggested_notional * 25.2 / 10_000.0,
             "suggested_notional_usd": suggested_notional,
             "suggested_leverage": 1.0,
             "suggested_order_type": "limit",
@@ -1021,6 +1325,7 @@ def test_one_h10_forecast_uses_profit_ml_suite_for_sizing_exits_and_execution(ap
     ]
     app.config["MAX_LEVERAGE"] = 3.0
     app.config["ONE_H10_MAX_LEVERAGE"] = 3.0
+    app.config["ONE_H10_MAX_COST_DRAG_BPS"] = 25.0
     engine = _OneH10ForecastSuite()
     service = app.extensions["services"]["one_h10_forecast"]
     service.ml_decision_engine = engine
@@ -1058,13 +1363,11 @@ def test_one_h10_forecast_uses_profit_ml_suite_for_sizing_exits_and_execution(ap
     assert forecast["suggested_order_type"] == "limit"
     assert forecast["ml_profit_score"] > 0.4
     assert forecast["net_expected_return_bps"] < forecast["gross_expected_return_bps"]
-    assert "cost_drag_above_threshold" in forecast["advisory_blockers"]
+    assert "cost_drag_above_threshold" not in forecast["decision_blockers"]
     assert forecast["roi_target_probability"] == 0.82
     assert forecast["extreme_upside_probability"] == 0.88
     assert all(horizon == "1h10" for _, horizon in engine.calls)
-    assert {"pytorch_roi_target", "pytorch_extreme_upside", "pytorch_exit_policy"}.issubset(
-        {family for family, _ in engine.calls}
-    )
+    assert {"pytorch_roi_target", "pytorch_extreme_upside", "pytorch_exit_policy"}.issubset({family for family, _ in engine.calls})
 
 
 def test_one_h10_forecast_scales_sizing_when_ml_families_disagree(app) -> None:
@@ -1137,13 +1440,69 @@ def test_one_h10_start_creates_provider_tagged_legs(app, monkeypatch) -> None:
     kucoin = _connection(app, user, "kucoin", active=False)
     db.session.add_all(
         [
-            LeveragedMarket(provider="hyperliquid", venue_symbol="kPEPE", symbol="KPEPE", status="active", settlement_asset="USDC", max_leverage=10, liquidity_usd=1_200_000),
-            LeveragedMarket(provider="hyperliquid", venue_symbol="ZEC", symbol="ZEC", status="active", settlement_asset="USDC", max_leverage=10, liquidity_usd=1_100_000),
-            LeveragedMarket(provider="hyperliquid", venue_symbol="ASTER", symbol="ASTER", status="active", settlement_asset="USDC", max_leverage=5, liquidity_usd=1_050_000),
-            LeveragedMarket(provider="hyperliquid", venue_symbol="BTC", symbol="BTC", status="active", settlement_asset="USDC", max_leverage=50, liquidity_usd=1_000_000),
-            LeveragedMarket(provider="kucoin", venue_symbol="XBTMM26", symbol="BTC", status="active", settlement_asset="XBT", max_leverage=20, liquidity_usd=1_100_000),
-            LeveragedMarket(provider="kucoin", venue_symbol="ETHUSDM", symbol="ETH", status="active", settlement_asset="ETH", max_leverage=50, liquidity_usd=1_050_000),
-            LeveragedMarket(provider="kucoin", venue_symbol="SOLUSDM", symbol="SOL", status="active", settlement_asset="SOL", max_leverage=50, liquidity_usd=1_000_000),
+            LeveragedMarket(
+                provider="hyperliquid",
+                venue_symbol="kPEPE",
+                symbol="KPEPE",
+                status="active",
+                settlement_asset="USDC",
+                max_leverage=10,
+                liquidity_usd=1_200_000,
+            ),
+            LeveragedMarket(
+                provider="hyperliquid",
+                venue_symbol="ZEC",
+                symbol="ZEC",
+                status="active",
+                settlement_asset="USDC",
+                max_leverage=10,
+                liquidity_usd=1_100_000,
+            ),
+            LeveragedMarket(
+                provider="hyperliquid",
+                venue_symbol="ASTER",
+                symbol="ASTER",
+                status="active",
+                settlement_asset="USDC",
+                max_leverage=5,
+                liquidity_usd=1_050_000,
+            ),
+            LeveragedMarket(
+                provider="hyperliquid",
+                venue_symbol="BTC",
+                symbol="BTC",
+                status="active",
+                settlement_asset="USDC",
+                max_leverage=50,
+                liquidity_usd=1_000_000,
+            ),
+            LeveragedMarket(
+                provider="kucoin",
+                venue_symbol="XBTMM26",
+                symbol="BTC",
+                status="active",
+                settlement_asset="XBT",
+                max_leverage=20,
+                liquidity_usd=1_100_000,
+            ),
+            LeveragedMarket(
+                provider="kucoin",
+                venue_symbol="ETHUSDM",
+                symbol="ETH",
+                status="active",
+                settlement_asset="ETH",
+                max_leverage=50,
+                liquidity_usd=1_050_000,
+            ),
+            LeveragedMarket(
+                provider="kucoin",
+                venue_symbol="SOLUSDM",
+                symbol="SOL",
+                status="active",
+                settlement_asset="SOL",
+                max_leverage=50,
+                liquidity_usd=1_000_000,
+            ),
         ]
     )
     db.session.flush()
@@ -1204,18 +1563,29 @@ def test_one_h10_start_creates_provider_tagged_legs(app, monkeypatch) -> None:
     assert [leg.details.get("app_symbol") for leg in kucoin_legs] == ["BTC", "ETH", "SOL"]
     assert [leg.details.get("provider_symbol") for leg in kucoin_legs] == ["XBTMM26", "ETHUSDM", "SOLUSDM"]
     assert [db.session.get(StrategyRun, leg.strategy_run_id).symbol for leg in kucoin_legs] == ["BTC", "ETH", "SOL"]
-    assert [db.session.get(StrategyRun, leg.strategy_run_id).parameters["venue_symbol"] for leg in kucoin_legs] == ["XBTMM26", "ETHUSDM", "SOLUSDM"]
+    assert [db.session.get(StrategyRun, leg.strategy_run_id).parameters["venue_symbol"] for leg in kucoin_legs] == [
+        "XBTMM26",
+        "ETHUSDM",
+        "SOLUSDM",
+    ]
     assert db.session.get(StrategyRun, hyperliquid_legs[0].strategy_run_id).parameters["venue_symbol"] == "kPEPE"
     assert all(db.session.get(LeveragedMarket, leg.details.get("market_id")).symbol == leg.symbol for leg in legs)
     assert all(db.session.get(StrategyRun, leg.strategy_run_id).trading_connection_id == leg.trading_connection_id for leg in legs)
     assert all((leg.details.get("one_h10_forecast") or {}).get("ml_namespace") == "1h10" for leg in legs)
     assert all(db.session.get(StrategyRun, leg.strategy_run_id).parameters["one_h10_forecast"]["ml_horizon"] == "1h10" for leg in legs)
+    assert all(float(leg.details.get("allocation_score") or 0.0) > 0 for leg in legs)
+    assert all(
+        db.session.get(StrategyRun, leg.strategy_run_id).parameters["forecast_profitability_score"] is not None for leg in legs
+    )
+    assert all(
+        db.session.get(StrategyRun, leg.strategy_run_id).parameters["forecast_execution_adjusted_net_return_bps"] is not None
+        for leg in legs
+    )
     history_legs = [
-        history_leg
-        for provider_row in cycle.selection_metadata["exchange_allocation_history"]
-        for history_leg in provider_row["legs"]
+        history_leg for provider_row in cycle.selection_metadata["exchange_allocation_history"] for history_leg in provider_row["legs"]
     ]
     assert history_legs[0]["forecast"]["ml_horizon"] == "1h10"
+    assert all(float(history_leg.get("allocation_score") or 0.0) > 0 for history_leg in history_legs)
     assert any(history_leg["venue_symbol"] == "kPEPE" for history_leg in history_legs)
     assert sum(float(leg.allocation_cap_usd or 0.0) for leg in legs) <= 100.0 + 1e-9
     assert started
@@ -1275,8 +1645,24 @@ def test_one_h10_start_honors_selected_provider_filter(app, monkeypatch) -> None
     kucoin = _connection(app, user, "kucoin", active=False)
     db.session.add_all(
         [
-            LeveragedMarket(provider="hyperliquid", venue_symbol="BTC", symbol="BTC", status="active", settlement_asset="USDC", max_leverage=50, liquidity_usd=1_000_000),
-            LeveragedMarket(provider="kucoin", venue_symbol="XBTUSDTM", symbol="BTC", status="active", settlement_asset="USDT", max_leverage=50, liquidity_usd=1_000_000),
+            LeveragedMarket(
+                provider="hyperliquid",
+                venue_symbol="BTC",
+                symbol="BTC",
+                status="active",
+                settlement_asset="USDC",
+                max_leverage=50,
+                liquidity_usd=1_000_000,
+            ),
+            LeveragedMarket(
+                provider="kucoin",
+                venue_symbol="XBTUSDTM",
+                symbol="BTC",
+                status="active",
+                settlement_asset="USDT",
+                max_leverage=50,
+                liquidity_usd=1_000_000,
+            ),
         ]
     )
     db.session.flush()
@@ -1329,7 +1715,15 @@ def test_one_h10_start_serializes_promoted_model_datetimes(app, monkeypatch) -> 
     user, secret = _create_user("routejson")
     db.session.add(WalletBalance(user_id=user.id, asset="USDC", available_balance=100.0, estimated_usd_value=100.0))
     _connection(app, user, "hyperliquid", active=True)
-    market = LeveragedMarket(provider="hyperliquid", venue_symbol="BTC", symbol="BTC", status="active", settlement_asset="USDC", max_leverage=50, liquidity_usd=1_000_000)
+    market = LeveragedMarket(
+        provider="hyperliquid",
+        venue_symbol="BTC",
+        symbol="BTC",
+        status="active",
+        settlement_asset="USDC",
+        max_leverage=50,
+        liquidity_usd=1_000_000,
+    )
     db.session.add(market)
     db.session.flush()
     _feature(market, score=1.0, liquidity=1_000_000)
@@ -1344,7 +1738,9 @@ def test_one_h10_start_serializes_promoted_model_datetimes(app, monkeypatch) -> 
     monkeypatch.setattr(
         service,
         "account_snapshot",
-        lambda user_id, mode, connection_id=None: ClientSnapshot(mode, [{"asset": "USDC", "type": "margin", "value": 50.0, "withdrawable": 50.0}], [], [], [], []),
+        lambda user_id, mode, connection_id=None: ClientSnapshot(
+            mode, [{"asset": "USDC", "type": "margin", "value": 50.0, "withdrawable": 50.0}], [], [], [], []
+        ),
     )
     monkeypatch.setattr(app.extensions["services"]["leveraged_markets"], "sync_for_user", lambda *args, **kwargs: [])
     monkeypatch.setitem(app.extensions["services"], "one_h10_forecast", _PassingOneH10Forecast())
@@ -1823,12 +2219,12 @@ def test_one_h10_risk_rejects_low_edge_forecast_before_live_order(app) -> None:
     assert decision.details["decision_reason_code"] == "BELOW_EDGE_THRESHOLD"
 
 
-def test_one_h10_signal_model_forward_steps_use_seventy_minute_horizon() -> None:
+def test_one_h10_signal_model_forward_steps_use_one_hour_horizon() -> None:
     from app.ml.signal_model import MLSignalModel
 
-    assert MLSignalModel._forward_steps("1h10", "1m") == 70
-    assert MLSignalModel._forward_steps("1h10", "5m") == 14
-    assert MLSignalModel._forward_steps("1h10", "15m") == 5
+    assert MLSignalModel._forward_steps("1h10", "1m") == 60
+    assert MLSignalModel._forward_steps("1h10", "5m") == 12
+    assert MLSignalModel._forward_steps("1h10", "15m") == 4
 
 
 def test_one_h10_backtest_ml_first_uses_explicit_horizon(app) -> None:
@@ -1870,24 +2266,25 @@ def test_one_h10_evaluation_report_includes_cost_metrics_and_small_sample_warnin
     from app.services.one_h10_evaluation import build_one_h10_evaluation_report
 
     class FakeEngine:
-        captured = None
+        calls = []
 
         def run(self, backtest, candles=None):
-            self.captured = backtest
+            self.calls.append(backtest)
+            optimized = backtest.parameters["optimizer_variant"] == "net_expectancy"
             return {
-                "total_return": 0.01,
-                "net_return_after_costs": 0.008,
-                "sharpe_like": 0.4,
-                "sortino_like": 0.3,
-                "max_drawdown": 0.02,
-                "win_rate": 0.5,
-                "profit_factor": 1.2,
-                "average_return_per_trade": 0.002,
+                "total_return": 0.012 if optimized else 0.01,
+                "net_return_after_costs": 0.009 if optimized else 0.006,
+                "sharpe_like": 0.5 if optimized else 0.4,
+                "sortino_like": 0.4 if optimized else 0.3,
+                "max_drawdown": -0.015 if optimized else -0.02,
+                "win_rate": 0.55 if optimized else 0.5,
+                "profit_factor": 1.4 if optimized else 1.2,
+                "average_return_per_trade": 0.003 if optimized else 0.002,
                 "avg_loss": 0.001,
                 "trade_count": 1,
                 "fees_paid": 0.5,
                 "funding_cost_estimate": 0.0,
-                "cost_drag_bps": 13.0,
+                "cost_drag_bps": 11.0 if optimized else 13.0,
                 "average_trade_duration_minutes": 12.0,
                 "no_trade_reason": "",
                 "trades": [{"direction": "long", "duration_minutes": 12.0, "return": 0.002}],
@@ -1902,12 +2299,14 @@ def test_one_h10_evaluation_report_includes_cost_metrics_and_small_sample_warnin
         candles=[{"timestamp": 1}, {"timestamp": 2}],
     )
 
-    assert report["horizon_seconds"] == 70 * 60
+    assert report["horizon_seconds"] == app.config["ONE_H10_HORIZON_SECONDS"]
     assert report["config"]["fee_bps"] == app.config["FEE_BPS"]
-    assert report["baseline"]["fees_paid"] == 0.5
-    assert report["baseline"]["long_trade_count"] == 1
+    assert report["baseline"]["profit_factor"] == 1.2
+    assert report["optimized"]["profit_factor"] == 1.4
+    assert report["difference"]["net_return_after_costs"] == pytest.approx(0.003)
     assert "sample_size_below_threshold" in report["warnings"]
-    assert fake.captured.parameters["ml_horizon"] == "1h10"
+    assert [call.parameters["optimizer_variant"] for call in fake.calls] == ["baseline", "net_expectancy"]
+    assert fake.calls[1].parameters["ml_horizon"] == "1h10"
 
 
 def test_one_h10_market_data_failure_backs_off_without_limiting_cycle(app) -> None:
@@ -2025,8 +2424,12 @@ def test_one_h10_provider_market_data_uses_connection_connector(app, monkeypatch
     }
     manager = app.extensions["services"]["strategy_manager"]
     market_data = app.extensions["services"]["market_data"]
-    monkeypatch.setattr(market_data, "get_candles", lambda *args, **kwargs: pytest.fail("Hyperliquid candles should not be used for KuCoin 1H10 legs"))
-    monkeypatch.setattr(market_data, "get_mid_price", lambda *args, **kwargs: pytest.fail("Hyperliquid mids should not be used for KuCoin 1H10 legs"))
+    monkeypatch.setattr(
+        market_data, "get_candles", lambda *args, **kwargs: pytest.fail("Hyperliquid candles should not be used for KuCoin 1H10 legs")
+    )
+    monkeypatch.setattr(
+        market_data, "get_mid_price", lambda *args, **kwargs: pytest.fail("Hyperliquid mids should not be used for KuCoin 1H10 legs")
+    )
 
     class Connector:
         def get_candles(self, symbol, timeframe, mode, limit):
@@ -2041,14 +2444,17 @@ def test_one_h10_provider_market_data_uses_connection_connector(app, monkeypatch
 
     candles = manager._run_candles(run, "live", limit=10)
     assert candles[0]["close"] == 1.5
-    assert app.extensions["services"]["order_manager"]._safe_market_price(
-        "BTC",
-        "live",
-        user_id=user.id,
-        trading_connection_id=kucoin.id,
-        provider="kucoin",
-        venue_symbol="XBTMM26",
-    ) == 1.5
+    assert (
+        app.extensions["services"]["order_manager"]._safe_market_price(
+            "BTC",
+            "live",
+            user_id=user.id,
+            trading_connection_id=kucoin.id,
+            provider="kucoin",
+            venue_symbol="XBTMM26",
+        )
+        == 1.5
+    )
 
 
 def test_one_h10_active_backoff_shows_runtime_notice_not_repair_prompt(app) -> None:
@@ -2238,7 +2644,9 @@ def test_one_h10_ready_policy_approves_with_1h10_horizon(app, monkeypatch) -> No
     _ReadyOneH10Policy.decision_horizons = []
     monkeypatch.setattr(risk_engine_module, "MLDecisionEngine", _ReadyOneH10Policy)
 
-    decision = app.extensions["services"]["risk_engine"].evaluate(_one_h10_intent(horizon="1h"), market_price=100.0, has_trading_access=True)
+    decision = app.extensions["services"]["risk_engine"].evaluate(
+        _one_h10_intent(horizon="1h"), market_price=100.0, has_trading_access=True
+    )
 
     assert decision.approved is True
     assert all(horizon == "1h10" for horizon in _ReadyOneH10Policy.readiness_horizons)
@@ -2637,6 +3045,77 @@ def test_one_h10_active_cycle_resumes_stopped_strategy_runs(app) -> None:
     assert cycle.selection_metadata["one_h10_auto_resumed_run_ids"] == [run.id]
 
 
+def test_one_h10_queued_worker_state_is_visible_in_cycle_summary(app) -> None:
+    app.config["WORKER_MODE"] = "web"
+    app.config["ENABLE_IN_PROCESS_WORKERS"] = False
+    user, _ = _create_user("queued1h10")
+    cycle = VaultCycle(
+        user_id=user.id,
+        deposit_asset="USDC",
+        deposit_amount=25.0,
+        settlement_asset="USDC",
+        lock_duration_hours=1,
+        lock_duration_seconds=app.config["ONE_H10_HORIZON_SECONDS"],
+        status="active",
+        execution_substatus="executing",
+        execution_mode="live",
+        algorithm_profile="1H10",
+        started_at=datetime.utcnow(),
+        unlocks_at=datetime.utcnow() + timedelta(hours=1),
+        starting_value_usd=25.0,
+        current_estimated_value_usd=25.0,
+    )
+    db.session.add(cycle)
+    db.session.flush()
+    run = StrategyRun(
+        user_id=user.id,
+        strategy_name="scalping",
+        symbol="BTC",
+        timeframe="1m",
+        mode="live",
+        status="starting",
+        manual_enabled=True,
+    )
+    run.parameters = {
+        "vault_cycle_id": cycle.id,
+        "one_h10_vault": True,
+        "ml_horizon": "1h10",
+        "algorithm_profile": "1H10",
+    }
+    db.session.add(run)
+    db.session.flush()
+    leg = VaultAllocationLeg(
+        vault_cycle_id=cycle.id,
+        strategy_run_id=run.id,
+        symbol="BTC",
+        timeframe="1m",
+        provider="hyperliquid",
+        allocation_cap_usd=25.0,
+        leverage=1.0,
+        status="active",
+    )
+    leg.details = {"one_h10_vault": True, "ml_horizon": "1h10", "provider": "hyperliquid"}
+    db.session.add(leg)
+    db.session.commit()
+
+    consumer_module._start_strategy_runs([run.id])
+    db.session.refresh(run)
+
+    summary = _cycle_summary(
+        cycle,
+        performance={"realized_pnl": 0.0, "unrealized_pnl": 0.0, "total_pnl": 0.0, "has_trading_data": False},
+    )
+
+    assert run.last_signal["metadata"]["trade_decision_stage"] == "queued_for_worker"
+    assert summary["trade_decision"]["stage"] == "queued_for_worker"
+    assert summary["trade_decision"]["broker_order_submitted"] is False
+    assert summary["trade_decision_legs"][0]["stage"] == "queued_for_worker"
+    assert summary["trade_decision_legs"][0]["reason"] == "strategy_worker_pending"
+    assert summary["worker"]["strategy_run_queue"] == "dedicated_worker"
+    assert summary["worker"]["queued_run_count"] == 1
+    assert summary["worker"]["live_order_path"] == "VaultCycle -> StrategyRun -> Worker -> RiskEngine -> OrderManager"
+
+
 def test_one_h10_rebalance_preserves_distinct_provider_symbols(app, monkeypatch) -> None:
     manager = app.extensions["services"]["strategy_manager"]
     user, _ = _create_user("distinctrebalance")
@@ -2752,7 +3231,9 @@ def test_one_h10_rebalance_preserves_distinct_provider_symbols(app, monkeypatch)
         ),
     ]
     monkeypatch.setattr(manager.order_manager, "current_position", lambda *args, **kwargs: {"quantity": 0.0})
-    monkeypatch.setattr(app.extensions["services"]["leveraged_markets"], "active_markets", lambda **kwargs: [SimpleNamespace(id=1), SimpleNamespace(id=2)])
+    monkeypatch.setattr(
+        app.extensions["services"]["leveraged_markets"], "active_markets", lambda **kwargs: [SimpleNamespace(id=1), SimpleNamespace(id=2)]
+    )
     monkeypatch.setattr(app.extensions["services"]["market_scanner"], "score_one_h10_markets", lambda *args, **kwargs: candidates)
 
     class FakeForecast:

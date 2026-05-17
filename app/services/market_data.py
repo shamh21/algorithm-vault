@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from statistics import mean
 from typing import Any
 
 from .hyperliquid_client import HyperliquidClient
-
 
 TIMEFRAME_TO_DELTA = {
     "1m": timedelta(minutes=1),
@@ -68,7 +67,7 @@ class MarketDataService:
                 return [dict(row) for row in cached]
         interval = TIMEFRAME_TO_DELTA[timeframe]
 
-        end = datetime.now(timezone.utc)
+        end = datetime.now(UTC)
         start = end - (interval * candle_limit)
 
         try:
@@ -144,7 +143,12 @@ class MarketDataService:
         timeframe: str,
         mode: str,
     ) -> list[dict[str, Any]]:
-        mids = self.get_all_mids(mode)
+        mids_error = ""
+        try:
+            mids = self.get_all_mids(mode)
+        except Exception as exc:  # noqa: BLE001
+            mids = {}
+            mids_error = str(exc)
         summary: list[dict[str, Any]] = []
 
         for symbol in symbols:
@@ -153,7 +157,7 @@ class MarketDataService:
 
                 candles = self.get_candles(symbol, timeframe, mode=mode, limit=30)
                 closes = [candle["close"] for candle in candles if candle["close"] > 0][-5:]
-                mid = self._safe_float(mids.get(symbol))
+                mid = self._safe_float(mids.get(symbol)) or (closes[-1] if closes else 0.0)
 
                 summary.append(
                     {
@@ -162,7 +166,8 @@ class MarketDataService:
                         "recent_average": mean(closes) if closes else 0.0,
                         "change_pct": self._change_pct(candles),
                         "candle_count": len(candles),
-                        "status": "ok",
+                        "status": "ok" if not mids_error else "partial",
+                        "error": mids_error,
                     }
                 )
             except Exception as exc:  # noqa: BLE001

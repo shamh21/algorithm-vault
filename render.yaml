@@ -32,6 +32,40 @@ services:
         value: "true"
       - key: VAULT_START_ASYNC_ENABLED
         value: "false"
+      - key: USE_REAL_ADDRESSES
+        value: "true"
+      - key: WALLET_REAL_CUSTODY_ENABLED
+        value: "true"
+      - key: WALLET_ALLOW_IN_APP_KEYGEN
+        value: "true"
+      - key: WALLET_AUTO_ENABLE_WITHDRAWALS
+        value: "true"
+      - key: WALLET_CUSTODY_MODE
+        value: mpc
+      - key: WALLET_WITHDRAWALS_ENABLED
+        sync: false
+      - key: WALLET_MPC_SIGNER_URL
+        sync: false
+      - key: WALLET_MPC_SIGNER_TOKEN
+        sync: false
+      - key: WALLET_SIGNER_ISOLATION_CONFIRMED
+        sync: false
+      - key: WALLET_SDK_CHECKS_PASSED
+        sync: false
+      - key: WALLET_DAILY_WITHDRAWAL_LIMIT_BY_WALLET
+        sync: false
+      - key: WALLET_DAILY_WITHDRAWAL_LIMIT_BY_ASSET_JSON
+        sync: false
+      - key: WALLET_DAILY_WITHDRAWAL_LIMIT_BY_DESTINATION
+        sync: false
+      - key: WALLET_DAILY_GLOBAL_WITHDRAWAL_LIMIT
+        sync: false
+      - key: PLATFORM_GAS_TREASURY_ENABLED
+        sync: false
+      - key: PLATFORM_GAS_TREASURY_DAILY_LIMIT_ETH
+        sync: false
+      - key: TREASURY_ENCRYPTION_KEY
+        sync: false
       - key: SESSION_COOKIE_SECURE
         value: "true"
       - key: SESSION_COOKIE_HTTPONLY
@@ -103,6 +137,40 @@ services:
         value: live
       - key: ONE_H10_LIVE_ENABLED
         value: "true"
+      - key: USE_REAL_ADDRESSES
+        value: "true"
+      - key: WALLET_REAL_CUSTODY_ENABLED
+        value: "true"
+      - key: WALLET_ALLOW_IN_APP_KEYGEN
+        value: "true"
+      - key: WALLET_AUTO_ENABLE_WITHDRAWALS
+        value: "true"
+      - key: WALLET_CUSTODY_MODE
+        value: mpc
+      - key: WALLET_WITHDRAWALS_ENABLED
+        sync: false
+      - key: WALLET_MPC_SIGNER_URL
+        sync: false
+      - key: WALLET_MPC_SIGNER_TOKEN
+        sync: false
+      - key: WALLET_SIGNER_ISOLATION_CONFIRMED
+        sync: false
+      - key: WALLET_SDK_CHECKS_PASSED
+        sync: false
+      - key: WALLET_DAILY_WITHDRAWAL_LIMIT_BY_WALLET
+        sync: false
+      - key: WALLET_DAILY_WITHDRAWAL_LIMIT_BY_ASSET_JSON
+        sync: false
+      - key: WALLET_DAILY_WITHDRAWAL_LIMIT_BY_DESTINATION
+        sync: false
+      - key: WALLET_DAILY_GLOBAL_WITHDRAWAL_LIMIT
+        sync: false
+      - key: PLATFORM_GAS_TREASURY_ENABLED
+        sync: false
+      - key: PLATFORM_GAS_TREASURY_DAILY_LIMIT_ETH
+        sync: false
+      - key: TREASURY_ENCRYPTION_KEY
+        sync: false
       - key: SESSION_COOKIE_SECURE
         value: "true"
       - key: LOG_FORMAT

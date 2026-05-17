@@ -1,215 +1,86 @@
 {% extends "base.html" %}
 {% import "components/algvault_ui.html" as av %}
-{% from "components/crypto_icon.html" import crypto_icon %}
 
 {% block title %}Dashboard · AlgVault{% endblock %}
 
 {% block content %}
-{% set pulse = dashboard_payload.vault_pulse %}
-{% set insights = dashboard_payload.insights %}
-{% set bot_summary = dashboard_payload.bot_summary %}
+{% set balance_state = wallet_overview.state %}
+{% set pnl_state = pnl_history.state %}
 <section
   id="dashboard"
-  class="av-command-center"
+  class="av-command-center av-home-minimal"
   data-command-center
-  data-provider-state-count="{{ enabled_provider_states|length }}"
+  data-balance-state="{{ balance_state }}"
+  data-pnl-state="{{ pnl_state }}"
 >
-  <script type="application/json" id="command-center-payload">{{ dashboard_payload|tojson }}</script>
-  <script type="application/json" id="portfolio-trend-data">{{ portfolio_trend|tojson }}</script>
-  <script type="application/json" id="wallet-allocation-data">{{ allocation_chart|tojson }}</script>
+  <script type="application/json" id="command-center-payload">{{ {"pnl_history": pnl_history}|tojson }}</script>
+  <script type="application/json" id="account-pnl-data">{{ pnl_history|tojson }}</script>
 
-  <header class="av-hero-panel" aria-labelledby="vault-pulse-title">
-    <div class="av-hero-copy">
-      <span class="card-kicker">Vault Pulse</span>
-      <h1 id="vault-pulse-title">AlgVault</h1>
-      <p>Algorithm Vault automated portfolio command center</p>
+  <article class="av-panel av-balance-focus" aria-labelledby="total-wallet-balance-title" data-balance-card data-state="{{ balance_state }}">
+    <div class="av-balance-topline">
+      <div>
+        <span class="card-kicker">Wallet</span>
+        <h1 id="total-wallet-balance-title">Total Wallet Balance</h1>
+      </div>
+      <span class="av-status-badge av-status-{{ 'danger' if balance_state == 'error' else 'neutral' }}">
+        {{ "Unavailable" if balance_state == "error" else "Live ledger" }}
+      </span>
     </div>
-    <div class="av-hero-balance" aria-label="Total vault balance">
-      <span class="sr-only">Portfolio Balance</span>
-      <span>Total Vault Balance</span>
-      <strong>${{ "%.2f"|format(pulse.balance_usd) }}</strong>
-      <small>{{ dashboard_payload.mode|replace("_", " ")|upper }} mode · {{ pulse.risk_detail }}</small>
-    </div>
-    <div class="av-pulse-grid" aria-label="Vault pulse summary">
-      {{ av.metric_card("Active Cycles", pulse.active_cycles, "Automation flows", "neutral") }}
-      {{ av.metric_card("Providers", pulse.enabled_providers ~ "/" ~ pulse.provider_total, "Enabled live-ready", "neutral") }}
-      {{ av.metric_card("Risk State", pulse.risk_state, pulse.risk_detail, "warning" if pulse.risk_state == "Blocked" else "success") }}
-      {{ av.metric_card("Exposure", "%.1f%%"|format(pulse.market_exposure_pct), "$%.2f active"|format(pulse.active_value_usd), "neutral") }}
-    </div>
-  </header>
 
-  <section class="av-pnl-strip" aria-label="One glance P and L">
-    {% for card in dashboard_payload.pnl %}
-      <article class="av-pnl-card av-tone-{{ card.tone }}">
-        <span>{{ card.label }} P&amp;L</span>
-        <strong>{{ "+" if card.value > 0 else "" }}${{ "%.2f"|format(card.value) }}</strong>
-      </article>
-    {% endfor %}
-  </section>
-
-  <section class="av-dashboard-grid">
-    <article class="av-panel av-chart-panel">
-      <div class="av-panel-head">
-        <div>
-          <span class="card-kicker">Performance</span>
-          <h2>Vault Equity Curve</h2>
-        </div>
-        {{ av.status_badge("Read Only", "neutral") }}
-      </div>
-      <div class="av-chart-stage">
-        <canvas data-vault-performance-chart aria-label="Vault performance chart"></canvas>
-        <div class="av-chart-empty" data-vault-performance-empty>
-          {{ av.empty_state("Awaiting cycle history", "Performance appears after completed or active vault cycles.") }}
-        </div>
-      </div>
-    </article>
-
-    <article class="av-panel av-risk-panel">
-      <div class="av-panel-head">
-        <div>
-          <span class="card-kicker">Risk Lens</span>
-          <h2>Vault Health</h2>
-        </div>
-      </div>
-      <div class="av-risk-meter" style="--meter-value: {{ insights.automation_confidence }}%">
-        <span></span>
-      </div>
-      <dl class="av-insight-list">
-        <div><dt>Automation confidence</dt><dd>{{ "%.0f"|format(insights.automation_confidence) }}%</dd></div>
-        <div><dt>Active exposure</dt><dd>{{ "%.1f"|format(insights.active_exposure_pct) }}%</dd></div>
-        <div><dt>Max drawdown</dt><dd class="{{ 'negative' if insights.drawdown_usd < 0 else 'muted' }}">${{ "%.2f"|format(insights.drawdown_usd) }}</dd></div>
-        <div><dt>Cycle win rate</dt><dd>{{ "%.0f"|format(insights.win_rate) }}%</dd></div>
-      </dl>
-    </article>
-  </section>
-
-  <section class="av-panel av-allocation-panel" aria-labelledby="vault-allocation-title">
-    {{ av.section_header("Vault", "Allocation", "Holdings and available balance by asset.") }}
-    <div class="av-allocation-list">
-      {% for item in dashboard_payload.allocation %}
-        <article class="av-asset-row">
-          <div class="av-asset-main">
-            {{ crypto_icon(item.asset, "wallet-coin") }}
-            <div>
-              <strong>{{ item.asset }}</strong>
-              <span>${{ "%.2f"|format(item.value_usd) }}</span>
-            </div>
-          </div>
-          <div class="av-allocation-meter" aria-label="{{ item.asset }} allocation {{ "%.1f"|format(item.allocation_pct) }}%">
-            <span style="width: {{ [item.allocation_pct, 100]|min }}%"></span>
-          </div>
-          <div class="av-asset-meta">
-            <span>{{ "%.1f"|format(item.allocation_pct) }}%</span>
-            <small>{{ "%.6f"|format(item.available) }} available</small>
-          </div>
-        </article>
+    <div class="av-balance-value" aria-live="polite">
+      {% if balance_state == "error" %}
+        <strong>--</strong>
       {% else %}
-        {{ av.empty_state("No wallet balances", "Connect and verify a provider to populate vault allocation.") }}
-      {% endfor %}
+        <strong>${{ "%.2f"|format(wallet_overview.total_usd) }}</strong>
+      {% endif %}
     </div>
-  </section>
 
-  <section id="bots" class="av-section-anchor av-panel" data-dashboard-section="bots">
-    {{ av.section_header("Bots", "Automated Strategies", "Read-only strategy state from optimizer rankings and live runs.") }}
-    <div class="av-bot-summary" aria-label="Bot status summary">
-      {{ av.metric_card("Running", bot_summary.running, "Active strategy runs", "success") }}
-      {{ av.metric_card("Monitoring", bot_summary.monitoring, "Ranked candidates", "neutral") }}
-      {{ av.metric_card("Warnings", bot_summary.warning, "Rejected or flagged", "warning") }}
-      {{ av.metric_card("Paused", bot_summary.paused, "Disabled runs", "neutral") }}
-    </div>
-    <div class="av-strategy-list">
-      {% for bot in dashboard_payload.bots %}
-        <button type="button" class="av-strategy-card" data-strategy-index="{{ loop.index0 }}" data-open-strategy-sheet>
-          <span class="av-strategy-status">{{ av.status_badge(bot.status, bot.status_tone) }}</span>
-          <strong>{{ bot.name }}</strong>
-          <span>{{ bot.provider }} · {{ bot.pair }} · {{ bot.timeframe }}</span>
-          <dl>
-            <div><dt>P&amp;L</dt><dd class="{{ 'positive' if bot.pnl_pct >= 0 else 'negative' }}">{{ "%+.2f"|format(bot.pnl_pct) }}%</dd></div>
-            <div><dt>Win</dt><dd>{{ "%.0f"|format(bot.win_rate) }}%</dd></div>
-            <div><dt>Drawdown</dt><dd>{{ "%.2f"|format(bot.drawdown) }}%</dd></div>
-          </dl>
-          <small>Last action: {{ bot.last_action }}</small>
-        </button>
+    {% if balance_state == "error" %}
+      <p class="av-data-state av-data-state-error" role="alert">{{ wallet_overview.error }}</p>
+    {% elif balance_state == "empty" %}
+      <p class="av-data-state">No wallet balance has been recorded yet.</p>
+    {% else %}
+      <p class="av-data-state">{{ wallet_overview.sync_label }}</p>
+    {% endif %}
+  </article>
+
+  <article class="av-panel av-pnl-focus" aria-labelledby="account-pnl-title">
+    <div class="av-panel-head av-pnl-head">
+      <div>
+        <span class="card-kicker">Performance</span>
+        <h2 id="account-pnl-title">Past Account P&amp;L</h2>
+      </div>
+      {% if pnl_state == "error" %}
+        {{ av.status_badge("Unavailable", "danger") }}
+      {% elif pnl_state == "empty" %}
+        {{ av.status_badge("No history", "neutral") }}
       {% else %}
-        {{ av.empty_state("No strategy rankings yet", "Run optimizer/backtest workflows to populate strategy candidates.") }}
-      {% endfor %}
+        {{ av.pnl_badge(pnl_history.total_pnl, pnl_history.tone) }}
+      {% endif %}
     </div>
-  </section>
 
-  <section id="markets" class="av-section-anchor av-panel" data-dashboard-section="markets">
-    {{ av.section_header("Markets", "Market Monitor", "Simplified watchlist view using current market summary data.") }}
-    <div class="av-market-grid">
-      {% for market in dashboard_payload.markets %}
-        <article class="av-market-card">
-          <div>
-            <strong>{{ market.symbol }}</strong>
-            {{ av.status_badge(market.status, "neutral") }}
-          </div>
-          <span class="av-market-price">{{ "%.4f"|format(market.price) }}</span>
-          <small class="{{ 'positive' if market.change_pct >= 0 else 'negative' }}">
-            {{ "%+.2f"|format(market.change_pct) }}%
-          </small>
-        </article>
-      {% else %}
-        {{ av.empty_state("Market data unavailable", "The watchlist will populate when market data is available.") }}
-      {% endfor %}
-    </div>
-  </section>
-
-  <section id="insights" class="av-section-anchor av-insights-grid" data-dashboard-section="insights">
-    <article class="av-panel">
-      {{ av.section_header("Insights", "Automation Activity", "Recent wallet and vault events.") }}
-      <div class="av-timeline">
-        {% for item in dashboard_payload.activity %}
-          <article class="av-timeline-item av-tone-{{ item.tone }}">
-            <span class="av-timeline-dot" aria-hidden="true"></span>
-            <div>
-              <div class="av-timeline-head">
-                <strong>{{ item.title }}</strong>
-                {{ av.status_badge(item.status, item.tone) }}
-              </div>
-              <p>{{ item.detail }}</p>
-              <time datetime="{{ item.timestamp }}">{{ item.label }}</time>
-            </div>
-          </article>
+    <div class="av-pnl-chart-shell" data-account-pnl-shell data-state="{{ pnl_state }}">
+      <canvas data-account-pnl-chart aria-label="Past account profit and loss graph"></canvas>
+      <div class="av-chart-loading av-pnl-loading" data-account-pnl-loading {% if pnl_state != "ready" %}hidden{% endif %}>
+        <span class="dashboard-skeleton" aria-hidden="true"></span>
+        <span>Rendering P&amp;L graph</span>
+      </div>
+      <div class="av-chart-empty" data-account-pnl-empty {% if pnl_state == "ready" %}hidden{% endif %}>
+        {% if pnl_state == "error" %}
+          {{ av.empty_state("P&L unavailable", pnl_history.error) }}
         {% else %}
-          {{ av.empty_state("No automation activity yet", "Activity appears after wallet or vault events are recorded.") }}
-        {% endfor %}
+          {{ av.empty_state("No P&L history", "Past account P&L appears after reconciled fills or completed vault cycles.") }}
+        {% endif %}
       </div>
-    </article>
-
-    <article class="av-panel">
-      {{ av.section_header("Signal Stack", "Risk Balance", "Compact summary of current automation conditions.") }}
-      <div class="av-signal-stack">
-        <div><span>Drawdown</span><strong>${{ "%.2f"|format(insights.drawdown_usd) }}</strong></div>
-        <div><span>Completed cycles</span><strong>{{ insights.completed_cycles }}</strong></div>
-        <div><span>Exposure</span><strong>{{ "%.1f"|format(insights.active_exposure_pct) }}%</strong></div>
-        <div><span>Confidence</span><strong>{{ "%.0f"|format(insights.automation_confidence) }}%</strong></div>
-      </div>
-      <a class="button-link secondary av-full-width-action" href="{{ url_for('consumer.activity') }}">Open Activity Log</a>
-    </article>
-  </section>
-
-  <section class="av-action-dock" aria-label="Primary actions">
-    <a href="{{ url_for('consumer.vault') }}" class="button-link primary">Open Vault</a>
-    <a href="{{ url_for('consumer.wallet') }}" class="button-link secondary">Wallet</a>
-  </section>
-</section>
-
-<section class="av-strategy-sheet" data-strategy-sheet aria-hidden="true">
-  <div class="sheet-handle" aria-hidden="true"></div>
-  <div class="sheet-head">
-    <div>
-      <span class="card-kicker">Strategy Detail</span>
-      <h2 data-strategy-sheet-title>Strategy</h2>
     </div>
-    <button type="button" class="trade-icon-button" data-close-strategy-sheet aria-label="Close strategy detail">×</button>
-  </div>
-  <dl class="av-sheet-metrics" data-strategy-sheet-body></dl>
+
+    {% if pnl_history.summary %}
+      <p class="av-data-state">{{ pnl_history.summary }}</p>
+    {% endif %}
+  </article>
 </section>
-<div class="sheet-backdrop av-strategy-backdrop" data-strategy-backdrop aria-hidden="true"></div>
 {% endblock %}
 
 {% block page_scripts %}
-<script defer src="{{ url_for('static', filename='js/command-center.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}"></script>
+<script defer src="{{ url_for('static', filename='js/command-center.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}-minimal-pnl-2"></script>
 {% endblock %}

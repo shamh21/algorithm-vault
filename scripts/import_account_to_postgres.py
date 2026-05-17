@@ -16,21 +16,24 @@ import sys
 from collections import OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import MetaData, create_engine, delete, insert, select, text
-from sqlalchemy.engine import Connection, Engine, make_url
+from sqlalchemy import MetaData, create_engine, delete, insert, inspect, select, text
+from sqlalchemy.engine import Connection, make_url
 from sqlalchemy.sql.sqltypes import Boolean, DateTime
-
 
 INSERT_ORDER = (
     "user",
     "trading_connection",
+    "strategy_run",
     "deposit_address",
     "wallet_account",
     "wallet_address",
+    "vault_cycle",
+    "order",
+    "fill",
     "wallet_balance",
     "wallet_transaction",
     "wallet_ledger_event",
@@ -106,9 +109,9 @@ def import_account(
 
         engine = create_engine(normalized_url, future=True)
         try:
-            target_metadata = MetaData()
-            target_metadata.reflect(bind=engine)
-            _validate_target_tables(target_metadata, selected)
+            target_metadata = _model_metadata()
+            target_tables = set(inspect(engine).get_table_names())
+            _validate_target_tables(target_metadata, selected, target_tables)
 
             if dry_run:
                 return ImportSummary(
@@ -175,11 +178,18 @@ def _collect_source_rows(
         if include_connections and "trading_connection" in tables
         else []
     )
+    selected["strategy_run"] = (
+        _fetch_source_rows(source_conn, "strategy_run", "user_id = ?", (source_user_id,))
+        if "strategy_run" in tables
+        else []
+    )
 
     for table in (
         "deposit_address",
         "wallet_account",
         "wallet_address",
+        "vault_cycle",
+        "order",
         "wallet_balance",
         "wallet_transaction",
         "wallet_ledger_event",
@@ -190,6 +200,13 @@ def _collect_source_rows(
         selected[table] = (
             _fetch_source_rows(source_conn, table, "user_id = ?", (source_user_id,)) if table in tables else []
         )
+
+    order_ids = _ids(selected.get("order", []))
+    selected["fill"] = (
+        _fetch_source_rows_by_ids(source_conn, "fill", "order_id", order_ids)
+        if order_ids and "fill" in tables
+        else []
+    )
 
     return _sanitize_rows(selected, include_connections=include_connections)
 
@@ -210,6 +227,25 @@ def _fetch_source_rows(
     return [dict(row) for row in rows]
 
 
+def _fetch_source_rows_by_ids(
+    source_conn: sqlite3.Connection,
+    table: str,
+    column: str,
+    ids: Iterable[int],
+) -> list[dict[str, Any]]:
+    normalized_ids = sorted({int(item) for item in ids})
+    if not normalized_ids:
+        return []
+    quoted_table = '"' + table.replace('"', '""') + '"'
+    quoted_column = '"' + column.replace('"', '""') + '"'
+    placeholders = ", ".join("?" for _ in normalized_ids)
+    rows = source_conn.execute(
+        f"SELECT * FROM {quoted_table} WHERE {quoted_column} IN ({placeholders}) ORDER BY id",
+        tuple(normalized_ids),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def _sanitize_rows(
     selected: OrderedDict[str, list[dict[str, Any]]],
     *,
@@ -219,7 +255,14 @@ def _sanitize_rows(
     account_ids = _ids(selected.get("wallet_account", []))
     address_ids = _ids(selected.get("wallet_address", []))
     connection_ids = _ids(selected.get("trading_connection", [])) if include_connections else set()
+    strategy_run_ids = _ids(selected.get("strategy_run", []))
+    cycle_ids = _ids(selected.get("vault_cycle", []))
+    order_ids = _ids(selected.get("order", []))
     withdrawal_ids = _ids(selected.get("wallet_withdrawal", []))
+
+    for row in selected.get("strategy_run", []):
+        if row.get("trading_connection_id") not in connection_ids:
+            row["trading_connection_id"] = None
 
     for row in selected.get("deposit_address", []):
         if row.get("rotated_from_id") not in deposit_ids:
@@ -241,8 +284,31 @@ def _sanitize_rows(
         if row.get("active_deposit_address_id") not in deposit_ids:
             row["active_deposit_address_id"] = None
 
+    for row in selected.get("vault_cycle", []):
+        if row.get("trading_connection_id") not in connection_ids:
+            row["trading_connection_id"] = None
+        if row.get("strategy_run_id") not in strategy_run_ids:
+            row["strategy_run_id"] = None
+
+    for row in selected.get("order", []):
+        if row.get("trading_connection_id") not in connection_ids:
+            row["trading_connection_id"] = None
+        if row.get("vault_cycle_id") not in cycle_ids:
+            row["vault_cycle_id"] = None
+        row["vault_leg_id"] = None
+
+    sanitized_fills = []
+    for row in selected.get("fill", []):
+        if row.get("order_id") not in order_ids:
+            continue
+        if row.get("source_order_id") not in order_ids:
+            row["source_order_id"] = None
+        sanitized_fills.append(row)
+    selected["fill"] = sanitized_fills
+
     for row in selected.get("wallet_transaction", []):
-        row["vault_cycle_id"] = None
+        if row.get("vault_cycle_id") not in cycle_ids:
+            row["vault_cycle_id"] = None
 
     for row in selected.get("wallet_ledger_event", []):
         if row.get("deposit_address_id") not in deposit_ids:
@@ -277,8 +343,23 @@ def _ids(rows: Iterable[dict[str, Any]]) -> set[int]:
     return {int(row["id"]) for row in rows if row.get("id") is not None}
 
 
-def _validate_target_tables(metadata: MetaData, selected: OrderedDict[str, list[dict[str, Any]]]) -> None:
-    missing = [table for table, rows in selected.items() if rows and table not in metadata.tables]
+def _model_metadata() -> MetaData:
+    import app.models  # noqa: F401
+    from app.extensions import db
+
+    return db.metadata
+
+
+def _validate_target_tables(
+    metadata: MetaData,
+    selected: OrderedDict[str, list[dict[str, Any]]],
+    existing_tables: set[str],
+) -> None:
+    missing = [
+        table
+        for table, rows in selected.items()
+        if rows and (table not in metadata.tables or table not in existing_tables)
+    ]
     if missing:
         raise ImportAccountError(f"target database is missing required tables: {', '.join(missing)}")
 
@@ -297,12 +378,23 @@ def _delete_existing_account(
     counts = {table: 0 for table in DELETE_ORDER}
     if not existing_user_ids:
         return counts
+    existing_order_ids: list[int] = []
+    if "order" in metadata.tables:
+        order_table = metadata.tables["order"]
+        existing_order_ids = [
+            int(row[0])
+            for row in target.execute(select(order_table.c.id).where(order_table.c.user_id.in_(existing_user_ids))).fetchall()
+        ]
 
     for table_name in DELETE_ORDER:
         if table_name not in metadata.tables:
             continue
         table = metadata.tables[table_name]
-        if table_name == "user":
+        if table_name == "fill":
+            if not existing_order_ids:
+                continue
+            result = target.execute(delete(table).where(table.c.order_id.in_(existing_order_ids)))
+        elif table_name == "user":
             result = target.execute(delete(table).where(table.c.username == username))
         elif "user_id" in table.c:
             result = target.execute(delete(table).where(table.c.user_id.in_(existing_user_ids)))
@@ -372,7 +464,7 @@ def _coerce_value(column: Any, value: Any) -> Any:
         except ValueError:
             return value
         if parsed.tzinfo is not None:
-            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+            parsed = parsed.astimezone(UTC).replace(tzinfo=None)
         return parsed
     return value
 

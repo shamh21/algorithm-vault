@@ -70,6 +70,7 @@ def validate_runtime_config(config: Mapping[str, Any], *, strict: bool = False) 
     deployment_target = str(config.get("DEPLOYMENT_TARGET", "local") or "local").strip().lower()
     profile = str(config.get("APP_ENV") or config.get("FLASK_ENV") or deployment_target or "local").strip().lower()
     backend = database_backend(str(config.get("SQLALCHEMY_DATABASE_URI", "") or ""))
+    recovery_sqlite_active = bool(config.get("RECOVERY_SQLITE_ACTIVE", False))
     worker_mode = str(config.get("WORKER_MODE", "web") or "web").strip().lower()
     custody_mode = str(config.get("WALLET_CUSTODY_MODE", "local_dev") or "local_dev").strip().lower()
     withdrawals_enabled = wallet_withdrawals_enabled(config)
@@ -101,8 +102,10 @@ def validate_runtime_config(config: Mapping[str, Any], *, strict: bool = False) 
             Fernet(totp_key.encode("utf-8"))
         except Exception:  # noqa: BLE001
             blockers.append("TOTP_ENCRYPTION_KEY must be a valid Fernet key")
-        if backend != "postgres":
+        if backend != "postgres" and not recovery_sqlite_active:
             blockers.append("production DEPLOYMENT_TARGET requires a PostgreSQL DATABASE_URL")
+        if recovery_sqlite_active and (live_trading_enabled or withdrawals_enabled or bool(config.get("ENABLE_IN_PROCESS_WORKERS", False))):
+            blockers.append("recovery SQLite mode requires live trading, withdrawals, and in-process workers to stay disabled")
         if bool(config.get("SCHEMA_BOOTSTRAP_ENABLED", False)) and not bool(config.get("ALLOW_PRODUCTION_SCHEMA_BOOTSTRAP", False)):
             blockers.append("production schema bootstrap is disabled; run migrations explicitly")
         if bool(config.get("ENABLE_IN_PROCESS_WORKERS", False)) and worker_mode == "web":

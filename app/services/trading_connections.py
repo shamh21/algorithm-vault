@@ -777,6 +777,7 @@ class TradingConnectionService:
         try:
             self._validate_saved_connection(spec, connection)
             connector = self._connector_for_connection(connection)
+            self._ensure_live_verification_runtime()
             if not connector.can_trade("live"):
                 raise RuntimeError("Credentials are present but cannot trade in live mode.")
             snapshot = connector.account_snapshot("live")
@@ -804,6 +805,15 @@ class TradingConnectionService:
         connection.provider_metadata = metadata
         db.session.flush()
         return {"ok": True, "connection": connection, "snapshot": snapshot}
+
+    def _ensure_live_verification_runtime(self) -> None:
+        if bool(self.config.get("RECOVERY_SQLITE_ACTIVE", False)):
+            raise RuntimeError(
+                "Live trading is disabled while the app is running on recovery SQLite. "
+                "Attach a healthy production Postgres database and set ALGVAULT_RECOVERY_SQLITE_ENABLED=false before verifying live trading."
+            )
+        if not bool(self.config.get("ENABLE_LIVE_TRADING", False)):
+            raise RuntimeError("Live trading is disabled by server configuration. Set ENABLE_LIVE_TRADING=true only after live readiness is validated.")
 
     def _normalize_provider_verification_error(self, provider: str, exc: Exception) -> dict[str, Any]:
         raw = str(exc or "")

@@ -7,17 +7,47 @@
   <article class="vault-card auth-card">
     <span class="card-kicker">Secure Access</span>
     <h1>Sign In</h1>
+    {% if next_destination %}
+      <p class="auth-route-context">Continue to {{ next_destination }}</p>
+    {% endif %}
     <p class="muted">Use your password and, when enabled, your 6-digit authenticator code.</p>
+    {% if ops_snapshot %}
+      <section class="auth-ops-panel auth-ops-panel-{{ ops_snapshot.tone }}" aria-label="Production operations snapshot">
+        <div class="auth-ops-head">
+          <span class="card-kicker">Production Status</span>
+          <span class="status-badge">{{ ops_snapshot.status_label }}</span>
+        </div>
+        <dl class="auth-ops-grid">
+          <div>
+            <dt>Database</dt>
+            <dd>{{ ops_snapshot.database }}</dd>
+          </div>
+          <div>
+            <dt>Mode</dt>
+            <dd>{{ ops_snapshot.mode }}</dd>
+          </div>
+          <div>
+            <dt>Withdrawals</dt>
+            <dd>{{ ops_snapshot.withdrawals }}</dd>
+          </div>
+          <div>
+            <dt>Treasury</dt>
+            <dd>{{ ops_snapshot.treasury }}</dd>
+          </div>
+        </dl>
+        <p>{{ ops_snapshot.message }}</p>
+      </section>
+    {% endif %}
     <form method="post" action="{{ url_for('auth.login_post', next=request.args.get('next', '')) }}" class="form-grid" data-disable-on-submit>
       {{ csrf_input()|safe }}
       <label>Username
-        <input type="text" name="username" value="{{ username or '' }}" autocomplete="username" required>
+        <input type="text" name="username" value="{{ username or '' }}" autocomplete="username" autocapitalize="none" spellcheck="false" required>
       </label>
       <label>Password
         <input type="password" name="password" autocomplete="current-password" required>
       </label>
       <label>Authenticator Code
-        <input type="text" name="totp_code" inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code" placeholder="000000" {% if require_2fa %}autofocus{% endif %}>
+        <input type="text" name="totp_code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" placeholder="000000" {% if require_2fa %}required autofocus{% endif %}>
       </label>
       <button type="submit" class="primary" data-loading-label="Signing in...">Sign In</button>
     </form>

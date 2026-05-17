@@ -4,15 +4,36 @@ import json
 from datetime import datetime, timedelta
 from typing import Any
 
-import pytest
 import pyotp
+import pytest
 from cryptography.fernet import Fernet
 from werkzeug.security import check_password_hash
 
 from app import create_app
 from app.auth import decrypt_totp_secret, encrypt_totp_secret, password_hash
 from app.extensions import db
-from app.models import AuditLog, BacktestRun, DepositAddress, Fill, LeveragedMarket, OptimizerRun, Order, ReferralInviteCode, Setting, StrategyRanking, StrategyRun, StrategyValidation, User, VaultCycle, VaultAllocationLeg, WalletAddress, WalletBalance, WalletLedgerEvent, WalletTransaction, WalletWithdrawal
+from app.models import (
+    AuditLog,
+    BacktestRun,
+    DepositAddress,
+    Fill,
+    LeveragedMarket,
+    OptimizerRun,
+    Order,
+    ReferralInviteCode,
+    Setting,
+    StrategyRanking,
+    StrategyRun,
+    StrategyValidation,
+    User,
+    VaultAllocationLeg,
+    VaultCycle,
+    WalletAddress,
+    WalletBalance,
+    WalletLedgerEvent,
+    WalletTransaction,
+    WalletWithdrawal,
+)
 from app.services.hyperliquid_client import ClientSnapshot
 from app.services.wallet_custody import BroadcastResult, GeneratedWallet, RealWalletCustodyService, WalletBalanceSnapshot
 
@@ -34,14 +55,11 @@ def _candles():
 def _patch_market_data(app) -> None:
     market_data = app.extensions["services"]["market_data"]
     market_data.get_dashboard_market_summary = lambda symbols, timeframe, mode: [
-        {"symbol": symbol, "mid": 100.0, "recent_average": 100.0, "change_pct": 0.0}
-        for symbol in symbols
+        {"symbol": symbol, "mid": 100.0, "recent_average": 100.0, "change_pct": 0.0} for symbol in symbols
     ]
     market_data.get_candles = lambda symbol, timeframe, mode, limit: _candles()
     market_data.get_mid_price = lambda symbol, mode: 100.0
-    market_data.get_order_book = lambda symbol, mode: {
-        "levels": [[{"px": "99.95", "sz": "1"}], [{"px": "100.05", "sz": "1"}]]
-    }
+    market_data.get_order_book = lambda symbol, mode: {"levels": [[{"px": "99.95", "sz": "1"}], [{"px": "100.05", "sz": "1"}]]}
 
 
 def _patch_deep_book(app, spread: float = 0.1, size: str = "1000") -> None:
@@ -113,6 +131,19 @@ def _seed_backtest_market(provider: str = "hyperliquid", symbol: str = "BTC", ve
     db.session.add(market)
     db.session.commit()
     return market
+
+
+def _seed_wallet_balance(user: User, asset: str = "USDC", available: float = 10_000.0, estimated_usd: float | None = None) -> WalletBalance:
+    balance = WalletBalance(
+        user_id=user.id,
+        asset=asset,
+        available_balance=available,
+        locked_balance=0.0,
+        estimated_usd_value=available if estimated_usd is None else estimated_usd,
+    )
+    db.session.add(balance)
+    db.session.commit()
+    return balance
 
 
 def _confirm_one_h10_live(app) -> None:
@@ -400,19 +431,20 @@ def test_consumer_pages_render_wallet_and_vault_experience(app) -> None:
 
     home = client.get("/")
     wallet = client.get("/wallet")
+    convert = client.get("/convert")
     vault = client.get("/vault")
     activity = client.get("/activity")
     settings = client.get("/settings/")
 
     assert home.status_code == 200
-    assert b"Algorithm Vault" in home.data
-    assert b"Portfolio Balance" in home.data
-    assert b"Vault Pulse" in home.data
-    assert b"Automated Strategies" in home.data
-    assert b"Market Monitor" in home.data
-    assert b"Automation Activity" in home.data
+    assert b"Total Wallet Balance" in home.data
+    assert b"Past Account P&amp;L" in home.data
+    assert b"Automated Strategies" not in home.data
+    assert b"Market Monitor" not in home.data
+    assert b"Automation Activity" not in home.data
     assert b"static/js/command-center.js" in home.data
     for removed_copy in [
+        b"Vault Pulse",
         b"Risk Notice",
         b"Start a Cycle",
         b"View Wallet",
@@ -423,14 +455,26 @@ def test_consumer_pages_render_wallet_and_vault_experience(app) -> None:
     ]:
         assert removed_copy not in home.data
     assert wallet.status_code == 200
-    assert b"Total Portfolio Value" in wallet.data
+    assert b"Verified On-chain Value" in wallet.data
     assert b"Balance Trend" in wallet.data
     assert b"Asset Mix" in wallet.data
     assert b"Deposit" in wallet.data
     assert b"Withdraw" in wallet.data
+    assert b"Convert" in wallet.data
     assert b"Settlement Currency" not in wallet.data
     assert b"Exchange Margin" not in wallet.data
     assert b"Risk Notice" not in wallet.data
+    assert b'data-bottom-nav-section="activity"' not in wallet.data
+    assert convert.status_code == 200
+    assert b"Convert Assets" in convert.data
+    assert b"Move available wallet balances" in convert.data
+    assert b"Convertible Assets" not in convert.data
+    assert b"data-convert-form" in convert.data
+    assert b"data-convert-offline" in convert.data
+    assert b"data-convert-preview" in convert.data
+    assert b"No convertible balance" in convert.data
+    assert b"USDC" in convert.data
+    assert b"XRP" in convert.data
     assert vault.status_code == 200
     assert b"Vault Cycle" in vault.data
     assert b"Start 1H10 Cycle" in vault.data
@@ -438,14 +482,9 @@ def test_consumer_pages_render_wallet_and_vault_experience(app) -> None:
     assert b"Operator Readiness" not in vault.data
     assert b"Vault risk notice" not in vault.data
     assert b"Algorithm Profile" not in vault.data
-    assert activity.status_code == 200
-    assert b"Wallet Transactions" in activity.data
-    assert b"Vault Cycles" in activity.data
-    assert b"Wallet and Vault History" not in activity.data
-    assert b"Allocation, settlement, and wallet events" not in activity.data
-    assert b"Risk Notice" not in activity.data
-    assert b"Crypto trading carries significant risk" not in activity.data
-    assert b"<table" not in activity.data
+    assert b'data-bottom-nav-section="activity"' not in vault.data
+    assert activity.status_code == 302
+    assert activity.headers["Location"].endswith("/")
     assert settings.status_code == 200
     assert b"App Mode" in settings.data
     assert b"Providers" in settings.data
@@ -459,7 +498,7 @@ def test_consumer_pages_render_wallet_and_vault_experience(app) -> None:
         assert removed_copy not in settings.data
 
 
-def test_activity_page_is_paginated_and_uses_mobile_cards(app) -> None:
+def test_activity_page_redirects_to_dashboard(app) -> None:
     _patch_market_data(app)
     user, secret = _create_user(username="activitypages")
     now = datetime.utcnow()
@@ -497,38 +536,15 @@ def test_activity_page_is_paginated_and_uses_mobile_cards(app) -> None:
     client = app.test_client()
     _login(client, user.username, secret)
 
-    first_page = client.get("/activity")
+    activity = client.get("/activity")
+    activity_with_query = client.get("/activity?activity_page=2&cycle_page=2")
 
-    assert first_page.status_code == 200
-    assert WalletTransaction.query.filter_by(user_id=user.id).count() == 50
-    assert VaultCycle.query.filter_by(user_id=user.id).count() == 50
-    assert b"activity-card wallet-activity-item" in first_page.data
-    assert b"activity-card cycle-activity-item" in first_page.data
-    assert b"wallet-note-54" in first_page.data
-    assert b"wallet-note-50" in first_page.data
-    assert b"wallet-note-49" not in first_page.data
-    assert b"CycleType54" in first_page.data
-    assert b"CycleType50" in first_page.data
-    assert b"CycleType49" not in first_page.data
-    assert first_page.data.count(b"Page 1 of 10") == 2
-    assert b"<table" not in first_page.data
-    assert b'class="responsive-table"' not in first_page.data
-    assert b"Wallet and Vault History" not in first_page.data
-    assert b"Risk Notice" not in first_page.data
-
-    wallet_second_page = client.get("/activity?activity_page=2")
-
-    assert wallet_second_page.status_code == 200
-    assert b"wallet-note-49" in wallet_second_page.data
-    assert b"wallet-note-54" not in wallet_second_page.data
-    assert b"CycleType54" in wallet_second_page.data
-
-    cycle_second_page = client.get("/activity?cycle_page=2")
-
-    assert cycle_second_page.status_code == 200
-    assert b"CycleType49" in cycle_second_page.data
-    assert b"CycleType54" not in cycle_second_page.data
-    assert b"wallet-note-54" in cycle_second_page.data
+    assert activity.status_code == 302
+    assert activity.headers["Location"].endswith("/")
+    assert activity_with_query.status_code == 302
+    assert activity_with_query.headers["Location"].endswith("/")
+    assert WalletTransaction.query.filter_by(user_id=user.id).count() == 55
+    assert VaultCycle.query.filter_by(user_id=user.id).count() == 55
 
 
 def test_wallet_activity_is_paginated_and_retained_to_50_records(app) -> None:
@@ -565,6 +581,79 @@ def test_wallet_activity_is_paginated_and_retained_to_50_records(app) -> None:
     assert second_page.status_code == 200
     assert b"49.000000 USDC" in second_page.data
     assert b"54.000000 USDC" not in second_page.data
+
+
+def test_convert_page_converts_between_wallet_assets(app) -> None:
+    _patch_market_data(app)
+    user, secret = _create_user(username="convertwallet")
+    db.session.add(WalletBalance(user_id=user.id, asset="USDC", available_balance=100.0, estimated_usd_value=100.0))
+    db.session.add(WalletBalance(user_id=user.id, asset="ETH", available_balance=0.0, estimated_usd_value=0.0))
+    db.session.commit()
+    client = app.test_client()
+    _login(client, user.username, secret)
+
+    page = client.get("/convert?from_asset=USDC&to_asset=ETH&amount=50")
+
+    assert page.status_code == 200
+    assert b"0.50000000 ETH" in page.data
+    assert b"$50.00" in page.data
+    assert b"Convert" in page.data
+    assert b"data-convert-form" in page.data
+    assert b"Ready to preview" not in page.data
+
+    response = client.post(
+        "/convert",
+        data={"from_asset": "USDC", "to_asset": "ETH", "amount": "50"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 302
+    confirmation = client.get(response.location)
+    assert confirmation.status_code == 200
+    assert b"Converted 50.00000000 USDC to 0.50000000 ETH." in confirmation.data
+    usdc = WalletBalance.query.filter_by(user_id=user.id, asset="USDC").one()
+    eth = WalletBalance.query.filter_by(user_id=user.id, asset="ETH").one()
+    assert usdc.available_balance == pytest.approx(50.0)
+    assert usdc.estimated_usd_value == pytest.approx(50.0)
+    assert eth.available_balance == pytest.approx(0.5)
+    assert eth.estimated_usd_value == pytest.approx(50.0)
+    transactions = WalletTransaction.query.filter_by(user_id=user.id, transaction_type="conversion").order_by(WalletTransaction.asset).all()
+    assert len(transactions) == 2
+    assert [(tx.asset, tx.amount) for tx in transactions] == [("ETH", pytest.approx(0.5)), ("USDC", pytest.approx(-50.0))]
+
+
+def test_convert_page_rejects_invalid_amounts(app) -> None:
+    _patch_market_data(app)
+    user, secret = _create_user(username="convertreject")
+    db.session.add(WalletBalance(user_id=user.id, asset="USDC", available_balance=25.0, estimated_usd_value=25.0))
+    db.session.commit()
+    client = app.test_client()
+    _login(client, user.username, secret)
+
+    response = client.post("/convert", data={"from_asset": "USDC", "to_asset": "ETH", "amount": "50"})
+
+    assert response.status_code == 200
+    assert b"Amount exceeds available USDC balance." in response.data
+    assert b"Review required" in response.data
+    assert b'aria-invalid="true"' in response.data
+    assert WalletBalance.query.filter_by(user_id=user.id, asset="USDC").one().available_balance == 25.0
+    assert WalletTransaction.query.filter_by(user_id=user.id, transaction_type="conversion").count() == 0
+
+
+def test_convert_page_disables_empty_state_without_available_funds(app) -> None:
+    _patch_market_data(app)
+    user, secret = _create_user(username="convertempty")
+    client = app.test_client()
+    _login(client, user.username, secret)
+
+    response = client.get("/convert")
+
+    assert response.status_code == 200
+    assert b"No convertible balance" in response.data
+    assert b'data-can-convert="false"' in response.data
+    assert b'disabled aria-disabled="true"' in response.data
+    assert b"static/js/convert.js" in response.data
+    assert b"Network unavailable" in response.data
 
 
 def test_vault_cycles_are_paginated_and_retained_to_50_records(app) -> None:
@@ -651,12 +740,14 @@ def test_vault_cycles_are_paginated_and_retained_to_50_records(app) -> None:
 
 def test_admin_routes_require_login_and_2fa(app) -> None:
     client = app.test_client()
-    for path in ["/admin/dashboard", "/admin/backtests", "/admin/panic"]:
+    assert client.get("/admin/panic").status_code == 404
+
+    for path in ["/admin/dashboard", "/admin/backtests"]:
         response = client.get(path)
         assert response.status_code == 302
         assert "/login" in response.location
 
-    for path in ["/admin/orders", "/admin/orders/", "/orders/"]:
+    for path in ["/admin/orders", "/admin/orders/", "/orders/", "/panic", "/panic/"]:
         response = client.get(path)
         assert response.status_code == 404
 
@@ -686,7 +777,6 @@ def test_admin_with_2fa_can_access_admin_and_user_cannot(app) -> None:
     _login(client, "admin2", admin_secret)
     dashboard = client.get("/admin/dashboard")
     backtests = client.get("/admin/backtests")
-    panic = client.get("/admin/panic")
     risk = client.get("/admin/risk")
     strategies = client.get("/admin/strategies")
     readiness = client.get("/admin/live-readiness")
@@ -697,13 +787,18 @@ def test_admin_with_2fa_can_access_admin_and_user_cannot(app) -> None:
     assert b"Manual Order Entry" not in dashboard.data
     assert b"Start Strategy" not in dashboard.data
     assert b"/admin/strategies/start" not in dashboard.data
+    assert b"/admin/panic" not in dashboard.data
+    assert b"Emergency Stop" not in dashboard.data
     assert client.get("/admin/orders").status_code == 404
+    assert client.get("/admin/panic").status_code == 404
     assert backtests.status_code == 200
     assert b"Paper Vault" in backtests.data
+    assert b"Vault backtesting" in backtests.data
+    assert b"Vault Allocation Assets" in backtests.data
     assert b"Test Allocation Amount" in backtests.data
     assert b"Vault Cycle" in backtests.data
     assert b"Vault Cycle Duration" not in backtests.data
-    assert b"Run Vault Cycle" in backtests.data
+    assert b"Run Backtest" in backtests.data
     assert b"static/js/backtests.js" in backtests.data
     assert b"static/js/vendor/lightweight-charts.standalone.production.js" in backtests.data
     assert b'name="strategy_name"' not in backtests.data
@@ -715,7 +810,7 @@ def test_admin_with_2fa_can_access_admin_and_user_cannot(app) -> None:
     assert b'name="sizing_mode"' not in backtests.data
     assert b"Auto Universe" in backtests.data
     assert b"All enabled leveraged pairs" in backtests.data
-    assert b"Auto-Optimized Metrics" in backtests.data
+    assert b"Auto-Optimized Metrics" not in backtests.data
     for removed_copy in [
         b"Short-Term Optimizer",
         b'value="dynamic_intraday"',
@@ -733,18 +828,11 @@ def test_admin_with_2fa_can_access_admin_and_user_cannot(app) -> None:
         b"Crypto trading carries significant risk",
     ]:
         assert removed_copy not in backtests.data
-    assert panic.status_code == 200
-    assert b"Panic" in panic.data
-    assert b"Emergency Control" in panic.data
-    assert b"Activate Panic" in panic.data
-    assert b"This action cancels open orders" not in panic.data
-    assert b"Risk Notice" not in panic.data
-    assert b"Crypto trading carries significant risk" not in panic.data
     assert risk.status_code == 200
     assert b"Risk Engine Controls" in risk.data
     assert b"Adaptive ML Slippage Engine" in risk.data
     assert b"static/js/risk.js" in risk.data
-    assert b'audit-feed' in risk.data
+    assert b"audit-feed" in risk.data
     assert b"Audit Events" in risk.data
     assert b"Risk Status" not in risk.data
     assert b"Admin Shortcuts" not in risk.data
@@ -766,19 +854,22 @@ def test_manual_trading_routes_are_not_registered(app) -> None:
     assert not any(endpoint.startswith("orders.") for endpoint in endpoints)
     assert "dashboard.start_strategy" not in endpoints
     assert "dashboard.stop_strategy" not in endpoints
-    assert not {
-        "/admin/orders/",
-        "/admin/orders",
-        "/admin/orders/place",
-        "/admin/orders/<int:order_id>/cancel",
-        "/admin/strategies/start",
-        "/admin/strategies/<int:run_id>/stop",
-        "/orders/",
-        "/orders/place",
-        "/orders/<int:order_id>/cancel",
-        "/strategies/start",
-        "/strategies/<int:run_id>/stop",
-    } & rules
+    assert (
+        not {
+            "/admin/orders/",
+            "/admin/orders",
+            "/admin/orders/place",
+            "/admin/orders/<int:order_id>/cancel",
+            "/admin/strategies/start",
+            "/admin/strategies/<int:run_id>/stop",
+            "/orders/",
+            "/orders/place",
+            "/orders/<int:order_id>/cancel",
+            "/strategies/start",
+            "/strategies/<int:run_id>/stop",
+        }
+        & rules
+    )
 
 
 def test_admin_login_defaults_to_consumer_home_instead_of_heavy_dashboard(app) -> None:
@@ -822,7 +913,8 @@ def test_removed_manual_trading_posts_return_404_without_service_calls(app, monk
 
 def test_backtests_json_run_uses_paper_allocation_and_returns_charts(app) -> None:
     _patch_market_data(app)
-    _, admin_secret = _create_user(username="backtestjson", role="admin")
+    admin, admin_secret = _create_user(username="backtestjson", role="admin")
+    _seed_wallet_balance(admin, "USDC", 1_000.0)
     _seed_backtest_market()
     client = app.test_client()
     _login(client, "backtestjson", admin_secret)
@@ -834,6 +926,7 @@ def test_backtests_json_run_uses_paper_allocation_and_returns_charts(app) -> Non
             "symbol": "BTC",
             "timeframe": "live",
             "allocation_amount_usd": "500",
+            "allocation_assets": "USDC",
             "cycle_duration": "1h10",
             "leverage": "99",
             "fee_bps": "999",
@@ -850,11 +943,38 @@ def test_backtests_json_run_uses_paper_allocation_and_returns_charts(app) -> Non
     assert payload["ok"] is True
     assert payload["run_id"]
     assert {"metrics", "charts", "summary", "result", "autopilot", "asset_breakdown", "execution_quality"} <= set(payload)
+    assert payload["execution_mode"] == "backtest"
+    assert payload["simulation_scope"]["creates_backtest_run"] is True
+    assert payload["simulation_scope"]["creates_vault_cycle"] is False
+    assert payload["simulation_scope"]["starts_strategy_runs"] is False
+    assert payload["simulation_scope"]["queues_worker"] is False
+    assert payload["simulation_scope"]["submits_broker_order"] is False
+    assert payload["trade_decision"]["stage"] == "simulated"
+    assert payload["trade_decision"]["broker_order_submitted"] is False
     assert payload["autopilot"]["enabled"] is True
     assert payload["execution_quality"]["venue_count"] == 1
     assert payload["execution_quality"]["fee_bps"] != 999
     assert payload["execution_quality"]["slippage_bps"] != 999
+    assert payload["result"]["target_multiplier"] == pytest.approx(10.0)
+    assert payload["result"]["target_roi_pct"] == pytest.approx(1000.0)
+    assert payload["result"]["objective_horizon_seconds"] == app.config["ONE_H10_HORIZON_SECONDS"]
+    assert payload["result"]["hit_target"] in {True, False}
+    assert payload["result"]["objective_gap_pct"] >= 0
+    assert payload["target_progress"] >= 0
+    assert payload["metrics"]["target_progress"] >= 0
+    assert {"net_pnl", "closed_trades", "open_trades", "average_trade", "profit_factor"} <= set(payload["metrics"])
+    assert payload["metrics"]["closed_trades"] >= 0
+    assert payload["metrics"]["open_trades"] >= 0
+    assert payload["portfolio_diagnostics"]["allocation_policy"] == "after_cost_pnl_weighted"
+    assert "allocation_plan" in payload
+    assert "skipped_candidates" in payload
+    assert payload["result"]["screener_source"]
+    assert payload["result"]["ml_families_used"]
     assert payload["asset_breakdown"]
+    assert "allocation_weight" in payload["asset_breakdown"][0]
+    assert "net_expected_return_bps" in payload["asset_breakdown"][0]
+    assert "closed_trades" in payload["asset_breakdown"][0]
+    assert "open_trades" in payload["asset_breakdown"][0]
     assert payload["metrics"]["ending_balance"] >= 0
     assert payload["charts"]["equity"]
     assert payload["charts"]["pnl"]
@@ -862,24 +982,209 @@ def test_backtests_json_run_uses_paper_allocation_and_returns_charts(app) -> Non
     assert payload["charts"]["growth"]
     assert "trade_timeline" in payload["charts"]
     assert payload["summary"]["allocation"] == 500.0
+    assert payload["summary"]["allocation_assets"] == ["USDC"]
     run = BacktestRun.query.one()
     assert run.strategy_name == "portfolio_vault_cycle_auto"
     assert run.timeframe == "1h10"
     assert run.parameters["initial_balance"] == 500.0
     assert run.parameters["allocation_amount_usd"] == 500.0
+    assert run.parameters["allocation_assets"] == ["USDC"]
     assert run.parameters["parameters"]["simulated_capital_only"] is True
+    assert run.parameters["parameters"]["execution_mode"] == "backtest"
+    assert run.parameters["parameters"]["broker_order_submitted"] is False
     assert run.parameters["parameters"]["paper_balance_usd"] == 10_000.0
     assert run.parameters["parameters"]["one_h10_vault"] is True
     assert run.parameters["parameters"]["ml_horizon"] == "1h10"
+    assert run.parameters["parameters"]["lock_duration_seconds"] == app.config["ONE_H10_HORIZON_SECONDS"]
+    assert run.parameters["parameters"]["target_multiplier"] == pytest.approx(10.0)
     assert run.parameters["parameters"]["asset_breakdown"]
+    assert run.parameters["parameters"]["allocation_plan"]
     assert "leverage" not in run.parameters
     assert "fee_bps" not in run.parameters
     assert run.result["autopilot"]["enabled"] is True
 
 
-def test_backtests_run_fails_closed_without_eligible_leveraged_pairs(app) -> None:
+def test_backtests_after_cost_allocator_skips_higher_raw_return_high_cost_candidate(app, monkeypatch) -> None:
+    admin, admin_secret = _create_user(username="aftercostadmin", role="admin")
+    _seed_wallet_balance(admin, "USDC", 1_000.0)
+    _seed_backtest_market(provider="hyperliquid", symbol="BTC", venue_symbol="BTC")
+    _seed_backtest_market(provider="hyperliquid", symbol="ETH", venue_symbol="ETH")
+    simulator = app.extensions["services"]["backtest_vault_simulator"]
+    candidates = [
+        {
+            "provider": "hyperliquid",
+            "provider_label": "Hyperliquid",
+            "symbol": "BTC",
+            "venue_symbol": "BTC",
+            "vault_allocation_asset": "USDC",
+            "liquidity_usd": 500_000.0,
+            "screener_score": 4.0,
+            "screener_source": "test",
+            "screener_features": {
+                "net_expected_return_bps": 80.0,
+                "cost_drag_bps": 6.0,
+                "expected_execution_quality": 0.92,
+                "liquidity_usd": 500_000.0,
+            },
+        },
+        {
+            "provider": "hyperliquid",
+            "provider_label": "Hyperliquid",
+            "symbol": "ETH",
+            "venue_symbol": "ETH",
+            "vault_allocation_asset": "USDC",
+            "liquidity_usd": 500_000.0,
+            "screener_score": 5.0,
+            "screener_source": "test",
+            "screener_features": {
+                "net_expected_return_bps": -12.0,
+                "cost_drag_bps": 42.0,
+                "expected_execution_quality": 0.35,
+                "liquidity_usd": 500_000.0,
+            },
+        },
+    ]
+
+    def fake_result(row: dict[str, Any], *, allocation: float, cycle_duration_minutes: int) -> dict[str, Any]:
+        roi = 0.08 if row["symbol"] == "BTC" else 0.22
+        return {
+            "vault_simulation": True,
+            "summary": {
+                "symbol": row["symbol"],
+                "provider": row["provider"],
+                "provider_label": row["provider_label"],
+                "vault_allocation_asset": "USDC",
+                "allocation": allocation,
+                "quote_asset": "USDC",
+            },
+            "metrics": {
+                "roi": roi,
+                "pnl": allocation * roi,
+                "win_rate": 1.0,
+                "max_drawdown": -0.02,
+                "trades": 3,
+                "fees": 1.0,
+                "ending_balance": allocation * (1.0 + roi),
+            },
+            "charts": {
+                "equity": [{"x": 1, "y": allocation}, {"x": 2, "y": allocation * (1.0 + roi)}],
+                "pnl": [{"x": 1, "y": 0.0}, {"x": 2, "y": allocation * roi}],
+                "drawdown": [{"x": 1, "y": 0.0}, {"x": 2, "y": -0.02}],
+                "growth": [{"x": 1, "y": 0.0}, {"x": 2, "y": roi}],
+                "trade_timeline": [],
+            },
+            "execution_quality": {
+                "fee_bps": 5.0,
+                "slippage_bps": 1.0,
+                "fill_quality": row["screener_features"]["expected_execution_quality"],
+                "liquidity_usd": row["liquidity_usd"],
+            },
+            "strategy_weights": [],
+            "screener_source": "test",
+        }
+
+    monkeypatch.setattr(simulator, "_rank_rows_for_one_h10", lambda rows, user=None: candidates)
+    monkeypatch.setattr(simulator, "_simulate_asset_row", fake_result)
+    client = app.test_client()
+    _login(client, "aftercostadmin", admin_secret)
+
+    response = client.post(
+        "/admin/backtests/run",
+        data={"allocation_amount_usd": "500", "allocation_assets": "USDC", "cycle_duration": "1h10"},
+        headers={"Accept": "application/json"},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert [row["asset"] for row in payload["allocation_plan"] if row["allocated"]] == ["BTC"]
+    assert payload["allocation_plan"][0]["allocation_weight"] == pytest.approx(1.0)
+    assert payload["asset_breakdown"][0]["asset"] == "BTC"
+    assert payload["asset_breakdown"][0]["allocation_weight"] == pytest.approx(1.0)
+    assert payload["skipped_candidates"][0]["asset"] == "ETH"
+    assert payload["skipped_candidates"][0]["skip_reason"] == "after_cost_edge_below_threshold"
+
+
+def test_backtest_strategy_weights_disable_negative_and_no_trade_strategies(app) -> None:
+    simulator = app.extensions["services"]["backtest_vault_simulator"]
+
+    weights = simulator._strategy_weights(
+        [
+            {
+                "strategy_name": "strong_after_cost",
+                "label": "Strong",
+                "score": 0.44,
+                "total_return": 0.05,
+                "net_return_after_costs": 0.05,
+                "max_drawdown": -0.02,
+                "win_rate": 0.75,
+                "trade_count": 4,
+                "error": "",
+            },
+            {
+                "strategy_name": "negative_after_cost",
+                "label": "Negative",
+                "score": 0.20,
+                "total_return": -0.01,
+                "net_return_after_costs": -0.01,
+                "max_drawdown": -0.01,
+                "win_rate": 0.40,
+                "trade_count": 3,
+                "error": "",
+            },
+            {
+                "strategy_name": "no_trades",
+                "label": "No Trades",
+                "score": 0.30,
+                "total_return": 0.02,
+                "net_return_after_costs": 0.02,
+                "max_drawdown": 0.0,
+                "win_rate": 0.0,
+                "trade_count": 0,
+                "error": "",
+            },
+        ]
+    )
+
+    by_name = {row["strategy_name"]: row for row in weights}
+    assert by_name["strong_after_cost"]["enabled"] is True
+    assert by_name["negative_after_cost"]["enabled"] is False
+    assert by_name["negative_after_cost"]["disabled_reason"] == "negative_after_cost_return"
+    assert by_name["no_trades"]["enabled"] is False
+    assert by_name["no_trades"]["disabled_reason"] == "no_after_cost_trades"
+
+
+def test_backtests_json_run_persists_multiple_vault_allocation_assets(app) -> None:
     _patch_market_data(app)
-    _, admin_secret = _create_user(username="backtestnomarkets", role="admin")
+    admin, admin_secret = _create_user(username="backtestmultiasset", role="admin")
+    _seed_wallet_balance(admin, "USDC", 400.0)
+    _seed_wallet_balance(admin, "ETH", 3.0, estimated_usd=300.0)
+    _seed_backtest_market(provider="hyperliquid", symbol="BTC", venue_symbol="BTC")
+    _seed_backtest_market(provider="hyperliquid", symbol="ETH", venue_symbol="ETH")
+    client = app.test_client()
+    _login(client, "backtestmultiasset", admin_secret)
+
+    response = client.post(
+        "/admin/backtests/run",
+        data={
+            "allocation_amount_usd": "600",
+            "allocation_assets": ["USDC", "ETH"],
+            "cycle_duration": "1h10",
+        },
+        headers={"Accept": "application/json"},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["summary"]["allocation_assets"] == ["USDC", "ETH"]
+    run = BacktestRun.query.one()
+    assert run.parameters["allocation_assets"] == ["USDC", "ETH"]
+    assert run.parameters["parameters"]["selected_allocation_assets"] == ["USDC", "ETH"]
+
+
+def test_backtests_run_records_unavailable_asset_without_eligible_leveraged_pairs(app) -> None:
+    _patch_market_data(app)
+    admin, admin_secret = _create_user(username="backtestnomarkets", role="admin")
+    _seed_wallet_balance(admin, "XRP", 500.0, estimated_usd=500.0)
     client = app.test_client()
     _login(client, "backtestnomarkets", admin_secret)
 
@@ -887,19 +1192,25 @@ def test_backtests_run_fails_closed_without_eligible_leveraged_pairs(app) -> Non
         "/admin/backtests/run",
         data={
             "allocation_amount_usd": "500",
+            "allocation_assets": "XRP",
             "cycle_duration": "1h10",
         },
         headers={"Accept": "application/json"},
     )
 
-    assert response.status_code == 500
-    assert b"Enable an exchange with leveraged pairs" in response.data
-    assert BacktestRun.query.count() == 0
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["ok"] is True
+    assert payload["asset_breakdown"][0]["asset"] == "XRP"
+    assert payload["asset_breakdown"][0]["status"] == "unavailable"
+    assert "No active leveraged market" in payload["asset_breakdown"][0]["error"]
+    assert BacktestRun.query.count() == 1
 
 
 def test_backtests_symbol_api_returns_paginated_exchange_universe(app) -> None:
     _patch_market_data(app)
     admin, admin_secret = _create_user(username="backtestsymbols", role="admin")
+    _seed_wallet_balance(admin, "USDC", 750.0)
     db.session.add(
         LeveragedMarket(
             provider="kucoin",
@@ -951,6 +1262,8 @@ def test_backtests_symbol_api_returns_paginated_exchange_universe(app) -> None:
     assert payload["symbols"][0]["provider"] == "kucoin"
     assert payload["symbols"][0]["venue_symbol"] == "BTCUSDTM"
     assert payload["symbols"][0]["compatibility_badges"] == ["KuCoin", "USDT"]
+    assert {"USDC", "USDT", "BTC", "ETH", "SOL", "XRP"} <= {row["asset"] for row in payload["allocation_assets"]}
+    assert payload["allocation_cap_usd"] == 750.0
     assert payload["has_more"] is False
 
 
@@ -960,9 +1273,7 @@ def test_backtests_quote_api_returns_precise_symbol_conversion(app) -> None:
     client = app.test_client()
     _login(client, "backtestquote", admin_secret)
 
-    response = client.get(
-        "/admin/backtests/api/quote?provider=kucoin&symbol=BTC&venue_symbol=BTCUSDTM&allocation_usd=10000"
-    )
+    response = client.get("/admin/backtests/api/quote?provider=kucoin&symbol=BTC&venue_symbol=BTCUSDTM&allocation_usd=10000")
 
     assert response.status_code == 200
     payload = response.get_json()
@@ -975,7 +1286,8 @@ def test_backtests_quote_api_returns_precise_symbol_conversion(app) -> None:
 
 def test_backtests_rejects_allocation_above_paper_balance(app) -> None:
     _patch_market_data(app)
-    _, admin_secret = _create_user(username="backtestcap", role="admin")
+    admin, admin_secret = _create_user(username="backtestcap", role="admin")
+    _seed_wallet_balance(admin, "USDC", 20_000.0)
     client = app.test_client()
     _login(client, "backtestcap", admin_secret)
 
@@ -986,13 +1298,42 @@ def test_backtests_rejects_allocation_above_paper_balance(app) -> None:
             "symbol": "BTC",
             "timeframe": "live",
             "allocation_amount_usd": "10000.01",
+            "allocation_assets": "USDC",
             "cycle_duration": "1h10",
         },
         headers={"Accept": "application/json"},
     )
 
     assert response.status_code == 400
-    assert b"paper funds" in response.data
+    payload = response.get_json()
+    assert payload["ok"] is False
+    assert payload["error_code"] == "invalid_backtest_input"
+    assert "selected Vault allocation funds" in payload["error"]
+    assert BacktestRun.query.count() == 0
+
+
+def test_backtests_rejects_unknown_vault_allocation_asset(app) -> None:
+    _patch_market_data(app)
+    admin, admin_secret = _create_user(username="backtestbadasset", role="admin")
+    _seed_wallet_balance(admin, "USDC", 500.0)
+    client = app.test_client()
+    _login(client, "backtestbadasset", admin_secret)
+
+    response = client.post(
+        "/admin/backtests/run",
+        data={
+            "allocation_amount_usd": "100",
+            "allocation_assets": "DOGE",
+            "cycle_duration": "1h10",
+        },
+        headers={"Accept": "application/json"},
+    )
+
+    assert response.status_code == 400
+    payload = response.get_json()
+    assert payload["ok"] is False
+    assert payload["error_code"] == "invalid_backtest_input"
+    assert payload["error"] == "Unsupported Vault allocation asset selected: DOGE."
     assert BacktestRun.query.count() == 0
 
 
@@ -1019,7 +1360,8 @@ def test_backtests_page_skips_optimizer_scanner_and_ml_services(app, monkeypatch
 
 def test_backtests_form_fallback_persists_without_javascript(app) -> None:
     _patch_market_data(app)
-    _, admin_secret = _create_user(username="backtestform", role="admin")
+    admin, admin_secret = _create_user(username="backtestform", role="admin")
+    _seed_wallet_balance(admin, "USDC", 1_000.0)
     _seed_backtest_market()
     client = app.test_client()
     _login(client, "backtestform", admin_secret)
@@ -1031,6 +1373,7 @@ def test_backtests_form_fallback_persists_without_javascript(app) -> None:
             "symbol": "BTC",
             "timeframe": "5m",
             "allocation_amount_usd": "750",
+            "allocation_assets": "USDC",
             "cycle_duration": "4h",
             "leverage": "99",
             "fee_bps": "999",
@@ -1048,6 +1391,7 @@ def test_backtests_form_fallback_persists_without_javascript(app) -> None:
     run = BacktestRun.query.one()
     assert run.strategy_name == "portfolio_vault_cycle_auto"
     assert run.parameters["initial_balance"] == 750.0
+    assert run.parameters["allocation_assets"] == ["USDC"]
     assert run.parameters["parameters"]["vault_cycle_duration"] == "1h10"
     assert "leverage" not in run.parameters
 
@@ -1131,9 +1475,7 @@ def test_backtests_page_hides_optimizer_internals_even_when_rankings_exist(app) 
         rejected=True,
         rejection_reason="low_trade_count",
     )
-    ranking.warnings = [
-        "Aggressive 1H mode is experimental and can lose capital quickly. Past backtests do not guarantee future returns."
-    ]
+    ranking.warnings = ["Aggressive 1H mode is experimental and can lose capital quickly. Past backtests do not guarantee future returns."]
     db.session.add(ranking)
     db.session.commit()
 
@@ -1228,11 +1570,7 @@ def test_configured_deposit_addresses_are_used_and_rotated(app) -> None:
 def test_rotation_without_replacement_keeps_current_address_active(app) -> None:
     _patch_market_data(app)
     Setting.set_json("use_real_addresses", True)
-    app.config["DEPOSIT_ADDRESS_BOOK"] = {
-        "USDC": {
-            "Ethereum": ["0x3333333333333333333333333333333333333333"]
-        }
-    }
+    app.config["DEPOSIT_ADDRESS_BOOK"] = {"USDC": {"Ethereum": ["0x3333333333333333333333333333333333333333"]}}
     db.session.commit()
     user, secret = _create_user(username="onaddr")
     client = app.test_client()
@@ -1276,11 +1614,7 @@ def test_generated_rotation_duplicate_replacement_fails_closed_without_500(app) 
 def test_configured_deposit_lookup_is_case_insensitive(app) -> None:
     _patch_market_data(app)
     Setting.set_json("use_real_addresses", True)
-    app.config["DEPOSIT_ADDRESS_BOOK"] = {
-        "usdc": {
-            "ethereum": ["0x4444444444444444444444444444444444444444"]
-        }
-    }
+    app.config["DEPOSIT_ADDRESS_BOOK"] = {"usdc": {"ethereum": ["0x4444444444444444444444444444444444444444"]}}
     db.session.commit()
     user, secret = _create_user(username="caseaddr")
     client = app.test_client()
@@ -1314,9 +1648,7 @@ def test_generated_live_deposit_address_page_creates_linked_wallet_record(app) -
 def test_wallet_models_do_not_store_custody_secrets(app) -> None:
     forbidden = {"private_key", "mnemonic", "seed", "xpub", "derivation"}
     model_columns = {
-        name.lower()
-        for model in (DepositAddress, WalletBalance, WalletTransaction)
-        for name in model.__table__.columns.keys()
+        column.name.lower() for model in (DepositAddress, WalletBalance, WalletTransaction) for column in model.__table__.columns
     }
 
     assert not any(any(term in column for term in forbidden) for column in model_columns)
@@ -1324,11 +1656,7 @@ def test_wallet_models_do_not_store_custody_secrets(app) -> None:
 
 def test_admin_can_view_deposit_address_history_but_consumer_cannot(app) -> None:
     _patch_market_data(app)
-    app.config["DEPOSIT_ADDRESS_BOOK"] = {
-        "USDC": {
-            "Ethereum": ["0x5555555555555555555555555555555555555555"]
-        }
-    }
+    app.config["DEPOSIT_ADDRESS_BOOK"] = {"USDC": {"Ethereum": ["0x5555555555555555555555555555555555555555"]}}
     user, user_secret = _create_user(username="consumer")
     _, admin_secret = _create_user(username="addradmin", role="admin")
     client = app.test_client()
@@ -2118,7 +2446,9 @@ def test_no_order_cycle_failure_is_visible_in_vault_and_detail(app) -> None:
     db.session.add(cycle)
     db.session.flush()
     run.parameters = {"consumer_vault": True, "vault_cycle_id": cycle.id}
-    db.session.add(VaultAllocationLeg(vault_cycle_id=cycle.id, strategy_run_id=run.id, symbol="BTC", timeframe="1m", allocation_cap_usd=5.0))
+    db.session.add(
+        VaultAllocationLeg(vault_cycle_id=cycle.id, strategy_run_id=run.id, symbol="BTC", timeframe="1m", allocation_cap_usd=5.0)
+    )
     db.session.commit()
 
     vault = client.get("/vault")
@@ -2179,7 +2509,9 @@ def test_repair_limited_cycle_releases_no_order_failed_cycle(app) -> None:
     db.session.add(cycle)
     db.session.flush()
     run.parameters = {"consumer_vault": True, "vault_cycle_id": cycle.id}
-    db.session.add(VaultAllocationLeg(vault_cycle_id=cycle.id, strategy_run_id=run.id, symbol="BTC", timeframe="1m", allocation_cap_usd=5.0))
+    db.session.add(
+        VaultAllocationLeg(vault_cycle_id=cycle.id, strategy_run_id=run.id, symbol="BTC", timeframe="1m", allocation_cap_usd=5.0)
+    )
     db.session.commit()
 
     preview = app.test_cli_runner().invoke(args=["repair-limited-cycle", "--cycle-id", str(cycle.id)])
@@ -2214,7 +2546,15 @@ def test_repair_limited_cycle_releases_no_order_failed_cycle(app) -> None:
 def test_repair_limited_cycle_refuses_cycles_with_orders(app) -> None:
     user, _ = _create_user(username="orderedcycle")
     db.session.add(WalletBalance(user_id=user.id, asset="USDT", available_balance=5.0, locked_balance=5.0, estimated_usd_value=10.0))
-    run = StrategyRun(user_id=user.id, strategy_name="scalping", symbol="BTC", timeframe="1m", mode="live", status="error", last_error="Invalid request ip")
+    run = StrategyRun(
+        user_id=user.id,
+        strategy_name="scalping",
+        symbol="BTC",
+        timeframe="1m",
+        mode="live",
+        status="error",
+        last_error="Invalid request ip",
+    )
     db.session.add(run)
     db.session.flush()
     cycle = VaultCycle(

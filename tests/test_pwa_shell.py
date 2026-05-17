@@ -27,6 +27,8 @@ def test_manifest_contains_dark_standalone_pwa_contract(app) -> None:
     assert icons["512x512"]["src"] == "/icons/algvault-ios-512.png"
     assert icons["512x512"]["purpose"] == "any maskable"
     assert icons["180x180"]["src"] == "/icons/algvault-ios-180.png"
+    assert "/admin/panic/" not in {shortcut["url"] for shortcut in manifest["shortcuts"]}
+    assert "/convert/" in {shortcut["url"] for shortcut in manifest["shortcuts"]}
 
 
 def test_manifest_files_stay_in_sync() -> None:
@@ -48,18 +50,39 @@ def test_base_template_has_dark_ios_pwa_metadata(app) -> None:
     assert '<meta name="apple-mobile-web-app-capable" content="yes">' in html
     assert '<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">' in html
     assert '<link rel="apple-touch-icon" href="/icons/algvault-ios-180.png">' in html
-    assert 'data-theme-toggle' in html
-    assert 'av-color-theme' in html
+    assert "data-theme-toggle" not in html
+    assert "av-color-theme" in html
     assert 'data-component="AlgVaultLaunchAnimation"' in html
+    settings_template = Path("templates/settings.html").read_text(encoding="utf-8")
+    assert "data-theme-toggle" in settings_template
+
+
+def test_login_shell_shows_redacted_operations_snapshot(app) -> None:
+    response = app.test_client().get("/login?next=/wallet/")
+    html = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert "Continue to Wallet" in html
+    assert "Production Status" in html
+    assert "Database" in html
+    assert "Withdrawals" in html
+    assert "Treasury" in html
+    assert 'autocapitalize="none"' in html
+    assert 'maxlength="6"' in html
+    assert "WALLET_MPC_SIGNER_TOKEN" not in html
+    assert "TREASURY_ENCRYPTION_KEY" not in html
 
 
 def test_base_template_uses_command_center_bottom_nav() -> None:
     html = Path("templates/base.html").read_text(encoding="utf-8")
-    for label in ("Dashboard", "Vault", "Bots", "Markets", "Insights"):
+    for label in ("Dashboard", "Wallet", "Convert", "Vault", "Settings"):
         assert f'<span class="nav-item-label">{label}</span>' in html
-    assert 'data-bottom-nav-section="bots"' in html
-    assert 'data-bottom-nav-section="markets"' in html
-    assert 'data-bottom-nav-section="insights"' in html
+    assert "bottom_dashboard_href = url_for('dashboard.index') if admin_authenticated" in html
+    assert "request.endpoint.startswith('dashboard')" in html
+    assert 'data-bottom-nav-section="wallet"' in html
+    assert 'data-bottom-nav-section="convert"' in html
+    assert 'data-bottom-nav-section="activity"' not in html
+    assert 'data-bottom-nav-section="settings"' in html
 
 
 def test_dark_pwa_icon_and_crypto_symbol_sources_exist() -> None:
@@ -104,9 +127,11 @@ def test_command_center_dark_theme_layer_is_final() -> None:
     assert "--bg: #050607" in final_layer
     assert "--panel: rgba(12, 16, 22, 0.96)" in final_layer
     assert "--accent: #6ee7ff" in final_layer
-    assert "html[data-theme=\"light\"]" in final_layer
+    assert 'html[data-theme="light"]' in final_layer
     assert ".av-command-center" in final_layer
+    assert ".av-home-minimal" in source
     assert ".av-strategy-card" in final_layer
+    assert ".settings-theme-toggle" in source
 
 
 def test_pwa_static_headers_keep_sw_fresh_and_assets_cacheable(app) -> None:

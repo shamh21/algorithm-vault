@@ -1,0 +1,232 @@
+{% extends "base.html" %}
+
+{% block title %}Convert · Algorithm Vault{% endblock %}
+
+{% block content %}
+{% set submit_disabled = (not convert_state.can_convert) or (not quote) or errors %}
+<section class="convert-page-shell convert-page-shell-simple" aria-labelledby="convert-title">
+  <article class="convert-widget convert-card-simple" data-convert-widget>
+    <header class="convert-widget-head">
+      <div>
+        <span class="card-kicker">Convert</span>
+        <h1 id="convert-title">Convert Assets</h1>
+        <p class="convert-widget-subtitle">Move available wallet balances between supported assets. Final checks run server-side.</p>
+      </div>
+    </header>
+
+    <div class="convert-offline-banner" data-convert-offline role="status" aria-live="polite" tabindex="-1" hidden>
+      <span class="convert-state-icon" aria-hidden="true"></span>
+      <span>
+        <strong>Network unavailable</strong>
+        <small>Reconnect before submitting a conversion.</small>
+      </span>
+    </div>
+
+    {% if errors and errors.get("form") %}
+      <div class="convert-state-panel is-error" role="alert">
+        <span class="convert-state-icon" aria-hidden="true"></span>
+        <span>
+          <strong>Conversion blocked</strong>
+          <small>{{ errors.get("form") }}</small>
+        </span>
+      </div>
+    {% endif %}
+
+    <form
+      method="post"
+      action="{{ url_for('consumer.convert') }}"
+      class="convert-form"
+      data-disable-on-submit
+      data-convert-form
+      data-can-convert="{{ 'true' if convert_state.can_convert else 'false' }}"
+      aria-describedby="convert-form-note"
+    >
+      {{ csrf_input()|safe }}
+
+      <fieldset class="convert-fieldset">
+        <legend class="sr-only">Conversion pair</legend>
+        <div class="convert-pair-stack">
+          <label class="convert-asset-field" for="convert-from-asset">
+            <span class="convert-field-label">From</span>
+            <select
+              id="convert-from-asset"
+              name="from_asset"
+              required
+              aria-describedby="convert-from-help convert-from-error"
+              aria-invalid="{{ 'true' if errors and errors.get('from_asset') else 'false' }}"
+            >
+              {% for asset in assets %}
+                <option
+                  value="{{ asset.asset }}"
+                  data-available="{{ '%.8f'|format(asset.available_balance) }}"
+                  data-price="{{ '%.8f'|format(asset.price_usd) }}"
+                  data-price-available="{{ 'true' if asset.price_available else 'false' }}"
+                  {% if asset.asset == form_values.from_asset %}selected{% endif %}
+                >
+                  {{ asset.asset }}
+                </option>
+              {% endfor %}
+            </select>
+            <span id="convert-from-help" class="convert-field-meta" data-convert-from-meta>
+              Available {{ "%.8f"|format(convert_state.from_available) }} {{ form_values.from_asset }}
+            </span>
+            <span
+              id="convert-from-error"
+              class="field-error convert-field-feedback"
+              data-convert-error="from_asset"
+              {% if not (errors and errors.get("from_asset")) %}aria-hidden="true"{% endif %}
+            >{{ errors.get("from_asset") if errors else "" }}</span>
+          </label>
+
+          <button
+            class="convert-swap-button"
+            type="button"
+            data-convert-swap
+            aria-label="Swap source and destination assets"
+          >
+            <svg aria-hidden="true" viewBox="0 0 24 24">
+              <path d="M7 7h11"></path>
+              <path d="m15 4 3 3-3 3"></path>
+              <path d="M17 17H6"></path>
+              <path d="m9 14-3 3 3 3"></path>
+            </svg>
+          </button>
+
+          <label class="convert-asset-field" for="convert-to-asset">
+            <span class="convert-field-label">To</span>
+            <select
+              id="convert-to-asset"
+              name="to_asset"
+              required
+              aria-describedby="convert-to-help convert-to-error"
+              aria-invalid="{{ 'true' if errors and errors.get('to_asset') else 'false' }}"
+            >
+              {% for asset in assets %}
+                <option
+                  value="{{ asset.asset }}"
+                  data-price="{{ '%.8f'|format(asset.price_usd) }}"
+                  data-price-available="{{ 'true' if asset.price_available else 'false' }}"
+                  {% if asset.asset == form_values.to_asset %}selected{% endif %}
+                >
+                  {{ asset.asset }}
+                </option>
+              {% endfor %}
+            </select>
+            <span id="convert-to-help" class="convert-field-meta" data-convert-to-meta>
+              Reference price ${{ "%.4f"|format(convert_state.to_price) }}
+            </span>
+            <span
+              id="convert-to-error"
+              class="field-error convert-field-feedback"
+              data-convert-error="to_asset"
+              {% if not (errors and errors.get("to_asset")) %}aria-hidden="true"{% endif %}
+            >{{ errors.get("to_asset") if errors else "" }}</span>
+          </label>
+        </div>
+      </fieldset>
+
+      <label class="convert-amount-field" for="convert-amount">
+        <span class="convert-field-label">Amount</span>
+        <span class="convert-amount-control">
+          <input
+            id="convert-amount"
+            type="number"
+            name="amount"
+            min="0"
+            step="0.00000001"
+            inputmode="decimal"
+            autocomplete="off"
+            value="{{ form_values.amount }}"
+            placeholder="0.00"
+            required
+            aria-describedby="convert-amount-help convert-amount-error"
+            aria-invalid="{{ 'true' if errors and errors.get('amount') else 'false' }}"
+          >
+          <button type="button" class="convert-max-button" data-convert-max aria-label="Use maximum available source asset amount">Max</button>
+        </span>
+        <span id="convert-amount-help" class="convert-field-meta" data-convert-amount-meta>Source price ${{ "%.4f"|format(convert_state.from_price) }}</span>
+        <span
+          id="convert-amount-error"
+          class="field-error convert-field-feedback"
+          data-convert-error="amount"
+          {% if not (errors and errors.get("amount")) %}aria-hidden="true"{% endif %}
+        >{{ errors.get("amount") if errors else "" }}</span>
+      </label>
+
+      <section
+        class="convert-preview-panel"
+        data-convert-preview
+        aria-live="polite"
+        aria-atomic="true"
+        aria-busy="false"
+      >
+        {% if not convert_state.can_convert %}
+          <div class="convert-state-panel is-empty" data-convert-preview-state>
+            <span class="convert-state-icon" aria-hidden="true"></span>
+            <span>
+              <strong data-convert-preview-title>No convertible balance</strong>
+              <small data-convert-preview-detail>Deposit or free an available wallet balance before converting.</small>
+            </span>
+          </div>
+          <dl class="convert-quote-details" data-convert-preview-details hidden>
+            <div><dt>Value</dt><dd data-convert-preview-value>$0.00</dd></div>
+            <div><dt>Rate</dt><dd data-convert-preview-rate>--</dd></div>
+            <div><dt>Fee</dt><dd>$0.00</dd></div>
+          </dl>
+        {% elif errors %}
+          <div class="convert-state-panel is-error" data-convert-preview-state>
+            <span class="convert-state-icon" aria-hidden="true"></span>
+            <span>
+              <strong data-convert-preview-title>Review required</strong>
+              <small data-convert-preview-detail>Fix the highlighted fields before submitting.</small>
+            </span>
+          </div>
+          <dl class="convert-quote-details" data-convert-preview-details hidden>
+            <div><dt>Value</dt><dd data-convert-preview-value>$0.00</dd></div>
+            <div><dt>Rate</dt><dd data-convert-preview-rate>--</dd></div>
+            <div><dt>Fee</dt><dd>$0.00</dd></div>
+          </dl>
+        {% elif quote %}
+          <div class="convert-quote-summary" data-convert-preview-state>
+            <span data-convert-preview-title>You receive</span>
+            <strong data-convert-preview-detail>{{ "%.8f"|format(quote.to_amount) }} {{ quote.to_asset }}</strong>
+          </div>
+          <dl class="convert-quote-details" data-convert-preview-details>
+            <div><dt>Value</dt><dd data-convert-preview-value>${{ "%.2f"|format(quote.usd_value) }}</dd></div>
+            <div><dt>Rate</dt><dd data-convert-preview-rate>1 {{ quote.from_asset }} = {{ "%.8f"|format(quote.rate) }} {{ quote.to_asset }}</dd></div>
+            <div><dt>Fee</dt><dd>$0.00</dd></div>
+          </dl>
+        {% else %}
+          <div class="convert-state-panel is-default" data-convert-preview-state>
+            <span class="convert-state-icon" aria-hidden="true"></span>
+            <span>
+              <strong data-convert-preview-title>Enter an amount</strong>
+              <small data-convert-preview-detail>Choose assets and enter an amount to preview the conversion.</small>
+            </span>
+          </div>
+          <dl class="convert-quote-details" data-convert-preview-details hidden>
+            <div><dt>Value</dt><dd data-convert-preview-value>$0.00</dd></div>
+            <div><dt>Rate</dt><dd data-convert-preview-rate>--</dd></div>
+            <div><dt>Fee</dt><dd>$0.00</dd></div>
+          </dl>
+        {% endif %}
+      </section>
+
+      <button
+        type="submit"
+        class="convert-submit-button primary"
+        data-convert-submit
+        data-loading-label="Converting..."
+        {% if submit_disabled %}disabled aria-disabled="true"{% endif %}
+      >
+        Convert
+      </button>
+      <p id="convert-form-note" class="convert-form-note">Preview pricing is informational. The submitted conversion is validated against current wallet balances and reference prices.</p>
+    </form>
+  </article>
+</section>
+{% endblock %}
+
+{% block page_scripts %}
+<script defer src="{{ url_for('static', filename='js/convert.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}-convert-simplify-2"></script>
+{% endblock %}

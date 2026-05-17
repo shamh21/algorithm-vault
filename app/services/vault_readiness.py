@@ -18,11 +18,14 @@ from flask import current_app, has_app_context
 from ..extensions import db
 from ..ml.online_ranker import ONE_H10_HORIZON
 from ..models import LeveragedMarket, RiskEvent, Setting, TradingConnection, User, WalletBalance
+from .one_h10_quality import ONE_H10_HORIZON_SECONDS
 from .provider_assets import normalize_provider, provider_collateral_asset
+from .vault_allocation_assets import BASE_VAULT_ALLOCATION_ASSETS, asset_usd_price
+from .worker_lease import in_process_workers_enabled
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_SETTLEMENT_ASSETS = {"BTC", "ETH", "SOL", "USDC", "USDT", "XRP"}
+SUPPORTED_SETTLEMENT_ASSETS = set(BASE_VAULT_ALLOCATION_ASSETS)
 VAULT_READINESS_EXCHANGES = ("hyperliquid", "kucoin")
 EXCHANGE_LABELS = {
     "hyperliquid": "Hyperliquid",
@@ -257,9 +260,7 @@ class VaultReadinessService:
             )
 
         ready_exchanges = [
-            exchange
-            for exchange, status in exchange_status.items()
-            if bool(status.get("enabled")) and bool(status.get("ready"))
+            exchange for exchange, status in exchange_status.items() if bool(status.get("enabled")) and bool(status.get("ready"))
         ]
         if not ready_exchanges:
             active_blockers.append(
@@ -281,21 +282,23 @@ class VaultReadinessService:
         ready_exchange_count = len(ready_exchanges)
         total_exchange_count = len(requested_exchanges)
         exchange_blockers = [
-            blocker
-            for status in exchange_status.values()
-            for blocker in list(status.get("blockers") or [])
-            if bool(status.get("enabled"))
+            blocker for status in exchange_status.values() for blocker in list(status.get("blockers") or []) if bool(status.get("enabled"))
         ]
         all_blockers = list(active_blockers) + exchange_blockers
         ready = not active_blockers and ready_exchange_count > 0 and notional_amount > 0
+        hard_blockers = self._hard_blockers(all_blockers)
+        advisory_blockers = self._advisory_blockers(warnings, ml_readiness)
+        clearable_blockers = self._clearable_blockers(all_blockers, advisory_blockers)
         mode = "live_ready" if ready else self._mode_for(active_blockers, ready_exchange_count)
         routing_summary = self._routing_summary(routes, exchange_status, notional_amount, ready_exchange_count)
         payload = {
             "ready": ready,
             "ok": ready,
+            "can_start": ready,
             "mode": mode,
             "state_label": self._state_label(active_blockers, exchange_blockers, ready),
             "cycle": "1H10",
+            "objective": self._objective_payload(),
             "settlement_asset": settlement,
             "deposit_asset": funding_asset,
             "amount": notional_amount,
@@ -306,6 +309,9 @@ class VaultReadinessService:
             "active_blockers": active_blockers,
             "exchange_blockers": exchange_blockers,
             "all_blockers": all_blockers,
+            "hard_blockers": hard_blockers,
+            "advisory_blockers": advisory_blockers,
+            "clearable_blockers": clearable_blockers,
             "warnings": warnings,
             "exchange_status": exchange_status,
             "routing_preview": {
@@ -318,6 +324,50 @@ class VaultReadinessService:
         }
         self._log_exchange_decisions(exchange_status)
         return payload
+
+    def _objective_payload(self) -> dict[str, Any]:
+        target_roi_pct = max(0.0, self._safe_float(self.config.get("ONE_H10_TARGET_ROI_PCT"), 1000.0))
+        horizon_seconds = max(60, int(self._safe_float(self.config.get("ONE_H10_HORIZON_SECONDS"), ONE_H10_HORIZON_SECONDS)))
+        return {
+            "profile": "1H10",
+            "name": "1 hour / 10x target",
+            "target_multiplier": max(1.0, target_roi_pct / 100.0),
+            "target_roi_pct": target_roi_pct,
+            "horizon_seconds": horizon_seconds,
+            "horizon_label": "1 hour",
+            "copy": "Optimizes routing toward a 1-hour / 10x target objective without guaranteeing returns.",
+        }
+
+    def _hard_blockers(self, blockers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        hard_severities = {"critical", "blocker"}
+        return [dict(item) for item in blockers if str(item.get("severity") or "").lower() in hard_severities]
+
+    def _advisory_blockers(self, warnings: list[dict[str, Any]], ml_readiness: dict[str, Any]) -> list[dict[str, Any]]:
+        advisory = [dict(item) for item in warnings if isinstance(item, dict)]
+        for blocker in ml_readiness.get("advisory_blockers", []) or []:
+            advisory.append(
+                self._blocker(
+                    "ml_readiness_advisory",
+                    "ML promotion advisory",
+                    str(blocker),
+                    "warning",
+                    "Bootstrap 1H10 mode can continue, but promoted ML should be repaired before increasing allocation.",
+                )
+            )
+        return advisory
+
+    def _clearable_blockers(
+        self,
+        blockers: list[dict[str, Any]],
+        advisory_blockers: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        clearable = [
+            dict(item)
+            for item in blockers
+            if str(item.get("severity") or "").lower() != "critical" and str(item.get("fix_hint") or "").strip()
+        ]
+        clearable.extend(dict(item) for item in advisory_blockers if str(item.get("fix_hint") or "").strip())
+        return clearable
 
     def _exchange_status(
         self,
@@ -431,7 +481,9 @@ class VaultReadinessService:
                         )
 
         if exchange == "hyperliquid":
-            market_warnings, market_blockers = self._hyperliquid_specific_blockers(connection, settlement_asset, markets, require_market_metadata)
+            market_warnings, market_blockers = self._hyperliquid_specific_blockers(
+                connection, settlement_asset, markets, require_market_metadata
+            )
             warnings.extend(market_warnings)
             blockers.extend(market_blockers)
         elif exchange == "kucoin":
@@ -472,7 +524,11 @@ class VaultReadinessService:
             "status": status,
             "readiness_state": status,
             "funding_status": "auto_funded" if auto_funded else "available" if available_margin > 0 else "unavailable",
-            "funding_label": "Auto-funded during vault cycle" if auto_funded else f"{collateral_asset} collateral available" if available_margin > 0 else f"{collateral_asset} collateral unavailable",
+            "funding_label": "Auto-funded during vault cycle"
+            if auto_funded
+            else f"{collateral_asset} collateral available"
+            if available_margin > 0
+            else f"{collateral_asset} collateral unavailable",
             "funding_detail": "Collateral is transferred at cycle start and withdrawn after cycle completion." if auto_funded else "",
             "label": label,
             "blockers": blockers,
@@ -523,9 +579,16 @@ class VaultReadinessService:
         if not combined:
             return None
         lowered = combined.lower()
-        if "400302" not in combined and not any(phrase in lowered for phrase in ("unavailable in your current area", "unavailable in the detected region", "restricted region", "current area")):
+        if "400302" not in combined and not any(
+            phrase in lowered
+            for phrase in ("unavailable in your current area", "unavailable in the detected region", "restricted region", "current area")
+        ):
             return None
-        detected = self._detected_area_from_text(combined) or "US" if " us" in f" {lowered}" or "united states" in lowered else self._detected_area_from_text(combined) or "restricted region"
+        detected = (
+            self._detected_area_from_text(combined) or "US"
+            if " us" in f" {lowered}" or "united states" in lowered
+            else self._detected_area_from_text(combined) or "restricted region"
+        )
         diagnostics = {
             "providerCode": "400302" if "400302" in combined else "",
             "detectedArea": str(detected).upper() if len(str(detected)) <= 3 else str(detected),
@@ -570,7 +633,11 @@ class VaultReadinessService:
     @staticmethod
     def _detected_area_from_text(message: str) -> str:
         text = str(message or "")
-        for pattern in (r'"(?:detectedArea|detected_area|area|country|region)"\s*:\s*"?([A-Za-z]{2,32})', r"detected region[:= ]+([A-Za-z]{2,32})", r"current area[:= ]+([A-Za-z]{2,32})"):
+        for pattern in (
+            r'"(?:detectedArea|detected_area|area|country|region)"\s*:\s*"?([A-Za-z]{2,32})',
+            r"detected region[:= ]+([A-Za-z]{2,32})",
+            r"current area[:= ]+([A-Za-z]{2,32})",
+        ):
             match = re.search(pattern, text, flags=re.IGNORECASE)
             if match:
                 return match.group(1)
@@ -787,6 +854,16 @@ class VaultReadinessService:
         return [payload], []
 
     def _append_live_gate_blockers(self, blockers: list[dict[str, Any]]) -> None:
+        if bool(self.config.get("RECOVERY_SQLITE_ACTIVE", False)):
+            blockers.append(
+                self._blocker(
+                    "recovery_database_mode",
+                    "Recovery database mode",
+                    "Live 1H10 execution is disabled while the app is running on recovery SQLite.",
+                    "critical",
+                    "Attach healthy production Postgres and set ALGVAULT_RECOVERY_SQLITE_ENABLED=false before live allocation.",
+                )
+            )
         if not bool(self.config.get("ENABLE_LIVE_TRADING", False)):
             blockers.append(
                 self._blocker(
@@ -795,6 +872,16 @@ class VaultReadinessService:
                     "Live trading is disabled by configuration.",
                     "critical",
                     "Set ENABLE_LIVE_TRADING=true only after the full live checklist passes.",
+                )
+            )
+        elif not self._live_execution_runtime_available():
+            blockers.append(
+                self._blocker(
+                    "live_execution_runtime_missing",
+                    "Live execution runtime missing",
+                    "Live 1H10 execution requires a worker runtime or a configured live execution process.",
+                    "critical",
+                    "Configure a dedicated worker/cron execution path before live allocation.",
                 )
             )
         if Setting.get_json("panic_lock", False):
@@ -911,10 +998,7 @@ class VaultReadinessService:
                 status["notional_usd"] = 0.0
                 status["target_amount"] = 0.0
             return []
-        weights = {
-            exchange: max(float(exchange_status[exchange].get("available_margin_usd") or 0.0), 0.0)
-            for exchange in ready_exchanges
-        }
+        weights = {exchange: max(float(exchange_status[exchange].get("available_margin_usd") or 0.0), 0.0) for exchange in ready_exchanges}
         if not any(value > 0 for value in weights.values()):
             weights = {exchange: max(float(exchange_status[exchange].get("score") or 0.0), 1.0) for exchange in ready_exchanges}
         total_weight = sum(weights.values()) or float(len(ready_exchanges))
@@ -1003,8 +1087,7 @@ class VaultReadinessService:
             if engine is None:
                 raise RuntimeError("ML decision engine is unavailable")
             families = {
-                family: dict(engine.family_readiness(family, ONE_H10_HORIZON, provider=provider))
-                for family in REQUIRED_ML_FAMILIES
+                family: dict(engine.family_readiness(family, ONE_H10_HORIZON, provider=provider)) for family in REQUIRED_ML_FAMILIES
             }
             blockers: list[str] = []
             for family, payload in families.items():
@@ -1049,6 +1132,9 @@ class VaultReadinessService:
         if enforce_ml_gate is not None:
             return bool(enforce_ml_gate)
         return bool(self.config.get("ONE_H10_REQUIRE_PROMOTED_ML", True)) and bool(self.config.get("ML_ALL_AREAS_ENABLED", False))
+
+    def _live_execution_runtime_available(self) -> bool:
+        return bool(self.config.get("WORKER_PROCESS_CONFIGURED", False)) or in_process_workers_enabled(self.config)
 
     def _active_markets(self, exchange: str, connection_id: int | None) -> list[LeveragedMarket]:
         query = LeveragedMarket.query.filter_by(provider=normalize_provider(exchange), status="active")
@@ -1103,21 +1189,10 @@ class VaultReadinessService:
 
     def _asset_usd_price(self, asset: str) -> tuple[float, dict[str, Any] | None]:
         asset_key = str(asset or "").upper()
-        if asset_key in {"USDC", "USDT"}:
-            return 1.0, None
-        try:
-            market_data = current_app.extensions.get("services", {}).get("market_data")
-            if market_data is None:
-                raise RuntimeError("market data service unavailable")
-            price = float(market_data.get_mid_price(asset_key, "live") or 0.0)
-        except Exception:  # noqa: BLE001
-            return 0.0, self._blocker(
-                "price_unavailable",
-                "Price unavailable",
-                f"USD price data is unavailable for {asset_key}.",
-                "warning",
-                "Use USDC/USDT or retry when market data is available.",
-            )
+        market_data = current_app.extensions.get("services", {}).get("market_data")
+        price = asset_usd_price(
+            asset_key, lambda key: float(market_data.get_mid_price(key, "live") or 0.0) if market_data is not None else 0.0
+        )
         if price <= 0:
             return 0.0, self._blocker(
                 "price_unavailable",
@@ -1155,9 +1230,7 @@ class VaultReadinessService:
         if enabled_exchanges is None:
             return list(VAULT_READINESS_EXCHANGES)
         exchanges = [
-            normalize_provider(exchange)
-            for exchange in enabled_exchanges
-            if normalize_provider(exchange) in VAULT_READINESS_EXCHANGES
+            normalize_provider(exchange) for exchange in enabled_exchanges if normalize_provider(exchange) in VAULT_READINESS_EXCHANGES
         ]
         return list(dict.fromkeys(exchanges))
 

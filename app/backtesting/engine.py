@@ -21,11 +21,11 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from enum import Enum
-from math import inf, sqrt
+from datetime import UTC, datetime, timedelta
+from enum import StrEnum
+from math import inf, isfinite, sqrt
 from statistics import mean
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from ..features.engine import FeatureEngine
 from ..ml.features import ML_FEATURE_SCHEMA_VERSION, MLFeatureFactory
@@ -35,7 +35,7 @@ from ..strategies.base import Signal
 from ..strategies.registry import StrategyRegistry
 
 
-class SizingMode(str, Enum):
+class SizingMode(StrEnum):
     """Enumeration of supported position sizing modes.
 
     - ``FIXED_FRACTION``: Position size is a fixed fraction of current equity.
@@ -49,7 +49,7 @@ class SizingMode(str, Enum):
     RISK_BASED = "risk_based"
 
     @classmethod
-    def from_str(cls, value: str) -> "SizingMode":
+    def from_str(cls, value: str) -> SizingMode:
         """Parse a sizing mode string into its corresponding enumeration.
 
         Args:
@@ -68,7 +68,7 @@ class SizingMode(str, Enum):
             return cls.FIXED_FRACTION
 
 
-class IntrabarModel(str, Enum):
+class IntrabarModel(StrEnum):
     """Enumeration of intrabar exit models.
 
     These models dictate how the engine resolves simultaneous stop loss and
@@ -87,7 +87,7 @@ class IntrabarModel(str, Enum):
     OPEN_LOW_HIGH_CLOSE = "open_low_high_close"
 
     @classmethod
-    def from_str(cls, value: str) -> "IntrabarModel":
+    def from_str(cls, value: str) -> IntrabarModel:
         """Parse an intrabar model string into its corresponding enumeration.
 
         Args:
@@ -124,7 +124,7 @@ class BacktestConfig:
     stop_loss_pct: float
     take_profit_pct: float
     position_size_fraction: float
-    parameters: Dict[str, Any]
+    parameters: dict[str, Any]
     sizing_mode: str = "fixed_fraction"
     fixed_dollar_size: float = 0.0
     risk_per_trade_pct: float = 0.01
@@ -135,7 +135,7 @@ class BacktestConfig:
     max_trades_per_window: int = 0
     trade_window_minutes: int = 60
     intrabar_model: str = "conservative"
-    evaluation_start_timestamp: Optional[int] = None
+    evaluation_start_timestamp: int | None = None
     runtime_deadline_monotonic: float = 0.0
     signal_history_limit: int = 0
     allocation_amount_usd: float = 0.0
@@ -164,10 +164,12 @@ class _Position:
     entry_price: float = 0.0
     entry_timestamp: int = 0
     entry_equity: float = 0.0
+    entry_fee: float = 0.0
+    entry_notional: float = 0.0
     stop_loss: float | None = None
     take_profit: float | None = None
-    entry_features: Optional[Dict[str, Any]] = None
-    entry_signal_metadata: Optional[Dict[str, Any]] = None
+    entry_features: dict[str, Any] | None = None
+    entry_signal_metadata: dict[str, Any] | None = None
 
 
 class BacktestEngine:
@@ -188,7 +190,7 @@ class BacktestEngine:
 
     def __init__(
         self,
-        config: Dict[str, Any],
+        config: dict[str, Any],
         registry: StrategyRegistry,
         market_data: MarketDataService,
         *,
@@ -214,7 +216,7 @@ class BacktestEngine:
     # -------------------------------------------------------------------
     # Public API
     #
-    def run(self, backtest: BacktestConfig, candles: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    def run(self, backtest: BacktestConfig, candles: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         """Execute a backtest for a given strategy and configuration.
 
         This method will fetch candle data if not provided, iterate over each
@@ -232,6 +234,7 @@ class BacktestEngine:
             A dictionary containing summary metrics, equity curves, trade
             details and risk events.  See ``_result`` for the full schema.
         """
+        self._validate_config(backtest)
         # Acquire candle data if not provided by the caller.  Honour a dashboard
         # candle limit if configured; default to a modest number to avoid
         # overwhelming the UI or memory usage.
@@ -241,6 +244,7 @@ class BacktestEngine:
             mode=backtest.mode,
             limit=int(self.config.get("DASHBOARD_CANDLE_LIMIT", 250)),
         )
+        candles = self._prepare_candles(candles)
         # Need at least 30 candles for meaningful results; otherwise return an
         # empty result structure.
         if not candles or len(candles) < 30:
@@ -258,17 +262,17 @@ class BacktestEngine:
 
         # Track the current open position, trades, equity and drawdown curves.
         position = _Position()
-        trades: List[Dict[str, Any]] = []
-        equity_curve: List[Dict[str, Any]] = []
-        drawdown_curve: List[Dict[str, Any]] = []
-        returns: List[float] = []
-        risk_events: List[Dict[str, Any]] = []
-        daily_realized: Dict[str, float] = {}
-        entry_timestamps: List[int] = []
+        trades: list[dict[str, Any]] = []
+        equity_curve: list[dict[str, Any]] = []
+        drawdown_curve: list[dict[str, Any]] = []
+        returns: list[float] = []
+        risk_events: list[dict[str, Any]] = []
+        daily_realized: dict[str, float] = {}
+        entry_timestamps: list[int] = []
 
         # Risk management state variables.
         loss_streak: int = 0
-        cooldown_until: Optional[datetime] = None
+        cooldown_until: datetime | None = None
         total_fees: float = 0.0
         total_funding_cost: float = 0.0
         total_traded_notional: float = 0.0
@@ -301,16 +305,15 @@ class BacktestEngine:
         # Main simulation loop: start after 25th candle to allow indicator
         # values to populate for typical technical indicators.
         for index in range(25, len(candles)):
-            if runtime_deadline > 0 and index % 25 == 0:
-                if time.monotonic() >= runtime_deadline:
-                    risk_events.append(
-                        {
-                            "timestamp": int(candles[index].get("timestamp", 0)),
-                            "rule": "optimizer_deadline_reached",
-                            "message": "Backtest stopped early because the optimizer deadline was reached.",
-                        }
-                    )
-                    break
+            if runtime_deadline > 0 and index % 25 == 0 and time.monotonic() >= runtime_deadline:
+                risk_events.append(
+                    {
+                        "timestamp": int(candles[index].get("timestamp", 0)),
+                        "rule": "optimizer_deadline_reached",
+                        "message": "Backtest stopped early because the optimizer deadline was reached.",
+                    }
+                )
+                break
             candle = candles[index]
             price: float = float(candle.get("close", 0.0))
             timestamp: int = int(candle.get("timestamp", 0))
@@ -345,11 +348,13 @@ class BacktestEngine:
                         slippage_rate,
                     )
                     funding_fee = self._funding_cost(position, timestamp, backtest)
-                    net_pnl = pnl - exit_fee - funding_fee
-                    cash += net_pnl
-                    total_fees += exit_fee
+                    settlement = self._settle_close(position, cash, pnl, exit_fee, funding_fee)
+                    cash += settlement["cash_delta"]
+                    total_fees += settlement["exit_fee"]
                     total_funding_cost += funding_fee
                     total_traded_notional += abs(position.quantity * adjusted_exit)
+                    if settlement["balance_floor_applied"]:
+                        risk_events.append(self._balance_floor_event(timestamp, settlement))
                     if evaluation_started:
                         duration_minutes = self._duration_minutes(position.entry_timestamp, timestamp)
                         trades.append(
@@ -357,11 +362,16 @@ class BacktestEngine:
                                 "direction": "long" if position.quantity > 0 else "short",
                                 "entry_price": position.entry_price,
                                 "exit_price": adjusted_exit,
-                                "pnl": net_pnl,
+                                "pnl": settlement["pnl"],
+                                "uncapped_pnl": settlement["uncapped_pnl"],
                                 "gross_pnl": pnl,
-                                "fee": exit_fee,
-                                "funding_fee": funding_fee,
-                                "return": net_pnl / max(position.entry_equity, 1e-9),
+                                "fee": settlement["fee"],
+                                "entry_fee": settlement["entry_fee"],
+                                "exit_fee": settlement["exit_fee"],
+                                "funding_fee": settlement["funding_fee"],
+                                "balance_floor_applied": settlement["balance_floor_applied"],
+                                "cash_floor_adjustment": settlement["cash_floor_adjustment"],
+                                "return": settlement["pnl"] / max(position.entry_equity, 1e-9),
                                 "reason": "max_drawdown_kill_switch",
                                 "entry_timestamp": position.entry_timestamp,
                                 "timestamp": timestamp,
@@ -397,7 +407,7 @@ class BacktestEngine:
             feature_payload = self._feature_payload(backtest.symbol, backtest.timeframe, signal_history, signal)
             signal = self._ml_first_signal(backtest, signal, signal_history, feature_payload)
             feature_payload = self._feature_payload(backtest.symbol, backtest.timeframe, signal_history, signal)
-            signal_metadata: Dict[str, Any] = getattr(signal, "metadata", {}) or {}
+            signal_metadata: dict[str, Any] = getattr(signal, "metadata", {}) or {}
 
             # Handle exiting an open position before considering new entries.
             if position.quantity != 0:
@@ -415,8 +425,7 @@ class BacktestEngine:
                 if exit_price is None and signal.action == "reduce":
                     exit_price, exit_reason = price, "signal_reduce"
                 elif exit_price is None and (
-                    (position.quantity > 0 and signal.action == "sell")
-                    or (position.quantity < 0 and signal.action == "buy")
+                    (position.quantity > 0 and signal.action == "sell") or (position.quantity < 0 and signal.action == "buy")
                 ):
                     exit_price, exit_reason = price, "signal_flip"
 
@@ -430,25 +439,32 @@ class BacktestEngine:
                         slippage_rate,
                     )
                     funding_fee = self._funding_cost(position, timestamp, backtest)
-                    net_pnl = pnl - exit_fee - funding_fee
-                    cash += net_pnl
-                    total_fees += exit_fee
+                    settlement = self._settle_close(position, cash, pnl, exit_fee, funding_fee)
+                    cash += settlement["cash_delta"]
+                    total_fees += settlement["exit_fee"]
                     total_funding_cost += funding_fee
                     total_traded_notional += abs(position.quantity * adjusted_exit)
+                    if settlement["balance_floor_applied"]:
+                        risk_events.append(self._balance_floor_event(timestamp, settlement))
                     day = candle_time.date().isoformat()
-                    daily_realized[day] = daily_realized.get(day, 0.0) + net_pnl
+                    daily_realized[day] = daily_realized.get(day, 0.0) + settlement["pnl"]
                     duration_minutes = self._duration_minutes(position.entry_timestamp, timestamp)
-                    trade_return = net_pnl / max(position.entry_equity, 1e-9)
+                    trade_return = settlement["pnl"] / max(position.entry_equity, 1e-9)
                     if evaluation_started:
                         trades.append(
                             {
                                 "direction": "long" if position.quantity > 0 else "short",
                                 "entry_price": position.entry_price,
                                 "exit_price": adjusted_exit,
-                                "pnl": net_pnl,
+                                "pnl": settlement["pnl"],
+                                "uncapped_pnl": settlement["uncapped_pnl"],
                                 "gross_pnl": pnl,
-                                "fee": exit_fee,
-                                "funding_fee": funding_fee,
+                                "fee": settlement["fee"],
+                                "entry_fee": settlement["entry_fee"],
+                                "exit_fee": settlement["exit_fee"],
+                                "funding_fee": settlement["funding_fee"],
+                                "balance_floor_applied": settlement["balance_floor_applied"],
+                                "cash_floor_adjustment": settlement["cash_floor_adjustment"],
                                 "return": trade_return,
                                 "reason": exit_reason,
                                 "entry_timestamp": position.entry_timestamp,
@@ -469,12 +485,8 @@ class BacktestEngine:
                             }
                         )
                     # Update loss streak and handle loss streak cooldown logic.
-                    loss_streak = loss_streak + 1 if net_pnl < 0 else 0
-                    if (
-                        loss_streak_cooldown > 0
-                        and loss_streak >= loss_streak_cooldown
-                        and cooldown_minutes > 0
-                    ):
+                    loss_streak = loss_streak + 1 if settlement["pnl"] < 0 else 0
+                    if loss_streak_cooldown > 0 and loss_streak >= loss_streak_cooldown and cooldown_minutes > 0:
                         cooldown_until = candle_time + timedelta(minutes=cooldown_minutes)
                         risk_events.append(
                             {
@@ -529,6 +541,17 @@ class BacktestEngine:
                         pass
                     else:
                         entry_fee: float = abs(qty * entry_price) * fee_rate
+                        if cash - entry_fee < -1e-9:
+                            risk_events.append(
+                                {
+                                    "timestamp": timestamp,
+                                    "rule": "entry_fee_exceeds_cash",
+                                    "message": "Entry blocked because fees would make simulated cash negative.",
+                                    "entry_fee": entry_fee,
+                                    "cash": cash,
+                                }
+                            )
+                            continue
                         cash -= entry_fee
                         total_fees += entry_fee
                         total_traded_notional += abs(qty * entry_price)
@@ -542,6 +565,8 @@ class BacktestEngine:
                             entry_price=entry_price,
                             entry_timestamp=timestamp,
                             entry_equity=max(equity, 1e-9),
+                            entry_fee=entry_fee,
+                            entry_notional=abs(qty * entry_price),
                             stop_loss=signal.stop_loss,
                             take_profit=signal.take_profit,
                             entry_features=feature_payload,
@@ -600,11 +625,13 @@ class BacktestEngine:
                 slippage_rate,
             )
             funding_fee = self._funding_cost(position, final_timestamp, backtest)
-            net_pnl = pnl - exit_fee - funding_fee
-            cash += net_pnl
-            total_fees += exit_fee
+            settlement = self._settle_close(position, cash, pnl, exit_fee, funding_fee)
+            cash += settlement["cash_delta"]
+            total_fees += settlement["exit_fee"]
             total_funding_cost += funding_fee
             total_traded_notional += abs(position.quantity * adjusted_exit)
+            if settlement["balance_floor_applied"]:
+                risk_events.append(self._balance_floor_event(final_timestamp, settlement))
             if evaluation_started:
                 duration_minutes = self._duration_minutes(position.entry_timestamp, final_timestamp)
                 trades.append(
@@ -612,11 +639,16 @@ class BacktestEngine:
                         "direction": "long" if position.quantity > 0 else "short",
                         "entry_price": position.entry_price,
                         "exit_price": adjusted_exit,
-                        "pnl": net_pnl,
+                        "pnl": settlement["pnl"],
+                        "uncapped_pnl": settlement["uncapped_pnl"],
                         "gross_pnl": pnl,
-                        "fee": exit_fee,
-                        "funding_fee": funding_fee,
-                        "return": net_pnl / max(position.entry_equity, 1e-9),
+                        "fee": settlement["fee"],
+                        "entry_fee": settlement["entry_fee"],
+                        "exit_fee": settlement["exit_fee"],
+                        "funding_fee": settlement["funding_fee"],
+                        "balance_floor_applied": settlement["balance_floor_applied"],
+                        "cash_floor_adjustment": settlement["cash_floor_adjustment"],
+                        "return": settlement["pnl"] / max(position.entry_equity, 1e-9),
                         "reason": "final_position_liquidation",
                         "entry_timestamp": position.entry_timestamp,
                         "timestamp": final_timestamp,
@@ -667,6 +699,78 @@ class BacktestEngine:
     # -------------------------------------------------------------------
     # Internal helpers
     #
+    @staticmethod
+    def _validate_config(backtest: BacktestConfig) -> None:
+        """Reject invalid backtest inputs before the simulation mutates state."""
+        if not str(backtest.strategy_name or "").strip():
+            raise ValueError("Strategy name is required.")
+        if not str(backtest.symbol or "").strip():
+            raise ValueError("Symbol is required.")
+        if not str(backtest.timeframe or "").strip():
+            raise ValueError("Timeframe is required.")
+        numeric_fields = {
+            "initial_balance": backtest.initial_balance,
+            "fee_bps": backtest.fee_bps,
+            "slippage_bps": backtest.slippage_bps,
+            "stop_loss_pct": backtest.stop_loss_pct,
+            "take_profit_pct": backtest.take_profit_pct,
+            "position_size_fraction": backtest.position_size_fraction,
+            "risk_per_trade_pct": backtest.risk_per_trade_pct,
+            "max_daily_loss": backtest.max_daily_loss,
+            "max_drawdown_pct": backtest.max_drawdown_pct,
+            "leverage": backtest.leverage,
+            "funding_cost_bps": backtest.funding_cost_bps,
+            "funding_interval_hours": backtest.funding_interval_hours,
+        }
+        for name, value in numeric_fields.items():
+            parsed = float(value or 0.0)
+            if not isfinite(parsed):
+                raise ValueError(f"{name} must be finite.")
+        if float(backtest.initial_balance) <= 0:
+            raise ValueError("Starting balance must be greater than zero.")
+        if float(backtest.fee_bps) < 0 or float(backtest.slippage_bps) < 0:
+            raise ValueError("Fees and slippage cannot be negative.")
+        if float(backtest.stop_loss_pct) < 0 or float(backtest.take_profit_pct) < 0:
+            raise ValueError("Stop loss and take profit percentages cannot be negative.")
+        if float(backtest.position_size_fraction) < 0 or float(backtest.risk_per_trade_pct) < 0:
+            raise ValueError("Position sizing and risk settings cannot be negative.")
+        if float(backtest.leverage or 1.0) < 1.0:
+            raise ValueError("Leverage must be at least 1x.")
+        if float(backtest.funding_cost_bps or 0.0) < 0 or float(backtest.funding_interval_hours) <= 0:
+            raise ValueError("Funding costs and intervals must be positive.")
+
+    @staticmethod
+    def _prepare_candles(candles: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+        """Normalize candle inputs and discard rows that cannot be simulated."""
+        prepared: list[dict[str, Any]] = []
+        for index, candle in enumerate(candles or []):
+            if not isinstance(candle, dict):
+                continue
+            try:
+                timestamp = int(candle.get("timestamp", index))
+                open_price = float(candle.get("open", candle.get("close", 0.0)))
+                high = float(candle.get("high", open_price))
+                low = float(candle.get("low", open_price))
+                close = float(candle.get("close", open_price))
+            except (TypeError, ValueError):
+                continue
+            if not all(isfinite(value) and value > 0 for value in (open_price, high, low, close)):
+                continue
+            normalized_high = max(high, open_price, low, close)
+            normalized_low = min(low, open_price, high, close)
+            prepared.append(
+                {
+                    **candle,
+                    "timestamp": timestamp,
+                    "open": open_price,
+                    "high": normalized_high,
+                    "low": normalized_low,
+                    "close": close,
+                }
+            )
+        prepared.sort(key=lambda row: int(row.get("timestamp", 0)))
+        return prepared
+
     def _result(
         self,
         *,
@@ -676,12 +780,12 @@ class BacktestEngine:
         total_fees: float,
         total_funding_cost: float,
         total_traded_notional: float,
-        trades: List[Dict[str, Any]],
-        equity_curve: List[Dict[str, Any]],
-        drawdown_curve: List[Dict[str, Any]],
-        returns: List[float],
-        risk_events: List[Dict[str, Any]],
-    ) -> Dict[str, Any]:
+        trades: list[dict[str, Any]],
+        equity_curve: list[dict[str, Any]],
+        drawdown_curve: list[dict[str, Any]],
+        returns: list[float],
+        risk_events: list[dict[str, Any]],
+    ) -> dict[str, Any]:
         """Assemble the final result dictionary from backtest components."""
         funding_cost_estimate = max(float(total_funding_cost or 0.0), 0.0)
         adjusted_final_equity = final_equity
@@ -690,6 +794,9 @@ class BacktestEngine:
         losses = [trade for trade in trades if trade["pnl"] < 0]
         gross_profit = sum(trade["pnl"] for trade in wins)
         gross_loss = abs(sum(trade["pnl"] for trade in losses))
+        net_pnl = adjusted_final_equity - backtest.initial_balance
+        gross_pnl = sum(float(trade.get("gross_pnl", 0.0) or 0.0) for trade in trades)
+        average_trade = mean([trade["pnl"] for trade in trades]) if trades else 0.0
         durations = [trade["duration_minutes"] for trade in trades if trade.get("duration_minutes") is not None]
         trade_returns = [trade["return"] for trade in trades]
         avg_win = mean([trade["pnl"] for trade in wins]) if wins else 0.0
@@ -713,8 +820,11 @@ class BacktestEngine:
             "sortino_like": self._sortino_like(returns),
             "profit_factor": (gross_profit / gross_loss) if gross_loss > 0 else (inf if gross_profit > 0 else 0.0),
             "trade_count": len(trades),
+            "closed_trade_count": len(trades),
+            "open_trade_count": 0,
             "trades_per_day": (len(trades) / elapsed_days) if elapsed_days > 0 else 0.0,
             "average_trade_duration_minutes": mean(durations) if durations else 0.0,
+            "average_trade": average_trade,
             "capital_turnover_rate": total_traded_notional / max(avg_equity, 1e-9),
             "turnover_after_fees": turnover_after_fees,
             "average_return_per_trade": mean(trade_returns) if trade_returns else 0.0,
@@ -727,6 +837,8 @@ class BacktestEngine:
             "max_adverse_excursion": min(trade_returns) if trade_returns else 0.0,
             "max_favorable_excursion": max(trade_returns) if trade_returns else 0.0,
             "no_trade_reason": "" if trades else "no_trades_after_costs",
+            "net_pnl": net_pnl,
+            "gross_pnl": gross_pnl,
             "realized_pnl": cash - backtest.initial_balance,
             "unrealized_pnl": final_equity - cash,
             "fees_paid": total_fees,
@@ -752,8 +864,8 @@ class BacktestEngine:
         self,
         backtest: BacktestConfig,
         signal: Signal,
-        candles: List[Dict[str, Any]],
-        feature_payload: Dict[str, Any],
+        candles: list[dict[str, Any]],
+        feature_payload: dict[str, Any],
     ) -> Signal:
         """Use promoted ML as the final signal source when ML-first mode is enabled.
 
@@ -912,7 +1024,7 @@ class BacktestEngine:
 
     def _intrabar_exit(
         self,
-        candle: Dict[str, Any],
+        candle: dict[str, Any],
         entry_price: float,
         quantity: float,
         stop_pct: float,
@@ -920,7 +1032,7 @@ class BacktestEngine:
         model: IntrabarModel,
         stop_loss_price: float | None = None,
         take_profit_price: float | None = None,
-    ) -> Tuple[Optional[float], Optional[str]]:
+    ) -> tuple[float | None, str | None]:
         """Determine intrabar exit price and reason if stop loss or take profit is hit.
 
         Args:
@@ -992,11 +1104,8 @@ class BacktestEngine:
         return max(0.0, abs(stop_price - liquidation_price) / entry_price)
 
     @staticmethod
-    def _minimum_trade_liquidation_buffer(trades: List[Dict[str, Any]]) -> float:
-        values = [
-            float(trade.get("liquidation_buffer_pct", 1.0) or 0.0)
-            for trade in trades
-        ]
+    def _minimum_trade_liquidation_buffer(trades: list[dict[str, Any]]) -> float:
+        values = [float(trade.get("liquidation_buffer_pct", 1.0) or 0.0) for trade in trades]
         return min(values) if values else 1.0
 
     @staticmethod
@@ -1006,12 +1115,53 @@ class BacktestEngine:
         exit_price: float,
         fee_rate: float,
         slippage_rate: float,
-    ) -> Tuple[float, float, float]:
+    ) -> tuple[float, float, float]:
         """Compute gross PnL, fees and slippage for closing a position."""
         adjusted_exit = exit_price * (1 - slippage_rate if quantity > 0 else 1 + slippage_rate)
         gross = quantity * (adjusted_exit - entry_price) if quantity > 0 else abs(quantity) * (entry_price - adjusted_exit)
         fee = abs(quantity * adjusted_exit) * fee_rate
         return gross, fee, adjusted_exit
+
+    @staticmethod
+    def _settle_close(
+        position: _Position,
+        cash: float,
+        gross_pnl: float,
+        exit_fee: float,
+        funding_fee: float,
+    ) -> dict[str, Any]:
+        """Return cash settlement and trade-ledger values for a closing fill."""
+        entry_fee = max(float(position.entry_fee or 0.0), 0.0)
+        fee = entry_fee + max(float(exit_fee or 0.0), 0.0)
+        funding = max(float(funding_fee or 0.0), 0.0)
+        uncapped_cash_delta = float(gross_pnl) - max(float(exit_fee or 0.0), 0.0) - funding
+        cash_delta = uncapped_cash_delta
+        projected_cash = float(cash) + cash_delta
+        balance_floor_applied = projected_cash < 0.0
+        cash_floor_adjustment = abs(projected_cash) if balance_floor_applied else 0.0
+        if balance_floor_applied:
+            cash_delta += cash_floor_adjustment
+        return {
+            "cash_delta": cash_delta,
+            "pnl": cash_delta - entry_fee,
+            "uncapped_pnl": uncapped_cash_delta - entry_fee,
+            "fee": fee,
+            "entry_fee": entry_fee,
+            "exit_fee": max(float(exit_fee or 0.0), 0.0),
+            "funding_fee": funding,
+            "balance_floor_applied": balance_floor_applied,
+            "cash_floor_adjustment": cash_floor_adjustment,
+        }
+
+    @staticmethod
+    def _balance_floor_event(timestamp: int, settlement: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "timestamp": timestamp,
+            "rule": "balance_floor_applied",
+            "message": "Close settlement was capped at zero cash because margin is not enabled for this backtest.",
+            "uncapped_pnl": settlement.get("uncapped_pnl", 0.0),
+            "cash_floor_adjustment": settlement.get("cash_floor_adjustment", 0.0),
+        }
 
     def _funding_cost(self, position: _Position, exit_timestamp: int, backtest: BacktestConfig) -> float:
         funding_bps = max(float(backtest.funding_cost_bps or 0.0), 0.0)
@@ -1032,7 +1182,7 @@ class BacktestEngine:
         return cash + unrealized
 
     @staticmethod
-    def _max_drawdown(equity_curve: List[Dict[str, Any]]) -> float:
+    def _max_drawdown(equity_curve: list[dict[str, Any]]) -> float:
         """Calculate the maximum drawdown of the equity curve as a fraction."""
         peak = 0.0
         drawdown = 0.0
@@ -1043,19 +1193,19 @@ class BacktestEngine:
         return drawdown
 
     @staticmethod
-    def _sharpe_like(returns: List[float]) -> float:
+    def _sharpe_like(returns: list[float]) -> float:
         """Compute a Sharpe ratio analogue for the series of returns."""
         if len(returns) < 2:
             return 0.0
         avg = mean(returns)
         variance = sum((value - avg) ** 2 for value in returns) / (len(returns) - 1)
-        stdev = variance ** 0.5
+        stdev = variance**0.5
         if stdev == 0:
             return 0.0
         return (avg / stdev) * sqrt(len(returns))
 
     @staticmethod
-    def _sortino_like(returns: List[float]) -> float:
+    def _sortino_like(returns: list[float]) -> float:
         """Compute a Sortino ratio analogue for the series of returns."""
         if len(returns) < 2:
             return 0.0
@@ -1063,7 +1213,7 @@ class BacktestEngine:
         if not downside:
             return 0.0
         avg = mean(returns)
-        downside_deviation = (sum(value ** 2 for value in downside) / len(downside)) ** 0.5
+        downside_deviation = (sum(value**2 for value in downside) / len(downside)) ** 0.5
         if downside_deviation == 0:
             return 0.0
         return (avg / downside_deviation) * sqrt(len(returns))
@@ -1081,11 +1231,11 @@ class BacktestEngine:
         value = int(timestamp)
         if value > 10_000_000_000:
             # Millisecond timestamp
-            return datetime.fromtimestamp(value / 1000, tz=timezone.utc)
-        return datetime.fromtimestamp(value, tz=timezone.utc)
+            return datetime.fromtimestamp(value / 1000, tz=UTC)
+        return datetime.fromtimestamp(value, tz=UTC)
 
     @staticmethod
-    def _elapsed_days(equity_curve: List[Dict[str, Any]]) -> float:
+    def _elapsed_days(equity_curve: list[dict[str, Any]]) -> float:
         """Compute the total elapsed time of the equity curve in days."""
         if len(equity_curve) < 2:
             return 1.0
@@ -1094,20 +1244,20 @@ class BacktestEngine:
         return max((end - start).total_seconds() / 86_400, 1 / 24)
 
     @staticmethod
-    def _daily_loss_reached(daily_realized: Dict[str, float], candle_time: datetime, max_daily_loss: float) -> bool:
+    def _daily_loss_reached(daily_realized: dict[str, float], candle_time: datetime, max_daily_loss: float) -> bool:
         """Check whether the maximum daily loss has been exceeded for the current day."""
         if max_daily_loss <= 0:
             return False
         return daily_realized.get(candle_time.date().isoformat(), 0.0) <= -abs(max_daily_loss)
 
     @staticmethod
-    def _cooling_down(cooldown_until: Optional[datetime], candle_time: datetime) -> bool:
+    def _cooling_down(cooldown_until: datetime | None, candle_time: datetime) -> bool:
         """Determine whether entries are currently cooling down due to a loss streak."""
         return cooldown_until is not None and candle_time < cooldown_until
 
     @staticmethod
     def _trade_window_full(
-        entry_timestamps: List[int],
+        entry_timestamps: list[int],
         timestamp: int,
         max_trades_per_window: int,
         trade_window_minutes: int,
@@ -1122,15 +1272,15 @@ class BacktestEngine:
 
     def _blocked_entry_reason(
         self,
-        daily_realized: Dict[str, float],
+        daily_realized: dict[str, float],
         candle_time: datetime,
-        cooldown_until: Optional[datetime],
-        entry_timestamps: List[int],
+        cooldown_until: datetime | None,
+        entry_timestamps: list[int],
         timestamp: int,
         max_trades_per_window: int,
         trade_window_minutes: int,
         max_daily_loss: float,
-    ) -> Optional[str]:
+    ) -> str | None:
         """Determine which risk rule blocked a new entry if any."""
         if self._daily_loss_reached(daily_realized, candle_time, max_daily_loss):
             return "max_daily_loss"
@@ -1144,9 +1294,9 @@ class BacktestEngine:
         self,
         symbol: str,
         timeframe: str,
-        candles: List[Dict[str, Any]],
-        signal: Optional[Any] = None,
-    ) -> Dict[str, Any]:
+        candles: list[dict[str, Any]],
+        signal: Any | None = None,
+    ) -> dict[str, Any]:
         """Extract a feature snapshot for audit purposes.
 
         The feature payload is determined from either metadata contained on the
@@ -1164,7 +1314,7 @@ class BacktestEngine:
         Returns:
             A dictionary of feature values used for audit and analytics.
         """
-        metadata: Dict[str, Any] = getattr(signal, "metadata", {}) if signal is not None else {}
+        metadata: dict[str, Any] = getattr(signal, "metadata", {}) if signal is not None else {}
         if isinstance(metadata, dict) and isinstance(metadata.get("feature_snapshot"), dict):
             return metadata["feature_snapshot"]
         config = self.feature_engine.config_from_parameters(metadata if isinstance(metadata, dict) else {})
@@ -1176,7 +1326,7 @@ class BacktestEngine:
         ).as_dict()
 
     @staticmethod
-    def _feature_audit_summary(trades: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _feature_audit_summary(trades: list[dict[str, Any]]) -> dict[str, Any]:
         """Summarise feature usage across all trades for auditing."""
         if not trades:
             return {
@@ -1188,16 +1338,9 @@ class BacktestEngine:
                 "pattern_logged_trades": 0,
             }
         feature_logged = [trade for trade in trades if trade.get("entry_features")]
-        volume_confirmed = [
-            trade
-            for trade in feature_logged
-            if trade.get("entry_features", {}).get("volume_spike", {}).get("is_spike")
-        ]
+        volume_confirmed = [trade for trade in feature_logged if trade.get("entry_features", {}).get("volume_spike", {}).get("is_spike")]
         rule_scores = [float(trade.get("rule_score", 0.0) or 0.0) for trade in trades]
-        atr_values = [
-            float(trade.get("entry_features", {}).get("atr_pct", 0.0) or 0.0)
-            for trade in feature_logged
-        ]
+        atr_values = [float(trade.get("entry_features", {}).get("atr_pct", 0.0) or 0.0) for trade in feature_logged]
         fibonacci_level_trades = [trade for trade in trades if trade.get("fibonacci_levels")]
         pattern_logged = [trade for trade in trades if trade.get("pattern_prediction")]
         return {
@@ -1218,7 +1361,7 @@ class BacktestEngine:
         return candidate if candidate == candidate and abs(candidate) != float("inf") else default
 
     @staticmethod
-    def _empty_result() -> Dict[str, Any]:
+    def _empty_result() -> dict[str, Any]:
         """Return an empty result structure used when no backtest can be run."""
         return {
             "total_return": 0.0,
@@ -1229,8 +1372,11 @@ class BacktestEngine:
             "sortino_like": 0.0,
             "profit_factor": 0.0,
             "trade_count": 0,
+            "closed_trade_count": 0,
+            "open_trade_count": 0,
             "trades_per_day": 0.0,
             "average_trade_duration_minutes": 0.0,
+            "average_trade": 0.0,
             "capital_turnover_rate": 0.0,
             "turnover_after_fees": 0.0,
             "average_return_per_trade": 0.0,
@@ -1243,6 +1389,8 @@ class BacktestEngine:
             "max_adverse_excursion": 0.0,
             "max_favorable_excursion": 0.0,
             "no_trade_reason": "no_test_window_data",
+            "net_pnl": 0.0,
+            "gross_pnl": 0.0,
             "realized_pnl": 0.0,
             "unrealized_pnl": 0.0,
             "fees_paid": 0.0,

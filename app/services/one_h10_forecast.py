@@ -10,6 +10,7 @@ from .one_h10_quality import (
     ONE_H10_HORIZON_SECONDS,
     first_one_h10_reason_code,
     one_h10_forecast_live_blockers,
+    one_h10_profitability_payload,
     one_h10_quality_thresholds,
 )
 from .provider_assets import normalize_provider
@@ -28,6 +29,9 @@ class OneH10ForecastService:
         self.config = config
         self.ml_decision_engine = ml_decision_engine
         self.vault_coherence = vault_coherence
+
+    def horizon_seconds(self) -> int:
+        return max(60, int(self._safe_float(self.config.get("ONE_H10_HORIZON_SECONDS"), ONE_H10_HORIZON_SECONDS)))
 
     def forecast(
         self,
@@ -108,6 +112,12 @@ class OneH10ForecastService:
                 advisory_blockers.append("low_confidence")
         forecast["blockers"] = list(dict.fromkeys(str(item) for item in forecast["blockers"] if str(item)))
         forecast["advisory_blockers"] = list(dict.fromkeys(str(item) for item in advisory_blockers if str(item)))
+        forecast["expected_execution_quality"] = self._safe_float(
+            forecast.get("expected_execution_quality"),
+            self._safe_float(forecast.get("execution_quality")),
+        )
+        forecast.update(self._target_progress_payload(forecast))
+        forecast.update(one_h10_profitability_payload(forecast, self.config))
         decision_blockers = one_h10_forecast_live_blockers(forecast, self.config)
         forecast["decision_blockers"] = decision_blockers
         forecast["decision_reason_code"] = first_one_h10_reason_code(decision_blockers)
@@ -120,11 +130,7 @@ class OneH10ForecastService:
         if isinstance(required, str):
             required = [item.strip() for item in required.split(",") if item.strip()]
         required_set = {str(item).strip() for item in (required or []) if str(item).strip()}
-        present = {
-            str(item).strip()
-            for item in (context.get("one_h10_feature_timeframes", []) or [])
-            if str(item).strip()
-        }
+        present = {str(item).strip() for item in (context.get("one_h10_feature_timeframes", []) or []) if str(item).strip()}
         if required_set and not required_set.issubset(present):
             blockers.append("features_stale")
         if self._features_are_stale(context):
@@ -141,8 +147,7 @@ class OneH10ForecastService:
             if self.vault_coherence is not None:
                 horizon_forecasts = self.vault_coherence.build_horizon_forecasts(context)
                 horizon_strategy_scores = [
-                    self.vault_coherence.score_horizon_strategy(str(row.get("horizon")), row, context)
-                    for row in horizon_forecasts
+                    self.vault_coherence.score_horizon_strategy(str(row.get("horizon")), row, context) for row in horizon_forecasts
                 ]
                 coherence_summary = self.vault_coherence.calculate_coherence_summary(horizon_forecasts, horizon_strategy_scores)
                 cycle_status = self.vault_coherence.format_vault_cycle_status(
@@ -157,8 +162,7 @@ class OneH10ForecastService:
             else:
                 horizon_forecasts = build_horizon_forecasts(context, config=self.config)
                 horizon_strategy_scores = [
-                    score_horizon_strategy(str(row.get("horizon")), row, context, config=self.config)
-                    for row in horizon_forecasts
+                    score_horizon_strategy(str(row.get("horizon")), row, context, config=self.config) for row in horizon_forecasts
                 ]
                 coherence_summary = calculate_coherence_summary(horizon_forecasts, horizon_strategy_scores)
                 cycle_status = format_vault_cycle_status(
@@ -306,24 +310,32 @@ class OneH10ForecastService:
             self._safe_float(self.config.get("ONE_H10_MAX_LEVERAGE"), self._safe_float(self.config.get("MAX_LEVERAGE"), 1.0)),
             self._safe_float(context.get("market_max_leverage"), self._safe_float(self.config.get("MAX_LEVERAGE"), 1.0)),
         )
-        aggressive_confidence = max(confidence, self._safe_float(self.config.get("ONE_H10_MIN_POSITION_FRACTION"), 0.20) if side != "hold" else 0.0)
-        suggested_leverage = max(1.0, min(max_leverage, 1.0 + aggressive_confidence * max(max_leverage - 1.0, 0.0)))
-        sizing_fraction = min(max(aggressive_confidence * quality["sizing_multiplier"], 0.0), 1.0)
+        aggressive_confidence = max(
+            confidence, self._safe_float(self.config.get("ONE_H10_MIN_POSITION_FRACTION"), 0.20) if side != "hold" else 0.0
+        )
         blockers = list(quality["blockers"])
         if thresholds["min_risk_reward"] > 0 and risk_reward < thresholds["min_risk_reward"]:
             blockers.append("poor_risk_reward")
+        aggressive_allowed = self._aggressive_positioning_allowed(quality, risk_reward, blockers)
+        position_cap = self._max_position_fraction() if aggressive_allowed else self._conservative_position_cap()
+        suggested_leverage = max(1.0, min(max_leverage, 1.0 + aggressive_confidence * max(max_leverage - 1.0, 0.0)))
+        if not aggressive_allowed:
+            suggested_leverage = 1.0
+        sizing_fraction = min(max(aggressive_confidence * quality["sizing_multiplier"], 0.0), position_cap)
         return {
             "predicted_side": side,
             "action": side,
-            "horizon_seconds": ONE_H10_HORIZON_SECONDS,
+            "horizon_seconds": self.horizon_seconds(),
             "gross_expected_return_bps": gross_expected_bps,
             "expected_return_bps": quality["net_expected_return_bps"],
             "net_expected_return_bps": quality["net_expected_return_bps"],
+            "execution_adjusted_net_return_bps": quality["execution_adjusted_net_return_bps"],
             "cost_drag_bps": quality["cost_drag_bps"],
             "estimated_fee_bps": quality["fee_bps"],
             "estimated_slippage_bps": quality["slippage_bps"],
             "spread_bps": quality["spread_bps"],
             "execution_quality": quality["execution_quality"],
+            "expected_execution_quality": quality["execution_quality"],
             "capital_efficiency_score": quality["capital_efficiency_score"],
             "expected_net_edge_passed": quality["net_expected_return_bps"] >= quality["min_edge_bps"],
             "min_expected_edge_after_cost_bps": quality["min_edge_bps"],
@@ -336,7 +348,9 @@ class OneH10ForecastService:
             "position_fraction": sizing_fraction,
             "suggested_notional_usd": budget * sizing_fraction,
             "suggested_leverage": suggested_leverage,
-            "suggested_order_type": "limit" if quality["spread_bps"] > 4.0 or quality["cost_drag_bps"] > quality["max_cost_drag_bps"] else "market",
+            "suggested_order_type": "limit"
+            if quality["spread_bps"] > 4.0 or quality["cost_drag_bps"] > quality["max_cost_drag_bps"]
+            else "market",
             "suggested_stop_loss_pct": stop_pct,
             "suggested_take_profit_pct": take_pct,
             "directional_score": directional,
@@ -345,9 +359,7 @@ class OneH10ForecastService:
 
     def _coerce_ml_suite(self, suite: dict[str, dict[str, Any]], fallback: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
         raw_by_family = {
-            family: dict(decision.get("raw") or {})
-            for family, decision in (suite or {}).items()
-            if isinstance(decision.get("raw"), dict)
+            family: dict(decision.get("raw") or {}) for family, decision in (suite or {}).items() if isinstance(decision.get("raw"), dict)
         }
         ready_decisions = [decision for decision in suite.values() if bool(decision.get("ready", False))]
         advisory_blockers: list[str] = []
@@ -501,19 +513,28 @@ class OneH10ForecastService:
         thresholds = one_h10_quality_thresholds(self.config)
         if thresholds["min_risk_reward"] > 0 and risk_reward < thresholds["min_risk_reward"]:
             advisory_blockers.append("poor_risk_reward")
+        aggressive_allowed = self._aggressive_positioning_allowed(quality, risk_reward, hard_blockers)
+        position_cap = self._max_position_fraction() if aggressive_allowed else self._conservative_position_cap()
+        position_fraction = min(position_fraction, position_cap)
+        if not aggressive_allowed:
+            suggested_leverage = max(1.0, min(suggested_leverage, self._safe_float(fallback.get("suggested_leverage"), 1.0)))
+        if budget > 0:
+            suggested_notional = min(suggested_notional, budget * position_fraction)
 
         return {
             "predicted_side": side,
             "action": side,
-            "horizon_seconds": int(self._safe_float(fallback.get("horizon_seconds"), ONE_H10_HORIZON_SECONDS)),
+            "horizon_seconds": int(self._safe_float(fallback.get("horizon_seconds"), self.horizon_seconds())),
             "gross_expected_return_bps": gross_expected_bps,
             "expected_return_bps": quality["net_expected_return_bps"],
             "net_expected_return_bps": quality["net_expected_return_bps"],
+            "execution_adjusted_net_return_bps": quality["execution_adjusted_net_return_bps"],
             "cost_drag_bps": quality["cost_drag_bps"],
             "estimated_fee_bps": quality["fee_bps"],
             "estimated_slippage_bps": quality["slippage_bps"],
             "spread_bps": quality["spread_bps"],
             "execution_quality": quality["execution_quality"],
+            "expected_execution_quality": quality["execution_quality"],
             "capital_efficiency_score": quality["capital_efficiency_score"],
             "expected_net_edge_passed": quality["net_expected_return_bps"] >= quality["min_edge_bps"],
             "min_expected_edge_after_cost_bps": quality["min_edge_bps"],
@@ -578,11 +599,7 @@ class OneH10ForecastService:
                 self._side_vote(fallback.get("predicted_side") or fallback.get("action")),
                 *[
                     self._side_vote(
-                        raw.get("predicted_side")
-                        or raw.get("action")
-                        or raw.get("side")
-                        or raw.get("direction")
-                        or raw.get("order_side")
+                        raw.get("predicted_side") or raw.get("action") or raw.get("side") or raw.get("direction") or raw.get("order_side")
                     )
                     for raw in raw_by_family.values()
                 ],
@@ -628,10 +645,7 @@ class OneH10ForecastService:
         agreement_score = max(
             0.0,
             min(
-                direction_agreement * 0.30
-                + probability_consistency * 0.25
-                + readiness_score * 0.20
-                + calibration_score * 0.25,
+                direction_agreement * 0.30 + probability_consistency * 0.25 + readiness_score * 0.20 + calibration_score * 0.25,
                 1.0,
             ),
         )
@@ -681,6 +695,7 @@ class OneH10ForecastService:
         max_cost = thresholds["max_cost_drag_bps"]
         min_edge = thresholds["min_edge_after_cost_bps"]
         net_expected = self._safe_float(gross_expected_bps) - cost_drag
+        execution_adjusted_net = net_expected
 
         liquidity = max(
             self._safe_float(context.get("liquidity_capacity_usd")),
@@ -688,15 +703,22 @@ class OneH10ForecastService:
             0.0,
         )
         budget = self._capital_budget(context)
-        min_liquidity = max(1.0, self._safe_float(self.config.get("ONE_H10_MIN_LIQUIDITY_USD"), self.config.get("VAULT_MIN_LIQUIDITY_USD", 1_000.0)))
+        min_liquidity = max(
+            1.0, self._safe_float(self.config.get("ONE_H10_MIN_LIQUIDITY_USD"), self.config.get("VAULT_MIN_LIQUIDITY_USD", 1_000.0))
+        )
         capacity_multiple = liquidity / max(budget, min_liquidity, 1.0) if liquidity > 0 else 1.0
         capital_efficiency = max(0.0, min(capacity_multiple / 10.0, 1.0))
 
-        max_spread = max(1.0, self._safe_float(self.config.get("ONE_H10_MAX_SLIPPAGE_BPS"), self.config.get("VAULT_MAX_SLIPPAGE_BPS", 20.0)))
+        max_spread = max(
+            1.0, self._safe_float(self.config.get("ONE_H10_MAX_SLIPPAGE_BPS"), self.config.get("VAULT_MAX_SLIPPAGE_BPS", 20.0))
+        )
         spread_quality = max(0.0, min(1.0 - spread / max(max_spread, 1.0), 1.0))
         cost_quality = max(0.0, min(1.0 - max(cost_drag - min_edge, 0.0) / max(max_cost * 2.0, 1.0), 1.0))
         edge_quality = max(0.0, min(net_expected / max(min_edge * 8.0, 1.0), 1.0))
-        execution_quality = max(0.0, min(cost_quality * 0.45 + spread_quality * 0.20 + capital_efficiency * 0.20 + edge_quality * 0.15, 1.0))
+        execution_quality = max(
+            0.0, min(cost_quality * 0.45 + spread_quality * 0.20 + capital_efficiency * 0.20 + edge_quality * 0.15, 1.0)
+        )
+        execution_adjusted_net = net_expected * execution_quality
 
         blockers: list[str] = []
         if cost_drag > max_cost:
@@ -728,6 +750,7 @@ class OneH10ForecastService:
             "min_edge_bps": min_edge,
             "gross_expected_return_bps": self._safe_float(gross_expected_bps),
             "net_expected_return_bps": net_expected,
+            "execution_adjusted_net_return_bps": execution_adjusted_net,
             "execution_quality": execution_quality,
             "capital_efficiency_score": capital_efficiency,
             "capacity_multiple": capacity_multiple,
@@ -742,6 +765,53 @@ class OneH10ForecastService:
         if stop_pct <= 0:
             return 0.0
         return max(take_pct, 0.0) / stop_pct
+
+    def _target_progress_payload(self, forecast: dict[str, Any]) -> dict[str, float]:
+        target_roi_pct = max(
+            0.0,
+            self._safe_float(
+                self.config.get("ML_TARGET_ROI_1H10_PCT", self.config.get("ONE_H10_TARGET_ROI_PCT")),
+                1000.0,
+            ),
+        )
+        target_multiplier = max(1.0, target_roi_pct / 100.0)
+        target_return_bps = max(target_roi_pct * 100.0, 1.0)
+        progress_edge_bps = self._safe_float(
+            forecast.get("execution_adjusted_net_return_bps"),
+            self._safe_float(forecast.get("net_expected_return_bps"), self._safe_float(forecast.get("expected_return_bps"))),
+        )
+        pnl_edge_bps = self._safe_float(
+            forecast.get("net_expected_return_bps"),
+            self._safe_float(forecast.get("expected_return_bps"), progress_edge_bps),
+        )
+        target_progress = max(0.0, min(progress_edge_bps / target_return_bps, 1.0))
+        notional = self._safe_float(forecast.get("suggested_notional_usd"))
+        return {
+            "target_roi_pct": target_roi_pct,
+            "target_multiplier": target_multiplier,
+            "target_return_bps": target_return_bps,
+            "target_progress": target_progress,
+            "target_gap_pct": max((1.0 - target_progress) * 100.0, 0.0),
+            "after_cost_pnl_estimate_usd": notional * pnl_edge_bps / 10_000.0,
+        }
+
+    def _max_position_fraction(self) -> float:
+        floor = self._safe_float(self.config.get("ONE_H10_MIN_POSITION_FRACTION"), 0.20)
+        return max(floor, min(self._safe_float(self.config.get("ONE_H10_MAX_POSITION_FRACTION"), 0.75), 1.0))
+
+    def _conservative_position_cap(self) -> float:
+        return min(self._max_position_fraction(), max(self._safe_float(self.config.get("ONE_H10_MIN_POSITION_FRACTION"), 0.20), 0.25))
+
+    def _aggressive_positioning_allowed(self, quality: dict[str, Any], risk_reward: float, blockers: list[str]) -> bool:
+        thresholds = one_h10_quality_thresholds(self.config)
+        return (
+            bool(self.config.get("ONE_H10_PROFIT_OPTIMIZER_ENABLED", True))
+            and not blockers
+            and self._safe_float(quality.get("net_expected_return_bps")) >= thresholds["min_edge_after_cost_bps"]
+            and self._safe_float(quality.get("execution_quality")) >= thresholds["min_execution_quality"]
+            and (thresholds["min_risk_reward"] <= 0 or risk_reward >= thresholds["min_risk_reward"])
+            and self._safe_float(quality.get("capacity_multiple"), 1.0) >= 1.0
+        )
 
     def _capital_budget(self, context: dict[str, Any]) -> float:
         allocation = self._safe_float(context.get("allocation_cap_usd"))
@@ -790,11 +860,19 @@ class OneH10ForecastService:
             "expected_return_bps": self._safe_float(raw.get("expected_return_bps"), fallback.get("expected_return_bps", 0.0)),
             "confidence": min(max(self._safe_float(raw.get("confidence"), fallback.get("confidence", 0.0)), 0.0), 1.0),
             "position_fraction": min(max(self._safe_float(raw.get("position_fraction"), fallback.get("position_fraction", 0.0)), 0.0), 1.0),
-            "suggested_notional_usd": max(self._safe_float(raw.get("suggested_notional_usd"), fallback.get("suggested_notional_usd", 0.0)), 0.0),
-            "suggested_leverage": max(1.0, min(self._safe_float(raw.get("suggested_leverage"), fallback.get("suggested_leverage", 1.0)), leverage_cap)),
+            "suggested_notional_usd": max(
+                self._safe_float(raw.get("suggested_notional_usd"), fallback.get("suggested_notional_usd", 0.0)), 0.0
+            ),
+            "suggested_leverage": max(
+                1.0, min(self._safe_float(raw.get("suggested_leverage"), fallback.get("suggested_leverage", 1.0)), leverage_cap)
+            ),
             "suggested_order_type": "limit" if str(raw.get("suggested_order_type") or "").lower() == "limit" else "market",
-            "suggested_stop_loss_pct": max(self._safe_float(raw.get("suggested_stop_loss_pct"), fallback.get("suggested_stop_loss_pct", 0.0)), 0.0),
-            "suggested_take_profit_pct": max(self._safe_float(raw.get("suggested_take_profit_pct"), fallback.get("suggested_take_profit_pct", 0.0)), 0.0),
+            "suggested_stop_loss_pct": max(
+                self._safe_float(raw.get("suggested_stop_loss_pct"), fallback.get("suggested_stop_loss_pct", 0.0)), 0.0
+            ),
+            "suggested_take_profit_pct": max(
+                self._safe_float(raw.get("suggested_take_profit_pct"), fallback.get("suggested_take_profit_pct", 0.0)), 0.0
+            ),
             "blockers": [] if self._bootstrap_live_enabled() else advisory_blockers,
             "advisory_blockers": advisory_blockers,
         }
@@ -805,9 +883,7 @@ class OneH10ForecastService:
         )
 
     def _feature_blockers_are_advisory(self) -> bool:
-        return self._bootstrap_live_enabled() and bool(
-            self.config.get("ONE_H10_BOOTSTRAP_FEATURE_BLOCKERS_ADVISORY", True)
-        )
+        return self._bootstrap_live_enabled() and bool(self.config.get("ONE_H10_BOOTSTRAP_FEATURE_BLOCKERS_ADVISORY", True))
 
     @staticmethod
     def _safe_float(value: Any, default: float = 0.0) -> float:

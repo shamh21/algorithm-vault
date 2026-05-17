@@ -5,6 +5,8 @@
   const ACTIVITY_ROW_HEIGHT = 58;
   const POLL_FOREGROUND_MS = 15000;
   const POLL_BACKGROUND_MS = 60000;
+  const RESTORE_CACHE_KEY = "av-admin-dashboard-restore-v1";
+  const RESTORE_CACHE_TTL_MS = 5 * 60 * 1000;
 
   const root = document.querySelector("[data-dashboard]");
   if (!root) return;
@@ -12,6 +14,11 @@
   const refs = {
     list: root.querySelector("[data-opportunity-list]"),
     status: root.querySelector("[data-stream-status]"),
+    connectionBanner: root.querySelector("[data-dashboard-connection-banner]"),
+    connectionTitle: root.querySelector("[data-dashboard-connection-title]"),
+    connectionDetail: root.querySelector("[data-dashboard-connection-detail]"),
+    connectionRetry: root.querySelector("[data-dashboard-retry]"),
+    cacheState: root.querySelector("[data-cache-state]"),
     chartPanel: root.querySelector("[data-chart-panel]"),
     chartHost: root.querySelector("[data-lightweight-chart]"),
     overlay: root.querySelector("[data-forecast-overlay]"),
@@ -45,6 +52,8 @@
     providerHealthStatus: root.querySelector("[data-provider-health-status]"),
     providerHealthLastCheck: root.querySelector("[data-provider-health-last-check]"),
     providerHealthImpact: root.querySelector("[data-provider-health-impact]"),
+    marketTape: root.querySelector("[data-market-tape]"),
+    strategyRankingsTable: root.querySelector("[data-strategy-rankings-table]"),
     openOrdersTable: root.querySelector("[data-open-orders-table]"),
     positionsTable: root.querySelector("[data-positions-table]"),
     recentTradesTable: root.querySelector("[data-recent-trades-table]"),
@@ -59,6 +68,14 @@
     forecastRoi: root.querySelector("[data-forecast-roi]"),
     forecastConfidence: root.querySelector("[data-forecast-confidence]"),
     forecastRisk: root.querySelector("[data-forecast-risk]"),
+    signalQuality: root.querySelector("[data-signal-quality]"),
+    marketRegime: root.querySelector("[data-market-regime]"),
+    providerQuality: root.querySelector("[data-provider-quality]"),
+    forecastExpiry: root.querySelector("[data-forecast-expiry]"),
+    confidenceMeter: root.querySelector("[data-confidence-meter]"),
+    confidenceFill: root.querySelector("[data-confidence-fill]"),
+    rationale: root.querySelector("[data-signal-rationale]"),
+    rationaleBody: root.querySelector("[data-signal-rationale-body]"),
     intel: {
       pair: root.querySelector("[data-intel-pair]"),
       provider: root.querySelector("[data-intel-provider]"),
@@ -104,10 +121,22 @@
     chartPayload: null,
     chartInView: false,
     chartModulePromise: null,
+    restoreCache: null,
+    connectionState: "connecting",
     eventSource: null,
     pollTimer: null,
     reconnectTimer: null,
+    staleStreamTimer: null,
+    expiryTimer: null,
     reconnectAttempt: 0,
+    lastHeartbeatAt: 0,
+    latestAppliedAt: {
+      opportunities: 0,
+      chart: 0,
+      activity: 0,
+      dashboard: 0,
+    },
+    forecastExpiresAt: 0,
     destroyed: false,
     longPressTimer: 0,
     raf: {},
@@ -153,6 +182,20 @@
     if (Number.isNaN(date.getTime())) return String(value);
     return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   };
+  const isPlainObject = (value) => value && typeof value === "object" && !Array.isArray(value);
+  const payloadTime = (payload) => {
+    const raw = payload?.updated_at || payload?.generated_at || payload?.at || payload?.savedAt || 0;
+    if (!raw) return Date.now();
+    const parsed = typeof raw === "number" ? raw : Date.parse(raw);
+    if (!Number.isFinite(parsed)) return Date.now();
+    return parsed < 10_000_000_000 ? parsed * 1000 : parsed;
+  };
+  const shouldApplyPayload = (key, payload) => {
+    const stamp = payloadTime(payload);
+    if (stamp + 250 < (state.latestAppliedAt[key] || 0)) return false;
+    state.latestAppliedAt[key] = Math.max(stamp, Date.now());
+    return true;
+  };
   const summarizeDetail = (detail = "", title = "") => {
     const text = String(detail || "").trim();
     const titleText = String(title || "").trim();
@@ -171,6 +214,46 @@
     });
   };
 
+  const readRestoreCache = () => {
+    try {
+      const raw = window.sessionStorage.getItem(RESTORE_CACHE_KEY);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      const savedAt = Number(parsed?.savedAt || 0);
+      if (!savedAt || Date.now() - savedAt > RESTORE_CACHE_TTL_MS) {
+        window.sessionStorage.removeItem(RESTORE_CACHE_KEY);
+        return null;
+      }
+      if (!isPlainObject(parsed)) {
+        window.sessionStorage.removeItem(RESTORE_CACHE_KEY);
+        return null;
+      }
+      return parsed;
+    } catch {
+      return null;
+    }
+  };
+
+  const writeRestoreCache = (patch = {}) => {
+    try {
+      const next = { ...(state.restoreCache || {}), ...patch, savedAt: Date.now() };
+      window.sessionStorage.setItem(RESTORE_CACHE_KEY, JSON.stringify(next));
+      state.restoreCache = next;
+    } catch {}
+  };
+
+  const cacheAgeLabel = (savedAt) => {
+    const seconds = Math.max(1, Math.round((Date.now() - Number(savedAt || 0)) / 1000));
+    if (seconds < 60) return "just now";
+    return `${Math.round(seconds / 60)} min ago`;
+  };
+
+  const showCacheState = (text = "") => {
+    if (!refs.cacheState) return;
+    refs.cacheState.hidden = !text;
+    refs.cacheState.textContent = text;
+  };
+
   const setStatus = (text, tone = "") => {
     if (!refs.status) return;
     refs.status.classList.toggle("is-live", tone === "live");
@@ -179,7 +262,35 @@
     if (copy) copy.textContent = text;
   };
 
+  const setConnectionState = (name, detail = "") => {
+    const normalized = navigator.onLine === false ? "offline" : name || "connecting";
+    state.connectionState = normalized;
+    root.dataset.connectionState = normalized;
+    const copy = {
+      connecting: ["Connecting", "Connecting", "Live dashboard data is refreshing.", ""],
+      live: ["Live", "Live", "Stream connected.", "live"],
+      polling: ["Polling", "Reconnecting", "Live stream is unavailable, so the dashboard is polling for updates.", "stale"],
+      reconnecting: ["Polling", "Reconnecting", detail || "Reconnecting to the live dashboard stream.", "stale"],
+      cached: ["Cached", "Restored", detail || "Showing the latest local dashboard snapshot while live data refreshes.", "stale"],
+      stale: ["Stale", "Stale data", detail || "Live data is delayed. Existing values remain visible while the dashboard retries.", "stale"],
+      offline: ["Offline", "Offline", "Reconnect to refresh account, market, and activity data.", "stale"],
+      error: ["Stale", "Data issue", detail || "Unable to refresh one or more dashboard panels.", "stale"],
+    }[normalized] || ["Connecting", "Connecting", detail || "Live dashboard data is refreshing.", ""];
+    setStatus(copy[0], copy[3]);
+    const showBanner = !["connecting", "live"].includes(normalized);
+    if (refs.connectionBanner) {
+      refs.connectionBanner.hidden = !showBanner;
+      refs.connectionBanner.dataset.connectionTone = normalized;
+    }
+    if (refs.connectionTitle) refs.connectionTitle.textContent = copy[1];
+    if (refs.connectionDetail) refs.connectionDetail.textContent = copy[2];
+  };
+
   const requestJson = async (key, url) => {
+    if (navigator.onLine === false) {
+      setConnectionState("offline");
+      throw new Error("offline");
+    }
     const slot = state.requests[key];
     slot.controller?.abort();
     slot.controller = "AbortController" in window ? new AbortController() : null;
@@ -191,7 +302,9 @@
     });
     if (id !== slot.id) return null;
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    return response.json();
+    const payload = await response.json();
+    if (id !== slot.id) return null;
+    return payload;
   };
 
   const setOpportunities = (rows) => {
@@ -203,6 +316,12 @@
       state.active = state.opportunities[0];
       updateSelectionText(state.active);
       if (state.chartInView) fetchChart(state.active);
+    } else {
+      const refreshed = state.opportunities.find((row) => row.provider === state.active.provider && row.symbol === state.active.symbol);
+      if (refreshed) {
+        state.active = refreshed;
+        updateSelectionText(state.active);
+      }
     }
     refs.neutral?.toggleAttribute("hidden", !state.opportunities.length || state.opportunities.some((row) => hasExecutableSetup(row)));
     schedule("opportunities", renderOpportunities);
@@ -236,13 +355,16 @@
 
   const filteredOpportunities = () => {
     if (state.filter === "all") return state.opportunities;
-    return state.opportunities.filter((row) => String(row.direction || row.action || "").toLowerCase() === state.filter);
+    const target = state.filter === "long" ? "buy" : state.filter === "short" ? "sell" : state.filter;
+    return state.opportunities.filter((row) => String(row.direction || row.action || "").toLowerCase() === target);
   };
 
   const renderOpportunities = () => {
     const rows = filteredOpportunities();
     const emptyText = state.opportunityDiagnostics?.stale
       ? "Cached scanner data has no ranked markets."
+      : state.opportunityDiagnostics?.error
+        ? "Unable to load ranked markets. Check provider health and refresh again."
       : "No ranked markets loaded. Check provider health or run a strategy cycle to populate rankings.";
     renderVirtual(refs.list, rows, ROW_HEIGHT, (row, index) => {
       const button = document.createElement("button");
@@ -267,8 +389,13 @@
       const sub = document.createElement("small");
       sub.textContent = `${label(row.provider).toUpperCase()} · ${label(row.direction).toUpperCase()}`;
       const conf = document.createElement("small");
-      conf.textContent = `Confidence ${percent(row.confidence, 0)}`;
-      main.append(title, sub, conf);
+      const confidenceScore = hasNumber(row.confidence_score) ? Number(row.confidence_score) : number(row.confidence) * 100;
+      const quality = row.signal_quality?.grade || (confidenceScore >= 70 ? "High" : confidenceScore >= 45 ? "Moderate" : "Low");
+      conf.textContent = `Confidence ${Math.round(confidenceScore)} · ${quality}`;
+      const regime = document.createElement("small");
+      regime.className = "opportunity-quality-line";
+      regime.textContent = `${label(row.market_regime?.state || "regime pending")} · ${label(row.data_quality?.state || "data pending")}`;
+      main.append(title, sub, conf, regime);
 
       const meta = document.createElement("span");
       meta.className = "opportunity-score";
@@ -361,6 +488,37 @@
     tbody.replaceChildren(fragment);
   };
 
+  const renderMarketSummary = (rows) => {
+    if (!refs.marketTape) return;
+    const data = (Array.isArray(rows) ? rows : [])
+      .filter((row) => row && row.symbol && String(row.symbol).toUpperCase() !== "N/A")
+      .slice(0, 8);
+    if (!data.length) {
+      refs.marketTape.replaceChildren(Object.assign(document.createElement("div"), {
+        className: "trade-empty-state",
+        textContent: "Market monitor is waiting for live market data.",
+      }));
+      return;
+    }
+    const fragment = document.createDocumentFragment();
+    data.forEach((row) => {
+      const item = document.createElement("div");
+      item.className = "market-tape-row";
+      const symbol = document.createElement("strong");
+      symbol.textContent = String(row.symbol || "").toUpperCase();
+      const mid = document.createElement("span");
+      mid.textContent = price(row.mid);
+      const change = document.createElement("em");
+      const changePct = hasNumber(row.change_pct) ? Number(row.change_pct) : null;
+      change.textContent = changePct !== null ? `${changePct.toFixed(2)}%` : dash;
+      change.classList.toggle("positive", changePct !== null && changePct >= 0);
+      change.classList.toggle("negative", changePct !== null && changePct < 0);
+      item.append(symbol, mid, change);
+      fragment.append(item);
+    });
+    refs.marketTape.replaceChildren(fragment);
+  };
+
   const renderAccountSummary = (payload = {}) => {
     const snapshot = payload.account_snapshot || {};
     const providerHealth = payload.provider_health || {};
@@ -392,6 +550,15 @@
     if (refs.providerHealthLastCheck) refs.providerHealthLastCheck.textContent = formatSyncValue(syncedAt);
     if (refs.providerHealthImpact) refs.providerHealthImpact.textContent = providerHealth.impact || "No structured health data loaded";
 
+    renderMarketSummary(payload.market_summary);
+
+    renderRows(refs.strategyRankingsTable, payload.strategy_rankings, [
+      { value: (row) => `${row.strategy_name || dash}${row.symbol ? ` · ${row.symbol}/${row.timeframe || "live"}` : ""}` },
+      { value: (row) => hasNumber(row.score) ? Number(row.score).toFixed(3) : dash },
+      { value: (row) => hasNumber(row.recent_performance_score) ? `${(Number(row.recent_performance_score) * 100).toFixed(2)}%` : dash },
+      { value: (row) => hasNumber(row.max_drawdown) ? `${(Number(row.max_drawdown) * 100).toFixed(2)}%` : dash },
+      { value: (row) => row.rejected ? "rejected" : "live-readiness candidate" },
+    ], "No optimizer rankings yet. Run a strategy cycle to populate rankings.");
     renderRows(refs.openOrdersTable, payload.open_orders, [
       { value: (row) => row.symbol || dash },
       { value: (row) => label(row.side).toUpperCase() },
@@ -489,6 +656,104 @@
     renderSparkline(hasPerformance ? points : [], changePercent);
   };
 
+  const updateConfidenceMeter = (score) => {
+    const value = Math.max(0, Math.min(Math.round(number(score)), 100));
+    if (refs.confidenceMeter) {
+      refs.confidenceMeter.setAttribute("aria-valuenow", String(value));
+      refs.confidenceMeter.setAttribute("aria-valuetext", `${value} percent confidence`);
+      refs.confidenceMeter.dataset.confidenceTone = value >= 75 ? "high" : value >= 50 ? "medium" : "low";
+    }
+    if (refs.confidenceFill) refs.confidenceFill.style.width = `${value}%`;
+  };
+
+  const factorList = (title, rows) => {
+    const section = document.createElement("section");
+    const heading = document.createElement("h3");
+    heading.textContent = title;
+    const list = document.createElement("ul");
+    (Array.isArray(rows) && rows.length ? rows : ["No material factors reported."]).slice(0, 5).forEach((item) => {
+      const li = document.createElement("li");
+      li.textContent = String(item);
+      list.append(li);
+    });
+    section.append(heading, list);
+    return section;
+  };
+
+  const renderRationale = (row) => {
+    if (!refs.rationaleBody) return;
+    refs.rationaleBody.replaceChildren();
+    if (!row) {
+      refs.rationaleBody.append(Object.assign(document.createElement("p"), { textContent: "Signal rationale appears once a forecast is selected." }));
+      return;
+    }
+    const explanation = isPlainObject(row.explanation) ? row.explanation : {};
+    const summary = document.createElement("p");
+    summary.textContent = explanation.summary || "Confidence reflects weighted market, liquidity, model, and data-quality inputs.";
+    const meta = document.createElement("dl");
+    meta.className = "signal-rationale-meta";
+    [
+      ["Data freshness", explanation.data_freshness || row.data_quality?.signal_freshness || "unknown"],
+      ["Provider reliability", explanation.provider_reliability || row.data_quality?.provider_reliability || "unknown"],
+      ["Volatility", explanation.volatility_condition || row.market_regime?.label || "unknown"],
+      ["Trend probability", hasNumber(row.trend_continuation_probability) ? `${Math.round(Number(row.trend_continuation_probability))}%` : dash],
+    ].forEach(([term, value]) => {
+      const wrap = document.createElement("div");
+      const dt = document.createElement("dt");
+      const dd = document.createElement("dd");
+      dt.textContent = term;
+      dd.textContent = String(value);
+      wrap.append(dt, dd);
+      meta.append(wrap);
+    });
+    refs.rationaleBody.append(
+      summary,
+      meta,
+      factorList("Bullish", row.bullish_factors || explanation.bullish_factors),
+      factorList("Bearish", row.bearish_factors || explanation.bearish_factors),
+      factorList("Neutralizing", row.neutralizing_factors || explanation.neutralizing_factors),
+      factorList("Risk penalties", row.risk_penalties || explanation.risk_penalties),
+    );
+  };
+
+  const updateForecastExpiry = () => {
+    if (!refs.forecastExpiry) return;
+    if (!state.forecastExpiresAt) {
+      refs.forecastExpiry.textContent = "Expiry pending";
+      return;
+    }
+    const remaining = Math.max(0, Math.round((state.forecastExpiresAt - Date.now()) / 1000));
+    const minutes = Math.floor(remaining / 60);
+    const seconds = remaining % 60;
+    refs.forecastExpiry.textContent = remaining > 0 ? `Expires ${minutes}:${String(seconds).padStart(2, "0")}` : "Forecast expired";
+    refs.forecastExpiry.classList.toggle("is-stale", remaining <= 0);
+  };
+
+  const startForecastExpiry = (seconds) => {
+    window.clearInterval(state.expiryTimer);
+    const resolvedSeconds = Math.max(0, Math.round(number(seconds)));
+    state.forecastExpiresAt = resolvedSeconds > 0 ? Date.now() + resolvedSeconds * 1000 : 0;
+    updateForecastExpiry();
+    if (state.forecastExpiresAt) state.expiryTimer = window.setInterval(updateForecastExpiry, 1000);
+  };
+
+  const updateTrustState = (row) => {
+    const confidenceScore = hasNumber(row?.confidence_score) ? Number(row.confidence_score) : number(row?.confidence) * 100;
+    const quality = row?.signal_quality?.grade || (confidenceScore >= 75 ? "High" : confidenceScore >= 50 ? "Moderate" : "Low");
+    const dataQuality = row?.data_quality?.state || "unknown";
+    const regime = row?.market_regime?.label || label(row?.market_regime?.state || "unknown");
+    if (refs.signalQuality) refs.signalQuality.textContent = `Signal ${quality}`;
+    if (refs.marketRegime) refs.marketRegime.textContent = `Regime ${regime}`;
+    if (refs.providerQuality) refs.providerQuality.textContent = `Data ${label(dataQuality)}`;
+    updateConfidenceMeter(confidenceScore);
+    startForecastExpiry(row?.forecast_expiry_seconds || row?.forecast?.horizon_seconds || 0);
+    renderRationale(row);
+    const degraded = ["poor", "stale", "insufficient"].includes(String(dataQuality));
+    if (degraded) {
+      setConnectionState("stale", "Forecast confidence is degraded because market data quality is limited.");
+    }
+  };
+
   const updateEmptyForecast = () => {
     refs.chartLoading?.setAttribute("hidden", "hidden");
     if (refs.chartTitle) refs.chartTitle.textContent = "Market Projection";
@@ -497,6 +762,12 @@
     if (refs.forecastRoi) refs.forecastRoi.textContent = dash;
     if (refs.forecastConfidence) refs.forecastConfidence.textContent = dash;
     if (refs.forecastRisk) refs.forecastRisk.textContent = dash;
+    if (refs.signalQuality) refs.signalQuality.textContent = "Quality pending";
+    if (refs.marketRegime) refs.marketRegime.textContent = "Regime pending";
+    if (refs.providerQuality) refs.providerQuality.textContent = "Provider pending";
+    if (refs.forecastExpiry) refs.forecastExpiry.textContent = "Expiry pending";
+    updateConfidenceMeter(0);
+    renderRationale(null);
     Object.values(refs.intel).forEach((node) => {
       if (node) node.textContent = dash;
     });
@@ -504,20 +775,27 @@
   };
 
   const fetchVaultPulse = async () => {
-    renderVaultPulse(initialPayload, { loading: true });
+    const fallback = state.restoreCache?.payload || initialPayload;
+    renderVaultPulse(fallback, { loading: !state.restoreCache?.payload });
     if (!urls.dashboardData) {
-      renderAccountSummary(initialPayload);
-      renderVaultPulse(initialPayload, { loading: false });
+      renderAccountSummary(fallback);
+      renderVaultPulse(fallback, { loading: false });
       return;
     }
     try {
       const payload = await requestJson("dashboard", urls.dashboardData);
-      if (payload) {
+      if (payload && shouldApplyPayload("dashboard", payload)) {
         renderAccountSummary(payload);
         renderVaultPulse(payload, { loading: false });
+        writeRestoreCache({ payload });
+        showCacheState("");
       }
     } catch (error) {
-      if (error.name !== "AbortError") renderVaultPulse(initialPayload, { loading: false, error: true });
+      if (error.name !== "AbortError") {
+        renderAccountSummary(fallback);
+        renderVaultPulse(fallback, { loading: false, error: true });
+        setConnectionState(navigator.onLine === false ? "offline" : "stale", "Account data could not refresh. The last visible snapshot remains on screen.");
+      }
     }
   };
 
@@ -567,11 +845,18 @@
     try {
       const payload = await requestJson("opportunities", url);
       if (!payload) return;
+      if (!shouldApplyPayload("opportunities", payload)) return;
       state.opportunityDiagnostics = payload.diagnostics || {};
       setOpportunities(payload.opportunities || []);
-      setStatus(payload.diagnostics?.stale ? "Cached" : "Live", payload.diagnostics?.stale ? "stale" : "live");
+      writeRestoreCache({ opportunities: state.opportunities, opportunityDiagnostics: state.opportunityDiagnostics });
+      setConnectionState(payload.diagnostics?.stale ? "stale" : "live", payload.diagnostics?.stale ? "Scanner data is cached while providers refresh." : "");
     } catch (error) {
-      if (error.name !== "AbortError") setStatus("Stale", "stale");
+      if (error.name !== "AbortError") {
+        state.opportunityDiagnostics = { error: String(error?.message || error || "Unable to load ranked markets.") };
+        if (!state.opportunities.length) setOpportunities([]);
+        else schedule("opportunities", renderOpportunities);
+        setConnectionState(navigator.onLine === false ? "offline" : "error", "Unable to load ranked markets. Check provider health and refresh again.");
+      }
     }
   };
 
@@ -581,9 +866,15 @@
     url.searchParams.set("limit", String(PAGE_SIZE));
     try {
       const payload = await requestJson("activity", url);
-      if (payload) setActivity(payload.items || []);
+      if (payload && shouldApplyPayload("activity", payload)) {
+        setActivity(payload.items || []);
+        writeRestoreCache({ activity: state.activity });
+      }
     } catch (error) {
-      if (error.name !== "AbortError") setActivity(state.activity);
+      if (error.name !== "AbortError") {
+        setActivity(state.activity);
+        setConnectionState(navigator.onLine === false ? "offline" : "stale", "Activity feed could not refresh. Existing entries remain visible.");
+      }
     }
   };
 
@@ -598,10 +889,19 @@
     try {
       const payload = await requestJson("chart", url);
       if (!payload) return;
+      if (!shouldApplyPayload("chart", payload)) return;
       state.chartPayload = payload;
+      if (state.active && isPlainObject(payload.forecast)) {
+        state.active = { ...state.active, ...payload.forecast, data_quality: payload.data_quality || payload.forecast.data_quality || state.active.data_quality };
+        updateSelectionText(state.active);
+      }
+      writeRestoreCache({ chartPayload: payload });
       await renderChart(payload);
     } catch (error) {
-      if (error.name !== "AbortError") await renderChart(state.chartPayload || {});
+      if (error.name !== "AbortError") {
+        await renderChart(state.chartPayload || state.restoreCache?.chartPayload || {});
+        setConnectionState(navigator.onLine === false ? "offline" : "stale", "Chart data could not refresh. The last projection remains visible.");
+      }
     } finally {
       refs.chartLoading?.setAttribute("hidden", "hidden");
     }
@@ -668,8 +968,12 @@
     });
     if (refs.forecastDirection) refs.forecastDirection.textContent = executable ? label(row.direction).toUpperCase() : "No active setup";
     if (refs.forecastRoi) refs.forecastRoi.textContent = executable ? roi(row.predicted_roi) : dash;
-    if (refs.forecastConfidence) refs.forecastConfidence.textContent = executable ? percent(row.confidence, 0) : dash;
+    if (refs.forecastConfidence) {
+      const score = hasNumber(row.confidence_score) ? `${Math.round(Number(row.confidence_score))}%` : percent(row.confidence, 0);
+      refs.forecastConfidence.textContent = executable ? score : dash;
+    }
     if (refs.forecastRisk) refs.forecastRisk.textContent = executable && hasNumber(row.risk_reward) ? number(row.risk_reward).toFixed(2) : dash;
+    updateTrustState(row);
     refs.setupHelper?.toggleAttribute("hidden", executable);
   };
 
@@ -702,7 +1006,6 @@
     const actions = {
       allocate: { title: "Allocate Capital", action: "Open Vault Flow", rows: setup },
       cycle: { title: "Start Cycle Preview", action: "Open Vault Flow", rows: setup },
-      panic: { title: "Emergency Stop Preview", action: "Open Panic Controls", rows: [["Status", "Preview only"], ["Effect", "Opens guarded panic controls"], ["Direct Submit", "No"]] },
       risk: { title: "Risk Mode Preview", action: "Open Risk Controls", rows: [["Status", "Preview only"], ["Direct Submit", "No"]] },
       setup: { title: `${row.symbol || "--"} · ${label(row.direction).toUpperCase()}`, action: "Open Vault Flow", rows: setup },
     };
@@ -763,6 +1066,28 @@
   const closeStream = () => {
     state.eventSource?.close();
     state.eventSource = null;
+    window.clearTimeout(state.staleStreamTimer);
+    state.staleStreamTimer = null;
+  };
+
+  const armStaleStreamTimer = () => {
+    window.clearTimeout(state.staleStreamTimer);
+    state.staleStreamTimer = window.setTimeout(() => {
+      if (state.destroyed || document.hidden) return;
+      const staleAfter = Math.max(POLL_FOREGROUND_MS * 2, 32000);
+      if (Date.now() - state.lastHeartbeatAt > staleAfter) {
+        setConnectionState("stale", "Live stream heartbeat is delayed. Polling remains active while the stream recovers.");
+        startPolling();
+      }
+    }, Math.max(POLL_FOREGROUND_MS * 2, 32000));
+  };
+
+  const parseEvent = (event) => {
+    try {
+      return JSON.parse(event.data || "{}");
+    } catch {
+      return {};
+    }
   };
 
   const scheduleReconnect = () => {
@@ -772,6 +1097,7 @@
     window.clearTimeout(state.reconnectTimer);
     const delay = Math.min(30000, 1000 * (2 ** Math.min(state.reconnectAttempt, 5))) + Math.floor(Math.random() * 650);
     state.reconnectAttempt += 1;
+    setConnectionState("reconnecting", `Reconnecting to the live stream in ${Math.ceil(delay / 1000)} seconds. Polling remains active.`);
     state.reconnectTimer = window.setTimeout(connectStream, delay);
   };
 
@@ -779,6 +1105,7 @@
     if (state.destroyed || document.hidden) return;
     if (!window.EventSource || !urls.stream) {
       startPolling();
+      setConnectionState("polling");
       return;
     }
     closeStream();
@@ -787,29 +1114,40 @@
       state.eventSource = new EventSource(url);
       state.eventSource.onopen = () => {
         state.reconnectAttempt = 0;
+        state.lastHeartbeatAt = Date.now();
+        armStaleStreamTimer();
         stopPolling();
-        setStatus("Live", "live");
+        setConnectionState("live");
       };
       state.eventSource.onerror = () => {
-        setStatus("Polling", "stale");
+        setConnectionState("polling");
         scheduleReconnect();
       };
       state.eventSource.addEventListener("opportunities", (event) => {
-        const payload = JSON.parse(event.data || "{}");
+        const payload = parseEvent(event);
+        if (!shouldApplyPayload("opportunities", payload)) return;
         setOpportunities(payload.opportunities || []);
       });
       state.eventSource.addEventListener("activity", (event) => {
-        const payload = JSON.parse(event.data || "{}");
+        const payload = parseEvent(event);
+        if (!shouldApplyPayload("activity", payload)) return;
         setActivity(payload.items || []);
       });
       state.eventSource.addEventListener("chart_delta", (event) => {
-        const payload = JSON.parse(event.data || "{}");
+        const payload = parseEvent(event);
+        if (!shouldApplyPayload("chart", payload)) return;
         if (!state.chartPayload && payload.chart) {
           state.chartPayload = payload.chart;
           if (state.chartInView) renderChart(payload.chart);
         }
       });
-      state.eventSource.addEventListener("heartbeat", () => setStatus("Live", "live"));
+      state.eventSource.addEventListener("heartbeat", (event) => {
+        state.lastHeartbeatAt = Date.now();
+        const payload = parseEvent(event);
+        shouldApplyPayload("dashboard", payload);
+        armStaleStreamTimer();
+        setConnectionState("live");
+      });
     } catch (error) {
       scheduleReconnect();
     }
@@ -834,6 +1172,16 @@
   };
 
   const initEvents = () => {
+    const refreshDashboard = () => {
+      setConnectionState(navigator.onLine === false ? "offline" : "connecting");
+      fetchVaultPulse();
+      fetchOpportunities(true);
+      fetchActivity();
+      connectStream();
+    };
+    const queueChartResize = () => schedule("chart-resize", () => state.chart?.resize?.());
+
+    refs.connectionRetry?.addEventListener("click", refreshDashboard);
     refs.refreshButtons.forEach((button) => button.addEventListener("click", () => fetchOpportunities(true)));
     refs.filterButtons.forEach((button) => {
       button.addEventListener("click", () => {
@@ -854,11 +1202,8 @@
           toggleFullscreenChart();
           return;
         }
-        if (["panic", "allocate"].includes(action)) {
-          const copy = action === "panic"
-            ? "Open emergency stop controls? This will not submit an emergency stop from the dashboard."
-            : "Open allocation preview? Review the vault flow before any live-impacting action.";
-          if (!window.confirm(copy)) return;
+        if (action === "allocate") {
+          if (!window.confirm("Open allocation preview? Review the vault flow before any live-impacting action.")) return;
         }
         openPreview(action, button.dataset.actionHref || "");
       });
@@ -879,12 +1224,22 @@
         closeStream();
         startPolling();
       } else {
+        setConnectionState(navigator.onLine === false ? "offline" : "connecting");
         fetchOpportunities(false);
         fetchActivity();
         connectStream();
       }
     });
-    window.addEventListener("resize", () => schedule("chart-resize", () => state.chart?.resize?.()), { passive: true });
+    window.addEventListener("online", refreshDashboard, { passive: true });
+    window.addEventListener("offline", () => {
+      closeStream();
+      startPolling();
+      setConnectionState("offline");
+    }, { passive: true });
+    window.addEventListener("resize", queueChartResize, { passive: true });
+    window.addEventListener("orientationchange", queueChartResize, { passive: true });
+    window.visualViewport?.addEventListener("resize", queueChartResize, { passive: true });
+    window.visualViewport?.addEventListener("scroll", queueChartResize, { passive: true });
     window.addEventListener("pagehide", cleanup, { once: true });
   };
 
@@ -893,12 +1248,38 @@
     closeStream();
     stopPolling();
     window.clearTimeout(state.reconnectTimer);
+    window.clearTimeout(state.staleStreamTimer);
+    window.clearInterval(state.expiryTimer);
     Object.values(state.requests).forEach((slot) => slot.controller?.abort());
     state.chart?.destroy?.();
   }
 
+  const restoreDisplayCache = () => {
+    state.restoreCache = readRestoreCache();
+    if (!state.restoreCache) return false;
+    if (isPlainObject(state.restoreCache.payload)) {
+      renderAccountSummary(state.restoreCache.payload);
+      renderVaultPulse(state.restoreCache.payload, { loading: false });
+    }
+    if (Array.isArray(state.restoreCache.opportunities)) {
+      state.opportunityDiagnostics = state.restoreCache.opportunityDiagnostics || { stale: true };
+      setOpportunities(state.restoreCache.opportunities);
+    }
+    if (Array.isArray(state.restoreCache.activity)) {
+      setActivity(state.restoreCache.activity);
+    }
+    if (isPlainObject(state.restoreCache.chartPayload)) {
+      state.chartPayload = state.restoreCache.chartPayload;
+    }
+    const restored = `Restored ${cacheAgeLabel(state.restoreCache.savedAt)} while live data refreshes.`;
+    showCacheState(restored);
+    setConnectionState("cached", restored);
+    return true;
+  };
+
   initEvents();
   renderAccountSummary(initialPayload);
+  if (!restoreDisplayCache()) setConnectionState("connecting");
   if (!state.active) updateEmptyForecast();
   fetchVaultPulse();
   fetchOpportunities(false);

@@ -15,6 +15,7 @@ from ..backtesting.optimizer import Profile
 from ..extensions import db
 from ..models import BacktestRun
 from ..runtime import get_service
+from ..services.one_h10_quality import ONE_H10_HORIZON_SECONDS
 
 backtests_bp = Blueprint("backtests", __name__, url_prefix="/admin/backtests")
 
@@ -26,7 +27,7 @@ _TIMEFRAME_SECONDS = {
 }
 
 _CYCLE_DURATIONS = {
-    "1h10": {"label": "1H10", "seconds": 70 * 60},
+    "1h10": {"label": "1H10", "seconds": ONE_H10_HORIZON_SECONDS},
     "4h": {"label": "4H", "seconds": 4 * 60 * 60},
     "24h": {"label": "24H", "seconds": 24 * 60 * 60},
 }
@@ -41,14 +42,20 @@ def _protect_backtests():
 def index():
     simulator = get_service("backtest_vault_simulator")
     latest_run = BacktestRun.query.order_by(BacktestRun.created_at.desc()).first()
+    user = current_user()
+    initial_symbols = simulator.symbol_payload(user=user, limit=40)
+    allocation_cap_usd = float(initial_symbols.get("allocation_cap_usd", simulator.allocation_cap_usd()) or 0.0)
+    allocation_default_usd = min(simulator.allocation_default_usd(), allocation_cap_usd)
 
     return render_template(
         "backtests/index.html",
         latest_payload=_backtest_response_payload(latest_run) if latest_run else {},
-        initial_symbols=simulator.symbol_payload(user=current_user(), limit=40),
+        initial_symbols=initial_symbols,
+        allocation_assets=initial_symbols.get("allocation_assets", []),
+        default_allocation_asset=initial_symbols.get("default_allocation_asset", "USDC"),
         paper_balance_usd=simulator.allocation_cap_usd(),
-        allocation_default_usd=simulator.allocation_default_usd(),
-        allocation_cap_usd=simulator.allocation_cap_usd(),
+        allocation_default_usd=allocation_default_usd,
+        allocation_cap_usd=allocation_cap_usd,
         timeframes=simulator.timeframes(),
     )
 
@@ -89,7 +96,7 @@ def run():
         request_input = simulator.parse_input(request.form, user=current_user())
     except ValueError as exc:
         if wants_json:
-            return jsonify({"ok": False, "error": str(exc)}), 400
+            return jsonify({"ok": False, "error": str(exc), "error_code": "invalid_backtest_input", "retryable": False}), 400
         flash(str(exc), "danger")
         return redirect(url_for("backtests.index"))
 
@@ -98,7 +105,7 @@ def run():
     except Exception as exc:  # noqa: BLE001
         message = str(exc)
         if wants_json:
-            return jsonify({"ok": False, "error": message}), 500
+            return jsonify({"ok": False, "error": message, "error_code": "backtest_run_failed", "retryable": True}), 500
         flash(message, "danger")
         return redirect(url_for("backtests.index"))
 
@@ -187,7 +194,7 @@ def _backtest_config(parameters: dict[str, Any]) -> BacktestConfig:
     symbol = str(request.form.get("symbol", "BTC")).upper().strip()
     timeframe = str(request.form.get("timeframe", current_app.config.get("DEFAULT_TIMEFRAME", "15m"))).strip()
     cycle_key = _cycle_duration_key()
-    cycle_seconds = int(_CYCLE_DURATIONS[cycle_key]["seconds"])
+    cycle_seconds = _cycle_duration_seconds(cycle_key)
     allocation_amount = _form_float("allocation_amount_usd", _allocation_default_usd())
     paper_balance = _paper_balance_usd()
 
@@ -282,7 +289,7 @@ def _backtest_parameters_dict(config: BacktestConfig) -> dict[str, Any]:
 
 def _backtest_candles(config: BacktestConfig) -> list[dict[str, Any]]:
     timeframe_seconds = _TIMEFRAME_SECONDS.get(config.timeframe, 15 * 60)
-    duration_seconds = int((config.parameters or {}).get("lock_duration_seconds") or _CYCLE_DURATIONS["1h10"]["seconds"])
+    duration_seconds = int((config.parameters or {}).get("lock_duration_seconds") or _cycle_duration_seconds("1h10"))
     warmup_candles = 30
     candle_limit = max(30, warmup_candles + math.ceil(duration_seconds / timeframe_seconds))
     return get_service("market_data").get_candles(config.symbol, config.timeframe, mode="testnet", limit=candle_limit)
@@ -295,7 +302,7 @@ def _backtest_response_payload(run: BacktestRun) -> dict[str, Any]:
     params = run.parameters if isinstance(run.parameters, dict) else {}
     nested = params.get("parameters") if isinstance(params.get("parameters"), dict) else {}
     duration_key = str(nested.get("vault_cycle_duration") or "1h10")
-    duration = _CYCLE_DURATIONS.get(duration_key, _CYCLE_DURATIONS["1h10"])
+    duration = _cycle_duration_payload(duration_key)
     initial_balance = _safe_float(params.get("initial_balance"), _safe_float(result.get("allocation_amount_usd"), 0.0))
     final_equity = _safe_float(result.get("final_equity"), initial_balance)
     pnl = final_equity - initial_balance
@@ -303,6 +310,8 @@ def _backtest_response_payload(run: BacktestRun) -> dict[str, Any]:
     wins = len([trade for trade in trades if _safe_float(trade.get("pnl")) > 0])
     losses = len([trade for trade in trades if _safe_float(trade.get("pnl")) < 0])
     flat = max(0, len(trades) - wins - losses)
+    closed_trades = int(result.get("closed_trade_count") or result.get("closed_trades") or len(trades))
+    open_trades = int(result.get("open_trade_count") or result.get("open_trades") or 0)
     payload = {
         "ok": True,
         "run_id": run.id,
@@ -318,10 +327,15 @@ def _backtest_response_payload(run: BacktestRun) -> dict[str, Any]:
         "metrics": {
             "roi": _safe_float(result.get("total_return")),
             "pnl": pnl,
+            "net_pnl": _safe_float(result.get("net_pnl"), pnl),
             "win_rate": _safe_float(result.get("win_rate")),
             "max_drawdown": _safe_float(result.get("max_drawdown")),
             "trades": int(result.get("trade_count") or 0),
+            "closed_trades": closed_trades,
+            "open_trades": open_trades,
             "fees": _safe_float(result.get("fees_paid")),
+            "average_trade": _safe_float(result.get("average_trade"), pnl / closed_trades if closed_trades else 0.0),
+            "profit_factor": _safe_float(result.get("profit_factor")),
             "ending_balance": final_equity,
         },
         "charts": {
@@ -406,6 +420,23 @@ def _downsample_series(series: list[dict[str, float]]) -> list[dict[str, float]]
 def _cycle_duration_key() -> str:
     raw = str(request.form.get("cycle_duration", "1h10")).strip().lower()
     return raw if raw in _CYCLE_DURATIONS else "1h10"
+
+
+def _one_h10_horizon_seconds() -> int:
+    return max(60, int(current_app.config.get("ONE_H10_HORIZON_SECONDS", ONE_H10_HORIZON_SECONDS) or ONE_H10_HORIZON_SECONDS))
+
+
+def _cycle_duration_seconds(key: str) -> int:
+    if str(key or "").lower() == "1h10":
+        return _one_h10_horizon_seconds()
+    return int(_CYCLE_DURATIONS.get(str(key or "").lower(), _CYCLE_DURATIONS["1h10"])["seconds"])
+
+
+def _cycle_duration_payload(key: str) -> dict[str, Any]:
+    duration = dict(_CYCLE_DURATIONS.get(str(key or "").lower(), _CYCLE_DURATIONS["1h10"]))
+    if str(key or "").lower() == "1h10":
+        duration["seconds"] = _one_h10_horizon_seconds()
+    return duration
 
 
 def _paper_balance_usd() -> float:

@@ -228,7 +228,13 @@ class MLSignalModel:
             model_type="pytorch_gru",
         ).one_or_none()
         if record is None:
-            return {"promoted": False, "horizon": horizon_key, "provider": provider_key, "model_id": model_id, "blockers": ["signal_model_not_found"]}
+            return {
+                "promoted": False,
+                "horizon": horizon_key,
+                "provider": provider_key,
+                "model_id": model_id,
+                "blockers": ["signal_model_not_found"],
+            }
         diagnostics = self.promotion_diagnostics(record)
         if not diagnostics["ready"]:
             self._record_failed_promotion("ml_signal", provider_key, horizon_key, int(model_id), diagnostics["blockers"])
@@ -582,7 +588,7 @@ class MLSignalModel:
             "5m": 5,
             "15m": 15,
             "1h": 60,
-            "1h10": 70,
+            "1h10": 60,
             "4h": 240,
             "24h": 1440,
             "1d": 1440,
@@ -693,24 +699,21 @@ class MLSignalModel:
             probabilities = torch.softmax(logits, dim=1)
             probability_rows = probabilities.detach().cpu().tolist()
         probability_decisions = [
-            self._probability_decision(
-                {label: float(row[index]) for index, label in enumerate(ACTION_LABELS)}
-            )
-            for row in probability_rows
+            self._probability_decision({label: float(row[index]) for index, label in enumerate(ACTION_LABELS)}) for row in probability_rows
         ]
         predictions = [ACTION_LABELS.index(str(decision.get("action") or "hold")) for decision in probability_decisions]
         confidences = [self._safe_float(decision.get("confidence")) for decision in probability_decisions]
-        correct = sum(1 for actual, predicted in zip(valid_y, predictions) if int(actual) == int(predicted))
+        correct = sum(1 for actual, predicted in zip(valid_y, predictions, strict=False) if int(actual) == int(predicted))
         min_confidence = float(self.config.get("ML_SIGNAL_MIN_CONFIDENCE", 0.60) or 0.60)
         actionable = [
             (actual, predicted)
-            for actual, predicted, confidence in zip(valid_y, predictions, confidences)
+            for actual, predicted, confidence in zip(valid_y, predictions, confidences, strict=False)
             if int(predicted) != 1 and float(confidence) >= min_confidence
         ]
         action_correct = sum(1 for actual, predicted in actionable if int(actual) == int(predicted))
         false_positive = sum(
             1
-            for actual, predicted, confidence in zip(valid_y, predictions, confidences)
+            for actual, predicted, confidence in zip(valid_y, predictions, confidences, strict=False)
             if int(predicted) != 1 and float(confidence) >= min_confidence and int(actual) == 1
         )
         return {
@@ -721,9 +724,7 @@ class MLSignalModel:
             "action_rate": len(actionable) / max(len(valid_y), 1),
             "action_count": len(actionable),
             "confidence_action_threshold": min_confidence,
-            "action_policy": "directional_probability"
-            if bool(self.config.get("ML_SIGNAL_DIRECTIONAL_ACTION_ENABLED", True))
-            else "argmax",
+            "action_policy": "directional_probability" if bool(self.config.get("ML_SIGNAL_DIRECTIONAL_ACTION_ENABLED", True)) else "argmax",
             "min_action_probability": self._min_action_probability(),
             "min_directional_margin": self._min_directional_margin(),
             "max_hold_probability_for_action": self._max_hold_probability_for_action(),

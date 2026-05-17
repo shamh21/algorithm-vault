@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -30,12 +31,14 @@ class DashboardOpportunityScanner:
         market_scanner: Any,
         projection_engine: Any,
         trading_connections: Any | None = None,
+        performance_tracker: Any | None = None,
     ) -> None:
         self.config = config
         self.leveraged_markets = leveraged_markets
         self.market_scanner = market_scanner
         self.projection_engine = projection_engine
         self.trading_connections = trading_connections
+        self.performance_tracker = performance_tracker
         self._cache: dict[tuple[Any, ...], _CachedOpportunities] = {}
         self._lock = threading.Lock()
         self._refreshing: set[tuple[Any, ...]] = set()
@@ -81,7 +84,9 @@ class DashboardOpportunityScanner:
                     return self._page_payload(dict(cached.payload), page_size=page_size, offset=resolved_offset, cache_hit=True)
                 if cached is not None and now < cached.stale_until:
                     self.metrics["stale_serves"] += 1
-                    self._refresh_async(key, user=user, mode=mode, market_mode=market_mode, limit=resolved_limit, ttl=ttl, stale_ttl=stale_ttl)
+                    self._refresh_async(
+                        key, user=user, mode=mode, market_mode=market_mode, limit=resolved_limit, ttl=ttl, stale_ttl=stale_ttl
+                    )
                     return self._page_payload(dict(cached.payload), page_size=page_size, offset=resolved_offset, cache_hit=True, stale=True)
 
         self.metrics["cache_misses"] += 1
@@ -109,9 +114,14 @@ class DashboardOpportunityScanner:
         markets = self._active_markets_for_user(user_id)
         rows = self._rank_markets(markets, mode=market_mode, limit=limit)
         if not rows:
+            rows = self._public_market_fallback(market_mode, limit)
+        if not rows:
             rows = self._ranking_fallback(limit)
         rows.sort(key=lambda row: float(row.get("score", 0.0) or 0.0), reverse=True)
         rows = rows[:limit]
+        performance_summary = self._performance_summary()
+        for row in rows:
+            row["performance_summary"] = performance_summary
         payload = {
             "opportunities": rows,
             "count": len(rows),
@@ -122,6 +132,7 @@ class DashboardOpportunityScanner:
                 "active_market_count": len(markets),
                 "cache_hit": False,
                 "forecast_persistence": "enabled",
+                "forecast_performance": performance_summary,
                 "preview_only": True,
             },
         }
@@ -145,8 +156,9 @@ class DashboardOpportunityScanner:
         self._refreshing.add(key)
         try:
             from flask import current_app, has_app_context
+
             app = current_app._get_current_object() if has_app_context() else None
-        except Exception:
+        except Exception:  # noqa: BLE001
             app = None
 
         def _run() -> None:
@@ -237,10 +249,22 @@ class DashboardOpportunityScanner:
             "last_scan_ms": self.metrics["last_scan_ms"],
             "last_count": self.metrics["last_count"],
             "forecast_rows": MarketForecast.query.count(),
+            "forecast_performance": self._performance_summary(),
         }
 
+    def _performance_summary(self) -> dict[str, Any]:
+        if self.performance_tracker is None:
+            return {}
+        try:
+            return dict(self.performance_tracker.rolling_metrics())
+        except Exception:  # noqa: BLE001
+            return {}
+
     def _maybe_sync_markets(self, user_id: int, market_mode: str) -> None:
-        if user_id <= 0 or not bool(self.config.get("DASHBOARD_OPPORTUNITY_DISCOVERY_REFRESH_ENABLED", False)):
+        if user_id <= 0:
+            return
+        refresh_enabled = bool(self.config.get("DASHBOARD_OPPORTUNITY_DISCOVERY_REFRESH_ENABLED", False))
+        if not refresh_enabled and self._has_active_markets_for_user(user_id):
             return
         ttl = max(30.0, float(self.config.get("DASHBOARD_OPPORTUNITY_DISCOVERY_REFRESH_SECONDS", 300.0) or 300.0))
         now = time.time()
@@ -249,8 +273,14 @@ class DashboardOpportunityScanner:
         self._last_sync_by_user[user_id] = now
         try:
             self.leveraged_markets.sync_for_user(user_id, mode=market_mode, feature_scope="allowed", persist_features=False)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return
+
+    def _has_active_markets_for_user(self, user_id: int) -> bool:
+        try:
+            return bool(self._active_markets_for_user(user_id))
+        except Exception:  # noqa: BLE001
+            return bool(self.leveraged_markets.active_markets())
 
     def _active_markets_for_user(self, user_id: int) -> list[LeveragedMarket]:
         all_markets = list(self.leveraged_markets.active_markets())
@@ -258,7 +288,7 @@ class DashboardOpportunityScanner:
             return all_markets
         try:
             connections = list(self.trading_connections.verified_tradable_connections(user_id))
-        except Exception:
+        except Exception:  # noqa: BLE001
             return all_markets
         connection_ids = {int(connection.id) for connection in connections if getattr(connection, "id", None)}
         providers = {normalize_provider(getattr(connection, "provider", "")) for connection in connections}
@@ -292,7 +322,7 @@ class DashboardOpportunityScanner:
     def _scored_candidates(self, markets: list[LeveragedMarket], *, provider: str, limit: int) -> list[Any]:
         try:
             return list(self.market_scanner.score_one_h10_markets(markets, provider=provider, limit=limit) or [])
-        except Exception:
+        except Exception:  # noqa: BLE001
             return []
 
     def _row_from_candidate(self, candidate: Any, market: LeveragedMarket | None, *, provider: str, mode: str) -> dict[str, Any]:
@@ -356,8 +386,16 @@ class DashboardOpportunityScanner:
         features: dict[str, Any],
         forecast: dict[str, Any],
     ) -> dict[str, Any]:
+        if hasattr(self.projection_engine, "enrich_forecast"):
+            forecast = self.projection_engine.enrich_forecast(
+                forecast,
+                features,
+                provider=provider,
+                symbol=symbol,
+            )
         levels = self.projection_engine.price_levels([], forecast, features)
         confidence = max(0.0, min(self._safe_float(forecast.get("confidence")), 1.0))
+        confidence_score = int(forecast.get("confidence_score") or round(confidence * 100))
         expected_bps = self._safe_float(forecast.get("expected_return_bps"), forecast.get("net_expected_return_bps", 0.0))
         model_agreement = self._safe_float(
             forecast.get("ml_agreement_score"),
@@ -372,14 +410,11 @@ class DashboardOpportunityScanner:
             self._safe_float(features.get("expected_execution_quality")),
             confidence,
         )
+        quality = forecast.get("data_quality") if isinstance(forecast.get("data_quality"), dict) else {}
+        quality_multiplier = max(0.2, min(self._safe_float(quality.get("score"), 70.0) / 100.0, 1.0))
         score = (
-            base_score
-            + confidence * 4.0
-            + max(expected_bps, 0.0) / 45.0
-            + model_agreement * 1.5
-            + fibonacci_alignment
-            + liquidity_score
-        )
+            base_score + confidence * 4.0 + max(expected_bps, 0.0) / 45.0 + model_agreement * 1.5 + fibonacci_alignment + liquidity_score
+        ) * quality_multiplier
         direction = str(forecast.get("predicted_side") or forecast.get("action") or "hold").lower()
         if direction not in {"buy", "sell", "hold"}:
             direction = "hold"
@@ -390,6 +425,7 @@ class DashboardOpportunityScanner:
             "direction": direction,
             "score": score,
             "confidence": confidence,
+            "confidence_score": confidence_score,
             "predicted_roi": expected_bps / 100.0,
             "expected_return_bps": expected_bps,
             "duration": self._duration_label(forecast),
@@ -404,6 +440,18 @@ class DashboardOpportunityScanner:
             "fibonacci_alignment": max(0.0, min(fibonacci_alignment, 1.0)),
             "blockers": [str(item) for item in (forecast.get("blockers", []) or []) if str(item)],
             "advisory_blockers": [str(item) for item in (forecast.get("advisory_blockers", []) or []) if str(item)],
+            "signal_quality": dict(forecast.get("signal_quality") or {}),
+            "market_regime": dict(forecast.get("market_regime") or {}),
+            "data_quality": dict(quality),
+            "explanation": dict(forecast.get("explanation") or {}),
+            "bullish_factors": list(forecast.get("bullish_factors") or []),
+            "bearish_factors": list(forecast.get("bearish_factors") or []),
+            "neutralizing_factors": list(forecast.get("neutralizing_factors") or []),
+            "risk_penalties": list(forecast.get("risk_penalties") or []),
+            "trend_continuation_probability": forecast.get("trend_continuation_probability"),
+            "no_trade_probability": forecast.get("no_trade_probability"),
+            "forecast_expiry_seconds": forecast.get("forecast_expiry_seconds"),
+            "performance_summary": {},
             "source": source,
             "score_breakdown": dict(features.get("scanner_score_breakdown") or {}),
             "forecast_source": forecast.get("source"),
@@ -411,6 +459,13 @@ class DashboardOpportunityScanner:
         }
 
     def _persist(self, row: dict[str, Any], forecast: dict[str, Any], features: dict[str, Any]) -> None:
+        if hasattr(self.projection_engine, "enrich_forecast"):
+            forecast = self.projection_engine.enrich_forecast(
+                forecast,
+                features,
+                provider=str(row.get("provider") or ""),
+                symbol=str(row.get("symbol") or ""),
+            )
         provider = normalize_provider(row.get("provider"))
         symbol = str(row.get("symbol") or "").upper()
         timeframe = "live"
@@ -445,6 +500,9 @@ class DashboardOpportunityScanner:
         record.zones = dict(overlays.get("zones", {}) or {})
         record.score_breakdown = dict(row.get("score_breakdown") or {})
         record.payload = {**dict(row), "forecast": forecast}
+        if self.performance_tracker is not None:
+            with suppress(Exception):
+                self.performance_tracker.record_forecast(row, forecast, features)
         record.created_at = now
         record.expires_at = now + timedelta(seconds=ttl)
         db.session.add(record)
@@ -455,9 +513,7 @@ class DashboardOpportunityScanner:
         MarketForecast.query.filter(MarketForecast.expires_at < now).delete(synchronize_session=False)
         max_rows = max(20, int(self.config.get("DASHBOARD_FORECAST_MAX_ROWS", 150) or 150))
         stale_ids = [
-            row.id
-            for row in MarketForecast.query.order_by(MarketForecast.created_at.desc()).offset(max_rows).all()
-            if row.id is not None
+            row.id for row in MarketForecast.query.order_by(MarketForecast.created_at.desc()).offset(max_rows).all() if row.id is not None
         ]
         if stale_ids:
             MarketForecast.query.filter(MarketForecast.id.in_(stale_ids)).delete(synchronize_session=False)
@@ -543,6 +599,68 @@ class DashboardOpportunityScanner:
                 }
             )
         return rows
+
+    def _public_market_fallback(self, market_mode: str, limit: int) -> list[dict[str, Any]]:
+        market_data = getattr(self.projection_engine, "market_data", None)
+        if market_data is None:
+            return []
+        symbols = [
+            str(symbol).upper() for symbol in (self.config.get("ALLOWED_SYMBOLS", ["BTC", "ETH", "SOL"]) or []) if str(symbol).strip()
+        ]
+        if not symbols:
+            symbols = ["BTC", "ETH", "SOL"]
+        try:
+            summary = market_data.get_dashboard_market_summary(
+                symbols[: max(1, min(limit, 12))],
+                str(self.config.get("DEFAULT_TIMEFRAME", "15m") or "15m"),
+                market_mode,
+            )
+        except Exception:  # noqa: BLE001
+            return []
+
+        rows: list[dict[str, Any]] = []
+        for item in summary:
+            if not isinstance(item, dict):
+                continue
+            symbol = str(item.get("symbol") or "").upper()
+            if not symbol or symbol == "N/A":
+                continue
+            mid = self._safe_float(item.get("mid")) or self._safe_float(item.get("recent_average"))
+            if mid <= 0:
+                continue
+            features = {
+                "provider": "hyperliquid",
+                "symbol": symbol,
+                "venue_symbol": symbol,
+                "close": mid,
+                "liquidity_usd": max(self._min_liquidity(), 1.0),
+                "liquidity_capacity_usd": max(self._min_liquidity(), 1.0),
+                "spread_bps": self._safe_float(item.get("spread_bps"), 2.0) or 2.0,
+                "fee_bps": self._safe_float(self.config.get("FEE_BPS"), 5.0),
+                "change_pct": self._safe_float(item.get("change_pct")),
+                "candle_count": self._safe_float(item.get("candle_count")),
+            }
+            forecast = self.projection_engine.forecast_from_features(
+                features,
+                provider="hyperliquid",
+                symbol=symbol,
+                allocation_cap_usd=self._preview_allocation(),
+                available_margin_usd=self._preview_allocation(),
+                market=None,
+            )
+            base_score = max(0.0, self._safe_float(item.get("candle_count")) / 30.0)
+            rows.append(
+                self._opportunity_row(
+                    provider="hyperliquid",
+                    symbol=symbol,
+                    venue_symbol=symbol,
+                    base_score=base_score,
+                    source="public_market_data",
+                    features=features,
+                    forecast=forecast,
+                )
+            )
+        return rows[:limit]
 
     def _duration_label(self, forecast: dict[str, Any]) -> str:
         seconds = self._safe_float(forecast.get("horizon_seconds"), 3600.0)

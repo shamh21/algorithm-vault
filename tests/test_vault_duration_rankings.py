@@ -7,12 +7,9 @@ from app.models import MLModelState, OptimizerRun, StrategyRanking
 def _patch_market(app) -> None:
     market_data = app.extensions["services"]["market_data"]
     market_data.get_candles = lambda symbol, timeframe, mode, limit: [
-        {"timestamp": index, "close": 100.0 + index * 0.01, "volume": 1000.0}
-        for index in range(max(limit, 40))
+        {"timestamp": index, "close": 100.0 + index * 0.01, "volume": 1000.0} for index in range(max(limit, 40))
     ]
-    market_data.get_order_book = lambda symbol, mode: {
-        "levels": [[{"px": "99.95", "sz": "1000"}], [{"px": "100.05", "sz": "1000"}]]
-    }
+    market_data.get_order_book = lambda symbol, mode: {"levels": [[{"px": "99.95", "sz": "1000"}], [{"px": "100.05", "sz": "1000"}]]}
 
 
 def _ranking(run_id: int, *, strategy: str, timeframe: str, duration: int, score: float) -> StrategyRanking:

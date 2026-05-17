@@ -8,10 +8,15 @@
       this.candleSeries = null;
       this.payload = null;
       this.libraryPromise = null;
+      this.resizeFrame = 0;
+      this.resizeObserver = null;
+      this.boundQueueResize = () => this.queueResize();
+      this.setupAutoResize();
     }
 
     async render(payload) {
       this.payload = payload || {};
+      this.payload.candles = this.cleanCandles(Array.isArray(this.payload.candles) ? this.payload.candles : []);
       try {
         await this.ensureChart();
         const candles = Array.isArray(this.payload.candles) ? this.payload.candles.slice(-150) : [];
@@ -27,17 +32,51 @@
         // The overlay canvas is a complete fallback when the chart library is unavailable.
       }
       this.draw();
+      this.queueResize();
     }
 
     resize() {
-      this.chart?.applyOptions?.({ autoSize: true });
+      const rect = this.host?.getBoundingClientRect?.();
+      if (rect && rect.width > 0 && rect.height > 0 && this.chart?.resize) {
+        this.chart.resize(Math.floor(rect.width), Math.floor(rect.height));
+      } else {
+        this.chart?.applyOptions?.({ autoSize: true });
+      }
       this.draw();
     }
 
     destroy() {
+      if (this.resizeFrame) {
+        cancelAnimationFrame(this.resizeFrame);
+        this.resizeFrame = 0;
+      }
+      this.resizeObserver?.disconnect?.();
+      window.removeEventListener("resize", this.boundQueueResize);
+      window.removeEventListener("orientationchange", this.boundQueueResize);
+      window.visualViewport?.removeEventListener("resize", this.boundQueueResize);
+      window.visualViewport?.removeEventListener("scroll", this.boundQueueResize);
       this.chart?.remove?.();
       this.chart = null;
       this.candleSeries = null;
+    }
+
+    setupAutoResize() {
+      if (this.host && "ResizeObserver" in window) {
+        this.resizeObserver = new ResizeObserver(this.boundQueueResize);
+        this.resizeObserver.observe(this.host);
+      }
+      window.addEventListener("resize", this.boundQueueResize, { passive: true });
+      window.addEventListener("orientationchange", this.boundQueueResize, { passive: true });
+      window.visualViewport?.addEventListener("resize", this.boundQueueResize, { passive: true });
+      window.visualViewport?.addEventListener("scroll", this.boundQueueResize, { passive: true });
+    }
+
+    queueResize() {
+      if (this.resizeFrame) return;
+      this.resizeFrame = requestAnimationFrame(() => {
+        this.resizeFrame = 0;
+        this.resize();
+      });
     }
 
     async ensureChart() {
@@ -102,9 +141,12 @@
       if (!this.chart || !this.candleSeries) {
         this.fallbackLine(ctx, candles, width, height);
       }
+      this.uncertainty(ctx, overlays, width, height, candles);
+      this.riskBands(ctx, overlays, width, height, candles);
       this.zones(ctx, overlays, width, height, candles);
       this.path(ctx, overlays, width, height, candles);
       this.confidence(ctx, overlays, width, height, candles);
+      this.forecastLabel(ctx, overlays, width, height);
     }
 
     fallbackLine(ctx, candles, width, height) {
@@ -167,8 +209,8 @@
     }
 
     confidence(ctx, overlays, width, height, candles) {
-      const upper = overlays.confidence_band?.upper;
-      const lower = overlays.confidence_band?.lower;
+      const upper = overlays.projected_range?.upper || overlays.confidence_band?.upper;
+      const lower = overlays.projected_range?.lower || overlays.confidence_band?.lower;
       if (!Array.isArray(upper) || !Array.isArray(lower) || !upper.length || upper.length !== lower.length) return;
       const allPrices = [
         ...candles.map((row) => this.number(row.close)),
@@ -194,6 +236,90 @@
       ctx.closePath();
       ctx.fill();
       ctx.restore();
+    }
+
+    uncertainty(ctx, overlays, width, height) {
+      const intensity = Math.max(0, Math.min(this.number(overlays.uncertainty_shading?.intensity, 0), 1));
+      if (!intensity) return;
+      ctx.save();
+      const gradient = ctx.createLinearGradient(width * 0.58, 0, width, 0);
+      gradient.addColorStop(0, `rgba(240,185,11,${0.02 + intensity * 0.03})`);
+      gradient.addColorStop(1, `rgba(240,185,11,${0.08 + intensity * 0.06})`);
+      ctx.fillStyle = gradient;
+      ctx.fillRect(width * 0.58, 0, width * 0.42, height);
+      ctx.restore();
+    }
+
+    riskBands(ctx, overlays, width, height, candles) {
+      const band = overlays.stop_loss_band || {};
+      const upper = this.number(band.upper);
+      const lower = this.number(band.lower);
+      if (upper > 0 && lower > 0) {
+        const y1 = this.priceToY(upper, candles, height);
+        const y2 = this.priceToY(lower, candles, height);
+        ctx.save();
+        ctx.fillStyle = "rgba(255,77,79,0.08)";
+        ctx.fillRect(0, Math.min(y1, y2), width, Math.max(Math.abs(y2 - y1), 1));
+        ctx.restore();
+      }
+      const invalidation = this.number(overlays.invalidation_zone?.price);
+      if (invalidation > 0) {
+        const y = this.priceToY(invalidation, candles, height);
+        ctx.save();
+        ctx.strokeStyle = "rgba(255,77,79,0.55)";
+        ctx.setLineDash([2, 7]);
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(width * 0.58, y);
+        ctx.lineTo(width, y);
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+    forecastLabel(ctx, overlays, width) {
+      const probability = this.number(overlays.trend_continuation_probability, NaN);
+      const regime = overlays.volatility_expansion?.state;
+      if (!Number.isFinite(probability) && !regime) return;
+      ctx.save();
+      ctx.fillStyle = "rgba(5,5,5,0.72)";
+      ctx.strokeStyle = "rgba(255,255,255,0.10)";
+      ctx.lineWidth = 1;
+      const text = [
+        Number.isFinite(probability) ? `Trend ${Math.round(probability)}%` : "",
+        regime ? String(regime).replace(/_/g, " ") : "",
+      ].filter(Boolean).join(" · ");
+      ctx.font = "700 11px Inter, system-ui, sans-serif";
+      const labelWidth = Math.min(width - 24, ctx.measureText(text).width + 22);
+      const x = Math.max(12, width - labelWidth - 12);
+      ctx.beginPath();
+      ctx.roundRect?.(x, 12, labelWidth, 26, 6);
+      if (!ctx.roundRect) ctx.rect(x, 12, labelWidth, 26);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = "rgba(255,255,255,0.82)";
+      ctx.fillText(text, x + 11, 29);
+      ctx.restore();
+    }
+
+    cleanCandles(rows) {
+      const seen = new Set();
+      const cleaned = [];
+      let previousClose = 0;
+      rows.forEach((row, index) => {
+        const time = this.number(row.time || row.timestamp || index);
+        const close = this.number(row.close || row.c || row.price);
+        if (!time || close <= 0 || seen.has(time)) return;
+        if (previousClose > 0 && Math.abs(close / previousClose - 1) > 0.45) return;
+        const open = this.number(row.open || row.o, close);
+        const high = Math.max(this.number(row.high || row.h, close), open, close);
+        const low = Math.min(this.number(row.low || row.l, close), open, close);
+        if (low <= 0 || high <= 0) return;
+        previousClose = close;
+        seen.add(time);
+        cleaned.push({ time, open, high, low, close, volume: this.number(row.volume || row.v) });
+      });
+      return cleaned.sort((a, b) => a.time - b.time).slice(-150);
     }
 
     resizeCanvas(canvas) {

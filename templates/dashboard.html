@@ -60,6 +60,16 @@
     </div>
   </header>
 
+  <section class="dashboard-connection-banner" data-dashboard-connection-banner aria-live="polite" aria-atomic="true" hidden>
+    <div>
+      <span class="trade-kicker" data-dashboard-connection-title>Connecting</span>
+      <p data-dashboard-connection-detail>Live dashboard data is refreshing.</p>
+    </div>
+    <button type="button" class="secondary" data-dashboard-retry>Retry</button>
+  </section>
+
+  <p class="dashboard-cache-state" data-cache-state aria-live="polite" hidden></p>
+
   <section class="trade-account-strip" aria-label="Operational status summary">
     <div class="trade-metric">
       <span>Account Equity</span>
@@ -81,9 +91,9 @@
       <small>{{ 'Live execution blocked' if live_blocked else ('Risk checks active' if live_blocked is not none else 'Status unavailable') }}</small>
     </div>
     <div class="trade-metric {{ 'status-error' if emergency_active else 'status-connected' }}">
-      <span>Emergency Stop</span>
+      <span>Safety Lock</span>
       <strong>{{ 'Engaged' if emergency_active else ('Clear' if emergency_active is not none else '—') }}</strong>
-      <small>{{ 'Manual review required' if emergency_active else ('Guarded controls ready' if emergency_active is not none else 'Status unavailable') }}</small>
+      <small>{{ 'Manual review required' if emergency_active else ('Risk checks active' if emergency_active is not none else 'Status unavailable') }}</small>
     </div>
     <div class="trade-metric {{ 'status-connected' if broker_label != '—' and snapshot_status == 'live' else ('status-error' if snapshot_status == 'degraded' else 'status-stale') }}">
       <span>Broker</span>
@@ -207,6 +217,21 @@
         <div><span>Confidence</span><strong data-forecast-confidence>—</strong></div>
         <div><span>R/R</span><strong data-forecast-risk>—</strong></div>
       </div>
+      <div class="forecast-trust-row" aria-label="Forecast quality state">
+        <span class="forecast-quality-chip" data-signal-quality>Quality pending</span>
+        <span class="forecast-quality-chip" data-market-regime>Regime pending</span>
+        <span class="forecast-quality-chip" data-provider-quality>Provider pending</span>
+        <span class="forecast-quality-chip" data-forecast-expiry>Expiry pending</span>
+      </div>
+      <div class="forecast-confidence-meter" data-confidence-meter role="meter" aria-label="Forecast confidence" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+        <span data-confidence-fill></span>
+      </div>
+      <details class="signal-rationale" data-signal-rationale>
+        <summary>Why this signal?</summary>
+        <div class="signal-rationale-body" data-signal-rationale-body>
+          <p>Signal rationale appears once a forecast is selected.</p>
+        </div>
+      </details>
       <p class="setup-hold-helper" data-setup-helper>The strategy is currently holding. No executable setup meets the configured risk threshold.</p>
     </article>
   </section>
@@ -291,7 +316,6 @@
     <div class="quick-action-group">
       <span>Risk</span>
       <button type="button" data-quick-action="risk" data-action-href="{{ url_for('admin.risk') }}"><span>Risk Settings</span></button>
-      <button type="button" data-quick-action="panic" data-action-href="{{ url_for('panic.index') }}"><span>Emergency Stop</span></button>
     </div>
     <div class="quick-action-group">
       <span>Data</span>
@@ -321,7 +345,7 @@
       <div class="ops-table-wrap">
         <table>
           <thead><tr><th>Strategy</th><th>Score</th><th>Recent</th><th>Drawdown</th><th>Status</th></tr></thead>
-          <tbody data-open-orders-table>
+          <tbody data-strategy-rankings-table>
             {% for ranking in strategy_rankings %}
               <tr>
                 <td>{{ ranking.strategy_name }}<br><span class="muted">{{ ranking.symbol }} / {{ ranking.timeframe }}</span></td>
@@ -343,7 +367,7 @@
       <div class="ops-table-wrap">
         <table>
           <thead><tr><th>Symbol</th><th>Side</th><th>Price</th><th>Size</th><th>Reduce</th></tr></thead>
-          <tbody data-positions-table>
+          <tbody data-open-orders-table>
             {% for order in open_orders %}
               <tr>
                 <td>{{ order.symbol }}</td>
@@ -365,7 +389,7 @@
       <div class="ops-table-wrap">
         <table>
           <thead><tr><th>Symbol</th><th>Qty</th><th>Entry</th><th>Mark</th><th>Unrealized PnL</th></tr></thead>
-          <tbody data-recent-trades-table>
+          <tbody data-positions-table>
             {% for position in positions %}
               <tr>
                 <td>{{ position.symbol }}</td>
@@ -423,7 +447,7 @@
       <div class="ops-table-wrap">
         <table>
           <thead><tr><th>Symbol</th><th>Side</th><th>Price</th><th>Size</th><th>Closed PnL</th></tr></thead>
-          <tbody>
+          <tbody data-recent-trades-table>
             {% for trade in recent_trades %}
               <tr>
                 <td>{{ trade.symbol }}</td>

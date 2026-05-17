@@ -229,6 +229,8 @@ Before first production traffic, provision a Vercel Marketplace Postgres databas
 SKIP_SCHEMA_BOOTSTRAP=1 python -m flask --app wsgi:app db upgrade
 ```
 
+If production is running in recovery SQLite because the configured Postgres target is unavailable, keep `ALGVAULT_RECOVERY_SQLITE_ENABLED=true` until the database is verified healthy, migrated, and imported. Use the safe cutover checklist in [docs/ops/postgres-recovery-cutover.md](docs/ops/postgres-recovery-cutover.md); do not change `DATABASE_URL` or disable recovery mode as part of a health-only deployment.
+
 Vercel production defaults should include:
 
 ```bash
