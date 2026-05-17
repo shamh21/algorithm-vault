@@ -201,6 +201,7 @@ def wallet():
         "wallet.html",
         balances=wallet_summary.balances,
         wallet_summary=wallet_summary,
+        wallet_view=_wallet_view_model(wallet_summary, activity_page.items),
         portfolio_total=wallet_summary.portfolio_total_usd,
         allocation_chart=_wallet_allocation_payload(wallet_summary),
         portfolio_trend=_portfolio_trend_payload(user, wallet_summary),
@@ -1774,6 +1775,190 @@ def _wallet_activity_page_number() -> int:
         return max(1, int(request.args.get("activity_page", "1") or 1))
     except (TypeError, ValueError):
         return 1
+
+
+def _wallet_view_model(wallet_summary, transactions: list[WalletTransaction]) -> dict[str, object]:
+    balances = list(getattr(wallet_summary, "balances", []) or [])
+    primary_balance = _primary_wallet_balance(balances)
+    primary_asset = str(getattr(primary_balance, "asset", "USDC") or "USDC").upper()
+    value_parts = [_wallet_balance_value_parts(balance) for balance in balances]
+    total_available = sum(part["available_usd"] for part in value_parts)
+    total_locked = sum(part["locked_usd"] for part in value_parts)
+    checked_count = sum(1 for balance in balances if str(getattr(balance, "onchain_status", "")).lower() == "checked")
+    issue_count = sum(1 for balance in balances if _wallet_balance_has_sync_issue(balance))
+    panic_locked = bool(Setting.get_json("panic_lock", False))
+    has_available_funds = any(_safe_float(getattr(balance, "available_balance", 0.0)) > 0 for balance in balances)
+    withdrawals_ready = wallet_withdrawals_enabled(current_app.config) and not panic_locked and has_available_funds
+    withdrawal_notice = ""
+    if panic_locked:
+        withdrawal_notice = "Withdrawals are paused while the safety lock is active."
+    elif not has_available_funds:
+        withdrawal_notice = "Add verified funds before requesting a withdrawal."
+    elif not wallet_withdrawals_enabled(current_app.config):
+        withdrawal_notice = "Withdrawals are waiting on server-side safety gates."
+
+    return {
+        "portfolio_total": _safe_float(getattr(wallet_summary, "portfolio_total_usd", 0.0)),
+        "available_total": total_available,
+        "locked_total": total_locked,
+        "primary_asset": primary_asset,
+        "asset_count": len(balances),
+        "checked_count": checked_count,
+        "issue_count": issue_count,
+        "sync_label": "Review needed" if issue_count else "Verified On-chain",
+        "sync_tone": "warning" if issue_count else "success",
+        "last_checked_label": _wallet_last_checked_label(balances),
+        "withdrawals_ready": withdrawals_ready,
+        "withdrawal_notice": withdrawal_notice,
+        "primary_deposit_href": url_for("consumer.deposit", asset=primary_asset),
+        "primary_withdraw_href": url_for("consumer.withdraw", asset=primary_asset),
+        "primary_convert_href": url_for("consumer.convert", from_asset=primary_asset),
+        "asset_rows": [_wallet_asset_row(balance) for balance in balances],
+        "transaction_rows": [_wallet_transaction_row(item) for item in transactions],
+    }
+
+
+def _primary_wallet_balance(balances: list[object]) -> object | None:
+    funded = [
+        balance
+        for balance in balances
+        if _safe_float(getattr(balance, "available_balance", 0.0)) + _safe_float(getattr(balance, "locked_balance", 0.0)) > 0
+    ]
+    preferred = ("USDC", "USDT", "ETH", "BTC", "SOL", "XRP")
+    for asset in preferred:
+        match = next((balance for balance in funded if str(getattr(balance, "asset", "")).upper() == asset), None)
+        if match is not None:
+            return match
+    return funded[0] if funded else (balances[0] if balances else None)
+
+
+def _wallet_asset_row(balance) -> dict[str, object]:
+    asset = str(getattr(balance, "asset", "USDC") or "USDC").upper()
+    total = _safe_float(getattr(balance, "total_balance", 0.0))
+    available = _safe_float(getattr(balance, "available_balance", 0.0))
+    locked = _safe_float(getattr(balance, "locked_balance", 0.0))
+    wallet_address = getattr(getattr(balance, "active_deposit_address", None), "address", "") or ""
+    sync_status = _wallet_sync_status(balance)
+    return {
+        "balance": balance,
+        "asset": asset,
+        "total": total,
+        "available": available,
+        "locked": locked,
+        "value_usd": _safe_float(getattr(balance, "estimated_usd_value", 0.0)),
+        "total_display": _format_asset_amount(total),
+        "available_display": _format_asset_amount(available),
+        "locked_display": _format_asset_amount(locked),
+        "onchain_display": _format_asset_amount(_safe_float(getattr(balance, "onchain_balance", 0.0)))
+        if str(getattr(balance, "onchain_status", "")).lower() == "checked"
+        else "Pending",
+        "address": wallet_address,
+        "address_short": _short_wallet_address(wallet_address),
+        "deposit_href": url_for("consumer.deposit", asset=asset),
+        "withdraw_href": url_for("consumer.withdraw", asset=asset),
+        "convert_href": url_for("consumer.convert", from_asset=asset),
+        "status": sync_status,
+    }
+
+
+def _wallet_balance_value_parts(balance) -> dict[str, float]:
+    available = _safe_float(getattr(balance, "available_balance", 0.0))
+    locked = _safe_float(getattr(balance, "locked_balance", 0.0))
+    total = max(0.0, available + locked)
+    estimated = max(0.0, _safe_float(getattr(balance, "estimated_usd_value", 0.0)))
+    price = (estimated / total) if total > 0 and estimated > 0 else max(0.0, _asset_usd_price(getattr(balance, "asset", "")))
+    return {
+        "available_usd": max(0.0, available) * price,
+        "locked_usd": max(0.0, locked) * price,
+    }
+
+
+def _wallet_transaction_row(item: WalletTransaction) -> dict[str, object]:
+    status = str(item.status or "pending").strip()
+    status_label = status.replace("_", " ").title()
+    transaction_type = str(item.transaction_type or "wallet_event").strip()
+    return {
+        "item": item,
+        "type_label": transaction_type.replace("_", " ").title(),
+        "amount_label": f"{_format_asset_amount(_safe_float(item.amount))} {item.asset}",
+        "status_label": status_label,
+        "status_tone": _wallet_transaction_status_tone(status),
+        "status_icon": _wallet_transaction_status_icon(status),
+        "meta_label": f"{item.network or item.asset} · {item.created_at.strftime('%b %d, %H:%M') if item.created_at else 'Pending'}",
+    }
+
+
+def _wallet_balance_has_sync_issue(balance) -> bool:
+    status = str(getattr(balance, "onchain_status", "") or "").lower()
+    mismatch = str(getattr(balance, "onchain_mismatch_status", "") or "").lower()
+    sync_stale = bool(getattr(balance, "sync_stale", False))
+    return sync_stale or status not in {"checked"} or mismatch in {"deficit_onchain", "surplus_onchain", "unavailable"}
+
+
+def _wallet_sync_status(balance) -> dict[str, str]:
+    status = str(getattr(balance, "onchain_status", "") or "").lower()
+    mismatch = str(getattr(balance, "onchain_mismatch_status", "") or "").lower()
+    if status == "checked" and mismatch in {"verified", "matched"}:
+        return {"label": "On-chain Verified", "tone": "verified", "icon": "OK"}
+    if status == "checked" and mismatch == "surplus_onchain":
+        return {"label": "On-chain Surplus", "tone": "warning", "icon": "Review"}
+    if status == "checked" and mismatch == "deficit_onchain":
+        return {"label": "Needs Review", "tone": "danger", "icon": "Hold"}
+    if bool(getattr(balance, "sync_stale", False)):
+        return {"label": "Sync Pending", "tone": "warning", "icon": "Sync"}
+    return {"label": "Verification Pending", "tone": "muted", "icon": "Pending"}
+
+
+def _wallet_transaction_status_tone(status: str) -> str:
+    normalized = status.lower()
+    if normalized in {"complete", "confirmed", "settled", "success"}:
+        return "success"
+    if normalized in {"failed", "rejected", "cancelled", "canceled"}:
+        return "danger"
+    if normalized in {"pending", "pending_approval", "pending_withdrawal", "submitted", "queued_treasury_solvency"}:
+        return "warning"
+    return "muted"
+
+
+def _wallet_transaction_status_icon(status: str) -> str:
+    tone = _wallet_transaction_status_tone(status)
+    if tone == "success":
+        return "OK"
+    if tone == "danger":
+        return "Hold"
+    if tone == "warning":
+        return "Pending"
+    return "Info"
+
+
+def _wallet_last_checked_label(balances: list[object]) -> str:
+    checked_values = [getattr(balance, "onchain_checked_at", None) for balance in balances if getattr(balance, "onchain_checked_at", None)]
+    if not checked_values:
+        return "Sync pending"
+    latest = max(checked_values)
+    if hasattr(latest, "strftime"):
+        return f"Checked {latest.strftime('%b %d, %H:%M')}"
+    return "Checked recently"
+
+
+def _short_wallet_address(address: str) -> str:
+    text = str(address or "").strip()
+    if not text:
+        return "Not generated"
+    if len(text) <= 18:
+        return text
+    return f"{text[:10]}...{text[-6:]}"
+
+
+def _format_asset_amount(value: object) -> str:
+    amount = _safe_float(value)
+    if abs(amount) < 0.0000005:
+        return "0"
+    if abs(amount) >= 100:
+        return f"{amount:,.2f}".rstrip("0").rstrip(".")
+    if abs(amount) >= 1:
+        return f"{amount:,.4f}".rstrip("0").rstrip(".")
+    return f"{amount:.6f}".rstrip("0").rstrip(".")
 
 
 def _vault_cycle_page_number() -> int:

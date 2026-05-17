@@ -111,7 +111,7 @@ def test_vault_assets_use_explicit_readiness_cache_busters() -> None:
     sw_source = Path("static/js/sw.js").read_text()
 
     assert "vault-shell-polish-9" in vault_source
-    assert "algvault-vault-shell-polish-9" in base_source
+    assert "algvault-vault-shell-polish-10-wallet-merge-1" in base_source
     assert "algvault-v21-vault-shell-polish-9" in sw_source
 
 

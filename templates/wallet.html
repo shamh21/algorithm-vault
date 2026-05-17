@@ -5,206 +5,244 @@
 {% block title %}Wallet · Algorithm Vault{% endblock %}
 
 {% block content %}
-<section class="wallet-exchange-shell">
-  <article class="wallet-total-card">
-    <span class="card-kicker">Verified On-chain Value</span>
-    <strong class="hero-value">${{ "%.2f"|format(portfolio_total) }}</strong>
-    <div class="wallet-actions">
-      <a href="{{ url_for('consumer.vault') }}" class="button-link primary">Allocate</a>
-      <a href="{{ url_for('consumer.convert') }}" class="button-link secondary">Convert</a>
-      <a href="{{ url_for('settings.connections') }}" class="button-link secondary">Providers</a>
+<section class="wallet-page-shell" data-wallet-page>
+  <header class="wallet-hero-panel" aria-labelledby="wallet-page-title">
+    <div class="wallet-hero-copy">
+      <span class="card-kicker">Verified On-chain Value</span>
+      <h1 id="wallet-page-title">Total Portfolio Value</h1>
+      <p>Verified on-chain balances, conversion, funding actions, and recent wallet activity in one secure view.</p>
     </div>
-  </article>
 
-  <article class="mini-chart-card wallet-chart-card" data-chart-card aria-labelledby="wallet-trend-title">
-    <div class="mini-chart-head">
+    <div class="wallet-hero-balance" aria-label="Total portfolio balance">
+      <span>Total Portfolio Balance</span>
+      <strong>${{ "%.2f"|format(wallet_view.portfolio_total) }}</strong>
+      <small>Available ${{ "%.2f"|format(wallet_view.available_total) }} · Locked ${{ "%.2f"|format(wallet_view.locked_total) }}</small>
+    </div>
+
+    <dl class="wallet-hero-metrics" aria-label="Wallet summary">
       <div>
-        <span class="card-kicker">Balance Trend</span>
-        <h2 id="wallet-trend-title">Vault Snapshots</h2>
+        <dt>Available Balance</dt>
+        <dd>${{ "%.2f"|format(wallet_view.available_total) }}</dd>
       </div>
-      <span class="metric-pill metric-pill-muted">{{ portfolio_trend.points|length }} points</span>
-    </div>
-    {% if portfolio_trend.empty %}
-      <div class="compact-state">Trend appears after vault cycles create value snapshots.</div>
-    {% else %}
-      <canvas
-        class="mini-chart-canvas"
-        data-mini-chart
-        data-chart-source="wallet-trend-data"
-        role="img"
-        aria-label="{{ portfolio_trend.summary }}"
-      ></canvas>
-    {% endif %}
-    <p class="chart-summary">{{ portfolio_trend.summary }}</p>
-  </article>
-</section>
-
-<section class="allocation-panel wallet-allocation-panel" aria-labelledby="wallet-allocation-title">
-  <div class="wallet-section-heading">
-    <div>
-      <span class="card-kicker">Allocation</span>
-      <h2 id="wallet-allocation-title">Verified Asset Mix</h2>
-    </div>
-    <span class="wallet-count">{{ allocation_chart.rows|length }} assets</span>
-  </div>
-  <div class="wallet-allocation-body">
-    <div
-      class="wallet-allocation-donut"
-      style="--allocation-gradient: {{ allocation_chart.gradient }}"
-      role="img"
-      aria-label="{{ allocation_chart.summary }}"
-    >
-      <span>${{ "%.2f"|format(allocation_chart.total) }}</span>
-      <small>On-chain</small>
-    </div>
-    <div class="allocation-bars wallet-allocation-list" role="list">
-      {% for row in allocation_chart.rows %}
-        <div class="allocation-bar-row wallet-allocation-row" role="listitem">
-          <div class="allocation-row-label">
-            <strong><i style="--asset-color: {{ row.color }}"></i>{{ row.asset }}</strong>
-            <span>{{ "%.6f"|format(row.total_balance) }} verified</span>
-          </div>
-          <div class="allocation-track" aria-hidden="true"><span style="width: {{ [row.pct, 100]|min }}%; --asset-color: {{ row.color }}"></span></div>
-          <span class="allocation-pct">${{ "%.2f"|format(row.value) }} · {{ "%.1f"|format(row.pct) }}%</span>
-        </div>
-      {% else %}
-        <div class="compact-state">No verified on-chain balances are available yet.</div>
-      {% endfor %}
-    </div>
-  </div>
-</section>
-
-<section class="wallet-assets-section" aria-label="Wallet balances">
-  <div class="wallet-section-heading">
-    <div>
-      <span class="card-kicker">Wallet</span>
-      <h2>Assets</h2>
-    </div>
-    <span class="wallet-count">{{ balances|length }} assets</span>
-  </div>
-
-  <div class="wallet-asset-grid">
-  {% for balance in balances %}
-    {% set wallet_address = balance.active_deposit_address.address if balance.active_deposit_address else "" %}
-    <article class="wallet-card balance-card wallet-asset-card">
-      <div class="wallet-asset-head">
-        {{ crypto_icon(balance.asset, "wallet-coin") }}
-        <div>
-          <h2>{{ balance.asset }}</h2>
-          <span>Verified On-chain</span>
-        </div>
-        <strong class="wallet-usd">${{ "%.2f"|format(balance.estimated_usd_value) }}</strong>
+      <div>
+        <dt>Assets</dt>
+        <dd>{{ wallet_view.asset_count }}</dd>
       </div>
-
-      <div class="wallet-balance-main">
-        <span>Verified Total</span>
-        <strong class="balance-amount">{{ "%.6f"|format(balance.total_balance) }}</strong>
+      <div>
+        <dt>Sync</dt>
+        <dd>{{ wallet_view.checked_count }}/{{ wallet_view.asset_count }} checked</dd>
       </div>
-
-      <dl class="wallet-balance-stats">
-        <div>
-          <dt>Available</dt>
-          <dd>{{ "%.6f"|format(balance.available_balance) }}</dd>
-        </div>
-        <div>
-          <dt>Locked</dt>
-          <dd>{{ "%.6f"|format(balance.locked_balance) }}</dd>
-        </div>
-        <div>
-          <dt>Status</dt>
-          <dd>
-            {% if balance.onchain_status == "checked" %}
-              Verified
-            {% else %}
-              Pending
-            {% endif %}
-          </dd>
-        </div>
-      </dl>
-
-      <div class="wallet-onchain-row">
-        {% if balance.onchain_status == "checked" %}
-          <span class="status-pill wallet-onchain-status {{ balance.onchain_mismatch_status }}">
-            On-chain Verified
+      <div>
+        <dt>Status</dt>
+        <dd>
+          <span class="wallet-status-chip wallet-status-{{ wallet_view.sync_tone }}">
+            <span aria-hidden="true"></span>{{ wallet_view.sync_label }}
           </span>
-          {% if balance.onchain_checked_at %}<span>Checked {{ balance.onchain_checked_at.strftime("%b %d, %H:%M") if balance.onchain_checked_at.strftime else balance.onchain_checked_at }}</span>{% endif %}
-        {% else %}
-          <span class="status-pill wallet-onchain-status unavailable">Verification Pending</span>
-          {% if balance.onchain_reason %}<span>{{ balance.onchain_reason }}</span>{% endif %}
-        {% endif %}
+        </dd>
       </div>
+    </dl>
 
-      <div class="wallet-card-actions wallet-action-row">
-        <a href="{{ url_for('consumer.deposit', asset=balance.asset) }}" class="button-link primary">Deposit</a>
-        <a href="{{ url_for('consumer.withdraw', asset=balance.asset) }}" class="button-link secondary">Withdraw</a>
-        <a href="{{ url_for('consumer.convert', from_asset=balance.asset) }}" class="button-link secondary">Convert</a>
+    <div class="wallet-primary-actions" aria-label="Primary wallet actions">
+      <a href="{{ wallet_view.primary_deposit_href }}" class="button-link primary">Deposit {{ wallet_view.primary_asset }}</a>
+      {% if wallet_view.withdrawals_ready %}
+        <a href="{{ wallet_view.primary_withdraw_href }}" class="button-link secondary">Withdraw {{ wallet_view.primary_asset }}</a>
+      {% else %}
+        <a href="{{ wallet_view.primary_withdraw_href }}" class="button-link secondary wallet-action-muted" aria-describedby="wallet-withdrawal-note">Withdraw</a>
+      {% endif %}
+      <a href="{{ wallet_view.primary_convert_href }}" class="button-link secondary">Convert</a>
+    </div>
+
+    <p class="wallet-trust-note" id="wallet-withdrawal-note">
+      {{ wallet_view.withdrawal_notice or wallet_view.last_checked_label }}
+    </p>
+    <p class="wallet-offline-notice" data-wallet-offline role="status" hidden>
+      Offline. Wallet balances may be stale until the connection returns.
+    </p>
+  </header>
+
+  <section class="wallet-insight-grid" aria-label="Wallet insights">
+    <article class="mini-chart-card wallet-chart-card" data-chart-card aria-labelledby="wallet-trend-title">
+      <div class="mini-chart-head">
+        <div>
+          <span class="card-kicker">Balance Trend</span>
+          <h2 id="wallet-trend-title">Vault Snapshots</h2>
+        </div>
+        <span class="metric-pill metric-pill-muted">{{ portfolio_trend.points|length }} points</span>
       </div>
+      {% if portfolio_trend.empty %}
+        <div class="compact-state">Trend appears after vault cycles create value snapshots.</div>
+      {% else %}
+        <canvas
+          class="mini-chart-canvas"
+          data-mini-chart
+          data-chart-source="wallet-trend-data"
+          role="img"
+          aria-label="{{ portfolio_trend.summary }}"
+        ></canvas>
+      {% endif %}
+      <p class="chart-summary">{{ portfolio_trend.summary }}</p>
+    </article>
 
-      <div class="wallet-address-row">
-        <span>Wallet address</span>
-        {% if wallet_address %}
-          <code title="{{ wallet_address }}">{{ wallet_address[:10] }}...{{ wallet_address[-6:] }}</code>
-        {% else %}
-          <code>Not generated</code>
-        {% endif %}
+    <article class="allocation-panel wallet-allocation-panel" aria-labelledby="wallet-allocation-title">
+      <div class="wallet-section-heading">
+        <div>
+          <span class="card-kicker">Allocation</span>
+          <h2 id="wallet-allocation-title">Asset Mix</h2>
+        </div>
+        <span class="wallet-count">{{ allocation_chart.rows|length }} assets</span>
+      </div>
+      <div class="wallet-allocation-body">
+        <div
+          class="wallet-allocation-donut"
+          style="--allocation-gradient: {{ allocation_chart.gradient }}"
+          role="img"
+          aria-label="{{ allocation_chart.summary }}"
+        >
+          <span>${{ "%.2f"|format(allocation_chart.total) }}</span>
+          <small>On-chain</small>
+        </div>
+        <div class="allocation-bars wallet-allocation-list" role="list">
+          {% for row in allocation_chart.rows %}
+            <div class="allocation-bar-row wallet-allocation-row" role="listitem">
+              <div class="allocation-row-label">
+                <strong><i style="--asset-color: {{ row.color }}"></i>{{ row.asset }}</strong>
+                <span>{{ "%.6f"|format(row.total_balance) }} verified</span>
+              </div>
+              <div class="allocation-track" aria-hidden="true"><span style="width: {{ [row.pct, 100]|min }}%; --asset-color: {{ row.color }}"></span></div>
+              <span class="allocation-pct">${{ "%.2f"|format(row.value) }} · {{ "%.1f"|format(row.pct) }}%</span>
+            </div>
+          {% else %}
+            <div class="compact-state">No verified on-chain balances are available yet.</div>
+          {% endfor %}
+        </div>
       </div>
     </article>
-  {% else %}
-    {{ empty_state('No balances available', 'Balances appear after a verified provider or supported wallet asset is available.', url_for('settings.connections'), 'Check provider') }}
-  {% endfor %}
-  </div>
-</section>
+  </section>
 
-<section class="card wallet-activity-card">
-  <div class="wallet-section-heading">
-    <div>
-      <span class="card-kicker">Wallet Activity</span>
-      <h2>Recent Transactions</h2>
+  <section class="wallet-assets-section" aria-label="Wallet balances">
+    <div class="wallet-section-heading">
+      <div>
+        <span class="card-kicker">Wallet</span>
+        <h2>Assets</h2>
+      </div>
+      <span class="wallet-count">{{ wallet_view.asset_rows|length }} assets</span>
     </div>
-  </div>
 
-  <div class="wallet-activity-list">
-    {% for item in transactions %}
-      <article class="wallet-activity-row">
-        <div>
-          <strong>{{ item.transaction_type|replace("_", " ")|title }}</strong>
-          <span>{{ item.network or item.asset }} · {{ item.created_at.strftime("%b %d, %H:%M") }}</span>
-        </div>
-        <div class="wallet-activity-amount">
-          <strong>{{ "%.6f"|format(item.amount) }} {{ item.asset }}</strong>
-          <span class="status-pill">{{ item.status|replace("_", " ")|title }}</span>
-        </div>
-      </article>
-    {% else %}
-      {{ empty_state('No activity yet', 'Funding and wallet events will appear here after deposits, withdrawals, or provider syncs.') }}
-    {% endfor %}
-  </div>
+    <div class="wallet-asset-list">
+      {% for row in wallet_view.asset_rows %}
+        <article class="wallet-card balance-card wallet-asset-row-card">
+          <div class="wallet-asset-identity">
+            {{ crypto_icon(row.asset, "wallet-coin") }}
+            <div>
+              <h3>{{ row.asset }}</h3>
+              <span>{{ row.status.label }}</span>
+            </div>
+          </div>
 
-  {% if activity_page and activity_page.total > 0 %}
-    <div class="wallet-pagination-summary">
-      {{ activity_page.start_index }}-{{ activity_page.end_index }} of {{ activity_page.total }}
+          <div class="wallet-asset-value">
+            <span>Verified Total</span>
+            <strong>{{ row.total_display }}</strong>
+            <small>${{ "%.2f"|format(row.value_usd) }}</small>
+          </div>
+
+          <dl class="wallet-asset-breakdown">
+            <div>
+              <dt>Available</dt>
+              <dd>{{ row.available_display }}</dd>
+            </div>
+            <div>
+              <dt>Locked</dt>
+              <dd>{{ row.locked_display }}</dd>
+            </div>
+            <div>
+              <dt>On-chain</dt>
+              <dd>{{ row.onchain_display }}</dd>
+            </div>
+          </dl>
+
+          <div class="wallet-row-status">
+            <span class="wallet-status-chip wallet-status-{{ row.status.tone }}">
+              <span aria-hidden="true"></span>{{ row.status.icon }} · {{ row.status.label }}
+            </span>
+            {% if row.balance.onchain_checked_at %}
+              <small>Checked {{ row.balance.onchain_checked_at.strftime("%b %d, %H:%M") if row.balance.onchain_checked_at.strftime else row.balance.onchain_checked_at }}</small>
+            {% elif row.balance.onchain_reason %}
+              <small>{{ row.balance.onchain_reason }}</small>
+            {% endif %}
+          </div>
+
+          <div class="wallet-card-actions wallet-action-row">
+            <a href="{{ row.deposit_href }}" class="button-link primary">Deposit</a>
+            <a href="{{ row.withdraw_href }}" class="button-link secondary">Withdraw</a>
+            <a href="{{ row.convert_href }}" class="button-link secondary">Convert</a>
+          </div>
+
+          <div class="wallet-address-row">
+            <span>Wallet address</span>
+            {% if row.address %}
+              <code title="{{ row.address }}">{{ row.address_short }}</code>
+            {% else %}
+              <code>Not generated</code>
+            {% endif %}
+          </div>
+        </article>
+      {% else %}
+        {{ empty_state('No balances available', 'Balances appear after a verified provider or supported wallet asset is available.', url_for('settings.connections'), 'Check provider') }}
+      {% endfor %}
     </div>
-  {% endif %}
+  </section>
 
-  {% if activity_page and activity_page.pages > 1 %}
-    <nav class="wallet-pagination" aria-label="Wallet activity pages">
-      {% if activity_page.has_prev %}
-        <a class="pagination-button" href="{{ url_for('consumer.wallet', activity_page=activity_page.prev_page) }}">Previous</a>
-      {% else %}
-        <span class="pagination-button is-disabled" aria-disabled="true">Previous</span>
+  <section class="card wallet-activity-card">
+    <div class="wallet-section-heading wallet-activity-heading">
+      <div>
+        <span class="card-kicker">Wallet Activity</span>
+        <h2>Recent Transactions</h2>
+      </div>
+      {% if activity_page and activity_page.total > 0 %}
+        <span class="wallet-count">{{ activity_page.start_index }}-{{ activity_page.end_index }} of {{ activity_page.total }}</span>
       {% endif %}
-      <span class="pagination-current">Page {{ activity_page.page }} of {{ activity_page.pages }}</span>
-      {% if activity_page.has_next %}
-        <a class="pagination-button" href="{{ url_for('consumer.wallet', activity_page=activity_page.next_page) }}">Next</a>
+    </div>
+
+    <div class="wallet-activity-list">
+      {% for row in wallet_view.transaction_rows %}
+        <article class="wallet-activity-row">
+          <div class="wallet-activity-main">
+            <strong>{{ row.type_label }}</strong>
+            <span>{{ row.meta_label }}</span>
+          </div>
+          <div class="wallet-activity-amount">
+            <strong>{{ row.amount_label }}</strong>
+            <span class="wallet-status-chip wallet-status-{{ row.status_tone }}">
+              <span aria-hidden="true"></span>{{ row.status_icon }} · {{ row.status_label }}
+            </span>
+          </div>
+        </article>
       {% else %}
-        <span class="pagination-button is-disabled" aria-disabled="true">Next</span>
-      {% endif %}
-    </nav>
-  {% endif %}
+        {{ empty_state('No activity yet', 'Funding, conversion, and wallet events will appear here after deposits, withdrawals, provider syncs, or asset conversions.') }}
+      {% endfor %}
+    </div>
+
+    {% if activity_page and activity_page.pages > 1 %}
+      <nav class="wallet-pagination" aria-label="Wallet activity pages">
+        {% if activity_page.has_prev %}
+          <a class="pagination-button" href="{{ url_for('consumer.wallet', activity_page=activity_page.prev_page) }}">Previous</a>
+        {% else %}
+          <span class="pagination-button is-disabled" aria-disabled="true">Previous</span>
+        {% endif %}
+        <span class="pagination-current">Page {{ activity_page.page }} of {{ activity_page.pages }}</span>
+        {% if activity_page.has_next %}
+          <a class="pagination-button" href="{{ url_for('consumer.wallet', activity_page=activity_page.next_page) }}">Next</a>
+        {% else %}
+          <span class="pagination-button is-disabled" aria-disabled="true">Next</span>
+        {% endif %}
+      </nav>
+    {% endif %}
+  </section>
 </section>
 <script type="application/json" id="wallet-trend-data">{{ portfolio_trend|tojson }}</script>
 {% endblock %}
 
 {% block page_scripts %}
+<script defer src="{{ url_for('static', filename='js/wallet.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}-merged-wallet-ux-1"></script>
 <script defer src="{{ url_for('static', filename='js/mini-charts.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}-mini-charts-1"></script>
 {% endblock %}

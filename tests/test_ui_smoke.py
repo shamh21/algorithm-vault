@@ -571,16 +571,16 @@ def test_wallet_activity_is_paginated_and_retained_to_50_records(app) -> None:
 
     assert first_page.status_code == 200
     assert WalletTransaction.query.filter_by(user_id=user.id).count() == 50
-    assert b"54.000000 USDC" in first_page.data
-    assert b"50.000000 USDC" in first_page.data
-    assert b"49.000000 USDC" not in first_page.data
+    assert b"54 USDC" in first_page.data
+    assert b"50 USDC" in first_page.data
+    assert b"49 USDC" not in first_page.data
     assert b"Page 1 of 10" in first_page.data
 
     second_page = client.get("/wallet?activity_page=2")
 
     assert second_page.status_code == 200
-    assert b"49.000000 USDC" in second_page.data
-    assert b"54.000000 USDC" not in second_page.data
+    assert b"49 USDC" in second_page.data
+    assert b"54 USDC" not in second_page.data
 
 
 def test_convert_page_converts_between_wallet_assets(app) -> None:

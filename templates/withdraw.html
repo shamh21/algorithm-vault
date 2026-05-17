@@ -3,58 +3,132 @@
 {% block title %}Withdraw {{ balance.asset }} · Algorithm Vault{% endblock %}
 
 {% block content %}
-<section class="modal-page-shell">
-  <article class="vault-card wallet-flow-card">
-    <span class="card-kicker">Withdraw</span>
-    <h1>Withdraw {{ balance.asset }}</h1>
-    <p class="muted">Destination addresses are validated. Test mode simulates; live mode submits to your configured provider.</p>
+<section class="modal-page-shell wallet-flow-shell">
+  <article class="vault-card wallet-flow-card wallet-withdraw-card">
+    <header class="wallet-flow-head">
+      <span class="card-kicker">Withdraw</span>
+      <h1>Withdraw {{ balance.asset }}</h1>
+      <p class="muted">Withdrawals are validated server-side and may require approval before broadcast.</p>
+    </header>
 
-    <div class="balance-pill-row">
-      <span class="balance-pill positive">Available {{ "%.6f"|format(balance.available_balance) }} {{ balance.asset }}</span>
-      <span class="balance-pill warning">Locked {{ "%.6f"|format(balance.locked_balance) }} {{ balance.asset }}</span>
-    </div>
+    <dl class="wallet-flow-balance" aria-label="{{ balance.asset }} withdrawal balance">
+      <div>
+        <dt>Available</dt>
+        <dd>{{ "%.6f"|format(balance.available_balance) }} {{ balance.asset }}</dd>
+      </div>
+      <div>
+        <dt>Locked</dt>
+        <dd>{{ "%.6f"|format(balance.locked_balance) }} {{ balance.asset }}</dd>
+      </div>
+      <div>
+        <dt>Maximum</dt>
+        <dd>{{ "%.6f"|format(max_withdrawal_amount or 0) }} {{ balance.asset }}</dd>
+      </div>
+    </dl>
 
-    <form method="post" action="{{ url_for('consumer.withdraw', asset=balance.asset) }}" class="form-grid" data-disable-on-submit>
+    <form method="post" action="{{ url_for('consumer.withdraw', asset=balance.asset) }}" class="form-grid wallet-withdraw-form" data-disable-on-submit>
       {{ csrf_input()|safe }}
       {% if errors and errors.get("form") %}
-        <div class="flash danger">{{ errors.get("form") }}</div>
+        <div class="flash danger" role="alert">{{ errors.get("form") }}</div>
       {% endif %}
-        <label>Destination Address
-        <input type="text" name="withdraw_address" placeholder="Paste destination address" value="{{ form_values.withdraw_address if form_values else '' }}" required>
-        {% if errors and errors.get("withdraw_address") %}<span class="field-error">{{ errors.get("withdraw_address") }}</span>{% endif %}
-      </label>
-      <label>Amount
-        <input type="number" name="amount" min="0" max="{{ max_withdrawal_amount or 0 }}" step="0.000001" inputmode="decimal" value="{{ form_values.amount if form_values else '' }}" required>
-        {% if errors and errors.get("amount") %}<span class="field-error">{{ errors.get("amount") }}</span>{% endif %}
-      </label>
-      {% if max_withdrawal_amount and max_withdrawal_amount > 0 %}
-        <label class="checkbox-row">
-          <input type="checkbox" name="withdraw_max" value="1">
-          <span>Withdraw max {{ "%.6f"|format(max_withdrawal_amount) }} {{ balance.asset }}</span>
-        </label>
-      {% endif %}
-      <label>Network
-        <select name="network">
-          {% for network in networks %}
-            <option value="{{ network }}" {% if network == (form_values.network if form_values else selected_network) %}selected{% endif %}>{{ network }}</option>
-          {% endfor %}
-        </select>
-        {% if errors and errors.get("network") %}<span class="field-error">{{ errors.get("network") }}</span>{% endif %}
-      </label>
-      <label>Authenticator Code
-        <input type="text" name="totp_code" inputmode="numeric" pattern="[0-9]{6}" autocomplete="one-time-code" placeholder="000000" required>
-        {% if errors and errors.get("totp_code") %}<span class="field-error">{{ errors.get("totp_code") }}</span>{% endif %}
-      </label>
 
-      <div class="risk-note">
-        <strong>Check asset and network before submitting.</strong>
-        <span>Withdrawals may incur fees and may remain pending during backend processing.</span>
+      <div class="wallet-form-section">
+        <span class="wallet-step-index">1</span>
+        <label for="withdraw-address">Destination Address</label>
+        <input
+          id="withdraw-address"
+          type="text"
+          name="withdraw_address"
+          placeholder="Paste destination address"
+          value="{{ form_values.withdraw_address if form_values else '' }}"
+          autocomplete="off"
+          autocapitalize="none"
+          spellcheck="false"
+          required
+          aria-describedby="withdraw-address-help{% if errors and errors.get('withdraw_address') %} withdraw-address-error{% endif %}"
+          {% if errors and errors.get("withdraw_address") %}aria-invalid="true"{% endif %}
+        >
+        <small id="withdraw-address-help">Use a destination address that matches {{ balance.asset }} on the selected network.</small>
+        {% if errors and errors.get("withdraw_address") %}<span class="field-error" id="withdraw-address-error">{{ errors.get("withdraw_address") }}</span>{% endif %}
       </div>
 
-      <button type="submit" class="primary" data-loading-label="Submitting...">Submit Withdrawal</button>
-    </form>
+      <div class="wallet-form-section">
+        <span class="wallet-step-index">2</span>
+        <label for="withdraw-amount">Amount</label>
+        <input
+          id="withdraw-amount"
+          type="number"
+          name="amount"
+          min="0"
+          max="{{ max_withdrawal_amount or 0 }}"
+          step="0.000001"
+          inputmode="decimal"
+          value="{{ form_values.amount if form_values else '' }}"
+          required
+          aria-describedby="withdraw-amount-help{% if errors and errors.get('amount') %} withdraw-amount-error{% endif %}"
+          {% if errors and errors.get("amount") %}aria-invalid="true"{% endif %}
+        >
+        <small id="withdraw-amount-help">Withdraw max {{ "%.6f"|format(max_withdrawal_amount or 0) }} {{ balance.asset }} based on server-verified availability.</small>
+        {% if errors and errors.get("amount") %}<span class="field-error" id="withdraw-amount-error">{{ errors.get("amount") }}</span>{% endif %}
+        {% if max_withdrawal_amount and max_withdrawal_amount > 0 %}
+          <label class="checkbox-row wallet-max-row">
+            <input type="checkbox" name="withdraw_max" value="1">
+            <span>Use maximum available amount</span>
+          </label>
+        {% endif %}
+      </div>
 
-    <a href="{{ url_for('consumer.wallet') }}" class="button-link secondary">Back to Wallet</a>
+      <div class="wallet-form-section wallet-form-section-pair">
+        <div>
+          <span class="wallet-step-index">3</span>
+          <label for="withdraw-network">Network</label>
+          <select
+            id="withdraw-network"
+            name="network"
+            aria-describedby="{% if errors and errors.get('network') %}withdraw-network-error{% else %}withdraw-network-help{% endif %}"
+            {% if errors and errors.get("network") %}aria-invalid="true"{% endif %}
+          >
+            {% for network in networks %}
+              <option value="{{ network }}" {% if network == (form_values.network if form_values else selected_network) %}selected{% endif %}>{{ network }}</option>
+            {% endfor %}
+          </select>
+          <small id="withdraw-network-help">Network must match the destination address.</small>
+          {% if errors and errors.get("network") %}<span class="field-error" id="withdraw-network-error">{{ errors.get("network") }}</span>{% endif %}
+        </div>
+        <div>
+          <span class="wallet-step-index">4</span>
+          <label for="withdraw-totp">Authenticator Code</label>
+          <input
+            id="withdraw-totp"
+            type="text"
+            name="totp_code"
+            inputmode="numeric"
+            pattern="[0-9]{6}"
+            autocomplete="one-time-code"
+            placeholder="000000"
+            required
+            aria-describedby="withdraw-totp-help{% if errors and errors.get('totp_code') %} withdraw-totp-error{% endif %}"
+            {% if errors and errors.get("totp_code") %}aria-invalid="true"{% endif %}
+          >
+          <small id="withdraw-totp-help">Enter the current 6-digit code.</small>
+          {% if errors and errors.get("totp_code") %}<span class="field-error" id="withdraw-totp-error">{{ errors.get("totp_code") }}</span>{% endif %}
+        </div>
+      </div>
+
+      <div class="risk-note wallet-flow-note">
+        <strong>Check asset, network, address, and amount before submitting.</strong>
+        <span>Funds can remain pending while server-side safety gates, approval, and provider confirmation complete.</span>
+      </div>
+
+      <div class="wallet-flow-submit">
+        <button type="submit" class="primary" data-loading-label="Submitting...">Submit Withdrawal</button>
+        <a href="{{ url_for('consumer.wallet') }}" class="button-link secondary">Back to Wallet</a>
+      </div>
+    </form>
   </article>
 </section>
+{% endblock %}
+
+{% block page_scripts %}
+<script defer src="{{ url_for('static', filename='js/wallet.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}-merged-wallet-ux-1"></script>
 {% endblock %}

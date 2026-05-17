@@ -3,62 +3,86 @@
 {% block title %}Deposit {{ balance.asset }} · Algorithm Vault{% endblock %}
 
 {% block content %}
-<section class="modal-page-shell">
-  <article class="vault-card wallet-flow-card">
-    <span class="card-kicker">Deposit</span>
-    <h1>{{ balance.asset }} Deposit Address</h1>
-    <p class="muted">Use a generated custody or configured exchange address. We only show verified addresses.</p>
+<section class="modal-page-shell wallet-flow-shell">
+  <article class="vault-card wallet-flow-card wallet-deposit-card">
+    <header class="wallet-flow-head">
+      <span class="card-kicker">Deposit</span>
+      <h1>{{ balance.asset }} Deposit Address</h1>
+      <p class="muted">Use the active address for this asset and network only. Wallet addresses stay server-generated or provider-configured.</p>
+    </header>
 
-    <form method="get" action="{{ url_for('consumer.deposit', asset=balance.asset) }}" class="inline-form">
-      <label>Network
-        <select name="network" onchange="this.form.submit()">
-          {% for network in networks %}
-            <option value="{{ network }}" {% if network == selected_network %}selected{% endif %}>{{ network }}</option>
-          {% endfor %}
-        </select>
-      </label>
+    <form method="get" action="{{ url_for('consumer.deposit', asset=balance.asset) }}" class="wallet-network-form">
+      <label for="deposit-network">Network</label>
+      <select id="deposit-network" name="network" onchange="this.form.submit()" aria-describedby="deposit-network-help">
+        {% for network in networks %}
+          <option value="{{ network }}" {% if network == selected_network %}selected{% endif %}>{{ network }}</option>
+        {% endfor %}
+      </select>
+      <small id="deposit-network-help">Only send {{ balance.asset }} on the selected network.</small>
     </form>
 
     {% if address %}
-      <div class="deposit-address-layout">
-        <img class="qr-code" src="{{ qr_code_uri }}" alt="{{ balance.asset }} deposit address QR code">
+      <div class="deposit-address-layout wallet-address-layout">
+        <div class="wallet-qr-frame">
+          <img class="qr-code" src="{{ qr_code_uri }}" alt="{{ balance.asset }} {{ selected_network }} deposit address QR code">
+        </div>
         <div class="address-copy-panel">
-          <label>Current Active Address
-            <input type="text" value="{{ address.address }}" readonly data-copy-source>
-          </label>
-          <button type="button" class="secondary copy-button" data-copy-button>Copy</button>
-          <span class="muted">Version {{ address.version }} · Created {{ address.created_at.strftime("%Y-%m-%d %H:%M") }}</span>
+          <label for="deposit-address">Current Active Address</label>
+          <input id="deposit-address" type="text" value="{{ address.address }}" readonly data-copy-source aria-describedby="deposit-address-help">
+          <div class="wallet-copy-actions">
+            <button type="button" class="secondary copy-button" data-copy-button data-copy-default="Copy address">Copy address</button>
+            <span class="wallet-copy-feedback" data-copy-feedback aria-live="polite"></span>
+          </div>
+          <small id="deposit-address-help">Version {{ address.version }} · Created {{ address.created_at.strftime("%Y-%m-%d %H:%M") }}</small>
         </div>
       </div>
     {% else %}
-      <div class="empty-state">
+      <div class="empty-state wallet-flow-state" role="status">
         <span class="coin-icon" aria-hidden="true">!</span>
         <strong>No deposit address configured for this asset/network.</strong>
         <span class="muted">Enable live wallet key generation or configure a real custody/exchange {{ balance.asset }} address for {{ selected_network }} before accepting deposits.</span>
       </div>
     {% endif %}
 
-    <div class="risk-note">
+    <div class="wallet-flow-steps" aria-label="Deposit safety steps">
+      <div>
+        <span>1</span>
+        <strong>Match the network</strong>
+        <small>{{ selected_network }} only for this address.</small>
+      </div>
+      <div>
+        <span>2</span>
+        <strong>Send {{ balance.asset }}</strong>
+        <small>Unsupported assets or networks can be unrecoverable.</small>
+      </div>
+      <div>
+        <span>3</span>
+        <strong>Wait for confirmation</strong>
+        <small>Balances update after provider confirmation.</small>
+      </div>
+    </div>
+
+    <div class="risk-note wallet-flow-note">
       <strong>Send only {{ balance.asset }} on {{ selected_network }}{% if address %} to this address{% endif %}.</strong>
       <span>Wrong assets or networks can result in loss. Fees may also apply.</span>
     </div>
 
     {% if address %}
-      <form method="post" action="{{ url_for('consumer.rotate_address', asset=balance.asset, network=selected_network) }}" class="form-grid rotate-form" data-disable-on-submit>
+      <form method="post" action="{{ url_for('consumer.rotate_address', asset=balance.asset, network=selected_network) }}" class="form-grid rotate-form wallet-rotate-form" data-disable-on-submit>
         {{ csrf_input()|safe }}
         <label class="checkbox-row">
           <input type="checkbox" name="confirm_rotate">
-          I understand rotating this address renders the old address inactive and it should not be reused.
+          <span>I understand rotating this address renders the old address inactive and it should not be reused.</span>
         </label>
         <button type="submit" class="secondary" data-loading-label="Rotating...">Rotate Address</button>
       </form>
     {% endif %}
 
-    <a href="{{ url_for('consumer.wallet') }}" class="button-link secondary">Back to Wallet</a>
+    <a href="{{ url_for('consumer.wallet') }}" class="button-link secondary wallet-back-link">Back to Wallet</a>
   </article>
 </section>
 {% endblock %}
 
 {% block page_scripts %}
-<script defer src="{{ url_for('static', filename='js/wallet.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}"></script>
+<script defer src="{{ url_for('static', filename='js/wallet.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}-merged-wallet-ux-1"></script>
 {% endblock %}
