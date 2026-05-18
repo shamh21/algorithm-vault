@@ -289,7 +289,7 @@
       const status = String(row.status || (row.error ? "failed" : "simulated")).toLowerCase();
       const validation = row.market_history_validation || {};
       const historyText = historyLabel(validation, row.fallback_timeframe);
-      const detail = row.error || row.skip_reason || historyText || row.exchange || row.provider_label || "Enabled venue";
+      const detail = row.error || row.skip_reason || fundingLabel(row) || historyText || row.exchange || row.provider_label || "Enabled venue";
       return `
       <div class="backtest-asset-row is-${escapeHtml(status)}">
         <div>
@@ -395,6 +395,14 @@
     const required = number(validation.required_candle_count, NaN);
     if (!Number.isFinite(valid) || !Number.isFinite(required)) return "--";
     return `${Math.round(valid)}/${Math.round(required)}`;
+  }
+  function fundingLabel(row) {
+    const fundingAsset = String(row.funding_asset || row.vault_allocation_asset || "").toUpperCase();
+    const collateralAsset = String(row.collateral_asset || row.quote_asset || "").toUpperCase();
+    if (row.conversion_required && fundingAsset && collateralAsset) return `Funded by ${fundingAsset} · paper converts to ${collateralAsset}`;
+    if (fundingAsset && collateralAsset && fundingAsset !== collateralAsset) return `Funded by ${fundingAsset} · collateral ${collateralAsset}`;
+    if (fundingAsset && fundingAsset !== String(row.asset || row.symbol || "").toUpperCase()) return `Funded by ${fundingAsset}`;
+    return "";
   }
   function historyLabel(validation, fallback) {
     if (!validation || typeof validation !== "object") return fallback ? `fallback ${fallback}` : "";

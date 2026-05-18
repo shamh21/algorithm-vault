@@ -1191,6 +1191,73 @@ def test_backtests_json_run_persists_multiple_vault_allocation_assets(app) -> No
     assert run.parameters["parameters"]["selected_allocation_assets"] == ["USDC", "ETH"]
 
 
+def test_backtests_usdt_funding_runs_hyperliquid_usdc_market_universe(app) -> None:
+    _patch_market_data(app)
+    admin, admin_secret = _create_user(username="backtestusdtfunding", role="admin")
+    _seed_wallet_balance(admin, "USDT", 30.0, estimated_usd=30.0)
+    _seed_backtest_market(provider="hyperliquid", symbol="BTC", venue_symbol="BTC")
+    _seed_backtest_market(provider="hyperliquid", symbol="ETH", venue_symbol="ETH")
+    client = app.test_client()
+    _login(client, "backtestusdtfunding", admin_secret)
+
+    response = client.post(
+        "/admin/backtests/run",
+        data={"allocation_amount_usd": "30", "allocation_assets": "USDT", "cycle_duration": "1h10"},
+        headers={"Accept": "application/json"},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    diagnostic_assets = {row["asset"] for row in payload["asset_diagnostics"]}
+    assert diagnostic_assets & {"BTC", "ETH"}
+    assert not any(row["asset"] == "USDT" and row["error_code"] == "market_unavailable" for row in payload["asset_diagnostics"])
+    assert payload["summary"]["allocation_assets"] == ["USDT"]
+    assert payload["summary"]["funding_assets"] == ["USDT"]
+    assert payload["summary"]["collateral_asset"] == "USDC"
+    assert payload["summary"]["conversion_required"] is True
+    assert payload["summary"]["conversion_from"] == "USDT"
+    assert payload["summary"]["conversion_to"] == "USDC"
+    assert payload["conversion_status"] == "simulated"
+    first_market = next(row for row in payload["asset_diagnostics"] if row["asset"] in {"BTC", "ETH"})
+    assert first_market["funding_asset"] == "USDT"
+    assert first_market["collateral_asset"] == "USDC"
+    assert first_market["conversion_required"] is True
+    assert first_market["conversion_status"] == "simulated"
+    assert Order.query.count() == 0
+    assert StrategyRun.query.count() == 0
+    assert VaultCycle.query.count() == 0
+
+
+def test_backtests_multi_funding_assets_do_not_filter_market_universe(app) -> None:
+    _patch_market_data(app)
+    admin, admin_secret = _create_user(username="backtestmultifunding", role="admin")
+    _seed_wallet_balance(admin, "USDT", 300.0, estimated_usd=300.0)
+    _seed_wallet_balance(admin, "ETH", 2.0, estimated_usd=300.0)
+    _seed_backtest_market(provider="hyperliquid", symbol="BTC", venue_symbol="BTC")
+    _seed_backtest_market(provider="hyperliquid", symbol="ETH", venue_symbol="ETH")
+    client = app.test_client()
+    _login(client, "backtestmultifunding", admin_secret)
+
+    response = client.post(
+        "/admin/backtests/run",
+        data={"allocation_amount_usd": "500", "allocation_assets": ["USDT", "ETH"], "cycle_duration": "1h10"},
+        headers={"Accept": "application/json"},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    diagnostic_assets = {row["asset"] for row in payload["asset_diagnostics"]}
+    assert {"BTC", "ETH"} <= diagnostic_assets
+    assert not any(row["asset"] == "USDT" and row["error_code"] == "market_unavailable" for row in payload["asset_diagnostics"])
+    assert payload["summary"]["allocation_assets"] == ["USDT", "ETH"]
+    assert payload["summary"]["funding_assets"] == ["USDT", "ETH"]
+    assert payload["summary"]["conversion_required"] is True
+    assert BacktestRun.query.count() == 1
+    assert Order.query.count() == 0
+    assert StrategyRun.query.count() == 0
+    assert VaultCycle.query.count() == 0
+
+
 def test_backtests_continue_when_one_asset_has_insufficient_history(app) -> None:
     _patch_market_data(app)
     admin, admin_secret = _create_user(username="backtestpartialhistory", role="admin")
