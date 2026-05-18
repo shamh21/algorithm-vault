@@ -1212,6 +1212,22 @@ class RealWalletCustodyService:
         )
         return [candidate for candidate in candidates if self._wallet_address_withdrawable(candidate)]
 
+    def _withdrawal_receipt_source_address(self, withdrawal: WalletWithdrawal) -> str:
+        if withdrawal.source_wallet_address_id:
+            source = db.session.get(WalletAddress, int(withdrawal.source_wallet_address_id))
+            if (
+                source is not None
+                and source.user_id == withdrawal.user_id
+                and source.asset == withdrawal.asset
+                and source.network == withdrawal.network
+            ):
+                return str(source.address or "")
+            return ""
+        try:
+            return str(self._withdrawal_source(withdrawal).address or "")
+        except RuntimeError:
+            return ""
+
     def _receipt_matches_withdrawal(self, withdrawal: WalletWithdrawal, receipt: dict[str, Any]) -> bool:
         asset = self._asset_key(withdrawal.asset)
         if asset == "ETH":
@@ -1226,8 +1242,10 @@ class RealWalletCustodyService:
         contract = adapter._token_contract(asset, withdrawal.network).lower()  # noqa: SLF001
         decimals = adapter._token_decimals(asset, withdrawal.network)  # noqa: SLF001
         amount_units = _decimal_units(withdrawal.amount, decimals)
-        source = self._withdrawal_source(withdrawal)
-        source_topic = "0x" + source.address.lower().replace("0x", "").rjust(64, "0")
+        source_address = self._withdrawal_receipt_source_address(withdrawal)
+        if not source_address:
+            return False
+        source_topic = "0x" + source_address.lower().replace("0x", "").rjust(64, "0")
         destination_topic = "0x" + withdrawal.destination_address.lower().replace("0x", "").rjust(64, "0")
         for log in receipt.get("logs") or []:
             if str(log.get("address") or "").lower() != contract:

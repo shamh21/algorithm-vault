@@ -1247,6 +1247,78 @@ def test_reconcile_successful_erc20_withdrawal_clears_lock(app) -> None:
     assert balance.locked_balance == 0.0
 
 
+def test_reconcile_successful_legacy_erc20_withdrawal_under_mpc_mode_clears_lock(app) -> None:
+    _enable_generated_wallets(app)
+    app.config["WALLET_CUSTODY_MODE"] = "mpc"
+    user, _ = _create_user("reconcilelegacympc")
+    account = WalletAccount(user_id=user.id, provider="in_app_custody", asset="USDT", network="Ethereum", status="active")
+    db.session.add(account)
+    db.session.flush()
+    source = WalletAddress(
+        wallet_account_id=account.id,
+        user_id=user.id,
+        asset="USDT",
+        network="Ethereum",
+        address="0x2222222222222222222222222222222222222222",
+        status="active",
+    )
+    source.encrypted_metadata = {"custody": "in_app", "encrypted_private_key": "legacy"}
+    db.session.add(source)
+    db.session.flush()
+    db.session.add(WalletBalance(user_id=user.id, asset="USDT", available_balance=1.0, locked_balance=1.0))
+    withdrawal = WalletWithdrawal(
+        user_id=user.id,
+        source_wallet_address_id=source.id,
+        asset="USDT",
+        network="Ethereum",
+        destination_address="0x1111111111111111111111111111111111111111",
+        amount=1.0,
+        status="submitted",
+        provider_reference="0xcomplete",
+        idempotency_token="manual:legacy-mpc-complete",
+    )
+    db.session.add(withdrawal)
+    db.session.flush()
+    db.session.add(
+        WalletTransaction(
+            user_id=user.id,
+            asset="USDT",
+            amount=1.0,
+            transaction_type="withdrawal",
+            status="pending_withdrawal",
+            network="Ethereum",
+            note=f"Withdrawal workflow {withdrawal.id}: submitted.",
+        )
+    )
+    source_topic = "0x" + source.address.lower().replace("0x", "").rjust(64, "0")
+    destination_topic = "0x" + withdrawal.destination_address.lower().replace("0x", "").rjust(64, "0")
+    receipt = {
+        "status": "0x1",
+        "logs": [
+            {
+                "address": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+                "topics": [
+                    "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+                    source_topic,
+                    destination_topic,
+                ],
+                "data": hex(1_000_000),
+            }
+        ],
+    }
+    custody = RealWalletCustodyService(app.config, adapters=[_ConfirmingAdapter(receipt)])
+
+    result = custody.reconcile_withdrawal(withdrawal, commit=True)
+
+    balance = WalletBalance.query.filter_by(user_id=user.id, asset="USDT").one()
+    tx = WalletTransaction.query.filter_by(user_id=user.id, transaction_type="withdrawal").one()
+    assert result["status"] == "complete"
+    assert withdrawal.status == "complete"
+    assert tx.status == "complete"
+    assert balance.available_balance == 1.0
+    assert balance.locked_balance == 0.0
+
+
 def test_platform_treasury_create_and_topup_keeps_private_key_encrypted(app, monkeypatch) -> None:
     _enable_generated_wallets(app)
     app.config["PLATFORM_GAS_TREASURY_ENABLED"] = True
