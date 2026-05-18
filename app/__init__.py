@@ -1143,7 +1143,9 @@ def _set_response_headers(app: Flask, response: Response) -> Response:
         response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
         response.headers["Access-Control-Allow-Headers"] = request.headers.get(
             "Access-Control-Request-Headers",
-            "Accept, Content-Type, X-CSRF-Token, X-Requested-With, Idempotency-Key",
+            "Accept, Content-Type, X-CSRF-Token, X-Requested-With, Idempotency-Key, "
+            "X-AlgVault-User-Id, X-AlgVault-Internal-Timestamp, X-AlgVault-Internal-Body-SHA256, "
+            "X-AlgVault-Internal-Signature",
         )
         response.headers["Access-Control-Max-Age"] = "600"
         vary = response.headers.get("Vary", "")

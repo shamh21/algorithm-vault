@@ -229,6 +229,8 @@
   }
 
   function metricLabel(provider, status) {
+    if (provider.conversion_required && provider.conversion_status === "planned") return "Auto-converts";
+    if (provider.fixed_egress_status === "pending" || provider.fixed_egress_status === "missing") return "Fixed egress";
     if (status === "ready_auto_funded" || provider.funding_status === "auto_funded") return "Auto-funded";
     if (status === "geo_restricted") return "Recheck provider";
     if (status === "needs_verification") return "Verify";
@@ -387,9 +389,13 @@
     card.querySelector("[data-provider-allocation]").textContent =
       numberValue(provider.allocation_pct, 0) > 0 ? formatPercent(provider.allocation_pct) : formatPercent(provider.allocation_weight);
     if (blockerEl) {
-      const text = blockerText(topBlocker) || provider.funding_detail || provider.funding_label || "";
+      const conversionText =
+        provider.conversion_required && provider.conversion_status === "planned"
+          ? `Auto converts allocation to ${provider.conversion_to || "collateral"}`
+          : "";
+      const text = blockerText(topBlocker) || conversionText || provider.funding_detail || provider.funding_label || "";
       blockerEl.textContent = text;
-      blockerEl.hidden = !text || status === "ready" || !enabled;
+      blockerEl.hidden = !text || (status === "ready" && !conversionText) || !enabled;
     }
   }
 

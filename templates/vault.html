@@ -104,17 +104,21 @@
             {% endfor %}
             {% set provider_status = preview.state.status|default(preview.state.readiness_state|default('checking')) %}
             {% set funding_status = preview.state.funding_status|default('') %}
+            {% set conversion_required = preview.state.conversion_required|default(false) %}
+            {% set conversion_status = preview.state.conversion_status|default('') %}
+            {% set fixed_egress_status = preview.state.fixed_egress_status|default('') %}
             {% set is_ready = provider_status in ['ready', 'ready_auto_funded'] %}
             {% set is_auto_funded = provider_status == 'ready_auto_funded' or funding_status == 'auto_funded' %}
             {% set is_restricted = provider_status == 'geo_restricted' %}
             {% set is_blocked = provider_status in ['blocked', 'not_connected', 'provider_unavailable', 'credential_error', 'transfer_failed'] %}
             {% set status_label = 'Ready' if is_ready else 'Provider restricted' if is_restricted else 'Wallet needed' if provider_status == 'needs_wallet' else 'Credentials needed' if provider_status == 'needs_api_credentials' else 'Verify' if provider_status == 'needs_verification' else 'Provider unavailable' if provider_status == 'provider_unavailable' else 'Credential error' if provider_status == 'credential_error' else 'Transfer failed' if provider_status == 'transfer_failed' else 'Disabled' if provider_status == 'disabled' else 'Connect' if provider_status == 'not_connected' else 'Action needed' if provider_status == 'blocked' else 'Checking' %}
-            {% set metric_label = 'Auto-funded' if is_auto_funded else 'Recheck provider' if is_restricted else 'Verify' if provider_status == 'needs_verification' else 'Action needed' if provider_status in ['needs_wallet', 'needs_api_credentials', 'credential_error'] else ((preview.state.score|default(0)|round|int) ~ ' score') if provider_status == 'ready' else status_label %}
+            {% set metric_label = 'Auto-converts' if conversion_required and conversion_status == 'planned' else 'Fixed egress' if fixed_egress_status in ['pending', 'missing'] else 'Auto-funded' if is_auto_funded else 'Recheck provider' if is_restricted else 'Verify' if provider_status == 'needs_verification' else 'Action needed' if provider_status in ['needs_wallet', 'needs_api_credentials', 'credential_error'] else ((preview.state.score|default(0)|round|int) ~ ' score') if provider_status == 'ready' else status_label %}
             {% set allocation_pct = preview.state.allocation_pct|default(0)|float %}
             {% set allocation_weight = preview.state.allocation_weight|default(0)|float %}
             {% set allocation_label = ('%.0f%%'|format(allocation_pct)) if allocation_pct > 0 else ('%.0f%%'|format(allocation_weight * 100)) %}
             {% set blocker = (preview.state.blockers|default([])|first) %}
-            {% set blocker_text = blocker.title|default(blocker.description|default(blocker.code|default(blocker|string))) if blocker else preview.state.funding_detail|default(preview.state.funding_label|default('')) %}
+            {% set conversion_text = ('Auto converts allocation to ' ~ preview.state.conversion_to) if conversion_required and conversion_status == 'planned' else '' %}
+            {% set blocker_text = blocker.title|default(blocker.description|default(blocker.code|default(blocker|string))) if blocker else conversion_text if conversion_text else preview.state.funding_detail|default(preview.state.funding_label|default('')) %}
             <label class="vault-exchange-card is-enabled{% if is_ready %} is-ready{% endif %}{% if is_auto_funded %} is-auto-funded{% endif %}{% if is_restricted %} is-restricted{% endif %}{% if is_blocked %} is-blocked{% endif %}" data-provider-card data-provider="{{ provider.provider }}">
               <input type="checkbox" name="providers" value="{{ provider.provider }}" checked data-provider-toggle aria-label="Enable {{ provider.label }} for 1H10 routing" aria-describedby="provider-blocker-{{ provider.provider }}">
               <span class="vault-provider-mark" aria-hidden="true">{{ provider.short_label }}</span>
@@ -127,7 +131,7 @@
                 <span data-provider-score>{{ metric_label }}</span>
                 <strong data-provider-allocation>{{ allocation_label }}</strong>
               </span>
-              <span class="vault-provider-blocker" id="provider-blocker-{{ provider.provider }}" data-provider-blocker{% if not blocker_text or provider_status == 'ready' %} hidden{% endif %}>{{ blocker_text }}</span>
+              <span class="vault-provider-blocker" id="provider-blocker-{{ provider.provider }}" data-provider-blocker{% if not blocker_text or (provider_status == 'ready' and not conversion_text) %} hidden{% endif %}>{{ blocker_text }}</span>
             </label>
           {% endfor %}
         </div>

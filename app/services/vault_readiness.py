@@ -255,6 +255,7 @@ class VaultReadinessService:
                 exchange=exchange,
                 enabled=exchange in requested_exchanges,
                 settlement_asset=settlement,
+                deposit_asset=funding_asset,
                 amount=notional_amount,
                 require_market_metadata=require_market_metadata,
             )
@@ -376,6 +377,7 @@ class VaultReadinessService:
         exchange: str,
         enabled: bool,
         settlement_asset: str,
+        deposit_asset: str,
         amount: float,
         require_market_metadata: bool,
     ) -> dict[str, Any]:
@@ -384,6 +386,8 @@ class VaultReadinessService:
         warnings: list[dict[str, Any]] = []
         connection = self._connection_for(user.id if user else None, exchange)
         collateral_asset = provider_collateral_asset(exchange)
+        conversion_plan = self._conversion_plan(exchange, deposit_asset, collateral_asset)
+        fixed_egress_status = self._fixed_egress_status(exchange)
         available_margin = 0.0
         markets = self._active_markets(exchange, connection.id if connection is not None else None)
 
@@ -416,69 +420,86 @@ class VaultReadinessService:
             credential_warnings, credential_blockers = self._credential_diagnostics(connection, exchange)
             warnings.extend(credential_warnings)
             blockers.extend(credential_blockers)
-            if not self._has_trading_permission(connection, exchange):
-                blockers.append(
-                    self._blocker(
-                        f"{exchange}_trading_permission_missing",
-                        f"{label} trading permission missing",
-                        f"{label} did not confirm live trading permission or its trading endpoint was unreachable.",
-                        "blocker",
-                        f"Verify the {label} connection with live trading permission enabled.",
-                        exchange=exchange,
-                    )
-                )
-            snapshot = self._account_snapshot(user.id if user else None, connection)
-            if snapshot is None:
-                blockers.append(
-                    self._blocker(
-                        f"{exchange}_balance_fetch_failed",
-                        f"{label} balance unavailable",
-                        f"{label} balances could not be fetched.",
-                        "blocker",
-                        f"Re-verify {label} credentials and retry the balance check.",
-                        exchange=exchange,
-                    )
-                )
-            else:
-                alerts = [str(alert) for alert in (getattr(snapshot, "alerts", []) or []) if str(alert).strip()]
-                geo_restriction = self._kucoin_geo_restriction(alerts if exchange == "kucoin" else [])
-                if geo_restriction is not None:
-                    blockers.append(geo_restriction)
-                elif alerts:
+            provider_preflight_blocked = False
+            if exchange == "kucoin":
+                kucoin_warnings, kucoin_blockers = self._kucoin_fixed_egress_blockers(fixed_egress_status)
+                warnings.extend(kucoin_warnings)
+                blockers.extend(kucoin_blockers)
+                provider_preflight_blocked = any(item.get("severity") in {"blocker", "critical"} for item in kucoin_blockers)
+            if not provider_preflight_blocked:
+                if not self._has_trading_permission(connection, exchange):
                     blockers.append(
                         self._blocker(
-                            f"{exchange}_connection_failed",
-                            f"{label} connection failed",
-                            self._sanitize_provider_message("; ".join(alerts[:2])),
+                            f"{exchange}_trading_permission_missing",
+                            f"{label} trading permission missing",
+                            f"{label} did not confirm live trading permission or its trading endpoint was unreachable.",
                             "blocker",
-                            f"Resolve the {label} connection alert, then verify the connection again.",
+                            f"Verify the {label} connection with live trading permission enabled.",
                             exchange=exchange,
                         )
                     )
-                available_margin = self._snapshot_available_margin(snapshot, collateral_asset)
-                if available_margin <= 0:
-                    if exchange == "hyperliquid":
-                        warnings.append(
-                            self._blocker(
-                                "hyperliquid_auto_funding_pending",
-                                "Auto-funded during cycle",
-                                "Collateral is transferred at cycle start and withdrawn after cycle completion.",
-                                "warning",
-                                "Keep Hyperliquid enabled; funding is handled by the Vault Cycle transfer step.",
-                                exchange=exchange,
-                            )
+                snapshot = self._account_snapshot(user.id if user else None, connection)
+                if snapshot is None:
+                    blockers.append(
+                        self._blocker(
+                            f"{exchange}_balance_fetch_failed",
+                            f"{label} balance unavailable",
+                            f"{label} balances could not be fetched.",
+                            "blocker",
+                            f"Re-verify {label} credentials and retry the balance check.",
+                            exchange=exchange,
                         )
-                    else:
+                    )
+                else:
+                    alerts = [str(alert) for alert in (getattr(snapshot, "alerts", []) or []) if str(alert).strip()]
+                    geo_restriction = self._kucoin_geo_restriction(alerts if exchange == "kucoin" else [])
+                    if geo_restriction is not None:
+                        blockers.append(geo_restriction)
+                    elif alerts:
                         blockers.append(
                             self._blocker(
-                                f"{exchange}_settlement_balance_unavailable",
-                                f"{label} collateral unavailable",
-                                f"{label} has no usable {collateral_asset} collateral for live Vault execution.",
+                                f"{exchange}_connection_failed",
+                                f"{label} connection failed",
+                                self._sanitize_provider_message("; ".join(alerts[:2])),
                                 "blocker",
-                                f"Fund the {label} futures account with {collateral_asset} or reduce the route.",
+                                f"Resolve the {label} connection alert, then verify the connection again.",
                                 exchange=exchange,
                             )
                         )
+                    available_margin = self._snapshot_available_margin(snapshot, collateral_asset)
+                    if available_margin <= 0:
+                        if exchange == "hyperliquid":
+                            warnings.append(
+                                self._blocker(
+                                    "hyperliquid_auto_funding_pending",
+                                    "Auto-funded during cycle",
+                                    "Collateral is transferred at cycle start and withdrawn after cycle completion.",
+                                    "warning",
+                                    "Keep Hyperliquid enabled; funding is handled by the Vault Cycle transfer step.",
+                                    exchange=exchange,
+                                )
+                            )
+                        else:
+                            blockers.append(
+                                self._blocker(
+                                    f"{exchange}_settlement_balance_unavailable",
+                                    f"{label} collateral unavailable",
+                                    f"{label} has no usable {collateral_asset} collateral for live Vault execution.",
+                                    "blocker",
+                                    f"Fund the {label} futures account with {collateral_asset} or reduce the route.",
+                                    exchange=exchange,
+                                )
+                            )
+
+        if available_margin > 0 and conversion_plan["conversion_required"]:
+            conversion_plan = {
+                **conversion_plan,
+                "conversion_required": False,
+                "conversion_from": "",
+                "conversion_to": "",
+                "conversion_supported": True,
+                "conversion_status": "not_required",
+            }
 
         if exchange == "hyperliquid":
             market_warnings, market_blockers = self._hyperliquid_specific_blockers(
@@ -486,10 +507,48 @@ class VaultReadinessService:
             )
             warnings.extend(market_warnings)
             blockers.extend(market_blockers)
+            if conversion_plan["conversion_required"] and conversion_plan["conversion_status"] == "planned":
+                warnings.append(
+                    self._blocker(
+                        "hyperliquid_allocation_auto_conversion_planned",
+                        "Auto converts allocation to USDC",
+                        "Hyperliquid allocation will be converted to USDC server-side before funding.",
+                        "warning",
+                        "Keep Hyperliquid enabled; conversion is applied only to its route amount.",
+                        exchange="hyperliquid",
+                    )
+                )
+            elif conversion_plan["conversion_required"] and conversion_plan["conversion_status"] != "planned":
+                blockers.append(
+                    self._blocker(
+                        "hyperliquid_allocation_conversion_unavailable",
+                        "Hyperliquid requires USDC",
+                        "Hyperliquid allocation requires USDC collateral and server-side conversion is not enabled.",
+                        "blocker",
+                        "Enable VAULT_CYCLE_CONVERSION_ENABLED=true or fund the route with USDC.",
+                        exchange="hyperliquid",
+                    )
+                )
         elif exchange == "kucoin":
             market_warnings, market_blockers = self._kucoin_specific_blockers(connection, markets, require_market_metadata)
             warnings.extend(market_warnings)
             blockers.extend(market_blockers)
+
+        if (
+            conversion_plan["conversion_required"]
+            and conversion_plan["conversion_status"] != "planned"
+            and not any(item.get("code") == f"{exchange}_allocation_conversion_unavailable" for item in blockers)
+        ):
+            blockers.append(
+                self._blocker(
+                    f"{exchange}_allocation_conversion_unavailable",
+                    f"{label} collateral conversion unavailable",
+                    f"{label} allocation needs {conversion_plan['conversion_to']} collateral, but server-side conversion is not enabled.",
+                    "blocker",
+                    "Enable VAULT_CYCLE_CONVERSION_ENABLED=true or fund the route with the exchange collateral asset.",
+                    exchange=exchange,
+                )
+            )
 
         market_warning = self._market_warning(exchange, markets)
         if market_warning is not None:
@@ -518,6 +577,13 @@ class VaultReadinessService:
             "target_amount": 0.0,
             "available_margin_usd": available_margin,
             "collateral_asset": collateral_asset,
+            "conversion_required": conversion_plan["conversion_required"],
+            "conversion_from": conversion_plan["conversion_from"],
+            "conversion_to": conversion_plan["conversion_to"],
+            "conversion_amount": 0.0,
+            "conversion_status": conversion_plan["conversion_status"],
+            "conversion_supported": conversion_plan["conversion_supported"],
+            "fixed_egress_status": fixed_egress_status,
             "connected": connection is not None,
             "verified": bool(connection and connection.verification_status == "verified"),
             "can_trade": ready,
@@ -798,16 +864,28 @@ class VaultReadinessService:
                 )
             )
         if settlement_asset != "USDC":
-            blockers.append(
-                self._blocker(
-                    "hyperliquid_usdc_settlement_unavailable",
-                    "Hyperliquid requires USDC",
-                    "Hyperliquid perpetuals use USDC collateral for this Vault routing flow.",
-                    "blocker",
-                    "Select USDC settlement for Hyperliquid or disable Hyperliquid for this route.",
-                    exchange="hyperliquid",
+            if bool(self.config.get("VAULT_CYCLE_CONVERSION_ENABLED", False)):
+                warnings.append(
+                    self._blocker(
+                        "hyperliquid_usdc_auto_conversion_planned",
+                        "Auto converts allocation to USDC",
+                        "Hyperliquid perpetual collateral is USDC, so only its allocated amount is converted server-side.",
+                        "warning",
+                        "Keep Hyperliquid enabled; the route allocator caps the conversion amount.",
+                        exchange="hyperliquid",
+                    )
                 )
-            )
+            else:
+                blockers.append(
+                    self._blocker(
+                        "hyperliquid_usdc_settlement_unavailable",
+                        "Hyperliquid requires USDC",
+                        "Hyperliquid perpetuals use USDC collateral for this Vault routing flow.",
+                        "blocker",
+                        "Select USDC settlement for Hyperliquid or enable server-side Vault Cycle conversion.",
+                        exchange="hyperliquid",
+                    )
+                )
         if connection is not None and not str(connection.wallet_address or "").strip():
             blockers.append(
                 self._blocker(
@@ -852,6 +930,57 @@ class VaultReadinessService:
         if require_market_metadata:
             return [], [payload]
         return [payload], []
+
+    def _kucoin_fixed_egress_blockers(self, fixed_egress_status: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        if fixed_egress_status == "ready":
+            return (
+                [
+                    self._blocker(
+                        "kucoin_fixed_egress_ready",
+                        "Fixed-egress preflight ready",
+                        "KuCoin checks are routed through the configured fixed-egress live API runtime.",
+                        "info",
+                        "",
+                        exchange="kucoin",
+                    )
+                ],
+                [],
+            )
+        if fixed_egress_status == "pending":
+            return [], [
+                self._blocker(
+                    "kucoin_compliance_confirmation_missing",
+                    "Fixed-egress preflight pending",
+                    "KuCoin routing requires operator/account eligibility confirmation before live allocation.",
+                    "blocker",
+                    "Set KUCOIN_COMPLIANCE_CONFIRMED=true only after eligibility under KuCoin terms is confirmed.",
+                    exchange="kucoin",
+                )
+            ]
+        if fixed_egress_status == "missing":
+            return [], [
+                self._blocker(
+                    "kucoin_fixed_egress_missing",
+                    "Fixed-egress preflight failed",
+                    "KuCoin routing requires a configured fixed-egress proxy on the live API runtime.",
+                    "blocker",
+                    "Configure KUCOIN_EGRESS_PROXY_URL or QUOTAGUARDSTATIC_URL on the live API and worker.",
+                    exchange="kucoin",
+                )
+            ]
+        return (
+            [
+                self._blocker(
+                    "kucoin_fixed_egress_not_configured",
+                    "Fixed-egress preflight pending",
+                    "KuCoin fixed-egress proxy is not configured for this environment.",
+                    "warning",
+                    "Use a fixed-egress live API runtime before enabling KuCoin live routing.",
+                    exchange="kucoin",
+                )
+            ],
+            [],
+        )
 
     def _append_live_gate_blockers(self, blockers: list[dict[str, Any]]) -> None:
         if bool(self.config.get("RECOVERY_SQLITE_ACTIVE", False)):
@@ -997,6 +1126,7 @@ class VaultReadinessService:
                 status["allocation_weight"] = 0.0
                 status["notional_usd"] = 0.0
                 status["target_amount"] = 0.0
+                status["conversion_amount"] = 0.0
             return []
         weights = {exchange: max(float(exchange_status[exchange].get("available_margin_usd") or 0.0), 0.0) for exchange in ready_exchanges}
         if not any(value > 0 for value in weights.values()):
@@ -1018,6 +1148,7 @@ class VaultReadinessService:
             status["allocation_weight"] = weight
             status["notional_usd"] = route_notional
             status["target_amount"] = target_amount
+            status["conversion_amount"] = target_amount if bool(status.get("conversion_required")) else 0.0
             routes.append(
                 {
                     "exchange": exchange,
@@ -1026,6 +1157,11 @@ class VaultReadinessService:
                     "allocation_weight": weight,
                     "notional_usd": route_notional,
                     "target_amount": target_amount,
+                    "conversion_required": bool(status.get("conversion_required")),
+                    "conversion_from": status.get("conversion_from", ""),
+                    "conversion_to": status.get("conversion_to", ""),
+                    "conversion_amount": status.get("conversion_amount", 0.0),
+                    "conversion_status": status.get("conversion_status", ""),
                     "score": status.get("score", 0),
                 }
             )
@@ -1035,7 +1171,34 @@ class VaultReadinessService:
                 status["allocation_weight"] = 0.0
                 status["notional_usd"] = 0.0
                 status["target_amount"] = 0.0
+                status["conversion_amount"] = 0.0
         return routes
+
+    def _conversion_plan(self, exchange: str, deposit_asset: str, collateral_asset: str) -> dict[str, Any]:
+        source = str(deposit_asset or "").upper().strip()
+        target = str(collateral_asset or "").upper().strip()
+        required = bool(source and target and source != target)
+        supported = not required or (
+            bool(self.config.get("VAULT_CYCLE_CONVERSION_ENABLED", False)) and {source, target}.issubset({"USDC", "USDT", "ETH"})
+        )
+        return {
+            "conversion_required": required,
+            "conversion_from": source if required else "",
+            "conversion_to": target if required else "",
+            "conversion_supported": supported,
+            "conversion_status": "not_required" if not required else "planned" if supported else "unsupported",
+            "exchange": exchange,
+        }
+
+    def _fixed_egress_status(self, exchange: str) -> str:
+        if exchange != "kucoin":
+            return "not_required"
+        fixed_required = bool(self.config.get("KUCOIN_FIXED_EGRESS_REQUIRED", False))
+        if not bool(self.config.get("KUCOIN_COMPLIANCE_CONFIRMED", False)) and fixed_required:
+            return "pending"
+        if str(self.config.get("KUCOIN_EGRESS_PROXY_URL") or self.config.get("QUOTAGUARDSTATIC_URL") or "").strip():
+            return "ready"
+        return "missing" if fixed_required else "not_configured"
 
     def _routing_summary(
         self,

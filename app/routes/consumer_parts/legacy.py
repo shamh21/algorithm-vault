@@ -8,13 +8,15 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
-from flask import Blueprint, abort, current_app, flash, jsonify, redirect, render_template, request, url_for
+import requests
+from flask import Blueprint, Response, abort, current_app, flash, jsonify, redirect, render_template, request, url_for
 from sqlalchemy import or_
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import joinedload
 
 from ...auth import current_user, qr_code_data_uri, require_authenticated_user, verify_totp
 from ...extensions import db
+from ...live_api_internal import is_live_api_internal_request, sign_live_api_internal_headers
 from ...ml.online_ranker import ONE_H10_HORIZON, extract_features, horizon_from_context, horizon_from_duration, outcome_from_result
 from ...models import (
     AuditLog,
@@ -113,6 +115,8 @@ def _protect_consumer():
     if guard is not None:
         return guard
     if request.endpoint in _LIVE_API_DELEGATED_ENDPOINTS and _vault_live_api_deferred_for_request():
+        if _live_api_proxy_enabled():
+            return _proxy_vault_live_api_request(current_user())
         return jsonify(
             {
                 "ok": False,
@@ -156,11 +160,87 @@ def _public_live_api_origin() -> str:
     return _origin_from_url(str(current_app.config.get("PUBLIC_LIVE_API_ORIGIN") or ""))
 
 
+def _live_api_internal_origin() -> str:
+    return _origin_from_url(
+        str(current_app.config.get("LIVE_API_INTERNAL_ORIGIN") or current_app.config.get("PUBLIC_LIVE_API_ORIGIN") or "")
+    )
+
+
+def _live_api_proxy_enabled() -> bool:
+    return bool(
+        current_app.config.get("LIVE_API_PROXY_ENABLED")
+        and _live_api_internal_origin()
+        and str(current_app.config.get("LIVE_API_INTERNAL_TOKEN") or "").strip()
+    )
+
+
 def _vault_live_api_deferred_for_request() -> bool:
-    live_origin = _public_live_api_origin()
-    if not live_origin:
+    if is_live_api_internal_request():
         return False
-    return _request_origin() != live_origin
+    live_origin = _public_live_api_origin()
+    internal_origin = _live_api_internal_origin() if _live_api_proxy_enabled() else ""
+    target_origin = internal_origin or live_origin
+    if not target_origin:
+        return False
+    return _request_origin() not in {origin for origin in (live_origin, internal_origin) if origin}
+
+
+def _proxy_vault_live_api_request(user) -> Response | tuple[Response, int]:
+    if user is None:
+        return jsonify({"ok": False, "code": "user_missing", "message": "Sign in before checking Vault readiness."}), 401
+    origin = _live_api_internal_origin()
+    query = request.query_string.decode("utf-8", errors="surrogateescape")
+    target_url = f"{origin}{request.path}{'?' + query if query else ''}"
+    body = request.get_data(cache=True) or b""
+    headers = _live_api_proxy_headers(user.id, body)
+    try:
+        upstream = requests.request(
+            request.method,
+            target_url,
+            data=body if request.method not in {"GET", "HEAD"} else None,
+            headers=headers,
+            timeout=float(current_app.config.get("LIVE_API_PROXY_TIMEOUT_SECONDS", 15.0) or 15.0),
+        )
+    except requests.RequestException as exc:
+        current_app.logger.warning("Vault live API proxy request failed path=%s error=%s", request.path, exc)
+        return jsonify(
+            {
+                "ok": False,
+                "code": "live_api_proxy_unavailable",
+                "message": "Vault live API is unavailable. Retry after the live API runtime is healthy.",
+            }
+        ), 502
+    response = Response(
+        upstream.content,
+        status=upstream.status_code,
+        content_type=upstream.headers.get("Content-Type") or "application/json",
+    )
+    for header in ("Cache-Control", "Retry-After"):
+        if upstream.headers.get(header):
+            response.headers[header] = upstream.headers[header]
+    return response
+
+
+def _live_api_proxy_headers(user_id: int, body: bytes) -> dict[str, str]:
+    headers = {
+        "Accept": request.headers.get("Accept", "application/json"),
+        "X-AlgVault-Forwarded-Origin": _request_origin(),
+    }
+    for header in ("Content-Type", "X-Requested-With", "Idempotency-Key"):
+        value = request.headers.get(header)
+        if value:
+            headers[header] = value
+    headers.update(
+        sign_live_api_internal_headers(
+            current_app.config,
+            method=request.method,
+            path=request.path,
+            query_string=request.query_string,
+            body=body,
+            user_id=int(user_id),
+        )
+    )
+    return headers
 
 
 @consumer_bp.get("/")
@@ -748,6 +828,7 @@ def start_cycle():
             selection=selection,
             connections=connections,
             starting_value_usd=starting_value_usd,
+            deposit_asset=asset,
             settlement_asset=settlement_asset,
             allowed_symbols=allowed_symbols,
             connection_blockers=connection_blockers,
@@ -1211,7 +1292,7 @@ def _start_vault_cycle_engine(
     user,
     amount: float,
     deposit_asset: str,
-    settlement_asset: str,
+    settlement_asset: str = "USDC",
     duration_seconds: int,
     providers: list[str],
     allowed_symbols: list[str],
@@ -2627,6 +2708,12 @@ def _deferred_live_api_routing_preview_payload(
             "connected": False,
             "can_trade": False,
             "collateral_asset": provider_collateral_asset(option["provider"]),
+            "conversion_required": False,
+            "conversion_from": "",
+            "conversion_to": "",
+            "conversion_amount": 0.0,
+            "conversion_status": "not_required",
+            "fixed_egress_status": "pending" if option["provider"] == "kucoin" else "not_required",
             "available_margin_usd": 0.0,
             "allocation_weight": 0.0,
             "allocation_pct": 0.0,
@@ -2745,6 +2832,12 @@ def _vault_routing_preview_payload(
                 "verified": bool(state.get("verified", False)),
                 "can_trade": bool(state.get("can_trade", state.get("ready", False))),
                 "collateral_asset": state.get("collateral_asset") or provider_collateral_asset(provider),
+                "conversion_required": bool(state.get("conversion_required", False)),
+                "conversion_from": str(state.get("conversion_from") or ""),
+                "conversion_to": str(state.get("conversion_to") or ""),
+                "conversion_amount": _one_h10_float(state.get("conversion_amount"), 0.0),
+                "conversion_status": str(state.get("conversion_status") or "not_required"),
+                "fixed_egress_status": str(state.get("fixed_egress_status") or ("not_required" if provider != "kucoin" else "")),
                 "available_margin_usd": _one_h10_float(state.get("available_margin_usd"), 0.0),
                 "allocation_weight": _one_h10_float(state.get("allocation_weight"), 0.0),
                 "allocation_pct": _one_h10_float(state.get("allocation_pct"), 0.0),
@@ -3796,6 +3889,7 @@ def _one_h10_provider_legs(
     selection,
     connections: list[TradingConnection],
     starting_value_usd: float,
+    deposit_asset: str = "USDC",
     settlement_asset: str,
     allowed_symbols: list[str],
     connection_blockers: list[dict[str, object]],
@@ -3829,7 +3923,25 @@ def _one_h10_provider_legs(
             blockers.append({"provider": provider, "trading_connection_id": connection.id, "reason": "; ".join(alerts)})
             continue
         available = _snapshot_free_margin_usd(snapshot, collateral)
-        if available <= 0:
+        conversion_required = available <= 0 and str(deposit_asset or "").upper().strip() != str(collateral or "").upper().strip()
+        conversion_supported = not conversion_required or (
+            bool(current_app.config.get("VAULT_CYCLE_CONVERSION_ENABLED", False))
+            and {str(deposit_asset or "").upper().strip(), str(collateral or "").upper().strip()}.issubset({"USDC", "USDT", "ETH"})
+        )
+        if not conversion_supported:
+            blockers.append(
+                {
+                    "provider": provider,
+                    "trading_connection_id": connection.id,
+                    "reason": "collateral_conversion_route_unavailable",
+                    "conversion_from": str(deposit_asset or "").upper().strip(),
+                    "conversion_to": collateral,
+                }
+            )
+            continue
+        auto_funded = available <= 0 and bool(current_app.config.get("VAULT_CYCLE_REAL_TRANSFERS_ENABLED", False))
+        allocation_available = available if available > 0 else starting_value_usd if auto_funded else 0.0
+        if allocation_available <= 0:
             blockers.append({"provider": provider, "trading_connection_id": connection.id, "reason": "insufficient_free_margin"})
             continue
         markets = market_service.active_markets(provider=provider, symbols=None)
@@ -3891,7 +4003,13 @@ def _one_h10_provider_legs(
                 "provider": provider,
                 "trading_connection_id": connection.id,
                 "collateral_asset": collateral,
-                "available_margin_usd": available,
+                "available_margin_usd": allocation_available,
+                "exchange_available_margin_usd": available,
+                "funding_status": "auto_funded" if auto_funded else "available",
+                "conversion_required": conversion_required,
+                "conversion_from": str(deposit_asset or "").upper().strip() if conversion_required else "",
+                "conversion_to": collateral if conversion_required else "",
+                "conversion_supported": conversion_supported,
                 "markets": markets,
                 "ranked": ranked,
                 "scanner_diagnostics": diagnostics,
@@ -3929,6 +4047,11 @@ def _one_h10_provider_legs(
             "trading_connection_id": connection_id,
             "collateral_asset": provider_allocation["collateral_asset"],
             "available_margin_usd": available,
+            "exchange_available_margin_usd": provider_allocation.get("exchange_available_margin_usd", available),
+            "funding_status": provider_allocation.get("funding_status", "available"),
+            "conversion_required": provider_allocation.get("conversion_required", False),
+            "conversion_from": provider_allocation.get("conversion_from", ""),
+            "conversion_to": provider_allocation.get("conversion_to", ""),
             "allocated_usd": 0.0,
             "settlement_asset": settlement_asset,
             "scanner_diagnostics": provider_allocation.get("scanner_diagnostics", {}),
@@ -4126,6 +4249,11 @@ def _one_h10_provider_legs(
                     "trading_connection_id": connection_id,
                     "collateral_asset": provider_allocation["collateral_asset"],
                     "settlement_asset": settlement_asset,
+                    "funding_status": provider_allocation.get("funding_status", "available"),
+                    "conversion_required": provider_allocation.get("conversion_required", False),
+                    "conversion_from": provider_allocation.get("conversion_from", ""),
+                    "conversion_to": provider_allocation.get("conversion_to", ""),
+                    "conversion_amount": allocation_cap if provider_allocation.get("conversion_required") else 0.0,
                     "available_margin_usd": available,
                     "allocation_weight": allocation_cap / max(starting_value_usd, 1.0),
                     "one_h10_vault": True,
@@ -4181,6 +4309,11 @@ def _one_h10_provider_legs(
                     "trading_connection_id": connection_id,
                     "collateral_asset": provider_allocation["collateral_asset"],
                     "settlement_asset": settlement_asset,
+                    "funding_status": provider_allocation.get("funding_status", "available"),
+                    "conversion_required": provider_allocation.get("conversion_required", False),
+                    "conversion_from": provider_allocation.get("conversion_from", ""),
+                    "conversion_to": provider_allocation.get("conversion_to", ""),
+                    "conversion_amount": allocation_cap if provider_allocation.get("conversion_required") else 0.0,
                     "symbol": symbol,
                     "venue_symbol": venue_symbol,
                     "app_symbol": symbol,
@@ -4204,6 +4337,10 @@ def _one_h10_provider_legs(
                     "venue_symbol": venue_symbol,
                     "provider_symbol": venue_symbol,
                     "allocation_cap_usd": allocation_cap,
+                    "conversion_required": provider_allocation.get("conversion_required", False),
+                    "conversion_from": provider_allocation.get("conversion_from", ""),
+                    "conversion_to": provider_allocation.get("conversion_to", ""),
+                    "conversion_amount": allocation_cap if provider_allocation.get("conversion_required") else 0.0,
                     "strategy_name": next_leg.get("strategy_name") or selection.strategy_name,
                     "market_id": getattr(market, "id", None),
                     "market_status": market_status,

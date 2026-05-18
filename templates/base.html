@@ -296,7 +296,7 @@
       </nav>
     {% endif %}
 
-    {% set vault_live_api_origin = current_app.config.get('PUBLIC_LIVE_API_ORIGIN') if request.endpoint == 'consumer.vault' else '' %}
+    {% set vault_live_api_origin = '' if current_app.config.get('LIVE_API_PROXY_ENABLED') else current_app.config.get('PUBLIC_LIVE_API_ORIGIN') if request.endpoint == 'consumer.vault' else '' %}
     <script>
       window.AlgVaultConfig = (() => {
         const config = {

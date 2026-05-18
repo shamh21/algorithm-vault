@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -7,6 +8,7 @@ import pytest
 
 from app.auth import encrypt_totp_secret, password_hash
 from app.extensions import db
+from app.live_api_internal import USER_HEADER, sign_live_api_internal_headers
 from app.models import LeveragedMarket, Setting, TradingConnection, User, VaultCycle, WalletBalance
 from app.routes.consumer import _persist_cycle_start_cycle_idempotency
 from app.services.hyperliquid_client import ClientSnapshot
@@ -33,6 +35,10 @@ def _confirm_live(app) -> None:
     app.config["SECONDARY_CONFIRMATION"] = True
     app.config["ONE_H10_REQUIRE_PROMOTED_ML"] = False
     app.config["ONE_H10_BOOTSTRAP_LIVE_ENABLED"] = True
+    app.config["VAULT_CYCLE_CONVERSION_ENABLED"] = True
+    app.config["KUCOIN_COMPLIANCE_CONFIRMED"] = True
+    app.config["KUCOIN_FIXED_EGRESS_REQUIRED"] = True
+    app.config["KUCOIN_EGRESS_PROXY_URL"] = "http://fixed-egress.test:8080"
     Setting.set_json("explicit_live_confirmed", True)
     Setting.set_json("secondary_confirmation", True)
     db.session.commit()
@@ -219,6 +225,71 @@ def test_vault_page_delegates_initial_preview_when_live_api_origin_configured(ap
     assert response.status_code == 200
     assert b"live_api_deferred" in response.data
     assert b"https://api.algvault.com" in response.data
+
+
+def test_vault_proxy_signs_delegated_live_api_request(app, monkeypatch) -> None:
+    _confirm_live(app)
+    app.config["LIVE_API_PROXY_ENABLED"] = True
+    app.config["LIVE_API_INTERNAL_ORIGIN"] = "https://live-api.algvault.test"
+    app.config["LIVE_API_INTERNAL_TOKEN"] = "proxy-secret"
+    app.config["PUBLIC_LIVE_API_ORIGIN"] = "https://live-api.algvault.test"
+    user = _user("vaultproxy")
+    client = app.test_client()
+    _login(client, user)
+    captured: dict[str, object] = {}
+
+    class UpstreamResponse:
+        status_code = 200
+        content = b'{"ok":true,"proxied":true}'
+        headers = {"Content-Type": "application/json"}
+
+    def fake_request(method, url, **kwargs):
+        captured.update({"method": method, "url": url, **kwargs})
+        return UpstreamResponse()
+
+    monkeypatch.setattr("app.routes.consumer_parts.legacy.requests.request", fake_request)
+
+    response = client.get(
+        "/api/vault/routing-preview?amount=10&deposit_asset=USDC&settlement_asset=USDC&providers=kucoin",
+        headers={"Accept": "application/json"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["proxied"] is True
+    assert captured["method"] == "GET"
+    assert captured["url"] == (
+        "https://live-api.algvault.test/api/vault/routing-preview?amount=10&deposit_asset=USDC&settlement_asset=USDC&providers=kucoin"
+    )
+    assert captured["headers"][USER_HEADER] == str(user.id)
+
+
+def test_internal_live_api_signature_authenticates_without_session_or_csrf(app) -> None:
+    _confirm_live(app)
+    app.config["WTF_CSRF_ENABLED"] = True
+    app.config["LIVE_API_INTERNAL_TOKEN"] = "internal-secret"
+    user = _user("internalsigned")
+    body = json.dumps(
+        {"deposit_asset": "USDC", "settlement_asset": "USDC", "amount": 0, "providers": ["kucoin"]},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        **sign_live_api_internal_headers(
+            app.config,
+            method="POST",
+            path="/vault/preview-route",
+            body=body,
+            user_id=user.id,
+        ),
+    }
+
+    response = app.test_client().post("/vault/preview-route", data=body, headers=headers, base_url="https://live-api.algvault.test")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["ok"] is False
+    assert "amount_required" in {item["code"] for item in payload["active_blockers"]}
 
 
 def test_kucoin_region_restriction_is_structured_and_redacted(app, monkeypatch) -> None:
@@ -577,6 +648,55 @@ def test_hyperliquid_zero_collateral_is_ready_auto_funded(app, monkeypatch) -> N
     assert "Collateral is transferred at cycle start" in status["funding_detail"]
 
 
+def test_hyperliquid_non_usdc_funding_auto_converts_allocated_amount(app, monkeypatch) -> None:
+    _confirm_live(app)
+    app.config["VAULT_CYCLE_CONVERSION_ENABLED"] = True
+    user = _user("hlautoconvert")
+    _ready_hyperliquid_zero_collateral(app, monkeypatch, user)
+    db.session.add(WalletBalance(user_id=user.id, asset="USDT", available_balance=20.0, estimated_usd_value=20.0))
+    db.session.commit()
+
+    payload = get_vault_cycle_readiness(
+        user.id,
+        amount=10,
+        deposit_asset="USDT",
+        settlement_asset="USDT",
+        live_acknowledged=True,
+        enabled_exchanges=["hyperliquid"],
+    )
+
+    status = payload["exchange_status"]["hyperliquid"]
+    assert payload["ready"] is True
+    assert status["conversion_required"] is True
+    assert status["conversion_from"] == "USDT"
+    assert status["conversion_to"] == "USDC"
+    assert status["conversion_amount"] == pytest.approx(10)
+    assert status["conversion_status"] == "planned"
+    assert "hyperliquid_usdc_settlement_unavailable" not in _codes(payload)
+    assert "Auto converts allocation to USDC" in str(status)
+
+
+def test_kucoin_fixed_egress_compliance_gate_fails_closed(app, monkeypatch) -> None:
+    _confirm_live(app)
+    app.config["KUCOIN_COMPLIANCE_CONFIRMED"] = False
+    user = _user("kucoinegresspending")
+    _ready_kucoin(app, monkeypatch, user)
+    service = app.extensions["services"]["trading_connections"]
+    monkeypatch.setattr(service, "can_trade", lambda *args, **kwargs: pytest.fail("KuCoin can_trade should wait for fixed egress"))
+    monkeypatch.setattr(
+        service,
+        "account_snapshot",
+        lambda *args, **kwargs: pytest.fail("KuCoin balance checks should wait for fixed egress"),
+    )
+
+    payload = get_vault_cycle_readiness(user.id, amount=10, live_acknowledged=True, enabled_exchanges=["kucoin"])
+
+    status = payload["exchange_status"]["kucoin"]
+    assert status["ready"] is False
+    assert status["fixed_egress_status"] == "pending"
+    assert "kucoin_compliance_confirmation_missing" in _codes(payload)
+
+
 def test_hyperliquid_missing_wallet_returns_needs_wallet(app, monkeypatch) -> None:
     _confirm_live(app)
     user = _user("hlmissingwallet")
@@ -683,6 +803,11 @@ def test_routing_preview_providers_include_new_readiness_fields(app, monkeypatch
     assert provider["funding_status"] == "auto_funded"
     assert provider["funding_label"] == "Auto-funded during vault cycle"
     assert provider["funding_detail"] == "Collateral is transferred at cycle start and withdrawn after cycle completion."
+    assert "conversion_required" in provider
+    assert "conversion_from" in provider
+    assert "conversion_to" in provider
+    assert "conversion_amount" in provider
+    assert "fixed_egress_status" in provider
     assert payload["can_start"] is True
     assert payload["objective"]["horizon_seconds"] == app.config["ONE_H10_HORIZON_SECONDS"]
     assert "hard_blockers" in payload

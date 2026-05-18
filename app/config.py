@@ -233,6 +233,11 @@ class BaseConfig:
     PUBLIC_APP_ORIGIN = _clean_public_origin(os.getenv("PUBLIC_APP_ORIGIN"), "")
     PUBLIC_API_ORIGIN = _clean_public_origin(os.getenv("PUBLIC_API_ORIGIN"), PUBLIC_APP_ORIGIN)
     PUBLIC_LIVE_API_ORIGIN = _clean_public_origin(os.getenv("PUBLIC_LIVE_API_ORIGIN"), "")
+    LIVE_API_PROXY_ENABLED = _as_bool(os.getenv("LIVE_API_PROXY_ENABLED"), default=False)
+    LIVE_API_INTERNAL_ORIGIN = _clean_public_origin(os.getenv("LIVE_API_INTERNAL_ORIGIN"), PUBLIC_LIVE_API_ORIGIN)
+    LIVE_API_INTERNAL_TOKEN = os.getenv("LIVE_API_INTERNAL_TOKEN", "").strip()
+    LIVE_API_PROXY_TIMEOUT_SECONDS = max(1.0, _as_float(os.getenv("LIVE_API_PROXY_TIMEOUT_SECONDS"), 15.0))
+    LIVE_API_INTERNAL_MAX_SKEW_SECONDS = max(5, _as_int(os.getenv("LIVE_API_INTERNAL_MAX_SKEW_SECONDS"), 60))
     LIVE_API_CORS_ALLOWED_ORIGINS = _parse_origin_list(
         os.getenv("LIVE_API_CORS_ALLOWED_ORIGINS"),
         (PUBLIC_APP_ORIGIN, "https://algorithm-vault-chi.vercel.app"),
@@ -299,6 +304,10 @@ class BaseConfig:
     KUCOIN_API_KEY = os.getenv("KUCOIN_API_KEY", "").strip()
     KUCOIN_API_SECRET = os.getenv("KUCOIN_API_SECRET", "").strip()
     KUCOIN_API_PASSPHRASE = os.getenv("KUCOIN_API_PASSPHRASE", "").strip()
+    QUOTAGUARDSTATIC_URL = os.getenv("QUOTAGUARDSTATIC_URL", "").strip()
+    KUCOIN_EGRESS_PROXY_URL = os.getenv("KUCOIN_EGRESS_PROXY_URL", QUOTAGUARDSTATIC_URL).strip()
+    KUCOIN_FIXED_EGRESS_REQUIRED = _as_bool(os.getenv("KUCOIN_FIXED_EGRESS_REQUIRED"), default=False)
+    KUCOIN_COMPLIANCE_CONFIRMED = _as_bool(os.getenv("KUCOIN_COMPLIANCE_CONFIRMED"), default=False)
     KUCOIN_DEFAULT_MARKET_TYPE = os.getenv("KUCOIN_DEFAULT_MARKET_TYPE", "futures").strip().lower() or "futures"
     KUCOIN_DEFAULT_SPOT_QUOTE = os.getenv("KUCOIN_DEFAULT_SPOT_QUOTE", "USDT").strip().upper() or "USDT"
     KUCOIN_ACCOUNT_OVERVIEW_PATH = os.getenv("KUCOIN_ACCOUNT_OVERVIEW_PATH", "/api/v1/account-overview").strip()
@@ -1074,6 +1083,11 @@ class BaseConfig:
             "PUBLIC_APP_ORIGIN": cls.PUBLIC_APP_ORIGIN,
             "PUBLIC_API_ORIGIN": cls.PUBLIC_API_ORIGIN,
             "PUBLIC_LIVE_API_ORIGIN": cls.PUBLIC_LIVE_API_ORIGIN,
+            "LIVE_API_PROXY_ENABLED": cls.LIVE_API_PROXY_ENABLED,
+            "LIVE_API_INTERNAL_ORIGIN": cls.LIVE_API_INTERNAL_ORIGIN,
+            "LIVE_API_INTERNAL_TOKEN_CONFIGURED": bool(cls.LIVE_API_INTERNAL_TOKEN),
+            "LIVE_API_PROXY_TIMEOUT_SECONDS": cls.LIVE_API_PROXY_TIMEOUT_SECONDS,
+            "LIVE_API_INTERNAL_MAX_SKEW_SECONDS": cls.LIVE_API_INTERNAL_MAX_SKEW_SECONDS,
             "LIVE_API_CORS_ALLOWED_ORIGINS": list(cls.LIVE_API_CORS_ALLOWED_ORIGINS),
             "WEB_CONCURRENCY": cls.WEB_CONCURRENCY,
             "GUNICORN_THREADS": cls.GUNICORN_THREADS,
@@ -1136,6 +1150,9 @@ class BaseConfig:
             "HYPERLIQUID_LIVE_TEST_MAX_NOTIONAL_USD": cls.HYPERLIQUID_LIVE_TEST_MAX_NOTIONAL_USD,
             "HYPERLIQUID_MIN_ORDER_VALUE_USD": cls.HYPERLIQUID_MIN_ORDER_VALUE_USD,
             "KUCOIN_CONTRACT_SPECS_JSON": cls.KUCOIN_CONTRACT_SPECS_JSON,
+            "KUCOIN_EGRESS_PROXY_CONFIGURED": bool(cls.KUCOIN_EGRESS_PROXY_URL),
+            "KUCOIN_FIXED_EGRESS_REQUIRED": cls.KUCOIN_FIXED_EGRESS_REQUIRED,
+            "KUCOIN_COMPLIANCE_CONFIRMED": cls.KUCOIN_COMPLIANCE_CONFIRMED,
             "KUCOIN_DEFAULT_MARKET_TYPE": cls.KUCOIN_DEFAULT_MARKET_TYPE,
             "KUCOIN_DEFAULT_SPOT_QUOTE": cls.KUCOIN_DEFAULT_SPOT_QUOTE,
             "KUCOIN_SPOT_BASE_URL": cls.KUCOIN_SPOT_BASE_URL,
@@ -1661,6 +1678,13 @@ class ProductionConfig(BaseConfig):
     PUBLIC_APP_ORIGIN = _clean_public_origin(os.getenv("PUBLIC_APP_ORIGIN"), "https://app.algvault.com")
     PUBLIC_API_ORIGIN = _clean_public_origin(os.getenv("PUBLIC_API_ORIGIN"), PUBLIC_APP_ORIGIN)
     PUBLIC_LIVE_API_ORIGIN = _clean_public_origin(os.getenv("PUBLIC_LIVE_API_ORIGIN"), "")
+    LIVE_API_PROXY_ENABLED = _as_bool(os.getenv("LIVE_API_PROXY_ENABLED"), default=False)
+    LIVE_API_INTERNAL_ORIGIN = _clean_public_origin(os.getenv("LIVE_API_INTERNAL_ORIGIN"), PUBLIC_LIVE_API_ORIGIN)
+    LIVE_API_INTERNAL_TOKEN = os.getenv("LIVE_API_INTERNAL_TOKEN", "").strip()
+    LIVE_API_PROXY_TIMEOUT_SECONDS = max(1.0, _as_float(os.getenv("LIVE_API_PROXY_TIMEOUT_SECONDS"), 15.0))
+    LIVE_API_INTERNAL_MAX_SKEW_SECONDS = max(5, _as_int(os.getenv("LIVE_API_INTERNAL_MAX_SKEW_SECONDS"), 60))
+    KUCOIN_FIXED_EGRESS_REQUIRED = _as_bool(os.getenv("KUCOIN_FIXED_EGRESS_REQUIRED"), default=True)
+    KUCOIN_COMPLIANCE_CONFIRMED = _as_bool(os.getenv("KUCOIN_COMPLIANCE_CONFIRMED"), default=False)
     LIVE_API_CORS_ALLOWED_ORIGINS = _parse_origin_list(
         os.getenv("LIVE_API_CORS_ALLOWED_ORIGINS"),
         (PUBLIC_APP_ORIGIN, "https://algorithm-vault-chi.vercel.app"),

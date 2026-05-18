@@ -30,6 +30,12 @@ services:
         value: live
       - key: ONE_H10_LIVE_ENABLED
         value: "true"
+      - key: VAULT_CYCLE_ENGINE_ENABLED
+        value: "true"
+      - key: VAULT_CYCLE_REAL_TRANSFERS_ENABLED
+        value: "true"
+      - key: VAULT_CYCLE_CONVERSION_ENABLED
+        value: "true"
       - key: VAULT_START_ASYNC_ENABLED
         value: "false"
       - key: USE_REAL_ADDRESSES
@@ -84,6 +90,8 @@ services:
         sync: false
       - key: LIVE_API_CORS_ALLOWED_ORIGINS
         sync: false
+      - key: LIVE_API_INTERNAL_TOKEN
+        sync: false
       - key: SESSION_COOKIE_DOMAIN
         sync: false
       - key: FLASK_SECRET_KEY
@@ -105,6 +113,14 @@ services:
       - key: KUCOIN_API_SECRET
         sync: false
       - key: KUCOIN_API_PASSPHRASE
+        sync: false
+      - key: KUCOIN_FIXED_EGRESS_REQUIRED
+        value: "true"
+      - key: KUCOIN_EGRESS_PROXY_URL
+        sync: false
+      - key: QUOTAGUARDSTATIC_URL
+        sync: false
+      - key: KUCOIN_COMPLIANCE_CONFIRMED
         sync: false
   - type: worker
     name: algorithm-vault-worker
@@ -136,6 +152,12 @@ services:
       - key: APP_MODE
         value: live
       - key: ONE_H10_LIVE_ENABLED
+        value: "true"
+      - key: VAULT_CYCLE_ENGINE_ENABLED
+        value: "true"
+      - key: VAULT_CYCLE_REAL_TRANSFERS_ENABLED
+        value: "true"
+      - key: VAULT_CYCLE_CONVERSION_ENABLED
         value: "true"
       - key: USE_REAL_ADDRESSES
         value: "true"
@@ -185,6 +207,8 @@ services:
         sync: false
       - key: LIVE_API_CORS_ALLOWED_ORIGINS
         sync: false
+      - key: LIVE_API_INTERNAL_TOKEN
+        sync: false
       - key: SESSION_COOKIE_DOMAIN
         sync: false
       - key: FLASK_SECRET_KEY
@@ -206,4 +230,12 @@ services:
       - key: KUCOIN_API_SECRET
         sync: false
       - key: KUCOIN_API_PASSPHRASE
+        sync: false
+      - key: KUCOIN_FIXED_EGRESS_REQUIRED
+        value: "true"
+      - key: KUCOIN_EGRESS_PROXY_URL
+        sync: false
+      - key: QUOTAGUARDSTATIC_URL
+        sync: false
+      - key: KUCOIN_COMPLIANCE_CONFIRMED
         sync: false

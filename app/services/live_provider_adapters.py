@@ -10,8 +10,8 @@ import logging
 import re
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
+from datetime import UTC, datetime, timedelta
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal, InvalidOperation
 from typing import Any
 from urllib.parse import urlencode
 
@@ -19,7 +19,6 @@ import requests
 
 from .failures import ProviderConnectionError
 from .hyperliquid_client import ClientSnapshot
-
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +73,18 @@ def _kucoin_unavailable_alert(exc: object, *, spot: bool = False) -> str:
         )
     label = "KuCoin spot unavailable" if spot else "KuCoin unavailable"
     return f"{label}: {exc}"
+
+
+def _kucoin_egress_proxy_url(config: dict[str, Any]) -> str:
+    return str(config.get("KUCOIN_EGRESS_PROXY_URL") or config.get("QUOTAGUARDSTATIC_URL") or "").strip()
+
+
+def _configure_kucoin_egress_proxy(session: requests.Session, config: dict[str, Any]) -> None:
+    proxy_url = _kucoin_egress_proxy_url(config)
+    if not proxy_url:
+        return
+    session.trust_env = False
+    session.proxies.update({"http": proxy_url, "https": proxy_url})
 
 
 def _balance_available(balances: list[dict[str, Any]], asset: str) -> float:
@@ -226,7 +237,7 @@ class BinanceFuturesConnector:
         for symbol in self._recent_symbols():
             try:
                 rows = self._signed("GET", "/fapi/v1/userTrades", {"symbol": symbol, "limit": 10})
-            except Exception:
+            except ProviderConnectionError:
                 continue
             if isinstance(rows, list):
                 for fill in rows:
@@ -362,6 +373,7 @@ class KucoinFuturesConnector:
         self.credentials = credentials
         self.metadata = metadata or {}
         self.session = requests.Session()
+        _configure_kucoin_egress_proxy(self.session, config)
         self._time_offset_ms = 0
         self._last_time_sync_monotonic = 0.0
 
@@ -382,7 +394,9 @@ class KucoinFuturesConnector:
             return ClientSnapshot(mode, [], [], [], [], ["KuCoin connector supports live futures only."])
         try:
             account = self._account_overview()
-            return ClientSnapshot(mode, self._balances(account), self.get_positions(mode), self.get_open_orders(mode), self.get_recent_fills(mode), [])
+            return ClientSnapshot(
+                mode, self._balances(account), self.get_positions(mode), self.get_open_orders(mode), self.get_recent_fills(mode), []
+            )
         except Exception as exc:  # noqa: BLE001
             return ClientSnapshot(mode, [], [], [], [], [_kucoin_unavailable_alert(exc)])
 
@@ -419,7 +433,9 @@ class KucoinFuturesConnector:
         accounts = [self._normalize_spot_account(row) for row in _as_list(_response_data(response))]
         if include_zero:
             return accounts
-        return [row for row in accounts if _safe_float(row.get("value")) or _safe_float(row.get("available")) or _safe_float(row.get("held"))]
+        return [
+            row for row in accounts if _safe_float(row.get("value")) or _safe_float(row.get("available")) or _safe_float(row.get("held"))
+        ]
 
     def get_spot_balances(
         self,
@@ -443,9 +459,7 @@ class KucoinFuturesConnector:
             try:
                 response = self._signed_spot("GET", self._path("KUCOIN_SUB_ACCOUNTS_PATH", "/api/v1/sub-accounts"))
                 discovered["sub_accounts"] = [
-                    self._normalize_sub_account(row)
-                    for row in _as_list(_response_data(response))
-                    if isinstance(row, dict)
+                    self._normalize_sub_account(row) for row in _as_list(_response_data(response)) if isinstance(row, dict)
                 ]
             except Exception as exc:  # noqa: BLE001 - sub-account listing can be unavailable for sub-user keys.
                 discovered["sub_account_error"] = _redact_provider_error(str(exc))
@@ -543,7 +557,7 @@ class KucoinFuturesConnector:
             params["symbol"] = self._spot_symbol(symbol)
         try:
             response = self._signed_spot("GET", self._path("KUCOIN_SPOT_FILLS_PATH", "/api/v1/hf/fills"), params=params)
-        except Exception:
+        except ProviderConnectionError:
             return []
         data = _response_data(response)
         rows = data.get("items") if isinstance(data, dict) else data
@@ -687,7 +701,9 @@ class KucoinFuturesConnector:
         )
         response = self._signed_spot("POST", self._path("KUCOIN_SPOT_TEST_ORDER_PATH", "/api/v1/hf/orders/test"), body=payload)
         data = _response_data(response)
-        normalized = self._normalize_spot_order_response(data if isinstance(data, dict) else {}, fallback_client_oid=str(payload["clientOid"]), raw=response)
+        normalized = self._normalize_spot_order_response(
+            data if isinstance(data, dict) else {}, fallback_client_oid=str(payload["clientOid"]), raw=response
+        )
         normalized["test_order"] = True
         return normalized
 
@@ -726,7 +742,9 @@ class KucoinFuturesConnector:
         )
         response = self._signed_spot("POST", self._path("KUCOIN_SPOT_ORDERS_PATH", "/api/v1/hf/orders"), body=payload)
         data = _response_data(response)
-        return self._normalize_spot_order_response(data if isinstance(data, dict) else {}, fallback_client_oid=str(payload["clientOid"]), raw=response)
+        return self._normalize_spot_order_response(
+            data if isinstance(data, dict) else {}, fallback_client_oid=str(payload["clientOid"]), raw=response
+        )
 
     def cancel_spot_order(
         self,
@@ -801,16 +819,29 @@ class KucoinFuturesConnector:
             errors.append("KUCOIN_ENABLE_LIVE_TEST_TRADES=true is required")
         if require_fill and not self._config_bool("KUCOIN_ENABLE_FILL_TEST", False):
             errors.append("KUCOIN_ENABLE_FILL_TEST=true is required")
+        if not self._config_bool("KUCOIN_COMPLIANCE_CONFIRMED", False):
+            errors.append("KUCOIN_COMPLIANCE_CONFIRMED=true is required")
+        if self._config_bool("KUCOIN_FIXED_EGRESS_REQUIRED", False) and not _kucoin_egress_proxy_url(self.config):
+            errors.append("KUCOIN_EGRESS_PROXY_URL or QUOTAGUARDSTATIC_URL is required")
         return errors
 
     def kucoin_live_test_preflight_summary(self) -> dict[str, Any]:
         max_notional = _safe_float(self.config.get("KUCOIN_MAX_TEST_NOTIONAL_USDT"))
+        proxy_url = _kucoin_egress_proxy_url(self.config)
         return {
             "account": str(self.config.get("KUCOIN_TEST_ACCOUNT") or "").strip(),
             "symbol": str(self.config.get("KUCOIN_TEST_SYMBOL") or "").strip(),
             "max_notional_usdt": max_notional if max_notional > 0 else None,
             "live_trading_enabled": self._config_bool("KUCOIN_ENABLE_LIVE_TEST_TRADES", False),
             "fill_test_enabled": self._config_bool("KUCOIN_ENABLE_FILL_TEST", False),
+            "fixed_egress_required": self._config_bool("KUCOIN_FIXED_EGRESS_REQUIRED", False),
+            "fixed_egress_configured": bool(proxy_url),
+            "fixed_egress_status": "ready"
+            if self._config_bool("KUCOIN_COMPLIANCE_CONFIRMED", False) and proxy_url
+            else "missing"
+            if self._config_bool("KUCOIN_FIXED_EGRESS_REQUIRED", False)
+            else "pending",
+            "compliance_confirmed": self._config_bool("KUCOIN_COMPLIANCE_CONFIRMED", False),
             "spot_base_url": self._spot_base_url(),
             "credentials_present": {
                 "api_key": bool(self.credentials.api_key),
@@ -1038,7 +1069,7 @@ class KucoinFuturesConnector:
             return self.get_spot_recent_fills(mode)
         try:
             response = self._signed("GET", self._path("KUCOIN_FILLS_PATH", "/api/v1/recentDoneOrders"))
-        except Exception:
+        except ProviderConnectionError:
             return []
         data = _response_data(response)
         rows = _as_list(data.get("items") if isinstance(data, dict) else data)
@@ -1256,7 +1287,7 @@ class KucoinFuturesConnector:
         venue_symbol = self._symbol(symbol)
         granularity = self._kline_granularity(timeframe)
         candle_limit = max(1, min(int(_safe_float(limit, 200)), 500))
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         start = now - (timedelta(minutes=granularity) * (candle_limit + 5))
         payload = _request_with_retries(
             self.session,
@@ -1356,7 +1387,9 @@ class KucoinFuturesConnector:
         for attempt in range(2):
             timestamp = str(self._timestamp_ms(force_sync=attempt > 0))
             pre_sign = f"{timestamp}{method.upper()}{endpoint}{body_text}"
-            signature = base64.b64encode(hmac.new(self.credentials.api_secret.encode("utf-8"), pre_sign.encode("utf-8"), hashlib.sha256).digest()).decode("utf-8")
+            signature = base64.b64encode(
+                hmac.new(self.credentials.api_secret.encode("utf-8"), pre_sign.encode("utf-8"), hashlib.sha256).digest()
+            ).decode("utf-8")
             passphrase = base64.b64encode(
                 hmac.new(self.credentials.api_secret.encode("utf-8"), self.credentials.passphrase.encode("utf-8"), hashlib.sha256).digest()
             ).decode("utf-8")
@@ -1447,7 +1480,9 @@ class KucoinFuturesConnector:
         return max(1, int(_safe_float(self.config.get("PROVIDER_RETRY_ATTEMPTS", self.config.get("EXCHANGE_RETRY_ATTEMPTS", 3)), 3)))
 
     def _retry_sleep_seconds(self) -> float:
-        return max(0.0, _safe_float(self.config.get("PROVIDER_RETRY_SLEEP_SECONDS", self.config.get("EXCHANGE_RETRY_SLEEP_SECONDS", 0.5)), 0.5))
+        return max(
+            0.0, _safe_float(self.config.get("PROVIDER_RETRY_SLEEP_SECONDS", self.config.get("EXCHANGE_RETRY_SLEEP_SECONDS", 0.5)), 0.5)
+        )
 
     def _path(self, key: str, default: str) -> str:
         return str(self.config.get(key, default)).strip() or default
@@ -1705,7 +1740,7 @@ class KucoinFuturesConnector:
         if timestamp > 10_000_000_000:
             timestamp = timestamp / 1000.0
         return {
-            "timestamp": datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat(),
+            "timestamp": datetime.fromtimestamp(timestamp, tz=UTC).isoformat(),
             "timeframe": timeframe,
             "open": open_price,
             "high": high,
@@ -1875,7 +1910,7 @@ class DydxV4Connector:
         path = f"/addresses/{address}/subaccountNumber/{subaccount}/perpetualPositions"
         try:
             payload = self._get(path, {"status": "OPEN"})
-        except Exception:
+        except ProviderConnectionError:
             return []
         rows = _as_list(payload.get("positions") if isinstance(payload, dict) else payload)
         return [
@@ -1933,7 +1968,7 @@ class DydxV4Connector:
     def _sdk_available() -> bool:
         try:
             __import__("dydx_v4_client")
-        except Exception:
+        except ImportError:
             return False
         return True
 
@@ -2042,7 +2077,7 @@ class UniswapDelegatedConnector:
         if not str(self.metadata.get("session_topic", "")).strip():
             raise RuntimeError("WalletConnect/Reown session reference is required before Uniswap can activate.")
         expires_at = _parse_datetime(self.metadata.get("delegation_expires_at"))
-        if expires_at is None or expires_at <= datetime.now(timezone.utc):
+        if expires_at is None or expires_at <= datetime.now(UTC):
             raise RuntimeError("Wallet delegation is expired or missing an expiry.")
         if _safe_float(self.metadata.get("daily_loss_usd")) <= 0:
             raise RuntimeError("Uniswap daily loss cap is required.")
@@ -2208,5 +2243,5 @@ def _parse_datetime(value: Any) -> datetime | None:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)

@@ -7,6 +7,8 @@ import secrets
 
 from flask import abort, current_app, request, session
 
+from .live_api_internal import is_live_api_internal_request
+
 CSRF_SESSION_KEY = "_csrf_token"
 
 
@@ -34,6 +36,8 @@ def validate_csrf_request() -> None:
     if getattr(request, "routing_exception", None) is not None:
         return
     if request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return
+    if is_live_api_internal_request():
         return
     if _csrf_exempt_auth_request():
         return

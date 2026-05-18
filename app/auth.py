@@ -17,6 +17,7 @@ from qrcode.image.svg import SvgPathImage
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from .extensions import db
+from .live_api_internal import live_api_internal_user_id
 from .models import User
 
 
@@ -35,6 +36,8 @@ def password_matches(user: User, password: str) -> bool:
 def current_user() -> User | None:
     user_id = session.get("user_id")
     if not user_id:
+        user_id = live_api_internal_user_id()
+    if not user_id:
         return None
     return db.session.get(User, int(user_id))
 
@@ -50,6 +53,9 @@ def logout_user() -> None:
 
 
 def two_factor_session_valid(user: User) -> bool:
+    internal_user_id = live_api_internal_user_id()
+    if internal_user_id is not None and int(internal_user_id) == int(user.id):
+        return True
     return user.two_factor_enabled and bool(session.get("two_factor_verified"))
 
 
