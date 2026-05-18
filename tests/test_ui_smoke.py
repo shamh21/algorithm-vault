@@ -25,6 +25,7 @@ from app.models import (
     StrategyRanking,
     StrategyRun,
     StrategyValidation,
+    TradingConnection,
     User,
     VaultAllocationLeg,
     VaultCycle,
@@ -152,6 +153,31 @@ def _confirm_one_h10_live(app) -> None:
     Setting.set_json("explicit_live_confirmed", True)
     Setting.set_json("secondary_confirmation", True)
     db.session.commit()
+
+
+def _enable_vault_wallet_conversion(app, monkeypatch, amount: float = 30.0) -> None:
+    app.config.update(
+        {
+            "VAULT_CYCLE_CONVERSION_ENABLED": True,
+            "WALLET_REAL_CUSTODY_ENABLED": True,
+            "WALLET_ALLOW_IN_APP_KEYGEN": True,
+            "TOTP_ENCRYPTION_KEY": Fernet.generate_key().decode("utf-8"),
+            "WALLET_EVM_RPC_URL": "https://evm.example.invalid",
+            "WALLET_EVM_TOKEN_CONTRACTS": {
+                "ETHEREUM": {
+                    "USDT": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+                    "USDT_DECIMALS": 6,
+                    "USDC": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+                    "USDC_DECIMALS": 6,
+                }
+            },
+        }
+    )
+    monkeypatch.setattr(
+        app.extensions["services"]["wallet_custody"],
+        "verified_spendable_amount",
+        lambda user_id, asset, network: amount if asset == "USDT" else 0.0,
+    )
 
 
 class _PassingOneH10Forecast:
@@ -2427,6 +2453,39 @@ def test_vault_selector_uses_only_aggressive_compatible_rankings_for_one_hour(ap
     assert selection.timeframe == "1m"
     assert selection.metadata["optimizer_profile"] == "aggressive_1h"
     assert selection.metadata["optimizer_recent_1h_return"] == 0.03
+
+
+def test_vault_provider_payload_shows_hyperliquid_auto_usdc_conversion(app, monkeypatch) -> None:
+    _patch_market_data(app)
+    _confirm_one_h10_live(app)
+    _enable_vault_wallet_conversion(app, monkeypatch, amount=30.0)
+    user, secret = _create_user(username="vaultautoconvert")
+    client = app.test_client()
+    _login(client, user.username, secret)
+    _seed_backtest_market("hyperliquid", "BTC")
+    db.session.add(WalletBalance(user_id=user.id, asset="USDT", available_balance=30.0, estimated_usd_value=30.0))
+    db.session.commit()
+    connection = TradingConnection.query.filter_by(user_id=user.id, provider="hyperliquid").one()
+    trading = app.extensions["services"]["trading_connections"]
+    monkeypatch.setattr(trading, "can_trade", lambda user_id, mode, connection_id=None: connection_id == connection.id)
+    monkeypatch.setattr(trading, "account_snapshot", lambda user_id, mode, connection_id=None: ClientSnapshot(mode, [], [], [], [], []))
+
+    response = client.get(
+        "/api/vault/routing-preview?amount=30&deposit_asset=USDT&settlement_asset=USDT&providers=hyperliquid&one_h10_live_ack=1",
+        headers={"Accept": "application/json"},
+    )
+
+    payload = response.get_json()
+    provider = next(item for item in payload["providers"] if item["provider"] == "hyperliquid")
+    assert response.status_code == 200
+    assert payload["can_start"] is True
+    assert provider["ready"] is True
+    assert provider["conversion_required"] is True
+    assert provider["conversion_from"] == "USDT"
+    assert provider["conversion_to"] == "USDC"
+    assert provider["conversion_amount"] == pytest.approx(30.0)
+    assert provider["funding_label"] == "Auto converts allocation to USDC"
+    assert "Hyperliquid requires USDC" not in response.get_data(as_text=True)
 
 
 def test_live_vault_cycle_starts_with_active_connection(app) -> None:

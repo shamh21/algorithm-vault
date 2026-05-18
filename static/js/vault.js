@@ -229,6 +229,7 @@
   }
 
   function metricLabel(provider, status) {
+    if (provider.conversion_required && provider.conversion_status === "ready") return "Auto converts";
     if (status === "ready_auto_funded" || provider.funding_status === "auto_funded") return "Auto-funded";
     if (status === "geo_restricted") return "Recheck provider";
     if (status === "needs_verification") return "Verify";
@@ -387,7 +388,10 @@
     card.querySelector("[data-provider-allocation]").textContent =
       numberValue(provider.allocation_pct, 0) > 0 ? formatPercent(provider.allocation_pct) : formatPercent(provider.allocation_weight);
     if (blockerEl) {
-      const text = blockerText(topBlocker) || provider.funding_detail || provider.funding_label || "";
+      const text =
+        blockerText(topBlocker) ||
+        (provider.conversion_required ? provider.funding_label || provider.funding_detail : provider.funding_detail || provider.funding_label) ||
+        "";
       blockerEl.textContent = text;
       blockerEl.hidden = !text || status === "ready" || !enabled;
     }

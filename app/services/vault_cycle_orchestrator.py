@@ -189,6 +189,7 @@ class VaultCycleOrchestrator:
         metadata["state_machine"] = "funding_exchange"
         cycle.selection_metadata = metadata
         for allocation in allocations:
+            self.transfer_service.prepare_allocation_funding(cycle, allocation)
             self.transfer_service.reserve_allocation(cycle, allocation)
 
         cycle.execution_substatus = "trading"

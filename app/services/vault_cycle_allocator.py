@@ -108,6 +108,9 @@ class VaultCycleAllocator:
                         "risk_adjusted_score": risk_adjusted,
                         "conversion_required": collateral != settlement,
                         "conversion_supported": conversion["supported"],
+                        "conversion_from": settlement if collateral != settlement else "",
+                        "conversion_to": collateral if collateral != settlement else "",
+                        "conversion_status": "planned" if collateral != settlement else "not_required",
                     },
                     "constraints": {
                         "max_exchange_allocation_pct": max_exchange_pct,
@@ -138,19 +141,24 @@ class VaultCycleAllocator:
             return [], blockers
 
         allocated_total = sum(float(item["target_amount"]) for item in raw_allocations)
-        plans = [
-            VaultCycleAllocationPlan(
-                connection=item["connection"],
-                provider=item["provider"],
-                settlement_asset=item["settlement_asset"],
-                collateral_asset=item["collateral_asset"],
-                target_amount=float(item["target_amount"]),
-                allocation_weight=float(item["target_amount"]) / max(allocated_total, 1e-9),
-                scores=item["scores"],
-                constraints=item["constraints"],
+        plans = []
+        for item in raw_allocations:
+            target_amount = float(item["target_amount"])
+            scores = dict(item["scores"])
+            if bool(scores.get("conversion_required")):
+                scores["conversion_amount"] = target_amount
+            plans.append(
+                VaultCycleAllocationPlan(
+                    connection=item["connection"],
+                    provider=item["provider"],
+                    settlement_asset=item["settlement_asset"],
+                    collateral_asset=item["collateral_asset"],
+                    target_amount=target_amount,
+                    allocation_weight=target_amount / max(allocated_total, 1e-9),
+                    scores=scores,
+                    constraints=item["constraints"],
+                )
             )
-            for item in raw_allocations
-        ]
         return plans, blockers
 
     def _market_score(self, provider: str, allowed_symbols: list[str] | None) -> dict[str, float]:
@@ -224,7 +232,11 @@ class VaultCycleAllocator:
     def _conversion_policy(self, provider: str, collateral: str, settlement: str) -> dict[str, Any]:
         if collateral == settlement:
             return {"supported": True, "reason": ""}
-        if {collateral, settlement}.issubset({"USDC", "USDT"}) and provider == "kucoin" and bool(self.config.get("VAULT_CYCLE_CONVERSION_ENABLED", False)):
+        if (
+            {collateral, settlement}.issubset({"USDC", "USDT"})
+            and provider in {"hyperliquid", "kucoin"}
+            and bool(self.config.get("VAULT_CYCLE_CONVERSION_ENABLED", False))
+        ):
             return {"supported": True, "reason": ""}
         return {"supported": False, "reason": "stablecoin_conversion_route_unavailable"}
 

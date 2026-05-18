@@ -254,8 +254,10 @@ class VaultReadinessService:
                 user=user,
                 exchange=exchange,
                 enabled=exchange in requested_exchanges,
+                funding_asset=funding_asset,
                 settlement_asset=settlement,
                 amount=notional_amount,
+                available_funding=available_funding,
                 require_market_metadata=require_market_metadata,
             )
 
@@ -375,8 +377,10 @@ class VaultReadinessService:
         user: User | None,
         exchange: str,
         enabled: bool,
+        funding_asset: str,
         settlement_asset: str,
         amount: float,
+        available_funding: float,
         require_market_metadata: bool,
     ) -> dict[str, Any]:
         label = EXCHANGE_LABELS.get(exchange, exchange.title())
@@ -386,6 +390,16 @@ class VaultReadinessService:
         collateral_asset = provider_collateral_asset(exchange)
         available_margin = 0.0
         markets = self._active_markets(exchange, connection.id if connection is not None else None)
+        conversion_state = self._provider_conversion_state(
+            exchange=exchange,
+            funding_asset=funding_asset,
+            collateral_asset=collateral_asset,
+            amount=amount,
+            available_funding=available_funding,
+        )
+        conversion_blocker = conversion_state.get("blocker")
+        if isinstance(conversion_blocker, dict):
+            blockers.append(conversion_blocker)
 
         if not enabled:
             blockers.append(
@@ -482,7 +496,7 @@ class VaultReadinessService:
 
         if exchange == "hyperliquid":
             market_warnings, market_blockers = self._hyperliquid_specific_blockers(
-                connection, settlement_asset, markets, require_market_metadata
+                connection, settlement_asset, markets, require_market_metadata, conversion_state
             )
             warnings.extend(market_warnings)
             blockers.extend(market_blockers)
@@ -496,8 +510,26 @@ class VaultReadinessService:
             warnings.append(market_warning)
 
         blocking = [item for item in blockers if item.get("severity") in {"blocker", "critical"}]
-        auto_funded = exchange == "hyperliquid" and available_margin <= 0 and not blocking
+        conversion_ready = bool(conversion_state.get("conversion_required")) and conversion_state.get("conversion_status") == "ready"
+        auto_funded = exchange == "hyperliquid" and (available_margin <= 0 or conversion_ready) and not blocking
         ready = enabled and not blocking and (available_margin > 0 or auto_funded)
+        funding_status = "auto_converting" if conversion_ready else "auto_funded" if auto_funded else "available" if available_margin > 0 else "unavailable"
+        funding_label = (
+            f"Auto converts allocation to {collateral_asset}"
+            if conversion_ready
+            else "Auto-funded during vault cycle"
+            if auto_funded
+            else f"{collateral_asset} collateral available"
+            if available_margin > 0
+            else f"{collateral_asset} collateral unavailable"
+        )
+        funding_detail = (
+            f"Auto converts allocation to {collateral_asset}; only the routed {label} amount is converted server-side."
+            if conversion_ready
+            else "Collateral is transferred at cycle start and withdrawn after cycle completion."
+            if auto_funded
+            else ""
+        )
         status = self._exchange_readiness_state(
             exchange=exchange,
             enabled=enabled,
@@ -518,18 +550,19 @@ class VaultReadinessService:
             "target_amount": 0.0,
             "available_margin_usd": available_margin,
             "collateral_asset": collateral_asset,
+            "conversion_required": bool(conversion_state.get("conversion_required", False)),
+            "conversion_from": str(conversion_state.get("conversion_from") or ""),
+            "conversion_to": str(conversion_state.get("conversion_to") or ""),
+            "conversion_amount": float(conversion_state.get("conversion_amount") or 0.0),
+            "conversion_status": str(conversion_state.get("conversion_status") or "not_required"),
             "connected": connection is not None,
             "verified": bool(connection and connection.verification_status == "verified"),
             "can_trade": ready,
             "status": status,
             "readiness_state": status,
-            "funding_status": "auto_funded" if auto_funded else "available" if available_margin > 0 else "unavailable",
-            "funding_label": "Auto-funded during vault cycle"
-            if auto_funded
-            else f"{collateral_asset} collateral available"
-            if available_margin > 0
-            else f"{collateral_asset} collateral unavailable",
-            "funding_detail": "Collateral is transferred at cycle start and withdrawn after cycle completion." if auto_funded else "",
+            "funding_status": funding_status,
+            "funding_label": funding_label,
+            "funding_detail": funding_detail,
             "label": label,
             "blockers": blockers,
             "warnings": warnings,
@@ -783,6 +816,7 @@ class VaultReadinessService:
         settlement_asset: str,
         markets: list[LeveragedMarket],
         require_market_metadata: bool,
+        conversion_state: dict[str, Any],
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         warnings: list[dict[str, Any]] = []
         blockers: list[dict[str, Any]] = []
@@ -797,7 +831,7 @@ class VaultReadinessService:
                     exchange="hyperliquid",
                 )
             )
-        if settlement_asset != "USDC":
+        if settlement_asset != "USDC" and not bool(conversion_state.get("conversion_required")):
             blockers.append(
                 self._blocker(
                     "hyperliquid_usdc_settlement_unavailable",
@@ -832,6 +866,101 @@ class VaultReadinessService:
                 )
             )
         return warnings, blockers
+
+    def _provider_conversion_state(
+        self,
+        *,
+        exchange: str,
+        funding_asset: str,
+        collateral_asset: str,
+        amount: float,
+        available_funding: float,
+    ) -> dict[str, Any]:
+        funding = str(funding_asset or "").upper().strip()
+        collateral = str(collateral_asset or "").upper().strip()
+        required = bool(funding and collateral and funding != collateral)
+        state: dict[str, Any] = {
+            "conversion_required": required,
+            "conversion_from": funding if required else "",
+            "conversion_to": collateral if required else "",
+            "conversion_amount": max(0.0, float(amount or 0.0)) if required else 0.0,
+            "conversion_status": "not_required",
+        }
+        if not required:
+            return state
+        if exchange != "hyperliquid":
+            state.update(
+                {
+                    "conversion_required": False,
+                    "conversion_from": "",
+                    "conversion_to": "",
+                    "conversion_amount": 0.0,
+                    "conversion_status": "not_required",
+                }
+            )
+            return state
+        if funding != "USDT" or collateral != "USDC":
+            state["conversion_status"] = "unsupported"
+            state["blocker"] = self._blocker(
+                f"{exchange}_auto_conversion_unsupported",
+                f"{EXCHANGE_LABELS.get(exchange, exchange.title())} auto-conversion unsupported",
+                f"{EXCHANGE_LABELS.get(exchange, exchange.title())} cannot auto-convert {funding} to {collateral} for this Vault route.",
+                "blocker",
+                f"Use {collateral} funding or choose another enabled exchange.",
+                exchange=exchange,
+            )
+            return state
+        if not bool(self.config.get("VAULT_CYCLE_CONVERSION_ENABLED", False)):
+            state["conversion_status"] = "unavailable"
+            state["blocker"] = self._blocker(
+                "hyperliquid_auto_conversion_unavailable",
+                "Hyperliquid auto-conversion unavailable",
+                "Hyperliquid requires USDC collateral and server-side USDT to USDC conversion is disabled.",
+                "blocker",
+                "Enable VAULT_CYCLE_CONVERSION_ENABLED and server-side wallet custody, or select USDC funding.",
+                exchange="hyperliquid",
+            )
+            return state
+        custody_blockers = self._wallet_conversion_config_blockers(funding, collateral)
+        if custody_blockers:
+            state["conversion_status"] = "unavailable"
+            state["blocker"] = self._blocker(
+                "hyperliquid_wallet_conversion_unavailable",
+                "Hyperliquid auto-conversion unavailable",
+                f"Server-side wallet conversion is not ready: {custody_blockers[0]}.",
+                "blocker",
+                "Repair wallet custody/conversion configuration before routing USDT to Hyperliquid.",
+                exchange="hyperliquid",
+            )
+            return state
+        if amount > 0 and available_funding + 1e-9 < amount:
+            state["conversion_status"] = "underfunded"
+            state["blocker"] = self._blocker(
+                "hyperliquid_auto_conversion_underfunded",
+                "Hyperliquid auto-conversion underfunded",
+                f"{amount:g} {funding} is required to convert this route to {collateral}, but only {available_funding:g} {funding} is available.",
+                "blocker",
+                "Reduce the allocation amount or deposit more verified funds.",
+                exchange="hyperliquid",
+            )
+            return state
+        state["conversion_status"] = "ready"
+        return state
+
+    def _wallet_conversion_config_blockers(self, from_asset: str, to_asset: str) -> list[str]:
+        if not has_app_context():
+            return ["wallet custody service is unavailable"]
+        custody = current_app.extensions.get("services", {}).get("wallet_custody")
+        if custody is None or not getattr(custody, "enabled", False):
+            return ["WALLET_REAL_CUSTODY_ENABLED is disabled"]
+        blockers: list[str] = []
+        for asset in (from_asset, to_asset):
+            network = self._default_network(asset)
+            try:
+                blockers.extend(str(item) for item in custody.generation_blockers(asset, network) if str(item).strip())
+            except Exception as exc:  # noqa: BLE001
+                blockers.append(f"{asset}/{network} custody check failed: {exc}")
+        return list(dict.fromkeys(blockers))
 
     def _kucoin_specific_blockers(
         self,
@@ -1018,6 +1147,8 @@ class VaultReadinessService:
             status["allocation_weight"] = weight
             status["notional_usd"] = route_notional
             status["target_amount"] = target_amount
+            if bool(status.get("conversion_required")):
+                status["conversion_amount"] = target_amount
             routes.append(
                 {
                     "exchange": exchange,
@@ -1027,6 +1158,11 @@ class VaultReadinessService:
                     "notional_usd": route_notional,
                     "target_amount": target_amount,
                     "score": status.get("score", 0),
+                    "conversion_required": bool(status.get("conversion_required", False)),
+                    "conversion_from": status.get("conversion_from") or "",
+                    "conversion_to": status.get("conversion_to") or "",
+                    "conversion_amount": float(status.get("conversion_amount") or 0.0),
+                    "conversion_status": status.get("conversion_status") or "not_required",
                 }
             )
         for exchange, status in exchange_status.items():

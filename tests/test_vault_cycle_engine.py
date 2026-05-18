@@ -294,6 +294,38 @@ def test_vault_cycle_allocator_excludes_unsupported_stablecoin_conversion(app) -
     assert any(item["provider"] == "hyperliquid" and item["reason"] == "stablecoin_conversion_route_unavailable" for item in blockers)
 
 
+def test_vault_cycle_allocator_allows_hyperliquid_usdt_funding_conversion(app) -> None:
+    app.config["VAULT_CYCLE_CONVERSION_ENABLED"] = True
+    user, _ = _create_user("allocator-hl-convert")
+    hyperliquid = _connection(user, "hyperliquid")
+    kucoin = _connection(user, "kucoin")
+    _seed_market("hyperliquid", "USDC")
+    _seed_market("kucoin", "USDT")
+    trading = app.extensions["services"]["trading_connections"]
+    trading.account_snapshot = _snapshot_for({hyperliquid.id: "hyperliquid", kucoin.id: "kucoin"})
+
+    plans, blockers = app.extensions["services"]["vault_cycle_allocator"].allocate(
+        user_id=user.id,
+        amount_usd=20.0,
+        settlement_asset="USDT",
+        connections=[hyperliquid, kucoin],
+        allowed_symbols=["BTC"],
+        provider_filter=["hyperliquid", "kucoin"],
+    )
+
+    providers = {plan.provider for plan in plans}
+    assert "hyperliquid" in providers
+    hyper_plan = next(plan for plan in plans if plan.provider == "hyperliquid")
+    assert hyper_plan.collateral_asset == "USDC"
+    assert hyper_plan.settlement_asset == "USDT"
+    assert hyper_plan.scores["conversion_required"] is True
+    assert hyper_plan.scores["conversion_from"] == "USDT"
+    assert hyper_plan.scores["conversion_to"] == "USDC"
+    assert hyper_plan.scores["conversion_amount"] == pytest.approx(hyper_plan.target_amount)
+    assert hyper_plan.scores["conversion_amount"] < 100.0
+    assert not any(item["provider"] == "hyperliquid" for item in blockers)
+
+
 def test_vault_cycle_route_creates_allocations_and_confirmed_reserve_transfer(app, monkeypatch) -> None:
     app.config.update(
         {
@@ -343,6 +375,101 @@ def test_vault_cycle_route_creates_allocations_and_confirmed_reserve_transfer(ap
     balance = WalletBalance.query.filter_by(user_id=user.id, asset="USDT").one()
     assert balance.available_balance == 30
     assert balance.locked_balance == 20
+
+
+def test_vault_cycle_hyperliquid_usdt_allocation_converts_route_amount(app) -> None:
+    app.config.update(
+        {
+            "VAULT_CYCLE_ENGINE_ENABLED": True,
+            "VAULT_CYCLE_REAL_TRANSFERS_ENABLED": True,
+            "VAULT_CYCLE_CONVERSION_ENABLED": True,
+            "VAULT_CYCLE_PROVIDERS": ["hyperliquid"],
+            "VAULT_CYCLE_REQUIRE_EXCHANGE_RESERVE": True,
+        }
+    )
+    _patch_market_data(app)
+    app.extensions["services"]["strategy_manager"].start = lambda run_id: None
+    user, _ = _create_user("route-hl-convert")
+    hyperliquid = _connection(user, "hyperliquid")
+    _seed_market("hyperliquid", "USDC")
+    db.session.add(WalletBalance(user_id=user.id, asset="USDT", available_balance=70.0, estimated_usd_value=70.0))
+    db.session.commit()
+    trading = app.extensions["services"]["trading_connections"]
+    trading.account_snapshot = _snapshot_for({hyperliquid.id: "hyperliquid"})
+    trading.connector_for_user = lambda user_id, connection_id=None: _FakeVaultConnector("USDC")
+
+    result = app.extensions["services"]["vault_cycle_orchestrator"].start_cycle(
+        user=user,
+        amount=30.0,
+        deposit_asset="USDT",
+        settlement_asset="USDT",
+        duration_seconds=3600,
+        providers=["hyperliquid"],
+        allowed_symbols=["BTC"],
+        idempotency_key="hl-usdt-conversion",
+        start_strategy_runs=False,
+    )
+
+    cycle = result["cycle"]
+    allocation = VaultCycleAllocation.query.filter_by(vault_cycle_id=cycle.id, provider="hyperliquid").one()
+    conversion = VaultCycleTransfer.query.filter_by(
+        vault_cycle_id=cycle.id,
+        allocation_id=allocation.id,
+        direction="conversion",
+        transfer_type="wallet_collateral_conversion",
+    ).one()
+    reserve = VaultCycleTransfer.query.filter_by(vault_cycle_id=cycle.id, allocation_id=allocation.id, direction="fund_exchange").one()
+    usdt = WalletBalance.query.filter_by(user_id=user.id, asset="USDT").one()
+    usdc = WalletBalance.query.filter_by(user_id=user.id, asset="USDC").one()
+
+    assert allocation.collateral_asset == "USDC"
+    assert allocation.scores["conversion_required"] is True
+    assert allocation.scores["conversion_from"] == "USDT"
+    assert allocation.scores["conversion_to"] == "USDC"
+    assert allocation.scores["conversion_amount"] == pytest.approx(allocation.allocated_amount)
+    assert conversion.status == "confirmed"
+    assert conversion.requested_amount == pytest.approx(allocation.allocated_amount)
+    assert conversion.requested_amount == pytest.approx(24.0)
+    assert conversion.requested_amount < 70.0
+    assert conversion.details["conversion_scope"] == "allocation_route_amount"
+    assert reserve.asset == "USDC"
+    assert usdt.available_balance == pytest.approx(40.0)
+    assert usdt.locked_balance == pytest.approx(6.0)
+    assert usdc.locked_balance == pytest.approx(24.0)
+
+
+def test_vault_cycle_start_blocks_when_verified_usdt_underfunded(app, monkeypatch) -> None:
+    app.config.update(
+        {
+            "VAULT_CYCLE_ENGINE_ENABLED": True,
+            "VAULT_CYCLE_REAL_TRANSFERS_ENABLED": True,
+            "VAULT_CYCLE_CONVERSION_ENABLED": True,
+            "VAULT_CYCLE_PROVIDERS": ["hyperliquid"],
+            "WALLET_REAL_CUSTODY_ENABLED": True,
+        }
+    )
+    _patch_market_data(app)
+    user, _ = _create_user("hl-verified-underfunded")
+    hyperliquid = _connection(user, "hyperliquid")
+    _seed_market("hyperliquid", "USDC")
+    db.session.add(WalletBalance(user_id=user.id, asset="USDT", available_balance=70.0, estimated_usd_value=70.0))
+    db.session.commit()
+    trading = app.extensions["services"]["trading_connections"]
+    trading.account_snapshot = _snapshot_for({hyperliquid.id: "hyperliquid"})
+    monkeypatch.setattr(app.extensions["services"]["wallet_custody"], "verified_spendable_amount", lambda user_id, asset, network: 10.0)
+
+    with pytest.raises(ValueError, match="verified on-chain wallet balance"):
+        app.extensions["services"]["vault_cycle_orchestrator"].start_cycle(
+            user=user,
+            amount=30.0,
+            deposit_asset="USDT",
+            settlement_asset="USDT",
+            duration_seconds=3600,
+            providers=["hyperliquid"],
+            allowed_symbols=["BTC"],
+            idempotency_key="hl-underfunded",
+            start_strategy_runs=False,
+        )
 
 
 def test_vault_cycle_materializes_onchain_surplus_before_allocation(app) -> None:

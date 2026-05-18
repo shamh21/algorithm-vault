@@ -7,7 +7,16 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from ..extensions import db
-from ..models import AuditLog, DepositAddress, VaultCycle, VaultCycleAllocation, VaultCycleRiskEvent, VaultCycleTransfer
+from ..models import (
+    AuditLog,
+    DepositAddress,
+    VaultCycle,
+    VaultCycleAllocation,
+    VaultCycleRiskEvent,
+    VaultCycleTransfer,
+    WalletBalance,
+    WalletTransaction,
+)
 
 
 class VaultCycleTransferService:
@@ -65,6 +74,111 @@ class VaultCycleTransferService:
         allocation.status = "funded"
         allocation.funded_at = transfer.confirmed_at
         self.audit(cycle, "allocation_reserved", f"Reserved {transfer.confirmed_amount:.6f} {transfer.asset} on {allocation.provider}.", allocation)
+        return transfer
+
+    def prepare_allocation_funding(self, cycle: VaultCycle, allocation: VaultCycleAllocation) -> VaultCycleTransfer | None:
+        """Record server-side funding conversion for the routed allocation amount."""
+
+        from_asset = str(cycle.deposit_asset or cycle.settlement_asset or "").upper().strip()
+        to_asset = str(allocation.collateral_asset or "").upper().strip()
+        if not from_asset or not to_asset or from_asset == to_asset:
+            return None
+        amount = max(0.0, float(allocation.allocated_amount or allocation.target_amount or 0.0))
+        if amount <= 0:
+            return None
+        if not bool(self.config.get("VAULT_CYCLE_CONVERSION_ENABLED", False)):
+            raise RuntimeError("hyperliquid_auto_conversion_unavailable")
+        if {from_asset, to_asset} != {"USDC", "USDT"}:
+            raise RuntimeError("hyperliquid_auto_conversion_unsupported")
+
+        transfer = self._get_or_create_transfer(
+            cycle=cycle,
+            allocation=allocation,
+            direction="conversion",
+            transfer_type="wallet_collateral_conversion",
+            asset=from_asset,
+            amount=amount,
+            idempotency_key=f"vault-cycle:{cycle.id}:allocation:{allocation.id}:funding-convert:{from_asset}:{to_asset}",
+        )
+        if transfer.status in {"confirmed", "complete"}:
+            return transfer
+
+        source = WalletBalance.query.filter_by(user_id=cycle.user_id, asset=from_asset).one_or_none()
+        if source is None or float(source.locked_balance or 0.0) + 1e-9 < amount:
+            raise RuntimeError(f"allocation_conversion_source_locked_unavailable:{from_asset}")
+        destination = WalletBalance.query.filter_by(user_id=cycle.user_id, asset=to_asset).one_or_none()
+        if destination is None:
+            destination = WalletBalance(user_id=cycle.user_id, asset=to_asset, available_balance=0.0, locked_balance=0.0)
+            db.session.add(destination)
+            db.session.flush()
+
+        source.locked_balance = max(0.0, float(source.locked_balance or 0.0) - amount)
+        destination.locked_balance = float(destination.locked_balance or 0.0) + amount
+        if from_asset in {"USDC", "USDT"}:
+            source.estimated_usd_value = float(source.total_balance or 0.0)
+        if to_asset in {"USDC", "USDT"}:
+            destination.estimated_usd_value = float(destination.total_balance or 0.0)
+
+        note = (
+            f"Vault Cycle {cycle.id} allocation {allocation.id}: converted {amount:.8f} {from_asset} "
+            f"to {amount:.8f} {to_asset} for {allocation.provider} collateral."
+        )
+        db.session.add(
+            WalletTransaction(
+                vault_cycle_id=cycle.id,
+                user_id=cycle.user_id,
+                asset=from_asset,
+                amount=-amount,
+                transaction_type="conversion",
+                status="complete",
+                network="internal",
+                note=note,
+            )
+        )
+        db.session.add(
+            WalletTransaction(
+                vault_cycle_id=cycle.id,
+                user_id=cycle.user_id,
+                asset=to_asset,
+                amount=amount,
+                transaction_type="conversion",
+                status="complete",
+                network="internal",
+                note=note,
+            )
+        )
+        transfer.status = "confirmed"
+        transfer.confirmed_amount = amount
+        transfer.destination = to_asset
+        transfer.submitted_at = datetime.utcnow()
+        transfer.confirmed_at = transfer.submitted_at
+        transfer.details = {
+            "conversion_required": True,
+            "conversion_from": from_asset,
+            "conversion_to": to_asset,
+            "conversion_amount": amount,
+            "conversion_status": "confirmed",
+            "conversion_scope": "allocation_route_amount",
+            "provider": allocation.provider,
+        }
+        scores = allocation.scores
+        scores.update(
+            {
+                "conversion_required": True,
+                "conversion_from": from_asset,
+                "conversion_to": to_asset,
+                "conversion_amount": amount,
+                "conversion_status": "confirmed",
+            }
+        )
+        allocation.scores = scores
+        self.audit(
+            cycle,
+            "allocation_funding_converted",
+            f"Converted {amount:.6f} {from_asset} to {to_asset} for {allocation.provider} collateral.",
+            allocation,
+            metadata=transfer.details,
+        )
         return transfer
 
     def convert_allocation_to_settlement(self, cycle: VaultCycle, allocation: VaultCycleAllocation, amount: float) -> VaultCycleTransfer | None:

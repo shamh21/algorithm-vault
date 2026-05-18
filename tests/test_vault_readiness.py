@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
+from cryptography.fernet import Fernet
 
 from app.auth import encrypt_totp_secret, password_hash
 from app.extensions import db
@@ -36,6 +37,31 @@ def _confirm_live(app) -> None:
     Setting.set_json("explicit_live_confirmed", True)
     Setting.set_json("secondary_confirmation", True)
     db.session.commit()
+
+
+def _enable_wallet_conversion(app, monkeypatch, amount: float = 30.0) -> None:
+    app.config.update(
+        {
+            "VAULT_CYCLE_CONVERSION_ENABLED": True,
+            "WALLET_REAL_CUSTODY_ENABLED": True,
+            "WALLET_ALLOW_IN_APP_KEYGEN": True,
+            "TOTP_ENCRYPTION_KEY": Fernet.generate_key().decode("utf-8"),
+            "WALLET_EVM_RPC_URL": "https://evm.example.invalid",
+            "WALLET_EVM_TOKEN_CONTRACTS": {
+                "ETHEREUM": {
+                    "USDT": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+                    "USDT_DECIMALS": 6,
+                    "USDC": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+                    "USDC_DECIMALS": 6,
+                }
+            },
+        }
+    )
+    monkeypatch.setattr(
+        app.extensions["services"]["wallet_custody"],
+        "verified_spendable_amount",
+        lambda user_id, asset, network: amount if asset == "USDT" else 0.0,
+    )
 
 
 def _kucoin_connection(app, user: User) -> TradingConnection:
@@ -577,6 +603,65 @@ def test_hyperliquid_zero_collateral_is_ready_auto_funded(app, monkeypatch) -> N
     assert "Collateral is transferred at cycle start" in status["funding_detail"]
 
 
+def test_hyperliquid_usdt_funding_auto_converts_to_usdc(app, monkeypatch) -> None:
+    _confirm_live(app)
+    _enable_wallet_conversion(app, monkeypatch, amount=30.0)
+    user = _user("hlautoconvert")
+    _ready_hyperliquid_zero_collateral(app, monkeypatch, user)
+    db.session.add(WalletBalance(user_id=user.id, asset="USDT", available_balance=30.0, estimated_usd_value=30.0))
+    db.session.commit()
+
+    payload = get_vault_cycle_readiness(
+        user.id,
+        settlement_asset="USDT",
+        deposit_asset="USDT",
+        amount=10,
+        live_acknowledged=True,
+        enabled_exchanges=["hyperliquid"],
+    )
+
+    status = payload["exchange_status"]["hyperliquid"]
+    assert payload["ready"] is True
+    assert status["ready"] is True
+    assert status["status"] == "ready_auto_funded"
+    assert status["conversion_required"] is True
+    assert status["conversion_from"] == "USDT"
+    assert status["conversion_to"] == "USDC"
+    assert status["conversion_status"] == "ready"
+    assert status["conversion_amount"] == pytest.approx(10.0)
+    assert status["target_amount"] == pytest.approx(10.0)
+    assert status["funding_status"] == "auto_converting"
+    assert status["funding_label"] == "Auto converts allocation to USDC"
+    assert "hyperliquid_usdc_settlement_unavailable" not in _codes(payload)
+
+
+def test_hyperliquid_usdt_funding_blocks_when_conversion_disabled(app, monkeypatch) -> None:
+    _confirm_live(app)
+    app.config["VAULT_CYCLE_CONVERSION_ENABLED"] = False
+    user = _user("hlautoconvertdisabled")
+    _ready_hyperliquid_zero_collateral(app, monkeypatch, user)
+    db.session.add(WalletBalance(user_id=user.id, asset="USDT", available_balance=30.0, estimated_usd_value=30.0))
+    db.session.commit()
+
+    payload = get_vault_cycle_readiness(
+        user.id,
+        settlement_asset="USDT",
+        deposit_asset="USDT",
+        amount=10,
+        live_acknowledged=True,
+        enabled_exchanges=["hyperliquid"],
+    )
+
+    status = payload["exchange_status"]["hyperliquid"]
+    assert payload["ready"] is False
+    assert status["ready"] is False
+    assert status["conversion_required"] is True
+    assert status["conversion_status"] == "unavailable"
+    assert "hyperliquid_auto_conversion_unavailable" in _codes(payload)
+    blocker = next(item for item in status["blockers"] if item["code"] == "hyperliquid_auto_conversion_unavailable")
+    assert blocker["title"] == "Hyperliquid auto-conversion unavailable"
+
+
 def test_hyperliquid_missing_wallet_returns_needs_wallet(app, monkeypatch) -> None:
     _confirm_live(app)
     user = _user("hlmissingwallet")
@@ -683,6 +768,8 @@ def test_routing_preview_providers_include_new_readiness_fields(app, monkeypatch
     assert provider["funding_status"] == "auto_funded"
     assert provider["funding_label"] == "Auto-funded during vault cycle"
     assert provider["funding_detail"] == "Collateral is transferred at cycle start and withdrawn after cycle completion."
+    assert provider["conversion_required"] is False
+    assert provider["conversion_status"] == "not_required"
     assert payload["can_start"] is True
     assert payload["objective"]["horizon_seconds"] == app.config["ONE_H10_HORIZON_SECONDS"]
     assert "hard_blockers" in payload
