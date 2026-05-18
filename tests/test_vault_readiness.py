@@ -192,6 +192,7 @@ def test_hyperliquid_missing_credentials_has_specific_blocker(app) -> None:
 
 def test_kucoin_ready_hyperliquid_blocked_allocates_kucoin_100(app, monkeypatch) -> None:
     _confirm_live(app)
+    app.config["KUCOIN_OPERATOR_REGION"] = "Alberta"
     user = _user("kucoinonly")
     _ready_kucoin(app, monkeypatch, user)
     _missing_hyperliquid(user)
@@ -201,6 +202,7 @@ def test_kucoin_ready_hyperliquid_blocked_allocates_kucoin_100(app, monkeypatch)
     assert payload["ready"] is True
     assert payload["exchange_status"]["hyperliquid"]["allocation_pct"] == 0
     assert payload["exchange_status"]["kucoin"]["allocation_pct"] == pytest.approx(100)
+    assert payload["exchange_status"]["kucoin"]["fixed_egress_status"] == "ready"
     assert payload["routing_preview"]["routes"][0]["exchange"] == "kucoin"
 
 
@@ -695,6 +697,44 @@ def test_kucoin_fixed_egress_compliance_gate_fails_closed(app, monkeypatch) -> N
     assert status["ready"] is False
     assert status["fixed_egress_status"] == "pending"
     assert "kucoin_compliance_confirmation_missing" in _codes(payload)
+
+
+def test_kucoin_restricted_operator_region_blocks_even_when_compliance_confirmed(app, monkeypatch) -> None:
+    _confirm_live(app)
+    app.config["KUCOIN_OPERATOR_REGION"] = "BC"
+    user = _user("kucoinbcrestricted")
+    _ready_kucoin(app, monkeypatch, user)
+    service = app.extensions["services"]["trading_connections"]
+    monkeypatch.setattr(service, "can_trade", lambda *args, **kwargs: pytest.fail("KuCoin can_trade should wait for region eligibility"))
+    monkeypatch.setattr(
+        service,
+        "account_snapshot",
+        lambda *args, **kwargs: pytest.fail("KuCoin balance checks should wait for region eligibility"),
+    )
+
+    payload = get_vault_cycle_readiness(user.id, amount=10, live_acknowledged=True, enabled_exchanges=["kucoin"])
+
+    status = payload["exchange_status"]["kucoin"]
+    assert status["ready"] is False
+    assert status["fixed_egress_status"] == "restricted"
+    assert "kucoin_operator_region_restricted" in _codes(payload)
+    blocker = next(item for item in payload["exchange_blockers"] if item["code"] == "kucoin_operator_region_restricted")
+    assert blocker["description"] == "KuCoin unavailable: British Columbia is restricted by KuCoin terms."
+
+
+def test_kucoin_non_restricted_operator_region_with_fixed_egress_is_ready(app, monkeypatch) -> None:
+    _confirm_live(app)
+    app.config["KUCOIN_OPERATOR_REGION"] = "Alberta"
+    user = _user("kucoinalbertaready")
+    _ready_kucoin(app, monkeypatch, user)
+
+    payload = get_vault_cycle_readiness(user.id, amount=10, live_acknowledged=True, enabled_exchanges=["kucoin"])
+
+    status = payload["exchange_status"]["kucoin"]
+    assert payload["ready"] is True
+    assert status["ready"] is True
+    assert status["fixed_egress_status"] == "ready"
+    assert "kucoin_operator_region_restricted" not in _codes(payload)
 
 
 def test_hyperliquid_missing_wallet_returns_needs_wallet(app, monkeypatch) -> None:

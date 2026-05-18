@@ -70,7 +70,9 @@ def test_kucoin_spot_symbol_normalization() -> None:
 def test_kucoin_spot_balance_parsing() -> None:
     connector = _connector()
 
-    parsed = connector._normalize_spot_account({"currency": "USDT", "type": "trade", "balance": "5.25", "available": "4.75", "holds": "0.5"})
+    parsed = connector._normalize_spot_account(
+        {"currency": "USDT", "type": "trade", "balance": "5.25", "available": "4.75", "holds": "0.5"}
+    )
 
     assert parsed["asset"] == "USDT"
     assert parsed["type"] == "spot_trade"
@@ -78,6 +80,46 @@ def test_kucoin_spot_balance_parsing() -> None:
     assert parsed["available"] == pytest.approx(4.75)
     assert parsed["withdrawable"] == pytest.approx(4.75)
     assert parsed["held"] == pytest.approx(0.5)
+
+
+def test_kucoin_live_preflight_rejects_restricted_operator_region() -> None:
+    connector = _connector(
+        {
+            "KUCOIN_FIXED_EGRESS_REQUIRED": True,
+            "KUCOIN_EGRESS_PROXY_URL": "http://fixed-egress.test:8080",
+            "KUCOIN_COMPLIANCE_CONFIRMED": True,
+            "KUCOIN_OPERATOR_REGION": "British Columbia",
+            "KUCOIN_TEST_ACCOUNT": "sufyanh",
+            "KUCOIN_TEST_SYMBOL": "BTC-USDT",
+            "KUCOIN_MAX_TEST_NOTIONAL_USDT": "1",
+        }
+    )
+
+    summary = connector.kucoin_live_test_preflight_summary()
+
+    assert summary["fixed_egress_status"] == "restricted"
+    assert summary["operator_region_restricted"] is True
+    assert "KUCOIN_OPERATOR_REGION=British Columbia is restricted under KuCoin terms" in summary["missing_or_blocked"]
+
+
+def test_kucoin_live_preflight_ready_for_non_restricted_region_with_fixed_egress() -> None:
+    connector = _connector(
+        {
+            "KUCOIN_FIXED_EGRESS_REQUIRED": True,
+            "KUCOIN_EGRESS_PROXY_URL": "http://fixed-egress.test:8080",
+            "KUCOIN_COMPLIANCE_CONFIRMED": True,
+            "KUCOIN_OPERATOR_REGION": "Alberta",
+            "KUCOIN_TEST_ACCOUNT": "sufyanh",
+            "KUCOIN_TEST_SYMBOL": "BTC-USDT",
+            "KUCOIN_MAX_TEST_NOTIONAL_USDT": "1",
+        }
+    )
+
+    summary = connector.kucoin_live_test_preflight_summary()
+
+    assert summary["fixed_egress_status"] == "ready"
+    assert summary["operator_region_restricted"] is False
+    assert summary["missing_or_blocked"] == []
 
 
 def test_kucoin_spot_market_metadata_parsing_and_validation() -> None:
@@ -146,7 +188,9 @@ def test_kucoin_spot_order_payload_construction() -> None:
 def test_kucoin_spot_order_response_status_mapping() -> None:
     connector = _connector()
 
-    open_order = connector._normalize_spot_order({"id": "order-1", "clientOid": "client-1", "symbol": "BTC-USDT", "active": True, "size": "0.01"})
+    open_order = connector._normalize_spot_order(
+        {"id": "order-1", "clientOid": "client-1", "symbol": "BTC-USDT", "active": True, "size": "0.01"}
+    )
     cancelled_order = connector._normalize_spot_order(
         {"id": "order-2", "clientOid": "client-2", "symbol": "BTC-USDT", "active": False, "cancelExist": True, "size": "0.01"}
     )
@@ -199,7 +243,9 @@ def test_kucoin_spot_mocked_integration_flows(monkeypatch) -> None:
     markets = connector.get_spot_markets(symbol="BTC-USDT")
     balances = connector.get_spot_balances("live")
     test_order = connector.create_spot_test_order("live", "BTC-USDT", "buy", "0.00001", "limit", "50000", client_order_id="test-client-1")
-    payload = connector.build_spot_order_payload("BTC", "buy", "0.00001", "limit", "50000", client_order_id="live-client-1", market=markets[0])
+    payload = connector.build_spot_order_payload(
+        "BTC", "buy", "0.00001", "limit", "50000", client_order_id="live-client-1", market=markets[0]
+    )
     live_order = connector.place_spot_order("live", "BTC-USDT", "buy", "0.00001", "limit", "50000", client_order_id="live-client-1")
     status = connector.get_spot_order_status("live", "BTC-USDT", client_order_id="live-client-1")
     cancel = connector.cancel_spot_order("live", "BTC-USDT", client_order_id="live-client-1")

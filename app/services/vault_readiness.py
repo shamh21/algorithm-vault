@@ -18,6 +18,7 @@ from flask import current_app, has_app_context
 from ..extensions import db
 from ..ml.online_ranker import ONE_H10_HORIZON
 from ..models import LeveragedMarket, RiskEvent, Setting, TradingConnection, User, WalletBalance
+from .kucoin_compliance import kucoin_operator_region_status
 from .one_h10_quality import ONE_H10_HORIZON_SECONDS
 from .provider_assets import normalize_provider, provider_collateral_asset
 from .vault_allocation_assets import BASE_VAULT_ALLOCATION_ASSETS, asset_usd_price
@@ -957,6 +958,19 @@ class VaultReadinessService:
                     exchange="kucoin",
                 )
             ]
+        if fixed_egress_status == "restricted":
+            region_status = kucoin_operator_region_status(self.config)
+            region_label = str(region_status.get("label") or region_status.get("region") or "Configured region")
+            return [], [
+                self._blocker(
+                    "kucoin_operator_region_restricted",
+                    "KuCoin unavailable",
+                    f"KuCoin unavailable: {region_label} is restricted by KuCoin terms.",
+                    "blocker",
+                    "Use a truthful non-restricted KuCoin account/operator region before enabling KuCoin live routing.",
+                    exchange="kucoin",
+                )
+            ]
         if fixed_egress_status == "missing":
             return [], [
                 self._blocker(
@@ -1194,6 +1208,8 @@ class VaultReadinessService:
         if exchange != "kucoin":
             return "not_required"
         fixed_required = bool(self.config.get("KUCOIN_FIXED_EGRESS_REQUIRED", False))
+        if bool(kucoin_operator_region_status(self.config).get("restricted", False)):
+            return "restricted"
         if not bool(self.config.get("KUCOIN_COMPLIANCE_CONFIRMED", False)) and fixed_required:
             return "pending"
         if str(self.config.get("KUCOIN_EGRESS_PROXY_URL") or self.config.get("QUOTAGUARDSTATIC_URL") or "").strip():

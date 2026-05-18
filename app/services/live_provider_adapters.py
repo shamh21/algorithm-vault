@@ -19,6 +19,7 @@ import requests
 
 from .failures import ProviderConnectionError
 from .hyperliquid_client import ClientSnapshot
+from .kucoin_compliance import kucoin_operator_region_status
 
 logger = logging.getLogger(__name__)
 
@@ -819,6 +820,9 @@ class KucoinFuturesConnector:
             errors.append("KUCOIN_ENABLE_LIVE_TEST_TRADES=true is required")
         if require_fill and not self._config_bool("KUCOIN_ENABLE_FILL_TEST", False):
             errors.append("KUCOIN_ENABLE_FILL_TEST=true is required")
+        region_status = kucoin_operator_region_status(self.config)
+        if bool(region_status.get("restricted", False)):
+            errors.append(f"KUCOIN_OPERATOR_REGION={region_status.get('label')} is restricted under KuCoin terms")
         if not self._config_bool("KUCOIN_COMPLIANCE_CONFIRMED", False):
             errors.append("KUCOIN_COMPLIANCE_CONFIRMED=true is required")
         if self._config_bool("KUCOIN_FIXED_EGRESS_REQUIRED", False) and not _kucoin_egress_proxy_url(self.config):
@@ -828,6 +832,16 @@ class KucoinFuturesConnector:
     def kucoin_live_test_preflight_summary(self) -> dict[str, Any]:
         max_notional = _safe_float(self.config.get("KUCOIN_MAX_TEST_NOTIONAL_USDT"))
         proxy_url = _kucoin_egress_proxy_url(self.config)
+        region_status = kucoin_operator_region_status(self.config)
+        fixed_egress_status = (
+            "restricted"
+            if bool(region_status.get("restricted", False))
+            else "ready"
+            if self._config_bool("KUCOIN_COMPLIANCE_CONFIRMED", False) and proxy_url
+            else "missing"
+            if self._config_bool("KUCOIN_FIXED_EGRESS_REQUIRED", False)
+            else "pending"
+        )
         return {
             "account": str(self.config.get("KUCOIN_TEST_ACCOUNT") or "").strip(),
             "symbol": str(self.config.get("KUCOIN_TEST_SYMBOL") or "").strip(),
@@ -836,12 +850,11 @@ class KucoinFuturesConnector:
             "fill_test_enabled": self._config_bool("KUCOIN_ENABLE_FILL_TEST", False),
             "fixed_egress_required": self._config_bool("KUCOIN_FIXED_EGRESS_REQUIRED", False),
             "fixed_egress_configured": bool(proxy_url),
-            "fixed_egress_status": "ready"
-            if self._config_bool("KUCOIN_COMPLIANCE_CONFIRMED", False) and proxy_url
-            else "missing"
-            if self._config_bool("KUCOIN_FIXED_EGRESS_REQUIRED", False)
-            else "pending",
+            "fixed_egress_status": fixed_egress_status,
             "compliance_confirmed": self._config_bool("KUCOIN_COMPLIANCE_CONFIRMED", False),
+            "operator_region": str(region_status.get("region") or ""),
+            "operator_region_label": str(region_status.get("label") or ""),
+            "operator_region_restricted": bool(region_status.get("restricted", False)),
             "spot_base_url": self._spot_base_url(),
             "credentials_present": {
                 "api_key": bool(self.credentials.api_key),

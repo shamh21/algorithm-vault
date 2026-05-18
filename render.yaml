@@ -122,6 +122,8 @@ services:
         sync: false
       - key: KUCOIN_COMPLIANCE_CONFIRMED
         sync: false
+      - key: KUCOIN_OPERATOR_REGION
+        sync: false
   - type: worker
     name: algorithm-vault-worker
     runtime: python
@@ -238,4 +240,6 @@ services:
       - key: QUOTAGUARDSTATIC_URL
         sync: false
       - key: KUCOIN_COMPLIANCE_CONFIRMED
+        sync: false
+      - key: KUCOIN_OPERATOR_REGION
         sync: false
