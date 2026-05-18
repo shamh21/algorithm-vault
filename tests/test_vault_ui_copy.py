@@ -36,6 +36,10 @@ def test_vault_template_is_minimal_one_h10_flow() -> None:
     assert 'name="providers"' in source
     assert "Enabled Exchanges" in source
     assert "Routing Preview" in source
+    assert "vault-exchange-dashboard" in source
+    assert "data-vault-performance-spark" in source
+    assert "data-vault-allocation-ring" in source
+    assert "data-routing-skeleton" in source
     assert "Hyperliquid" not in source
     assert "KuCoin" not in source
     assert "Vault Activity" in source
@@ -102,6 +106,8 @@ def test_vault_provider_ui_supports_safe_geo_and_auto_funded_copy() -> None:
     assert "geo_restricted" in source
     assert "Provider restricted" in source
     assert "metricLabel" in source
+    assert "renderVaultSparkline" in source
+    assert "renderVaultAllocationRing" in source
     assert "98.84.12.34" not in source
 
 
@@ -110,9 +116,9 @@ def test_vault_assets_use_explicit_readiness_cache_busters() -> None:
     base_source = Path("templates/base.html").read_text()
     sw_source = Path("static/js/sw.js").read_text()
 
-    assert "vault-shell-polish-9" in vault_source
-    assert "algvault-vault-shell-polish-10-wallet-merge-1" in base_source
-    assert "algvault-v21-vault-shell-polish-9" in sw_source
+    assert "vault-iphone-exchange-4" in vault_source
+    assert "algvault-vault-iphone-exchange-4" in base_source
+    assert "algvault-v30-vault-iphone-exchange-4" in sw_source
 
 
 def test_pwa_shell_keeps_heavy_chart_libraries_off_precache_path() -> None:

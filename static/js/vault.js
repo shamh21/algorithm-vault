@@ -114,6 +114,78 @@
     return `${titleCase(value || "neutral")} horizon signal`;
   }
 
+  function renderVaultSparkline(element) {
+    if (!element) return;
+    const points = String(element.dataset.points || "")
+      .split(",")
+      .map((value) => numberValue(value, NaN))
+      .filter((value) => Number.isFinite(value));
+    if (points.length < 2 || points.every((value) => value === points[0])) {
+      element.classList.add("is-empty");
+      return;
+    }
+
+    const width = 240;
+    const height = 82;
+    const min = Math.min(...points);
+    const max = Math.max(...points);
+    const range = Math.max(max - min, 1);
+    const step = width / Math.max(points.length - 1, 1);
+    const coords = points.map((value, index) => {
+      const x = Math.round(index * step * 100) / 100;
+      const y = Math.round((height - 10 - ((value - min) / range) * (height - 20)) * 100) / 100;
+      return [x, y];
+    });
+    const line = coords.map(([x, y], index) => `${index === 0 ? "M" : "L"}${x} ${y}`).join(" ");
+    const area = `${line} L${width} ${height} L0 ${height} Z`;
+    clearElement(element);
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+    svg.setAttribute("role", "img");
+    svg.setAttribute("aria-label", "Recent vault cycle value trend");
+    const areaPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    areaPath.setAttribute("class", "vault-sparkline-area");
+    areaPath.setAttribute("d", area);
+    const linePath = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    linePath.setAttribute("class", "vault-sparkline-line");
+    linePath.setAttribute("d", line);
+    svg.append(areaPath, linePath);
+    element.appendChild(svg);
+    element.classList.remove("is-empty");
+  }
+
+  function renderVaultAllocationRing() {
+    const ring = document.querySelector("[data-vault-allocation-ring]");
+    if (!ring) return;
+    const rows = Array.from(document.querySelectorAll("[data-vault-allocation-row]")).map((row) => ({
+      asset: row.dataset.asset || "",
+      value: numberValue(row.dataset.value, 0),
+    })).filter((row) => row.value > 0);
+    const total = rows.reduce((sum, row) => sum + row.value, 0);
+    if (!rows.length || total <= 0) {
+      ring.classList.add("is-empty");
+      return;
+    }
+
+    const colors = ["#ff1f36", "#ff6b7a", "#f0b90b", "#22d3ee", "#34d399", "#a78bfa"];
+    let cursor = 0;
+    const segments = rows.map((row, index) => {
+      const start = cursor;
+      const end = cursor + (row.value / total) * 360;
+      cursor = end;
+      return `${colors[index % colors.length]} ${start.toFixed(1)}deg ${end.toFixed(1)}deg`;
+    });
+    const top = rows.slice().sort((a, b) => b.value - a.value)[0];
+    ring.style.setProperty("--vault-ring", segments.join(", "));
+    updateText(ring, "[data-vault-ring-label]", top?.asset || "Mix");
+    ring.classList.remove("is-empty");
+  }
+
+  function renderVaultVisuals() {
+    document.querySelectorAll("[data-vault-performance-spark]").forEach(renderVaultSparkline);
+    renderVaultAllocationRing();
+  }
+
   function updateText(root, selector, value) {
     const element = root.querySelector(selector);
     if (element) element.textContent = value;
@@ -339,7 +411,9 @@
 
   function setRoutingBusy(form, busy) {
     const preview = form?.querySelector("[data-routing-preview]");
+    const skeleton = form?.querySelector("[data-routing-skeleton]");
     form?.classList.toggle("is-routing-loading", Boolean(busy));
+    if (skeleton) skeleton.hidden = !busy;
     if (preview) {
       preview.setAttribute("aria-busy", String(Boolean(busy)));
       if (busy) preview.dataset.previewState = "loading";
@@ -436,6 +510,25 @@
     button.classList.toggle("is-disabled", !ready);
   }
 
+  function updateVaultDashboardMetrics(form, payload, summary) {
+    const state = formPreviewState(form);
+    const readyCount = numberValue(payload.ready_exchange_count, numberValue(summary.ready_provider_count, 0));
+    const selectedCount = numberValue(payload.total_exchange_count, numberValue(summary.selected_provider_count, state.providers.length));
+    const blockers = Array.isArray(payload?.active_blockers) ? payload.active_blockers : Array.isArray(payload?.blockers) ? payload.blockers : [];
+    const routeState = document.querySelector("[data-vault-route-state]");
+    const readyCountNode = document.querySelector("[data-vault-ready-count]");
+    const activeBlockers = document.querySelector("[data-vault-active-blockers]");
+    if (routeState) routeState.textContent = payload.ready ? "Executable" : payload.state_label || "Blocked";
+    if (readyCountNode) readyCountNode.textContent = `${readyCount}/${selectedCount} exchanges ready`;
+    if (activeBlockers) {
+      activeBlockers.textContent = payload.ready
+        ? "Guardrails clear for the current route."
+        : blockers.length
+          ? `${blockers.length} guardrail${blockers.length === 1 ? "" : "s"} active.`
+          : "Waiting for server readiness.";
+    }
+  }
+
   function renderRoutingPreview(form, payload) {
     if (!form || !payload) return;
     lastPreview.set(form, payload);
@@ -468,6 +561,7 @@
       ml.textContent = mlReadiness.display_status || (mlReadiness.ready ? "ML ready" : "ML check");
     }
 
+    updateVaultDashboardMetrics(form, payload, summary);
     renderBlockers(form, payload);
     updateStartState(form, payload);
     clearElement(list);
@@ -864,6 +958,7 @@
   }
 
   const initialPreview = parseInitialPreview();
+  renderVaultVisuals();
   document.querySelectorAll(".vault-form").forEach((form) => {
     setupForm(form);
     if (initialPreview && form.matches("[data-vault-routing-form]")) {

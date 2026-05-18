@@ -5,16 +5,93 @@
 
 {% block content %}
 {% set default_asset = vault_default_asset if vault_default_asset is defined else (balances[0].asset if balances else "USDC") %}
-<section class="vault-mobile-shell vault-execution-shell">
+{% set preview_providers = initial_routing_preview.providers if initial_routing_preview is defined and initial_routing_preview.providers is defined else [] %}
+{% set vault_metrics = namespace(wallet_total=0.0, active_value=0.0, recent_pnl=0.0, funded_count=0, ready_exchange_count=0, exchange_count=0) %}
+{% for balance in balances %}
+  {% set balance_value = balance.estimated_usd_value|default(0)|float %}
+  {% set vault_metrics.wallet_total = vault_metrics.wallet_total + balance_value %}
+  {% if balance_value > 0 %}
+    {% set vault_metrics.funded_count = vault_metrics.funded_count + 1 %}
+  {% endif %}
+{% endfor %}
+{% for cycle in active_cycles %}
+  {% set vault_metrics.active_value = vault_metrics.active_value + (cycle.current_estimated_value_usd|default(cycle.starting_value_usd|default(0))|float) %}
+{% endfor %}
+{% for cycle in recent_cycles %}
+  {% set vault_metrics.recent_pnl = vault_metrics.recent_pnl + ((cycle.selection_metadata or {}).get("total_pnl_usd", 0.0)|float) %}
+{% endfor %}
+{% if preview_providers %}
+  {% set vault_metrics.exchange_count = preview_providers|length %}
+{% else %}
+  {% set vault_metrics.exchange_count = vault_provider_options|length %}
+{% endif %}
+{% for row in preview_providers %}
+  {% set row_status = row.status|default(row.readiness_state|default("checking")) %}
+  {% if row_status in ["ready", "ready_auto_funded"] %}
+    {% set vault_metrics.ready_exchange_count = vault_metrics.ready_exchange_count + 1 %}
+  {% endif %}
+{% endfor %}
+
+<section class="vault-mobile-shell vault-execution-shell vault-exchange-dashboard">
+  <header class="vault-exchange-hero" aria-labelledby="vault-dashboard-title">
+    <div class="vault-hero-copy">
+      <div class="vault-eyebrow-row">
+        <span class="card-kicker">AlgV Vault</span>
+        <span class="status-badge vault-cycle-live-badge">1H10</span>
+      </div>
+      <h1 id="vault-dashboard-title">Execution command center</h1>
+      <p>Allocate available funds, verify exchange routing, and monitor active cycle decisions from a fast mobile trading surface.</p>
+      <div class="vault-hero-chips" aria-label="Vault status summary">
+        <span>{{ active_cycles|length }} active</span>
+        <span data-vault-ready-count>{{ vault_metrics.ready_exchange_count }}/{{ vault_metrics.exchange_count }} exchanges ready</span>
+        <span>{{ vault_metrics.funded_count }} funded assets</span>
+      </div>
+    </div>
+    <div class="vault-hero-terminal" aria-label="Vault portfolio overview">
+      <div>
+        <span>Vault wallet</span>
+        <strong data-vault-hero-total>${{ "%.2f"|format(vault_metrics.wallet_total) }}</strong>
+      </div>
+      <div
+        class="vault-sparkline-shell"
+        data-vault-performance-spark
+        data-points="{% if recent_cycles %}{% for cycle in recent_cycles[:8] %}{{ "%.2f"|format(cycle.current_estimated_value_usd|default(cycle.starting_value_usd|default(0))|float) }}{% if not loop.last %},{% endif %}{% endfor %}{% else %}0,0,0{% endif %}"
+        aria-label="Recent cycle value sparkline"
+      >
+        <span class="vault-sparkline-empty">Awaiting cycle data</span>
+      </div>
+    </div>
+  </header>
+
+  <div class="vault-metric-strip" aria-label="Vault metrics">
+    <div>
+      <span>Wallet value</span>
+      <strong>${{ "%.2f"|format(vault_metrics.wallet_total) }}</strong>
+    </div>
+    <div>
+      <span>Active allocation</span>
+      <strong>${{ "%.2f"|format(vault_metrics.active_value) }}</strong>
+    </div>
+    <div>
+      <span>Recent PnL</span>
+      <strong class="{{ 'positive' if vault_metrics.recent_pnl >= 0 else 'negative' }}">${{ "%.2f"|format(vault_metrics.recent_pnl) }}</strong>
+    </div>
+    <div>
+      <span>Route state</span>
+      <strong data-vault-route-state>Awaiting amount</strong>
+    </div>
+  </div>
+
   <article class="vault-card vault-start-card vault-command-card">
     <div class="vault-title-row vault-command-head">
       <div>
         <span class="card-kicker">Vault</span>
-        <h1>Automated allocation</h1>
+        <h2>Automated allocation</h2>
       </div>
       <span class="status-badge vault-cycle-live-badge">1H10</span>
     </div>
 
+    <div class="vault-command-layout">
     <form
       id="vault-start-form"
       method="post"
@@ -142,6 +219,11 @@
           <span data-routing-engine>1H10 Smart Router</span>
           <strong data-routing-total>$0.00</strong>
         </div>
+        <div class="vault-routing-skeleton" data-routing-skeleton hidden aria-hidden="true">
+          <span></span>
+          <span></span>
+          <span></span>
+        </div>
         <div class="vault-readiness-state">
           <span data-vault-state-label>Amount Required</span>
           <strong data-routing-summary>Enter amount to generate route.</strong>
@@ -183,6 +265,63 @@
         </button>
       </div>
     </form>
+
+    <aside class="vault-insight-rail" aria-label="Vault dashboard modules">
+      <section class="vault-insight-card vault-allocation-panel">
+        <div class="vault-section-heading">
+          <div>
+            <span class="card-kicker">Portfolio</span>
+            <h2>Asset mix</h2>
+          </div>
+        </div>
+        <div class="vault-allocation-dashboard">
+          <div class="vault-allocation-ring" data-vault-allocation-ring aria-label="Wallet allocation chart">
+            <span data-vault-ring-label>{{ default_asset }}</span>
+          </div>
+          <div class="vault-allocation-rows">
+            {% for balance in balances %}
+              {% set asset_value = balance.estimated_usd_value|default(0)|float %}
+              {% if asset_value > 0 %}
+                {% set asset_pct = (asset_value / vault_metrics.wallet_total * 100) if vault_metrics.wallet_total > 0 else 0 %}
+                <div class="vault-allocation-row-mini" data-vault-allocation-row data-asset="{{ balance.asset }}" data-value="{{ "%.6f"|format(asset_value) }}">
+                  <span>{{ balance.asset }}</span>
+                  <strong>${{ "%.2f"|format(asset_value) }}</strong>
+                  <em style="--asset-share: {{ "%.0f"|format(asset_pct) }}%"></em>
+                </div>
+              {% endif %}
+            {% endfor %}
+            {% if vault_metrics.funded_count == 0 %}
+              <div class="vault-empty-state">No funded asset rows.</div>
+            {% endif %}
+          </div>
+        </div>
+      </section>
+
+      <section class="vault-insight-card vault-execution-panel">
+        <div class="vault-section-heading">
+          <div>
+            <span class="card-kicker">Execution</span>
+            <h2>Guarded path</h2>
+          </div>
+        </div>
+        <div class="vault-module-list">
+          <div>
+            <span>Server-side controls</span>
+            <strong>Signing, routing, and account checks stay off-device.</strong>
+          </div>
+          <div>
+            <span>Readiness gates</span>
+            <strong data-vault-active-blockers>Checking server guardrails.</strong>
+          </div>
+          <div>
+            <span>PWA shell</span>
+            <strong>Safe-area layout, sticky controls, and offline-aware chrome.</strong>
+          </div>
+        </div>
+      </section>
+    </aside>
+    </div>
+
     <div class="vault-result-sheet" data-vault-result-sheet hidden role="status" aria-live="polite">
       <div class="vault-result-sheet-handle" aria-hidden="true"></div>
       <strong data-vault-result-title>Vault Cycle</strong>
@@ -190,14 +329,14 @@
     </div>
   </article>
 
-  {% if active_cycles %}
-    <aside class="vault-card active-cycle-panel vault-active-card">
-      <div class="vault-section-heading">
-        <div>
-          <span class="card-kicker">Cycle Status</span>
-          <h2>{{ active_cycles|length }} Active Cycle{{ "" if active_cycles|length == 1 else "s" }}</h2>
-        </div>
+  <aside class="vault-card active-cycle-panel vault-active-card">
+    <div class="vault-section-heading">
+      <div>
+        <span class="card-kicker">Cycle Status</span>
+        <h2>{{ active_cycles|length }} Active Cycle{{ "" if active_cycles|length == 1 else "s" }}</h2>
       </div>
+    </div>
+    {% if active_cycles %}
       <div class="active-cycle-list vault-cycle-card-list">
         {% for cycle in active_cycles %}
           {% set cycle_pnl = cycle.selection_metadata.get("total_pnl_usd", 0.0) %}
@@ -283,8 +422,10 @@
           </article>
         {% endfor %}
       </div>
-    </aside>
-  {% endif %}
+    {% else %}
+      <div class="vault-empty-state">No cycle running. Enter an amount to build a guarded 1H10 route.</div>
+    {% endif %}
+  </aside>
 </section>
 
 <section class="vault-activity-card">
@@ -345,5 +486,5 @@
 {% endblock %}
 
 {% block page_scripts %}
-    <script defer src="{{ url_for('static', filename='js/vault.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}-vault-shell-polish-9"></script>
+    <script defer src="{{ url_for('static', filename='js/vault.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}-vault-iphone-exchange-4"></script>
 {% endblock %}
