@@ -42,11 +42,11 @@ def build_kucoin_ip_diagnostics(
     elif mode == "trusted" and not server_egress_ips:
         status = "server_egress_ip_unknown"
         can_work = False
-        message = "Server/live API egress IP is not configured."
+        message = "Server/proxy egress IP is not configured."
     elif mode == "trusted" and trusted_ips and missing_from_trusted:
         status = "trusted_ip_mismatch"
         can_work = False
-        message = "KuCoin trusted IPs do not include every server/live API egress IP."
+        message = "KuCoin trusted IPs do not include every server/proxy egress IP."
     elif mode == "trusted" and not trusted_ips:
         status = "trusted_ips_missing"
         can_work = False
@@ -54,7 +54,7 @@ def build_kucoin_ip_diagnostics(
     elif mode == "trusted":
         status = "ready"
         can_work = True
-        message = "KuCoin trusted-IP routing can use the configured server/live API egress IP."
+        message = "KuCoin trusted-IP routing can use the configured server/proxy egress IP."
     else:
         status = "unknown"
         can_work = False

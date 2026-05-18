@@ -242,14 +242,14 @@ def _proxy_kucoin_connection_verify(user_id: int, connection: TradingConnection)
         payload = upstream.json()
     except (requests.RequestException, ValueError) as exc:
         current_app.logger.warning("KuCoin live API verification proxy failed connection_id=%s error=%s", connection.id, exc)
-        flash("KuCoin verification requires the fixed-egress live API runtime, but the live API proxy is unavailable.", "danger")
+        flash("KuCoin verification requires the fixed-egress server runtime, but the live API proxy is unavailable.", "danger")
         return redirect(url_for("settings.connection_provider", provider=connection.provider, connection_id=connection.id))
     message = str(payload.get("message") or payload.get("error") or "")
     payload_connection = payload.get("connection") if isinstance(payload.get("connection"), dict) else {}
     provider = str(payload_connection.get("provider") or connection.provider)
     connection_id = int(payload_connection.get("id") or connection.id)
     if upstream.status_code >= 400 or not bool(payload.get("ok", False)):
-        flash(message or "KuCoin verification failed on the fixed-egress live API runtime.", "danger")
+        flash(message or "KuCoin verification failed on the fixed-egress server runtime.", "danger")
     else:
         flash(message or "Connection verified. Enable it to use live wallet, vault, and order workflows.", "success")
     return redirect(url_for("settings.connection_provider", provider=provider, connection_id=connection_id))
@@ -291,6 +291,8 @@ def _internal_json_requested() -> bool:
 def _settings_verify_deferred_for_request() -> bool:
     if is_live_api_internal_request():
         return False
+    if _settings_direct_kucoin_fixed_egress_configured():
+        return False
     live_origin = _settings_public_live_api_origin()
     internal_origin = _settings_live_api_internal_origin() if _settings_live_api_proxy_enabled() else ""
     known_live_origins = {origin for origin in (live_origin, internal_origin) if origin}
@@ -308,6 +310,10 @@ def _settings_live_api_proxy_enabled() -> bool:
         and _settings_live_api_internal_origin()
         and str(current_app.config.get("LIVE_API_INTERNAL_TOKEN") or "").strip()
     )
+
+
+def _settings_direct_kucoin_fixed_egress_configured() -> bool:
+    return bool(str(current_app.config.get("KUCOIN_EGRESS_PROXY_URL") or current_app.config.get("QUOTAGUARDSTATIC_URL") or "").strip())
 
 
 def _settings_public_live_api_origin() -> str:
@@ -339,8 +345,8 @@ def _origin_from_url(value: str) -> str:
 
 def _kucoin_fixed_egress_required_message() -> str:
     return (
-        "KuCoin verification must run from the fixed-egress live API/worker. "
-        "Do not whitelist the browser IP for production; whitelist the server egress IP shown by KuCoin."
+        "KuCoin verification must run through a configured fixed-egress server runtime or proxy. "
+        "Do not whitelist the browser IP for production; whitelist the fixed server/proxy egress IP shown by KuCoin."
     )
 
 

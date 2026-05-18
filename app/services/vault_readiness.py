@@ -948,7 +948,7 @@ class VaultReadinessService:
                     self._blocker(
                         "kucoin_fixed_egress_ready",
                         "Fixed-egress preflight ready",
-                        "KuCoin checks are routed through the configured fixed-egress live API runtime.",
+                        "KuCoin checks are routed through the configured fixed-egress server runtime or proxy.",
                         "info",
                         "",
                         exchange="kucoin",
@@ -985,9 +985,9 @@ class VaultReadinessService:
                 self._blocker(
                     "kucoin_fixed_egress_missing",
                     "Fixed-egress preflight failed",
-                    "KuCoin routing requires a configured fixed-egress proxy on the live API runtime.",
+                    "KuCoin routing requires a configured fixed-egress proxy on the server runtime.",
                     "blocker",
-                    "Configure KUCOIN_EGRESS_PROXY_URL or QUOTAGUARDSTATIC_URL on the live API and worker.",
+                    "Configure KUCOIN_EGRESS_PROXY_URL or QUOTAGUARDSTATIC_URL on the runtime that sends KuCoin API requests.",
                     exchange="kucoin",
                 )
             ]
@@ -998,7 +998,7 @@ class VaultReadinessService:
                     "Fixed-egress preflight pending",
                     "KuCoin fixed-egress proxy is not configured for this environment.",
                     "warning",
-                    "Use a fixed-egress live API runtime before enabling KuCoin live routing.",
+                    "Use a fixed-egress server runtime or proxy before enabling KuCoin live routing.",
                     exchange="kucoin",
                 )
             ],
@@ -1016,7 +1016,7 @@ class VaultReadinessService:
                     self._blocker(
                         "kucoin_trusted_ip_ready",
                         "Trusted IP ready",
-                        "KuCoin trusted-IP list includes the configured server/live API egress IP.",
+                        "KuCoin trusted-IP list includes the configured server/proxy egress IP.",
                         "info",
                         "",
                         exchange="kucoin",
@@ -1045,9 +1045,9 @@ class VaultReadinessService:
                 "trusted_ip_mismatch": "Trusted IP mismatch",
             }
             descriptions = {
-                "server_egress_ip_unknown": "KuCoin trusted-IP routing requires the server/live API egress IP, not the operator browser IP.",
+                "server_egress_ip_unknown": "KuCoin trusted-IP routing requires the server/proxy egress IP, not the operator browser IP.",
                 "trusted_ips_missing": "KuCoin trusted-IP routing requires KUCOIN_TRUSTED_IPS to mirror the KuCoin API key trusted-IP list.",
-                "trusted_ip_mismatch": "KuCoin trusted IPs do not include every configured server/live API egress IP.",
+                "trusted_ip_mismatch": "KuCoin trusted IPs do not include every configured server/proxy egress IP.",
             }
             return [], [
                 self._blocker(
@@ -1055,7 +1055,7 @@ class VaultReadinessService:
                     titles[status],
                     descriptions[status],
                     "blocker",
-                    "Whitelist the fixed server/live API egress IP in KuCoin and set KUCOIN_EGRESS_PUBLIC_IPS plus KUCOIN_TRUSTED_IPS.",
+                    "Whitelist the fixed server/proxy egress IP in KuCoin and set KUCOIN_EGRESS_PUBLIC_IPS plus KUCOIN_TRUSTED_IPS.",
                     exchange="kucoin",
                 )
             ]

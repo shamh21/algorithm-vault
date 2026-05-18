@@ -20,6 +20,7 @@ from ..extensions import db
 from ..models import TradingConnection
 from .connection_health import parse_exchange_failure
 from .hyperliquid_client import ClientSnapshot, HyperliquidClient
+from .kucoin_compliance import kucoin_operator_region_status
 from .live_provider_adapters import (
     BinanceFuturesConnector,
     DydxV4Connector,
@@ -842,8 +843,9 @@ class TradingConnectionService:
 
         try:
             self._validate_saved_connection(spec, connection)
-            connector = self._connector_for_connection(connection)
             self._ensure_live_verification_runtime()
+            self._ensure_provider_verification_runtime(connection.provider)
+            connector = self._connector_for_connection(connection)
             if not connector.can_trade("live"):
                 raise RuntimeError("Credentials are present but cannot trade in live mode.")
             snapshot = connector.account_snapshot("live")
@@ -888,6 +890,22 @@ class TradingConnectionService:
                 "Live trading is disabled by server configuration. Set ENABLE_LIVE_TRADING=true only after live readiness is validated."
             )
 
+    def _ensure_provider_verification_runtime(self, provider: str) -> None:
+        if self._normalize_provider(provider) != "kucoin":
+            return
+        region_status = kucoin_operator_region_status(self.config)
+        if bool(region_status.get("restricted", False)):
+            region_label = str(region_status.get("label") or region_status.get("region") or "configured region")
+            raise RuntimeError(f"KuCoin unavailable: {region_label} is restricted by KuCoin terms.")
+        if not bool(self.config.get("KUCOIN_FIXED_EGRESS_REQUIRED", False)):
+            return
+        if not bool(self.config.get("KUCOIN_COMPLIANCE_CONFIRMED", False)):
+            raise RuntimeError("KuCoin verification requires operator/account eligibility confirmation before live routing.")
+        if not str(self.config.get("KUCOIN_EGRESS_PROXY_URL") or self.config.get("QUOTAGUARDSTATIC_URL") or "").strip():
+            raise RuntimeError(
+                "KuCoin verification requires KUCOIN_EGRESS_PROXY_URL or QUOTAGUARDSTATIC_URL on this server runtime."
+            )
+
     def _normalize_provider_verification_error(self, provider: str, exc: Exception) -> dict[str, Any]:
         raw = str(exc or "")
         provider_code = str(getattr(exc, "provider_code", "") or "")
@@ -907,7 +925,7 @@ class TradingConnectionService:
             diagnostics = {key: value for key, value in diagnostics.items() if value}
             client_error = (
                 f"Trusted IP mismatch: KuCoin rejected server egress IP {masked_ip or 'reported by KuCoin'}. "
-                "Whitelist the fixed live API/worker egress IP in KuCoin, not the browser/operator IP."
+                "Whitelist the fixed server/proxy egress IP in KuCoin, not the browser/operator IP."
             )
             current_app.logger.warning("KuCoin verification trusted-IP mismatch diagnostics=%s", diagnostics)
             return {

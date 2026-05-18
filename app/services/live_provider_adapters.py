@@ -70,7 +70,7 @@ def _kucoin_unavailable_alert(exc: object, *, spot: bool = False) -> str:
     if _is_kucoin_region_restricted_error(exc):
         return (
             "KuCoin region restricted: this runtime is not in a KuCoin-supported access region. "
-            "Use only a compliant non-restricted fixed-egress live API runtime for KuCoin routing."
+            "Use only a compliant non-restricted fixed-egress server runtime or proxy for KuCoin routing."
         )
     label = "KuCoin spot unavailable" if spot else "KuCoin unavailable"
     return f"{label}: {exc}"

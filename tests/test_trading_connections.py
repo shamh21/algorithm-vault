@@ -1032,6 +1032,76 @@ def test_kucoin_verify_route_blocks_vercel_without_live_api_proxy(app, monkeypat
     assert db.session.get(TradingConnection, connection.id).verification_status == "needs_verification"
 
 
+def test_kucoin_verify_route_uses_direct_fixed_egress_proxy_when_configured(app, monkeypatch) -> None:
+    app.config["DEPLOYMENT_TARGET"] = "vercel"
+    app.config["KUCOIN_FIXED_EGRESS_REQUIRED"] = True
+    app.config["LIVE_API_PROXY_ENABLED"] = False
+    app.config["PUBLIC_LIVE_API_ORIGIN"] = ""
+    app.config["KUCOIN_EGRESS_PROXY_URL"] = "http://fixed-egress.test:8080"
+    app.config["KUCOIN_COMPLIANCE_CONFIRMED"] = True
+    app.config["KUCOIN_OPERATOR_REGION"] = "Alberta"
+    user = _create_user("kucoin-direct-proxy")
+    _enable_2fa(user)
+    service = app.extensions["services"]["trading_connections"]
+    connection = service.create_or_update(
+        user_id=user.id,
+        provider="kucoin",
+        connection_type="cex_api_key",
+        api_key="kucoin-key",
+        api_secret="kucoin-secret",
+        passphrase="kucoin-passphrase",
+    )
+    db.session.commit()
+
+    class GoodConnector:
+        def can_trade(self, mode: str) -> bool:
+            return True
+
+        def account_snapshot(self, mode: str) -> ClientSnapshot:
+            return ClientSnapshot(mode, [{"asset": "USDT", "type": "margin", "value": 500.0, "withdrawable": 500.0}], [], [], [], [])
+
+    monkeypatch.setattr(service, "_connector_for_connection", lambda record: GoodConnector())
+    client = app.test_client()
+    _login_session(client, user)
+
+    response = client.post(f"/settings/connections/{connection.id}/verify")
+
+    assert response.status_code == 302
+    assert db.session.get(TradingConnection, connection.id).verification_status == "verified"
+
+
+def test_kucoin_verify_route_keeps_compliance_gate_with_direct_proxy(app, monkeypatch) -> None:
+    app.config["DEPLOYMENT_TARGET"] = "vercel"
+    app.config["KUCOIN_FIXED_EGRESS_REQUIRED"] = True
+    app.config["LIVE_API_PROXY_ENABLED"] = False
+    app.config["PUBLIC_LIVE_API_ORIGIN"] = ""
+    app.config["KUCOIN_EGRESS_PROXY_URL"] = "http://fixed-egress.test:8080"
+    app.config["KUCOIN_COMPLIANCE_CONFIRMED"] = False
+    app.config["KUCOIN_OPERATOR_REGION"] = "Alberta"
+    user = _create_user("kucoin-direct-no-compliance")
+    _enable_2fa(user)
+    service = app.extensions["services"]["trading_connections"]
+    connection = service.create_or_update(
+        user_id=user.id,
+        provider="kucoin",
+        connection_type="cex_api_key",
+        api_key="kucoin-key",
+        api_secret="kucoin-secret",
+        passphrase="kucoin-passphrase",
+    )
+    db.session.commit()
+    monkeypatch.setattr(service, "_connector_for_connection", lambda record: pytest.fail("Compliance gate must run before KuCoin verify"))
+    client = app.test_client()
+    _login_session(client, user)
+
+    response = client.post(f"/settings/connections/{connection.id}/verify", follow_redirects=True)
+
+    assert response.status_code == 200
+    stored = db.session.get(TradingConnection, connection.id)
+    assert stored.verification_status == "action_needed"
+    assert "operator/account eligibility confirmation" in (stored.last_verification_error or "")
+
+
 def test_kucoin_verify_route_proxies_to_live_api_with_internal_signature(app, monkeypatch) -> None:
     app.config["DEPLOYMENT_TARGET"] = "vercel"
     app.config["KUCOIN_FIXED_EGRESS_REQUIRED"] = True

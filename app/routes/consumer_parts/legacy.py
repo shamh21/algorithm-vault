@@ -5826,7 +5826,7 @@ def _sanitize_cycle_reason(reason: object) -> str:
     if "provider_market_data_unavailable" in lower:
         return "Provider-specific market data is unavailable for this symbol; waiting for a safe data source."
     if "400302" in lower or "currently unavailable in the u.s" in lower or "current ip:" in lower:
-        return "KuCoin is unavailable from this runtime region; use a compliant non-restricted fixed-egress live API runtime."
+        return "KuCoin is unavailable from this runtime region; use a compliant non-restricted fixed-egress server runtime or proxy."
     if "invalid request ip" in lower:
         return text
     if len(text) > 240:
