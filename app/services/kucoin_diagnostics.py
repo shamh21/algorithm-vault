@@ -22,7 +22,7 @@ def build_kucoin_ip_diagnostics(
     configured_egress_ips = _parse_ip_list(config.get("KUCOIN_EGRESS_PUBLIC_IPS") or config.get("KUCOIN_FIXED_EGRESS_PUBLIC_IPS") or "")
     server_egress_ips = list(dict.fromkeys([*configured_egress_ips, *list(resolved_server_ips or [])]))
     trusted_ips = _parse_ip_list(config.get("KUCOIN_TRUSTED_IPS") or config.get("KUCOIN_API_TRUSTED_IPS") or "")
-    fixed_egress_configured = bool(str(config.get("KUCOIN_EGRESS_PROXY_URL") or config.get("QUOTAGUARDSTATIC_URL") or "").strip())
+    fixed_egress_configured = _fixed_egress_configured(config, configured_egress_ips)
     fixed_egress_required = bool(config.get("KUCOIN_FIXED_EGRESS_REQUIRED", False))
     mode = str(config.get("KUCOIN_IP_RESTRICTION_MODE") or "").strip().lower()
     if mode not in {"trusted", "unrestricted", "unknown", ""}:
@@ -116,6 +116,12 @@ def resolve_server_egress_ip(config: dict[str, Any], *, timeout: float = 2.5) ->
     if isinstance(payload, dict):
         return _parse_ip_list(payload.get("ip") or payload.get("origin") or payload.get("address") or "")
     return _parse_ip_list(str(payload))
+
+
+def _fixed_egress_configured(config: dict[str, Any], configured_egress_ips: list[str]) -> bool:
+    if str(config.get("KUCOIN_EGRESS_PROXY_URL") or config.get("QUOTAGUARDSTATIC_URL") or "").strip():
+        return True
+    return bool(config.get("KUCOIN_NATIVE_STATIC_EGRESS_ENABLED") and configured_egress_ips)
 
 
 def _permission_probe_unknown(connection: Any | None) -> dict[str, Any]:

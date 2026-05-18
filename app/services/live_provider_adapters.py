@@ -80,6 +80,12 @@ def _kucoin_egress_proxy_url(config: dict[str, Any]) -> str:
     return str(config.get("KUCOIN_EGRESS_PROXY_URL") or config.get("QUOTAGUARDSTATIC_URL") or "").strip()
 
 
+def _kucoin_fixed_egress_configured(config: dict[str, Any]) -> bool:
+    if _kucoin_egress_proxy_url(config):
+        return True
+    return bool(config.get("KUCOIN_NATIVE_STATIC_EGRESS_ENABLED") and str(config.get("KUCOIN_EGRESS_PUBLIC_IPS") or "").strip())
+
+
 def _configure_kucoin_egress_proxy(session: requests.Session, config: dict[str, Any]) -> None:
     proxy_url = _kucoin_egress_proxy_url(config)
     if not proxy_url:
@@ -862,19 +868,19 @@ class KucoinFuturesConnector:
             errors.append(f"KUCOIN_OPERATOR_REGION={region_status.get('label')} is restricted under KuCoin terms")
         if not self._config_bool("KUCOIN_COMPLIANCE_CONFIRMED", False):
             errors.append("KUCOIN_COMPLIANCE_CONFIRMED=true is required")
-        if self._config_bool("KUCOIN_FIXED_EGRESS_REQUIRED", False) and not _kucoin_egress_proxy_url(self.config):
-            errors.append("KUCOIN_EGRESS_PROXY_URL or QUOTAGUARDSTATIC_URL is required")
+        if self._config_bool("KUCOIN_FIXED_EGRESS_REQUIRED", False) and not _kucoin_fixed_egress_configured(self.config):
+            errors.append("KUCOIN_EGRESS_PROXY_URL/QUOTAGUARDSTATIC_URL or native static egress IPs are required")
         return errors
 
     def kucoin_live_test_preflight_summary(self) -> dict[str, Any]:
         max_notional = _safe_float(self.config.get("KUCOIN_MAX_TEST_NOTIONAL_USDT"))
-        proxy_url = _kucoin_egress_proxy_url(self.config)
+        fixed_egress_configured = _kucoin_fixed_egress_configured(self.config)
         region_status = kucoin_operator_region_status(self.config)
         fixed_egress_status = (
             "restricted"
             if bool(region_status.get("restricted", False))
             else "ready"
-            if self._config_bool("KUCOIN_COMPLIANCE_CONFIRMED", False) and proxy_url
+            if self._config_bool("KUCOIN_COMPLIANCE_CONFIRMED", False) and fixed_egress_configured
             else "missing"
             if self._config_bool("KUCOIN_FIXED_EGRESS_REQUIRED", False)
             else "pending"
@@ -886,7 +892,7 @@ class KucoinFuturesConnector:
             "live_trading_enabled": self._config_bool("KUCOIN_ENABLE_LIVE_TEST_TRADES", False),
             "fill_test_enabled": self._config_bool("KUCOIN_ENABLE_FILL_TEST", False),
             "fixed_egress_required": self._config_bool("KUCOIN_FIXED_EGRESS_REQUIRED", False),
-            "fixed_egress_configured": bool(proxy_url),
+            "fixed_egress_configured": fixed_egress_configured,
             "fixed_egress_status": fixed_egress_status,
             "compliance_confirmed": self._config_bool("KUCOIN_COMPLIANCE_CONFIRMED", False),
             "operator_region": str(region_status.get("region") or ""),

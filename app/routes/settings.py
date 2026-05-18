@@ -313,7 +313,12 @@ def _settings_live_api_proxy_enabled() -> bool:
 
 
 def _settings_direct_kucoin_fixed_egress_configured() -> bool:
-    return bool(str(current_app.config.get("KUCOIN_EGRESS_PROXY_URL") or current_app.config.get("QUOTAGUARDSTATIC_URL") or "").strip())
+    if str(current_app.config.get("KUCOIN_EGRESS_PROXY_URL") or current_app.config.get("QUOTAGUARDSTATIC_URL") or "").strip():
+        return True
+    return bool(
+        current_app.config.get("KUCOIN_NATIVE_STATIC_EGRESS_ENABLED")
+        and str(current_app.config.get("KUCOIN_EGRESS_PUBLIC_IPS") or "").strip()
+    )
 
 
 def _settings_public_live_api_origin() -> str:

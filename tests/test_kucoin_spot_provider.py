@@ -122,6 +122,27 @@ def test_kucoin_live_preflight_ready_for_non_restricted_region_with_fixed_egress
     assert summary["missing_or_blocked"] == []
 
 
+def test_kucoin_live_preflight_ready_for_native_static_egress() -> None:
+    connector = _connector(
+        {
+            "KUCOIN_FIXED_EGRESS_REQUIRED": True,
+            "KUCOIN_NATIVE_STATIC_EGRESS_ENABLED": True,
+            "KUCOIN_EGRESS_PUBLIC_IPS": "203.0.113.10",
+            "KUCOIN_COMPLIANCE_CONFIRMED": True,
+            "KUCOIN_OPERATOR_REGION": "Alberta",
+            "KUCOIN_TEST_ACCOUNT": "sufyanh",
+            "KUCOIN_TEST_SYMBOL": "BTC-USDT",
+            "KUCOIN_MAX_TEST_NOTIONAL_USDT": "1",
+        }
+    )
+
+    summary = connector.kucoin_live_test_preflight_summary()
+
+    assert summary["fixed_egress_status"] == "ready"
+    assert summary["fixed_egress_configured"] is True
+    assert summary["missing_or_blocked"] == []
+
+
 def test_kucoin_permission_probe_uses_read_only_endpoints(monkeypatch) -> None:
     calls: list[dict[str, Any]] = []
 

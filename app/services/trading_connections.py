@@ -901,10 +901,15 @@ class TradingConnectionService:
             return
         if not bool(self.config.get("KUCOIN_COMPLIANCE_CONFIRMED", False)):
             raise RuntimeError("KuCoin verification requires operator/account eligibility confirmation before live routing.")
-        if not str(self.config.get("KUCOIN_EGRESS_PROXY_URL") or self.config.get("QUOTAGUARDSTATIC_URL") or "").strip():
+        if not self._kucoin_fixed_egress_configured():
             raise RuntimeError(
-                "KuCoin verification requires KUCOIN_EGRESS_PROXY_URL or QUOTAGUARDSTATIC_URL on this server runtime."
+                "KuCoin verification requires a configured fixed-egress proxy or native static egress on this server runtime."
             )
+
+    def _kucoin_fixed_egress_configured(self) -> bool:
+        if str(self.config.get("KUCOIN_EGRESS_PROXY_URL") or self.config.get("QUOTAGUARDSTATIC_URL") or "").strip():
+            return True
+        return bool(self.config.get("KUCOIN_NATIVE_STATIC_EGRESS_ENABLED") and str(self.config.get("KUCOIN_EGRESS_PUBLIC_IPS") or "").strip())
 
     def _normalize_provider_verification_error(self, provider: str, exc: Exception) -> dict[str, Any]:
         raw = str(exc or "")

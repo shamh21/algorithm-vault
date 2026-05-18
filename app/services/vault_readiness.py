@@ -1277,9 +1277,14 @@ class VaultReadinessService:
             return "restricted"
         if not bool(self.config.get("KUCOIN_COMPLIANCE_CONFIRMED", False)) and fixed_required:
             return "pending"
-        if str(self.config.get("KUCOIN_EGRESS_PROXY_URL") or self.config.get("QUOTAGUARDSTATIC_URL") or "").strip():
+        if self._kucoin_fixed_egress_configured():
             return "ready"
         return "missing" if fixed_required else "not_configured"
+
+    def _kucoin_fixed_egress_configured(self) -> bool:
+        if str(self.config.get("KUCOIN_EGRESS_PROXY_URL") or self.config.get("QUOTAGUARDSTATIC_URL") or "").strip():
+            return True
+        return bool(self.config.get("KUCOIN_NATIVE_STATIC_EGRESS_ENABLED") and str(self.config.get("KUCOIN_EGRESS_PUBLIC_IPS") or "").strip())
 
     def _routing_summary(
         self,

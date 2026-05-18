@@ -737,6 +737,26 @@ def test_kucoin_non_restricted_operator_region_with_fixed_egress_is_ready(app, m
     assert "kucoin_operator_region_restricted" not in _codes(payload)
 
 
+def test_kucoin_native_static_egress_is_ready(app, monkeypatch) -> None:
+    _confirm_live(app)
+    app.config["KUCOIN_OPERATOR_REGION"] = "Alberta"
+    app.config["KUCOIN_EGRESS_PROXY_URL"] = ""
+    app.config["KUCOIN_NATIVE_STATIC_EGRESS_ENABLED"] = True
+    app.config["KUCOIN_EGRESS_PUBLIC_IPS"] = "203.0.113.10"
+    app.config["KUCOIN_TRUSTED_IPS"] = "203.0.113.10"
+    app.config["KUCOIN_IP_RESTRICTION_MODE"] = "trusted"
+    user = _user("kucoinnativeegressready")
+    _ready_kucoin(app, monkeypatch, user)
+
+    payload = get_vault_cycle_readiness(user.id, amount=10, live_acknowledged=True, enabled_exchanges=["kucoin"])
+
+    status = payload["exchange_status"]["kucoin"]
+    assert payload["ready"] is True
+    assert status["ready"] is True
+    assert status["fixed_egress_status"] == "ready"
+    assert status["kucoin_diagnostics"]["ip_restriction"]["fixed_egress_configured"] is True
+
+
 def test_kucoin_trusted_ip_mismatch_blocks_before_permission_check(app, monkeypatch) -> None:
     _confirm_live(app)
     app.config["KUCOIN_OPERATOR_REGION"] = "Alberta"
