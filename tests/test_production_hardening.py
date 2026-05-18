@@ -35,7 +35,7 @@ def test_static_cache_headers_distinguish_assets_from_pwa_control_files(app) -> 
     manifest = client.get("/manifest.json")
     worker = client.get("/static/js/sw.js")
     root_worker = client.get("/sw.js")
-    icon = client.get("/icons/icon-192.png")
+    icon = client.get("/icons/algv-mascot-192.png")
 
     assert css.status_code == 200
     assert "immutable" in css.headers["Cache-Control"]
@@ -401,9 +401,9 @@ def test_pwa_manifest_has_ios_install_shape(app) -> None:
     assert payload["background_color"] == "#050607"
     assert payload["theme_color"] == "#050607"
     assert {icon["src"] for icon in payload["icons"]} >= {
-        "/icons/algvault-ios-192.png",
-        "/icons/algvault-ios-512.png",
-        "/icons/algvault-ios-180.png",
+        "/icons/algv-mascot-192.png",
+        "/icons/algv-mascot-512.png",
+        "/icons/algv-mascot-180.png",
     }
     assert any("maskable" in icon["purpose"] and icon["sizes"] == "192x192" for icon in payload["icons"])
     assert any("maskable" in icon["purpose"] and icon["sizes"] == "512x512" for icon in payload["icons"])
@@ -420,7 +420,7 @@ def test_ios_pwa_head_tags_target_algvault(app) -> None:
     assert '<meta name="theme-color" content="#050607">' in shell
     assert '<meta name="color-scheme" content="dark">' in shell
     assert '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">' in shell
-    assert '<link rel="apple-touch-icon" href="/icons/algvault-ios-180.png">' in shell
+    assert '<link rel="apple-touch-icon" href="/icons/algv-mascot-180.png">' in shell
     assert "data-theme-toggle" not in shell
     assert "data-theme-toggle" in Path("templates/settings.html").read_text(encoding="utf-8")
     assert '<link rel="manifest" href="/manifest.json">' in shell
@@ -429,11 +429,11 @@ def test_ios_pwa_head_tags_target_algvault(app) -> None:
 def test_service_worker_clears_old_algvault_and_tradingbot_caches(app) -> None:
     worker = app.test_client().get("/static/js/sw.js").get_data(as_text=True)
 
-    assert 'const CACHE_VERSION = "algvault-v21-vault-shell-polish-9"' in worker
+    assert 'const CACHE_VERSION = "algvault-v33-vault-iphone-exchange-7"' in worker
     assert 'name.startsWith("algvault-") || name.startsWith("tradingbot-")' in worker
     assert "self.clients.claim()" in worker
     assert "/manifest.json" in worker
-    assert "/icons/algvault-ios-192.png" in worker
+    assert "/icons/algv-mascot-192.png" in worker
 
 
 def test_service_worker_offline_fallback_does_not_cache_trading_state(app) -> None:

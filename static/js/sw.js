@@ -1,4 +1,4 @@
-const CACHE_VERSION = "algvault-v32-vault-iphone-exchange-6";
+const CACHE_VERSION = "algvault-v33-vault-iphone-exchange-7";
 const SHELL_CACHE = `${CACHE_VERSION}-shell`;
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 
@@ -8,12 +8,9 @@ const APP_SHELL = [
   "/static/js/responsive-tables.js",
   "/static/brand/algv-mascot-square.webp",
   "/manifest.json",
-  "/icons/algvault-ios-180.png",
-  "/icons/algvault-ios-192.png",
-  "/icons/algvault-ios-512.png",
-  "/icons/icon-192.png",
-  "/icons/icon-512.png",
-  "/icons/apple-touch-icon.png",
+  "/icons/algv-mascot-180.png",
+  "/icons/algv-mascot-192.png",
+  "/icons/algv-mascot-512.png",
 ];
 
 const OFFLINE_HTML = `<!doctype html>

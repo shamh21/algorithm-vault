@@ -16,7 +16,7 @@
     <meta name="apple-mobile-web-app-title" content="AlgVault">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="msapplication-TileColor" content="#050607">
-    {% set asset_v = current_app.config.get('ASSET_VERSION', '1') ~ '-algvault-vault-iphone-exchange-6' %}
+    {% set asset_v = current_app.config.get('ASSET_VERSION', '1') ~ '-algvault-vault-iphone-exchange-7' %}
     <script>
       try {
         const storedTheme = window.localStorage.getItem("av-color-theme");
@@ -28,11 +28,11 @@
     </script>
     <title>{% block title %}AlgVault{% endblock %}</title>
     <link rel="manifest" href="/manifest.json">
-    <link rel="icon" type="image/svg+xml" href="/icons/algvault-icon.svg">
-    <link rel="icon" type="image/png" sizes="192x192" href="/icons/algvault-ios-192.png">
-    <link rel="icon" type="image/png" sizes="512x512" href="/icons/algvault-ios-512.png">
-    <link rel="apple-touch-icon" href="/icons/algvault-ios-180.png">
-    <link rel="apple-touch-icon-precomposed" href="/icons/algvault-ios-180.png">
+    <link rel="icon" type="image/png" sizes="180x180" href="/icons/algv-mascot-180.png">
+    <link rel="icon" type="image/png" sizes="192x192" href="/icons/algv-mascot-192.png">
+    <link rel="icon" type="image/png" sizes="512x512" href="/icons/algv-mascot-512.png">
+    <link rel="apple-touch-icon" href="/icons/algv-mascot-180.png">
+    <link rel="apple-touch-icon-precomposed" href="/icons/algv-mascot-180.png">
     <link rel="preload" as="style" href="{{ url_for('static', filename='css/app.css') }}?v={{ asset_v }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}?v={{ asset_v }}">
     {% block page_styles %}{% endblock %}

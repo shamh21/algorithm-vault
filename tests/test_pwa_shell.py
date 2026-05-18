@@ -22,11 +22,11 @@ def test_manifest_contains_dark_standalone_pwa_contract(app) -> None:
     assert "finance" in manifest["categories"]
 
     icons = {icon["sizes"]: icon for icon in manifest["icons"]}
-    assert icons["192x192"]["src"] == "/icons/algvault-ios-192.png"
+    assert icons["192x192"]["src"] == "/icons/algv-mascot-192.png"
     assert icons["192x192"]["purpose"] == "any maskable"
-    assert icons["512x512"]["src"] == "/icons/algvault-ios-512.png"
+    assert icons["512x512"]["src"] == "/icons/algv-mascot-512.png"
     assert icons["512x512"]["purpose"] == "any maskable"
-    assert icons["180x180"]["src"] == "/icons/algvault-ios-180.png"
+    assert icons["180x180"]["src"] == "/icons/algv-mascot-180.png"
     assert "/admin/panic/" not in {shortcut["url"] for shortcut in manifest["shortcuts"]}
     assert "/convert/" in {shortcut["url"] for shortcut in manifest["shortcuts"]}
 
@@ -49,7 +49,7 @@ def test_base_template_has_dark_ios_pwa_metadata(app) -> None:
     assert '<meta name="color-scheme" content="dark">' in html
     assert '<meta name="apple-mobile-web-app-capable" content="yes">' in html
     assert '<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">' in html
-    assert '<link rel="apple-touch-icon" href="/icons/algvault-ios-180.png">' in html
+    assert '<link rel="apple-touch-icon" href="/icons/algv-mascot-180.png">' in html
     assert "data-theme-toggle" not in html
     assert "av-color-theme" in html
     assert 'data-component="AlgVaultLaunchAnimation"' in html
@@ -103,10 +103,9 @@ def test_service_worker_precaches_only_safe_shell_assets() -> None:
     assert '"/static/js/app-shell.js"' in app_shell
     assert '"/static/js/responsive-tables.js"' in app_shell
     assert '"/manifest.json"' in app_shell
-    assert '"/icons/algvault-ios-180.png"' in app_shell
-    assert '"/icons/algvault-ios-192.png"' in app_shell
-    assert '"/icons/algvault-ios-512.png"' in app_shell
-    assert '"/icons/icon-192.png"' in app_shell
+    assert '"/icons/algv-mascot-180.png"' in app_shell
+    assert '"/icons/algv-mascot-192.png"' in app_shell
+    assert '"/icons/algv-mascot-512.png"' in app_shell
     assert '"/admin/dashboard"' not in app_shell
     assert '"/wallet"' not in app_shell
     assert '"/vault"' not in app_shell
@@ -140,7 +139,7 @@ def test_pwa_static_headers_keep_sw_fresh_and_assets_cacheable(app) -> None:
     sw = client.get("/static/js/sw.js")
     root_sw = client.get("/sw.js")
     css = client.get("/static/css/app.css")
-    icon = client.get("/icons/algvault-ios-192.png")
+    icon = client.get("/icons/algv-mascot-192.png")
 
     assert "must-revalidate" in sw.headers["Cache-Control"]
     assert sw.headers["Service-Worker-Allowed"] == "/"

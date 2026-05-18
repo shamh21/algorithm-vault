@@ -4,12 +4,12 @@
 {% block title %}Vault · Algorithm Vault{% endblock %}
 
 {% block page_styles %}
-  {% set vault_visual_v = current_app.config.get('ASSET_VERSION', '1') ~ '-vault-iphone-exchange-6' %}
+  {% set vault_visual_v = current_app.config.get('ASSET_VERSION', '1') ~ '-vault-iphone-exchange-7' %}
   <link rel="preload" as="image" href="{{ url_for('static', filename='brand/algv-mascot-square.webp') }}?v={{ vault_visual_v }}" fetchpriority="high">
 {% endblock %}
 
 {% block content %}
-{% set vault_visual_v = current_app.config.get('ASSET_VERSION', '1') ~ '-vault-iphone-exchange-6' %}
+{% set vault_visual_v = current_app.config.get('ASSET_VERSION', '1') ~ '-vault-iphone-exchange-7' %}
 {% set default_asset = vault_default_asset if vault_default_asset is defined else (balances[0].asset if balances else "USDC") %}
 {% set preview_providers = initial_routing_preview.providers if initial_routing_preview is defined and initial_routing_preview.providers is defined else [] %}
 {% set vault_metrics = namespace(wallet_total=0.0, active_value=0.0, recent_pnl=0.0, funded_count=0, ready_exchange_count=0, exchange_count=0) %}
@@ -375,6 +375,24 @@
           <span class="card-kicker">Mobile shell</span>
           <strong>Install-ready layout with safe-area controls and cached static visuals.</strong>
         </div>
+        <div class="vault-brand-icon-grid" aria-label="AlgV mobile capabilities">
+          <span>
+            <svg aria-hidden="true" focusable="false"><use href="#icon-markets"></use></svg>
+            <strong>Charts</strong>
+          </span>
+          <span>
+            <svg aria-hidden="true" focusable="false"><use href="#icon-vault"></use></svg>
+            <strong>Shield</strong>
+          </span>
+          <span>
+            <svg aria-hidden="true" focusable="false"><use href="#icon-convert"></use></svg>
+            <strong>Fast</strong>
+          </span>
+          <span>
+            <svg aria-hidden="true" focusable="false"><use href="#icon-wallet"></use></svg>
+            <strong>Wallet</strong>
+          </span>
+        </div>
       </section>
     </aside>
     </div>
@@ -543,5 +561,5 @@
 {% endblock %}
 
 {% block page_scripts %}
-    <script defer src="{{ url_for('static', filename='js/vault.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}-vault-iphone-exchange-6"></script>
+    <script defer src="{{ url_for('static', filename='js/vault.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}-vault-iphone-exchange-7"></script>
 {% endblock %}

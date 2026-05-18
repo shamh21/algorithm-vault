@@ -44,6 +44,7 @@ def test_vault_template_is_minimal_one_h10_flow() -> None:
     assert "data-routing-skeleton" in source
     assert "algv-mascot-square.webp" in source
     assert "algv-trade-smarter-panel.webp" in source
+    assert "vault-brand-icon-grid" in source
     assert "Hyperliquid" not in source
     assert "KuCoin" not in source
     assert "Vault Activity" in source
@@ -120,9 +121,9 @@ def test_vault_assets_use_explicit_readiness_cache_busters() -> None:
     base_source = Path("templates/base.html").read_text()
     sw_source = Path("static/js/sw.js").read_text()
 
-    assert "vault-iphone-exchange-6" in vault_source
-    assert "algvault-vault-iphone-exchange-6" in base_source
-    assert "algvault-v32-vault-iphone-exchange-6" in sw_source
+    assert "vault-iphone-exchange-7" in vault_source
+    assert "algvault-vault-iphone-exchange-7" in base_source
+    assert "algvault-v33-vault-iphone-exchange-7" in sw_source
     assert "/static/brand/algv-mascot-square.webp" in sw_source
 
 

@@ -22,19 +22,19 @@
   "prefer_related_applications": false,
   "icons": [
     {
-      "src": "/icons/algvault-ios-192.png",
+      "src": "/icons/algv-mascot-192.png",
       "sizes": "192x192",
       "type": "image/png",
       "purpose": "any maskable"
     },
     {
-      "src": "/icons/algvault-ios-512.png",
+      "src": "/icons/algv-mascot-512.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any maskable"
     },
     {
-      "src": "/icons/algvault-ios-180.png",
+      "src": "/icons/algv-mascot-180.png",
       "sizes": "180x180",
       "type": "image/png",
       "purpose": "any"
@@ -47,7 +47,7 @@
       "url": "/",
       "icons": [
         {
-          "src": "/icons/icon-192.png",
+          "src": "/icons/algv-mascot-192.png",
           "sizes": "192x192",
           "type": "image/png"
         }
@@ -59,7 +59,7 @@
       "url": "/wallet/",
       "icons": [
         {
-          "src": "/icons/icon-192.png",
+          "src": "/icons/algv-mascot-192.png",
           "sizes": "192x192",
           "type": "image/png"
         }
@@ -71,7 +71,7 @@
       "url": "/convert/",
       "icons": [
         {
-          "src": "/icons/icon-192.png",
+          "src": "/icons/algv-mascot-192.png",
           "sizes": "192x192",
           "type": "image/png"
         }
@@ -83,7 +83,7 @@
       "url": "/vault/",
       "icons": [
         {
-          "src": "/icons/icon-192.png",
+          "src": "/icons/algv-mascot-192.png",
           "sizes": "192x192",
           "type": "image/png"
         }

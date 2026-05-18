@@ -17811,6 +17811,48 @@ html[data-theme] .vault-brand-panel strong {
   line-height: 1.32;
 }
 
+html[data-theme] .vault-brand-icon-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.45rem;
+}
+
+html[data-theme] .vault-brand-icon-grid span {
+  display: grid;
+  place-items: center;
+  gap: 0.24rem;
+  min-height: 4.15rem;
+  padding: 0.48rem 0.34rem;
+  border: 1px solid rgba(255, 31, 54, 0.28);
+  border-radius: var(--radius-md, 8px);
+  background:
+    radial-gradient(circle at 50% 20%, rgba(255, 31, 54, 0.22), transparent 2rem),
+    rgba(255, 255, 255, 0.045);
+}
+
+html[data-theme] .vault-brand-icon-grid svg {
+  width: 1.45rem;
+  height: 1.45rem;
+  color: #ffb3bc;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.1;
+  filter: drop-shadow(0 0 10px rgba(255, 0, 31, 0.48));
+}
+
+html[data-theme] .vault-brand-icon-grid use {
+  fill: none;
+  stroke: currentColor;
+}
+
+html[data-theme] .vault-brand-icon-grid strong {
+  color: #fff;
+  font-size: 0.68rem;
+  font-weight: 900;
+  line-height: 1.05;
+  text-transform: uppercase;
+}
+
 html[data-theme] .vault-allocation-dashboard {
   display: grid;
   gap: 0.78rem;
