@@ -135,6 +135,28 @@
             </label>
           {% endfor %}
         </div>
+        {% set kucoin_diag = initial_routing_preview.kucoin_diagnostics|default({}) %}
+        {% set ip_diag = kucoin_diag.ip_restriction|default({}) %}
+        {% set permission_diag = kucoin_diag.permissions|default({}) %}
+        <div class="vault-kucoin-diagnostics" data-kucoin-diagnostics>
+          <div>
+            <span>Operator IP</span>
+            <strong data-kucoin-operator-ip>{{ ip_diag.operator_ip|default('Not detected') or 'Not detected' }}</strong>
+          </div>
+          <div>
+            <span>Server egress</span>
+            <strong data-kucoin-server-egress>{{ (ip_diag.server_egress_ips|default([]))|join(', ') or 'Not configured' }}</strong>
+          </div>
+          <div>
+            <span>Trusted IP</span>
+            <strong data-kucoin-trusted-status>{{ ip_diag.trusted_ip_status|default('unknown')|replace('_', ' ')|title }}</strong>
+          </div>
+          <div>
+            <span>Spot / Futures / Unified</span>
+            <strong data-kucoin-permissions>{{ permission_diag.spot.status|default('not_checked')|replace('_', ' ') }} / {{ permission_diag.futures.status|default('not_checked')|replace('_', ' ') }} / {{ permission_diag.unified.status|default('not_checked')|replace('_', ' ') }}</strong>
+          </div>
+          <p data-kucoin-trusted-message>{{ ip_diag.trusted_ip_message|default('Server-side KuCoin diagnostics pending.') }}</p>
+        </div>
       </section>
 
       <section class="vault-form-section vault-preview-module" data-routing-preview role="status" aria-live="polite" aria-atomic="false" aria-busy="false">

@@ -124,6 +124,14 @@ services:
         sync: false
       - key: KUCOIN_OPERATOR_REGION
         sync: false
+      - key: KUCOIN_IP_RESTRICTION_MODE
+        value: trusted
+      - key: KUCOIN_TRUSTED_IPS
+        sync: false
+      - key: KUCOIN_EGRESS_PUBLIC_IPS
+        sync: false
+      - key: KUCOIN_UNIFIED_ACCOUNT_ENABLED
+        sync: false
   - type: worker
     name: algorithm-vault-worker
     runtime: python
@@ -242,4 +250,12 @@ services:
       - key: KUCOIN_COMPLIANCE_CONFIRMED
         sync: false
       - key: KUCOIN_OPERATOR_REGION
+        sync: false
+      - key: KUCOIN_IP_RESTRICTION_MODE
+        value: trusted
+      - key: KUCOIN_TRUSTED_IPS
+        sync: false
+      - key: KUCOIN_EGRESS_PUBLIC_IPS
+        sync: false
+      - key: KUCOIN_UNIFIED_ACCOUNT_ENABLED
         sync: false

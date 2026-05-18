@@ -4056,6 +4056,41 @@ table .mobile-hide {
   display: none;
 }
 
+.vault-kucoin-diagnostics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.42);
+}
+
+.vault-kucoin-diagnostics div {
+  min-width: 0;
+}
+
+.vault-kucoin-diagnostics span,
+.vault-kucoin-diagnostics p {
+  color: rgba(203, 213, 225, 0.68);
+  font-size: 0.74rem;
+}
+
+.vault-kucoin-diagnostics strong {
+  display: block;
+  margin-top: 3px;
+  overflow-wrap: anywhere;
+  color: #e5eefb;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.vault-kucoin-diagnostics p {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+
 .vault-routing-summary,
 .vault-readiness-state,
 .vault-routing-foot,
@@ -4514,6 +4549,10 @@ table .mobile-hide {
     scroll-snap-align: start;
   }
 
+  .vault-kucoin-diagnostics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .vault-sticky-actions {
     position: sticky;
     bottom: calc(var(--bottom-nav-height, 72px) + var(--safe-bottom) + 0.62rem);
@@ -4542,6 +4581,10 @@ table .mobile-hide {
 
   .vault-exchange-grid {
     gap: 0.42rem;
+  }
+
+  .vault-kucoin-diagnostics {
+    grid-template-columns: 1fr;
   }
 
   .vault-exchange-card {

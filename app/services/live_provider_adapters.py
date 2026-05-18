@@ -388,6 +388,43 @@ class KucoinFuturesConnector:
         self._position_mode()
         return True
 
+    def permission_probe(self, mode: str = "live") -> dict[str, Any]:
+        """Run read-only KuCoin permission probes without submitting orders."""
+
+        credentials_present = {
+            "api_key": bool(self.credentials.api_key),
+            "api_secret": bool(self.credentials.api_secret),
+            "api_passphrase": bool(self.credentials.passphrase),
+        }
+        if mode != "live":
+            return {
+                "credentials_present": credentials_present,
+                "general": {"status": "blocked", "message": "KuCoin permission probes require live mode."},
+                "spot": {"status": "blocked", "message": "KuCoin permission probes require live mode."},
+                "futures": {"status": "blocked", "message": "KuCoin permission probes require live mode."},
+                "unified": {"status": "not_checked", "message": "Unified Account permission is operator-selected in KuCoin."},
+            }
+
+        return {
+            "credentials_present": credentials_present,
+            "general": self._permission_check("general", lambda: self.get_spot_accounts(mode, include_zero=False)),
+            "spot": self._permission_check("spot", lambda: self.get_spot_accounts(mode, account_type="trade", include_zero=False)),
+            "futures": self._permission_check("futures", lambda: (self._account_overview(), self._position_mode())),
+            "unified": {
+                "status": "operator_configured" if self._config_bool("KUCOIN_UNIFIED_ACCOUNT_ENABLED", False) else "not_checked",
+                "message": "Unified Account is marked enabled in server config."
+                if self._config_bool("KUCOIN_UNIFIED_ACCOUNT_ENABLED", False)
+                else "Unified Account permission is selected in KuCoin and is not probed by this app.",
+            },
+        }
+
+    def _permission_check(self, permission: str, callback: Any) -> dict[str, str]:
+        try:
+            callback()
+        except Exception as exc:  # noqa: BLE001
+            return {"status": "failed", "message": _kucoin_unavailable_alert(exc, spot=permission == "spot")}
+        return {"status": "ready", "message": f"KuCoin {permission} permission check passed."}
+
     def account_snapshot(self, mode: str) -> ClientSnapshot:
         if self._default_market_type() == "spot":
             return self.spot_account_snapshot(mode)

@@ -405,6 +405,8 @@ The canary command computes size from existing live caps, allocation/risk config
 
 KuCoin and other IP-restricted exchange API keys must whitelist the machine's current public egress IP before any live vault cycle can start. For reliable production use, run the app behind a stable VPS, VPN, or static egress IP and update the exchange whitelist before activating live cycles. If a provider returns `Invalid request ip`, the app records the latest connection health and blocks new cycles before locking funds.
 
+For Vercel-to-live-API vault routing, whitelist the fixed live API/worker egress IP in KuCoin, not the operator browser IP shown in KuCoin's API-key screen. Set `KUCOIN_IP_RESTRICTION_MODE=trusted`, mirror the KuCoin trusted-IP list in `KUCOIN_TRUSTED_IPS`, and set the actual server egress IPs in `KUCOIN_EGRESS_PUBLIC_IPS`. The `/api/vault/kucoin-diagnostics` endpoint reports operator IP separately from server egress and never exposes KuCoin API secrets.
+
 ## KuCoin And Hyperliquid Live Validation
 
 KuCoin futures order size is contract count, not the app's asset quantity. Keep `KUCOIN_SYMBOL_MAP_JSON` and `KUCOIN_CONTRACT_SPECS_JSON` configured for every KuCoin symbol you allow; missing or misaligned contract metadata fails closed before any order is submitted. The safe validation order is mocked tests first, then `flask production-readiness --strict`, then read-only connection verification/account snapshot. Only use `flask live-canary-trade ... --submit --confirm LIVE-CANARY-TRADE` after that staged validation and after lowering live caps to match the small test balance.

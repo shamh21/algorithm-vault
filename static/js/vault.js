@@ -239,6 +239,10 @@
     return statusLabel({ ...provider, status });
   }
 
+  function titleStatus(value) {
+    return String(value || "unknown").replaceAll("_", " ").replace(/\b\w/g, (char) => char.toUpperCase());
+  }
+
   function selectedAllocationOption(form) {
     return form?.querySelector("input[name='deposit_asset']:checked")?.closest("[data-asset-option]");
   }
@@ -448,6 +452,7 @@
     applyRoutingState(form, payload);
     const providers = providersFromPayload(payload);
     providers.forEach((provider) => updateProviderCard(form, provider));
+    updateKucoinDiagnostics(form, payload.kucoin_diagnostics || providers.find((provider) => provider.provider === "kucoin")?.kucoin_diagnostics);
 
     const summary = payload.summary || {};
     const routingPreview = payload.routing_preview || {};
@@ -507,6 +512,26 @@
         bars.appendChild(segment);
       }
     });
+  }
+
+  function updateKucoinDiagnostics(form, diagnostics) {
+    const panel = form.querySelector("[data-kucoin-diagnostics]");
+    if (!panel || !diagnostics) return;
+    const ip = diagnostics.ip_restriction || {};
+    const permissions = diagnostics.permissions || {};
+    const spot = permissions.spot?.status || "not_checked";
+    const futures = permissions.futures?.status || "not_checked";
+    const unified = permissions.unified?.status || "not_checked";
+    const operatorIp = panel.querySelector("[data-kucoin-operator-ip]");
+    const serverEgress = panel.querySelector("[data-kucoin-server-egress]");
+    const trustedStatus = panel.querySelector("[data-kucoin-trusted-status]");
+    const permissionText = panel.querySelector("[data-kucoin-permissions]");
+    const trustedMessage = panel.querySelector("[data-kucoin-trusted-message]");
+    if (operatorIp) operatorIp.textContent = ip.operator_ip || "Not detected";
+    if (serverEgress) serverEgress.textContent = Array.isArray(ip.server_egress_ips) && ip.server_egress_ips.length ? ip.server_egress_ips.join(", ") : "Not configured";
+    if (trustedStatus) trustedStatus.textContent = titleStatus(ip.trusted_ip_status);
+    if (permissionText) permissionText.textContent = `${titleStatus(spot)} / ${titleStatus(futures)} / ${titleStatus(unified)}`;
+    if (trustedMessage) trustedMessage.textContent = ip.trusted_ip_message || "Server-side KuCoin diagnostics pending.";
   }
 
   function failedPreview(form, message) {

@@ -42,6 +42,7 @@ from ...services.connection_health import (
     store_connection_health,
 )
 from ...services.db_retry import commit_with_retry, is_database_locked
+from ...services.kucoin_diagnostics import build_kucoin_diagnostics_payload, resolve_server_egress_ip
 from ...services.market_scanner import ScoredCandidate
 from ...services.one_h10_quality import ONE_H10_HORIZON_SECONDS, one_h10_forecast_live_blockers
 from ...services.provider_assets import normalize_provider, provider_collateral_asset, provider_feature_context
@@ -90,6 +91,7 @@ _LIVE_API_DELEGATED_ENDPOINTS = {
     "consumer.vault_readiness",
     "consumer.vault_preview_route",
     "consumer.vault_routing_preview",
+    "consumer.vault_kucoin_diagnostics",
     "consumer.start_cycle",
     "consumer.create_vault_cycle",
     "consumer.vault_cycle_status",
@@ -107,6 +109,7 @@ def _protect_consumer():
         "consumer.vault",
         "consumer.vault_readiness",
         "consumer.vault_routing_preview",
+        "consumer.vault_kucoin_diagnostics",
         "consumer.vault_preview_route",
         "consumer.start_cycle",
         "consumer.vault_start_cycle",
@@ -1463,6 +1466,17 @@ def vault_routing_preview():
     return jsonify(payload)
 
 
+@consumer_bp.get("/api/vault/kucoin-diagnostics")
+def vault_kucoin_diagnostics():
+    user = current_user()
+    if user is None:
+        return jsonify({"ok": False, "code": "user_missing", "message": "Sign in before checking KuCoin diagnostics."}), 401
+    probe = str(request.args.get("probe") or "").strip().lower() in {"1", "true", "yes", "on"}
+    egress_probe = str(request.args.get("egress_probe") or "").strip().lower() in {"1", "true", "yes", "on"}
+    payload = _kucoin_diagnostics_payload(user, probe=probe, egress_probe=egress_probe)
+    return jsonify({"ok": True, "code": "kucoin_diagnostics", "result": payload})
+
+
 @consumer_bp.get("/api/vault/cycles/<int:cycle_id>")
 def vault_cycle_status(cycle_id: int):
     user = current_user()
@@ -2699,6 +2713,7 @@ def _deferred_live_api_routing_preview_payload(
     requested = [provider for provider in dict.fromkeys(providers or list(VAULT_UI_PROVIDERS)) if provider in VAULT_UI_PROVIDERS]
     requested = requested or list(VAULT_UI_PROVIDERS)
     amount = max(0.0, float(amount or 0.0))
+    kucoin_diagnostics = build_kucoin_diagnostics_payload(current_app.config, operator_ip=_request_operator_ip())
     provider_rows = [
         {
             "provider": option["provider"],
@@ -2714,6 +2729,7 @@ def _deferred_live_api_routing_preview_payload(
             "conversion_amount": 0.0,
             "conversion_status": "not_required",
             "fixed_egress_status": "pending" if option["provider"] == "kucoin" else "not_required",
+            "kucoin_diagnostics": kucoin_diagnostics if option["provider"] == "kucoin" else {},
             "available_margin_usd": 0.0,
             "allocation_weight": 0.0,
             "allocation_pct": 0.0,
@@ -2774,6 +2790,7 @@ def _deferred_live_api_routing_preview_payload(
         "clearable_blockers": active_blockers,
         "can_start": False,
         "warnings": [],
+        "kucoin_diagnostics": kucoin_diagnostics,
         "exchange_status": {},
         "routing_preview": {
             "notional_usd": 0.0,
@@ -2812,6 +2829,7 @@ def _vault_routing_preview_payload(
     exchange_status = {
         str(key).lower(): value for key, value in dict(readiness.get("exchange_status") or {}).items() if isinstance(value, dict)
     }
+    kucoin_diagnostics = _kucoin_diagnostics_payload(user, probe=False, egress_probe=False)
     rows: list[dict[str, object]] = []
     for option in _vault_provider_options():
         provider = str(option["provider"])
@@ -2838,6 +2856,7 @@ def _vault_routing_preview_payload(
                 "conversion_amount": _one_h10_float(state.get("conversion_amount"), 0.0),
                 "conversion_status": str(state.get("conversion_status") or "not_required"),
                 "fixed_egress_status": str(state.get("fixed_egress_status") or ("not_required" if provider != "kucoin" else "")),
+                "kucoin_diagnostics": kucoin_diagnostics if provider == "kucoin" else {},
                 "available_margin_usd": _one_h10_float(state.get("available_margin_usd"), 0.0),
                 "allocation_weight": _one_h10_float(state.get("allocation_weight"), 0.0),
                 "allocation_pct": _one_h10_float(state.get("allocation_pct"), 0.0),
@@ -2893,9 +2912,69 @@ def _vault_routing_preview_payload(
         "clearable_blockers": readiness.get("clearable_blockers", []),
         "can_start": bool(readiness.get("can_start", readiness.get("ready", False))),
         "warnings": readiness.get("warnings", []),
+        "kucoin_diagnostics": kucoin_diagnostics,
         "exchange_status": readiness.get("exchange_status", {}),
         "routing_preview": readiness.get("routing_preview", {}),
     }
+
+
+def _kucoin_diagnostics_payload(user, *, probe: bool = False, egress_probe: bool = False) -> dict[str, object]:
+    connection = _kucoin_connection_for_user(user)
+    permission_probe = _kucoin_permission_probe(user, connection) if probe and connection is not None else None
+    resolved_server_ips: list[str] = []
+    if egress_probe:
+        try:
+            resolved_server_ips = resolve_server_egress_ip(current_app.config)
+        except Exception as exc:  # noqa: BLE001
+            current_app.logger.warning("KuCoin egress IP probe failed: %s", exc)
+    return build_kucoin_diagnostics_payload(
+        current_app.config,
+        operator_ip=_request_operator_ip(),
+        connection=connection,
+        permission_probe=permission_probe,
+        resolved_server_ips=resolved_server_ips,
+    )
+
+
+def _kucoin_connection_for_user(user) -> TradingConnection | None:
+    if user is None:
+        return None
+    return (
+        TradingConnection.query.filter_by(user_id=user.id, provider="kucoin")
+        .order_by(TradingConnection.is_active.desc(), TradingConnection.updated_at.desc(), TradingConnection.id.desc())
+        .first()
+    )
+
+
+def _kucoin_permission_probe(user, connection: TradingConnection | None) -> dict[str, object] | None:
+    if user is None or connection is None:
+        return None
+    try:
+        connector = get_service("trading_connections").connector_for_user(user.id, connection.id)
+        probe = getattr(connector, "permission_probe", None)
+        if callable(probe):
+            return dict(probe("live"))
+    except Exception as exc:  # noqa: BLE001
+        message = str(exc)[:240] or "KuCoin permission preflight failed."
+        return {
+            "credentials_present": {
+                "api_key": bool(connection.encrypted_api_key),
+                "api_secret": bool(connection.encrypted_api_secret),
+                "api_passphrase": bool(connection.encrypted_passphrase),
+            },
+            "general": {"status": "failed", "message": message},
+            "spot": {"status": "failed", "message": message},
+            "futures": {"status": "failed", "message": message},
+            "unified": {"status": "not_checked", "message": "Unified Account permission is operator-selected in KuCoin."},
+        }
+    return None
+
+
+def _request_operator_ip() -> str:
+    access_route = list(request.access_route or [])
+    if access_route:
+        return str(access_route[0] or "").strip()
+    return str(request.remote_addr or "").strip()
 
 
 def _is_one_h10_duration(duration_seconds: int, duration_hours: int) -> bool:

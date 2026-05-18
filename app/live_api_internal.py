@@ -19,6 +19,7 @@ _LIVE_API_INTERNAL_PATHS = {
     "/api/vault/readiness",
     "/vault/preview-route",
     "/api/vault/routing-preview",
+    "/api/vault/kucoin-diagnostics",
     "/vault/start-cycle",
     "/consumer/start",
     "/vault/start",

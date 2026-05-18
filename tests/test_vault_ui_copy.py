@@ -37,7 +37,8 @@ def test_vault_template_is_minimal_one_h10_flow() -> None:
     assert "Enabled Exchanges" in source
     assert "Routing Preview" in source
     assert "Hyperliquid" not in source
-    assert "KuCoin" not in source
+    assert "data-kucoin-diagnostics" in source
+    assert "Server-side KuCoin diagnostics pending." in source
     assert "Vault Activity" in source
     assert "Recent Cycles" in source
     assert "Full History" not in source

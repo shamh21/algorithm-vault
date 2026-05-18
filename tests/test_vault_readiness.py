@@ -737,6 +737,70 @@ def test_kucoin_non_restricted_operator_region_with_fixed_egress_is_ready(app, m
     assert "kucoin_operator_region_restricted" not in _codes(payload)
 
 
+def test_kucoin_trusted_ip_mismatch_blocks_before_permission_check(app, monkeypatch) -> None:
+    _confirm_live(app)
+    app.config["KUCOIN_OPERATOR_REGION"] = "Alberta"
+    app.config["KUCOIN_IP_RESTRICTION_MODE"] = "trusted"
+    app.config["KUCOIN_EGRESS_PUBLIC_IPS"] = "203.0.113.10"
+    app.config["KUCOIN_TRUSTED_IPS"] = "2001:569:76f5:3400:f1a3:1a1:f8ac:489c"
+    user = _user("kucoinipmismatch")
+    _ready_kucoin(app, monkeypatch, user)
+    service = app.extensions["services"]["trading_connections"]
+    monkeypatch.setattr(service, "can_trade", lambda *args, **kwargs: pytest.fail("KuCoin can_trade should wait for trusted IP match"))
+    monkeypatch.setattr(
+        service,
+        "account_snapshot",
+        lambda *args, **kwargs: pytest.fail("KuCoin balance checks should wait for trusted IP match"),
+    )
+
+    payload = get_vault_cycle_readiness(user.id, amount=10, live_acknowledged=True, enabled_exchanges=["kucoin"])
+
+    status = payload["exchange_status"]["kucoin"]
+    assert status["ready"] is False
+    assert "kucoin_trusted_ip_mismatch" in _codes(payload)
+    assert status["kucoin_diagnostics"]["ip_restriction"]["operator_ip_is_trading_egress"] is False
+
+
+def test_kucoin_server_egress_ip_missing_blocks_trusted_ip_mode(app, monkeypatch) -> None:
+    _confirm_live(app)
+    app.config["KUCOIN_OPERATOR_REGION"] = "Alberta"
+    app.config["KUCOIN_IP_RESTRICTION_MODE"] = "trusted"
+    app.config["KUCOIN_EGRESS_PUBLIC_IPS"] = ""
+    app.config["KUCOIN_TRUSTED_IPS"] = "64.180.247.128"
+    user = _user("kucoinegressmissing")
+    _ready_kucoin(app, monkeypatch, user)
+
+    payload = get_vault_cycle_readiness(user.id, amount=10, live_acknowledged=True, enabled_exchanges=["kucoin"])
+
+    assert "kucoin_server_egress_ip_unknown" in _codes(payload)
+    diagnostics = payload["exchange_status"]["kucoin"]["kucoin_diagnostics"]["ip_restriction"]
+    assert diagnostics["server_egress_ips"] == []
+    assert diagnostics["operator_ip_is_trading_egress"] is False
+
+
+def test_kucoin_diagnostics_api_separates_operator_and_server_ip(app) -> None:
+    _confirm_live(app)
+    app.config["KUCOIN_OPERATOR_REGION"] = "Alberta"
+    app.config["KUCOIN_IP_RESTRICTION_MODE"] = "trusted"
+    app.config["KUCOIN_EGRESS_PUBLIC_IPS"] = "203.0.113.10"
+    app.config["KUCOIN_TRUSTED_IPS"] = "203.0.113.10"
+    user = _user("kucoindiag")
+    _kucoin_connection(app, user)
+    client = app.test_client()
+    _login(client, user)
+
+    response = client.get("/api/vault/kucoin-diagnostics", environ_overrides={"REMOTE_ADDR": "64.180.247.128"})
+
+    payload = response.get_json()["result"]
+    ip = payload["ip_restriction"]
+    assert response.status_code == 200
+    assert ip["operator_ip"] == "64.180.247.128"
+    assert ip["server_egress_ips"] == ["203.0.113.10"]
+    assert ip["trusted_ip_status"] == "ready"
+    assert ip["operator_ip_is_trading_egress"] is False
+    assert payload["secrets_exposed"] is False
+
+
 def test_hyperliquid_missing_wallet_returns_needs_wallet(app, monkeypatch) -> None:
     _confirm_live(app)
     user = _user("hlmissingwallet")

@@ -122,6 +122,33 @@ def test_kucoin_live_preflight_ready_for_non_restricted_region_with_fixed_egress
     assert summary["missing_or_blocked"] == []
 
 
+def test_kucoin_permission_probe_uses_read_only_endpoints(monkeypatch) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def fake_request(session, method, url, *, provider, attempts, sleep_seconds, timeout, **kwargs):
+        calls.append({"method": method, "url": url, **kwargs})
+        if "/api/v1/accounts" in url:
+            return {"code": "200000", "data": [{"currency": "USDT", "type": "trade", "balance": "2", "available": "2"}]}
+        if "/api/v1/account-overview" in url:
+            return {"code": "200000", "data": {"currency": "USDT", "availableBalance": "2"}}
+        if "/api/v2/position/getPositionMode" in url:
+            return {"code": "200000", "data": {"positionMode": "ONE_WAY"}}
+        raise AssertionError(f"Unhandled KuCoin permission probe request: {method} {url}")
+
+    monkeypatch.setattr(adapters, "_request_with_retries", fake_request)
+    connector = _connector({"KUCOIN_UNIFIED_ACCOUNT_ENABLED": True})
+
+    result = connector.permission_probe("live")
+
+    assert result["general"]["status"] == "ready"
+    assert result["spot"]["status"] == "ready"
+    assert result["futures"]["status"] == "ready"
+    assert result["unified"]["status"] == "operator_configured"
+    assert calls
+    assert all(call["method"] == "GET" for call in calls)
+    assert not any("/orders" in call["url"] for call in calls)
+
+
 def test_kucoin_spot_market_metadata_parsing_and_validation() -> None:
     connector = _connector()
     market = connector._normalize_spot_market(

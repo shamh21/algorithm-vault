@@ -19,6 +19,7 @@ from ..extensions import db
 from ..ml.online_ranker import ONE_H10_HORIZON
 from ..models import LeveragedMarket, RiskEvent, Setting, TradingConnection, User, WalletBalance
 from .kucoin_compliance import kucoin_operator_region_status
+from .kucoin_diagnostics import build_kucoin_diagnostics_payload
 from .one_h10_quality import ONE_H10_HORIZON_SECONDS
 from .provider_assets import normalize_provider, provider_collateral_asset
 from .vault_allocation_assets import BASE_VAULT_ALLOCATION_ASSETS, asset_usd_price
@@ -389,6 +390,7 @@ class VaultReadinessService:
         collateral_asset = provider_collateral_asset(exchange)
         conversion_plan = self._conversion_plan(exchange, deposit_asset, collateral_asset)
         fixed_egress_status = self._fixed_egress_status(exchange)
+        kucoin_diagnostics = build_kucoin_diagnostics_payload(self.config, connection=connection) if exchange == "kucoin" else {}
         available_margin = 0.0
         markets = self._active_markets(exchange, connection.id if connection is not None else None)
 
@@ -426,7 +428,13 @@ class VaultReadinessService:
                 kucoin_warnings, kucoin_blockers = self._kucoin_fixed_egress_blockers(fixed_egress_status)
                 warnings.extend(kucoin_warnings)
                 blockers.extend(kucoin_blockers)
+                ip_warnings, ip_blockers = self._kucoin_ip_blockers(kucoin_diagnostics)
+                warnings.extend(ip_warnings)
+                blockers.extend(ip_blockers)
                 provider_preflight_blocked = any(item.get("severity") in {"blocker", "critical"} for item in kucoin_blockers)
+                provider_preflight_blocked = provider_preflight_blocked or any(
+                    item.get("severity") in {"blocker", "critical"} for item in ip_blockers
+                )
             if not provider_preflight_blocked:
                 if not self._has_trading_permission(connection, exchange):
                     blockers.append(
@@ -585,6 +593,7 @@ class VaultReadinessService:
             "conversion_status": conversion_plan["conversion_status"],
             "conversion_supported": conversion_plan["conversion_supported"],
             "fixed_egress_status": fixed_egress_status,
+            "kucoin_diagnostics": kucoin_diagnostics if exchange == "kucoin" else {},
             "connected": connection is not None,
             "verified": bool(connection and connection.verification_status == "verified"),
             "can_trade": ready,
@@ -995,6 +1004,62 @@ class VaultReadinessService:
             ],
             [],
         )
+
+    def _kucoin_ip_blockers(self, diagnostics: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        ip_restriction = diagnostics.get("ip_restriction") if isinstance(diagnostics, dict) else {}
+        if not isinstance(ip_restriction, dict):
+            return [], []
+        status = str(ip_restriction.get("trusted_ip_status") or "")
+        if status == "ready":
+            return (
+                [
+                    self._blocker(
+                        "kucoin_trusted_ip_ready",
+                        "Trusted IP ready",
+                        "KuCoin trusted-IP list includes the configured server/live API egress IP.",
+                        "info",
+                        "",
+                        exchange="kucoin",
+                    )
+                ],
+                [],
+            )
+        if status == "unrestricted":
+            return (
+                [
+                    self._blocker(
+                        "kucoin_ip_unrestricted",
+                        "KuCoin IP restriction disabled",
+                        "KuCoin API key is not configured for trusted-IP restriction.",
+                        "warning",
+                        "Enable Restrict to Trusted IPs Only in KuCoin after fixed server egress is configured.",
+                        exchange="kucoin",
+                    )
+                ],
+                [],
+            )
+        if status in {"server_egress_ip_unknown", "trusted_ips_missing", "trusted_ip_mismatch"}:
+            titles = {
+                "server_egress_ip_unknown": "Server egress IP missing",
+                "trusted_ips_missing": "Trusted IP list missing",
+                "trusted_ip_mismatch": "Trusted IP mismatch",
+            }
+            descriptions = {
+                "server_egress_ip_unknown": "KuCoin trusted-IP routing requires the server/live API egress IP, not the operator browser IP.",
+                "trusted_ips_missing": "KuCoin trusted-IP routing requires KUCOIN_TRUSTED_IPS to mirror the KuCoin API key trusted-IP list.",
+                "trusted_ip_mismatch": "KuCoin trusted IPs do not include every configured server/live API egress IP.",
+            }
+            return [], [
+                self._blocker(
+                    f"kucoin_{status}",
+                    titles[status],
+                    descriptions[status],
+                    "blocker",
+                    "Whitelist the fixed server/live API egress IP in KuCoin and set KUCOIN_EGRESS_PUBLIC_IPS plus KUCOIN_TRUSTED_IPS.",
+                    exchange="kucoin",
+                )
+            ]
+        return [], []
 
     def _append_live_gate_blockers(self, blockers: list[dict[str, Any]]) -> None:
         if bool(self.config.get("RECOVERY_SQLITE_ACTIVE", False)):

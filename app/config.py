@@ -309,6 +309,11 @@ class BaseConfig:
     KUCOIN_FIXED_EGRESS_REQUIRED = _as_bool(os.getenv("KUCOIN_FIXED_EGRESS_REQUIRED"), default=False)
     KUCOIN_COMPLIANCE_CONFIRMED = _as_bool(os.getenv("KUCOIN_COMPLIANCE_CONFIRMED"), default=False)
     KUCOIN_OPERATOR_REGION = os.getenv("KUCOIN_OPERATOR_REGION", "").strip()
+    KUCOIN_IP_RESTRICTION_MODE = os.getenv("KUCOIN_IP_RESTRICTION_MODE", "").strip().lower()
+    KUCOIN_TRUSTED_IPS = os.getenv("KUCOIN_TRUSTED_IPS", "").strip()
+    KUCOIN_EGRESS_PUBLIC_IPS = os.getenv("KUCOIN_EGRESS_PUBLIC_IPS", "").strip()
+    KUCOIN_EGRESS_IP_CHECK_URL = os.getenv("KUCOIN_EGRESS_IP_CHECK_URL", "https://api64.ipify.org").strip()
+    KUCOIN_UNIFIED_ACCOUNT_ENABLED = _as_bool(os.getenv("KUCOIN_UNIFIED_ACCOUNT_ENABLED"), default=False)
     KUCOIN_DEFAULT_MARKET_TYPE = os.getenv("KUCOIN_DEFAULT_MARKET_TYPE", "futures").strip().lower() or "futures"
     KUCOIN_DEFAULT_SPOT_QUOTE = os.getenv("KUCOIN_DEFAULT_SPOT_QUOTE", "USDT").strip().upper() or "USDT"
     KUCOIN_ACCOUNT_OVERVIEW_PATH = os.getenv("KUCOIN_ACCOUNT_OVERVIEW_PATH", "/api/v1/account-overview").strip()
@@ -1155,6 +1160,10 @@ class BaseConfig:
             "KUCOIN_FIXED_EGRESS_REQUIRED": cls.KUCOIN_FIXED_EGRESS_REQUIRED,
             "KUCOIN_COMPLIANCE_CONFIRMED": cls.KUCOIN_COMPLIANCE_CONFIRMED,
             "KUCOIN_OPERATOR_REGION": cls.KUCOIN_OPERATOR_REGION,
+            "KUCOIN_IP_RESTRICTION_MODE": cls.KUCOIN_IP_RESTRICTION_MODE,
+            "KUCOIN_TRUSTED_IPS_CONFIGURED": bool(cls.KUCOIN_TRUSTED_IPS),
+            "KUCOIN_EGRESS_PUBLIC_IPS_CONFIGURED": bool(cls.KUCOIN_EGRESS_PUBLIC_IPS),
+            "KUCOIN_UNIFIED_ACCOUNT_ENABLED": cls.KUCOIN_UNIFIED_ACCOUNT_ENABLED,
             "KUCOIN_DEFAULT_MARKET_TYPE": cls.KUCOIN_DEFAULT_MARKET_TYPE,
             "KUCOIN_DEFAULT_SPOT_QUOTE": cls.KUCOIN_DEFAULT_SPOT_QUOTE,
             "KUCOIN_SPOT_BASE_URL": cls.KUCOIN_SPOT_BASE_URL,
@@ -1688,6 +1697,11 @@ class ProductionConfig(BaseConfig):
     KUCOIN_FIXED_EGRESS_REQUIRED = _as_bool(os.getenv("KUCOIN_FIXED_EGRESS_REQUIRED"), default=True)
     KUCOIN_COMPLIANCE_CONFIRMED = _as_bool(os.getenv("KUCOIN_COMPLIANCE_CONFIRMED"), default=False)
     KUCOIN_OPERATOR_REGION = os.getenv("KUCOIN_OPERATOR_REGION", "").strip()
+    KUCOIN_IP_RESTRICTION_MODE = os.getenv("KUCOIN_IP_RESTRICTION_MODE", "").strip().lower()
+    KUCOIN_TRUSTED_IPS = os.getenv("KUCOIN_TRUSTED_IPS", "").strip()
+    KUCOIN_EGRESS_PUBLIC_IPS = os.getenv("KUCOIN_EGRESS_PUBLIC_IPS", "").strip()
+    KUCOIN_EGRESS_IP_CHECK_URL = os.getenv("KUCOIN_EGRESS_IP_CHECK_URL", "https://api64.ipify.org").strip()
+    KUCOIN_UNIFIED_ACCOUNT_ENABLED = _as_bool(os.getenv("KUCOIN_UNIFIED_ACCOUNT_ENABLED"), default=False)
     LIVE_API_CORS_ALLOWED_ORIGINS = _parse_origin_list(
         os.getenv("LIVE_API_CORS_ALLOWED_ORIGINS"),
         (PUBLIC_APP_ORIGIN, "https://algorithm-vault-chi.vercel.app"),
