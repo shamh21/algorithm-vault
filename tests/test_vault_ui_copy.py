@@ -37,9 +37,13 @@ def test_vault_template_is_minimal_one_h10_flow() -> None:
     assert "Enabled Exchanges" in source
     assert "Routing Preview" in source
     assert "vault-exchange-dashboard" in source
+    assert "vault-brand-lockup" in source
+    assert "vault-feature-dock" in source
     assert "data-vault-performance-spark" in source
     assert "data-vault-allocation-ring" in source
     assert "data-routing-skeleton" in source
+    assert "algv-mascot-square.webp" in source
+    assert "algv-trade-smarter-panel.webp" in source
     assert "Hyperliquid" not in source
     assert "KuCoin" not in source
     assert "Vault Activity" in source
@@ -116,9 +120,20 @@ def test_vault_assets_use_explicit_readiness_cache_busters() -> None:
     base_source = Path("templates/base.html").read_text()
     sw_source = Path("static/js/sw.js").read_text()
 
-    assert "vault-iphone-exchange-4" in vault_source
-    assert "algvault-vault-iphone-exchange-4" in base_source
-    assert "algvault-v30-vault-iphone-exchange-4" in sw_source
+    assert "vault-iphone-exchange-6" in vault_source
+    assert "algvault-vault-iphone-exchange-6" in base_source
+    assert "algvault-v32-vault-iphone-exchange-6" in sw_source
+    assert "/static/brand/algv-mascot-square.webp" in sw_source
+
+
+def test_vault_reference_assets_are_optimized_for_pwa_shell() -> None:
+    mascot = Path("static/brand/algv-mascot-square.webp")
+    panel = Path("static/brand/algv-trade-smarter-panel.webp")
+
+    assert mascot.exists()
+    assert panel.exists()
+    assert mascot.stat().st_size < 60_000
+    assert panel.stat().st_size < 80_000
 
 
 def test_pwa_shell_keeps_heavy_chart_libraries_off_precache_path() -> None:

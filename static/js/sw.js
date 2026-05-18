@@ -1,4 +1,4 @@
-const CACHE_VERSION = "algvault-v30-vault-iphone-exchange-4";
+const CACHE_VERSION = "algvault-v32-vault-iphone-exchange-6";
 const SHELL_CACHE = `${CACHE_VERSION}-shell`;
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 
@@ -6,6 +6,7 @@ const APP_SHELL = [
   "/static/css/app.css",
   "/static/js/app-shell.js",
   "/static/js/responsive-tables.js",
+  "/static/brand/algv-mascot-square.webp",
   "/manifest.json",
   "/icons/algvault-ios-180.png",
   "/icons/algvault-ios-192.png",
@@ -26,7 +27,7 @@ const OFFLINE_HTML = `<!doctype html>
     html,body{margin:0;min-height:100%;background:#050607;color:#f8fafc;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text",Inter,system-ui,sans-serif}
     main{min-height:100svh;display:grid;place-items:center;padding:calc(2rem + env(safe-area-inset-top)) max(1.25rem,env(safe-area-inset-right)) calc(2rem + env(safe-area-inset-bottom)) max(1.25rem,env(safe-area-inset-left))}
     section{max-width:28rem;border:1px solid rgba(148,163,184,.2);border-radius:16px;padding:1.25rem;background:#101826;box-shadow:0 22px 56px rgba(0,0,0,.46)}
-    span{color:#7dd3fc;font-size:.74rem;font-weight:800;text-transform:uppercase}
+    span{color:#ff4d5f;font-size:.74rem;font-weight:800;text-transform:uppercase}
     h1{margin:.35rem 0;font-size:1.35rem} p{margin:0;color:#aeb9ca}
   </style>
 </head>

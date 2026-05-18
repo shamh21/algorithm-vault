@@ -17411,17 +17411,20 @@ body:has(.wallet-flow-shell) .crypto-rail {
 /* Vault iPhone exchange dashboard polish. Scoped to /vault/ so other shells keep their current contracts. */
 html[data-theme] {
   --vault-red: #ff1f36;
+  --vault-red-hot: #ff001f;
   --vault-red-strong: #ff4d5f;
   --vault-red-soft: rgba(255, 31, 54, 0.13);
   --vault-red-border: rgba(255, 31, 54, 0.34);
+  --vault-red-glow: rgba(255, 0, 31, 0.38);
   --vault-panel: rgba(8, 10, 14, 0.96);
   --vault-panel-strong: rgba(13, 15, 21, 0.98);
 }
 
 body:has(.vault-exchange-dashboard) {
   background:
-    radial-gradient(circle at 18% 8%, rgba(255, 31, 54, 0.18), transparent 26rem),
-    radial-gradient(circle at 84% 18%, rgba(34, 211, 238, 0.08), transparent 22rem),
+    radial-gradient(circle at 14% 4%, rgba(255, 0, 31, 0.22), transparent 23rem),
+    radial-gradient(circle at 88% 8%, rgba(255, 31, 54, 0.12), transparent 18rem),
+    linear-gradient(115deg, rgba(255, 255, 255, 0.025) 0 1px, transparent 1px 18px),
     linear-gradient(180deg, #030405 0%, #07080b 46%, #030405 100%);
 }
 
@@ -17455,10 +17458,11 @@ html[data-theme] .vault-insight-card {
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: var(--radius-lg, 8px);
   background:
+    radial-gradient(circle at 8% 0%, rgba(255, 0, 31, 0.2), transparent 14rem),
     linear-gradient(135deg, rgba(255, 31, 54, 0.13), transparent 34%),
     linear-gradient(180deg, rgba(15, 17, 24, 0.98), rgba(4, 5, 8, 0.98)),
     #050607;
-  box-shadow: 0 24px 62px rgba(0, 0, 0, 0.48), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  box-shadow: 0 24px 62px rgba(0, 0, 0, 0.48), 0 0 0 1px rgba(255, 31, 54, 0.045), inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
 html[data-theme] .vault-exchange-hero {
@@ -17470,6 +17474,18 @@ html[data-theme] .vault-exchange-hero {
   align-items: stretch;
   min-width: 0;
   padding: 1rem;
+}
+
+html[data-theme] .vault-exchange-hero::after {
+  content: "";
+  position: absolute;
+  right: -6rem;
+  bottom: -5rem;
+  width: 19rem;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(255, 0, 31, 0.22), transparent 68%);
+  pointer-events: none;
 }
 
 html[data-theme] .vault-exchange-hero::before,
@@ -17487,8 +17503,48 @@ html[data-theme] .vault-hero-copy {
   min-width: 0;
 }
 
+html[data-theme] .vault-brand-lockup {
+  display: flex;
+  align-items: center;
+  gap: 0.72rem;
+  min-width: 0;
+}
+
+html[data-theme] .vault-brand-lockup img {
+  flex: 0 0 auto;
+  width: 5.2rem;
+  height: 5.2rem;
+  border: 1px solid rgba(255, 31, 54, 0.62);
+  border-radius: var(--radius-lg, 8px);
+  object-fit: cover;
+  background: #050607;
+  box-shadow: 0 0 30px rgba(255, 0, 31, 0.34);
+}
+
+html[data-theme] .vault-brand-lockup div {
+  display: grid;
+  gap: 0.08rem;
+  min-width: 0;
+}
+
+html[data-theme] .vault-brand-wordmark {
+  color: var(--vault-red-hot);
+  font-size: 1.95rem;
+  font-weight: 950;
+  line-height: 0.95;
+  text-shadow: 0 0 22px rgba(255, 0, 31, 0.42);
+}
+
+html[data-theme] .vault-brand-lockup strong {
+  color: var(--muted-strong);
+  font-size: 0.94rem;
+  font-weight: 850;
+  line-height: 1.25;
+}
+
 html[data-theme] .vault-eyebrow-row,
 html[data-theme] .vault-hero-chips,
+html[data-theme] .vault-feature-dock,
 html[data-theme] .vault-metric-strip,
 html[data-theme] .vault-command-layout,
 html[data-theme] .vault-module-list,
@@ -17525,6 +17581,57 @@ html[data-theme] .vault-hero-chips {
   display: flex;
   flex-wrap: wrap;
   gap: 0.45rem;
+}
+
+html[data-theme] .vault-feature-dock {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.5rem;
+}
+
+html[data-theme] .vault-feature-dock span {
+  display: grid;
+  justify-items: center;
+  gap: 0.22rem;
+  min-height: 5.1rem;
+  padding: 0.58rem 0.45rem;
+  border: 1px solid rgba(255, 31, 54, 0.22);
+  border-radius: var(--radius-lg, 8px);
+  color: var(--muted);
+  background:
+    radial-gradient(circle at 50% 16%, rgba(255, 31, 54, 0.2), transparent 2.35rem),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.022));
+}
+
+html[data-theme] .vault-feature-dock svg {
+  width: 1.8rem;
+  height: 1.8rem;
+  color: #ffb3bc;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.1;
+  filter: drop-shadow(0 0 10px rgba(255, 0, 31, 0.54));
+}
+
+html[data-theme] .vault-feature-dock use {
+  fill: none;
+  stroke: currentColor;
+}
+
+html[data-theme] .vault-feature-dock strong {
+  color: #fff;
+  font-size: 0.76rem;
+  font-weight: 950;
+  line-height: 1.05;
+  text-transform: uppercase;
+}
+
+html[data-theme] .vault-feature-dock small {
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 800;
+  line-height: 1.12;
+  text-align: center;
 }
 
 html[data-theme] .vault-hero-chips span,
@@ -17676,6 +17783,32 @@ html[data-theme] .vault-insight-card {
   display: grid;
   gap: 0.78rem;
   padding: 0.82rem;
+}
+
+html[data-theme] .vault-brand-panel {
+  gap: 0.55rem;
+}
+
+html[data-theme] .vault-brand-panel img {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 900 / 394;
+  border: 1px solid rgba(255, 31, 54, 0.22);
+  border-radius: var(--radius-lg, 8px);
+  object-fit: cover;
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.36);
+}
+
+html[data-theme] .vault-brand-panel div {
+  display: grid;
+  gap: 0.22rem;
+}
+
+html[data-theme] .vault-brand-panel strong {
+  color: var(--muted-strong);
+  font-size: 0.84rem;
+  line-height: 1.32;
 }
 
 html[data-theme] .vault-allocation-dashboard {
@@ -17859,6 +17992,12 @@ html[data-theme] .vault-active-card {
   width: 100%;
 }
 
+html[data-theme] .vault-active-card,
+html[data-theme] .vault-activity-card {
+  content-visibility: auto;
+  contain-intrinsic-size: 28rem;
+}
+
 html[data-theme] .vault-empty-state,
 html[data-theme] .vault-routing-empty {
   color: var(--muted-strong);
@@ -17926,6 +18065,23 @@ html[data-theme] .vault-result-sheet {
     font-size: 1.72rem;
   }
 
+  html[data-theme] .vault-brand-lockup {
+    gap: 0.58rem;
+  }
+
+  html[data-theme] .vault-brand-lockup img {
+    width: 3.8rem;
+    height: 3.8rem;
+  }
+
+  html[data-theme] .vault-brand-wordmark {
+    font-size: 1.42rem;
+  }
+
+  html[data-theme] .vault-brand-lockup strong {
+    font-size: 0.82rem;
+  }
+
   html[data-theme] .vault-exchange-hero p {
     font-size: 0.92rem;
   }
@@ -17944,6 +18100,31 @@ html[data-theme] .vault-result-sheet {
 
   html[data-theme] .vault-hero-chips span {
     flex: 0 0 auto;
+  }
+
+  html[data-theme] .vault-feature-dock {
+    display: flex;
+    gap: 0.48rem;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scroll-snap-type: x proximity;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+
+  html[data-theme] .vault-feature-dock::-webkit-scrollbar {
+    display: none;
+  }
+
+  html[data-theme] .vault-feature-dock span {
+    flex: 0 0 6.65rem;
+    min-height: 4.45rem;
+    scroll-snap-align: start;
+  }
+
+  html[data-theme] .vault-feature-dock svg {
+    width: 1.45rem;
+    height: 1.45rem;
   }
 
   html[data-theme] .vault-hero-terminal {
@@ -18005,6 +18186,25 @@ html[data-theme] .vault-result-sheet {
 @media (max-width: 430px) {
   html[data-theme] .vault-exchange-hero h1 {
     font-size: 1.56rem;
+  }
+
+  html[data-theme] .vault-brand-lockup img {
+    width: 3.35rem;
+    height: 3.35rem;
+  }
+
+  html[data-theme] .vault-brand-wordmark {
+    font-size: 1.25rem;
+  }
+
+  html[data-theme] .vault-feature-dock small {
+    display: none;
+  }
+
+  html[data-theme] .vault-feature-dock span {
+    flex-basis: 5.45rem;
+    min-height: 3.55rem;
+    padding: 0.46rem 0.38rem;
   }
 
   html[data-theme] .vault-exchange-hero p {

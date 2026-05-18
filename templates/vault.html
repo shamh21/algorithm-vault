@@ -3,7 +3,13 @@
 
 {% block title %}Vault · Algorithm Vault{% endblock %}
 
+{% block page_styles %}
+  {% set vault_visual_v = current_app.config.get('ASSET_VERSION', '1') ~ '-vault-iphone-exchange-6' %}
+  <link rel="preload" as="image" href="{{ url_for('static', filename='brand/algv-mascot-square.webp') }}?v={{ vault_visual_v }}" fetchpriority="high">
+{% endblock %}
+
 {% block content %}
+{% set vault_visual_v = current_app.config.get('ASSET_VERSION', '1') ~ '-vault-iphone-exchange-6' %}
 {% set default_asset = vault_default_asset if vault_default_asset is defined else (balances[0].asset if balances else "USDC") %}
 {% set preview_providers = initial_routing_preview.providers if initial_routing_preview is defined and initial_routing_preview.providers is defined else [] %}
 {% set vault_metrics = namespace(wallet_total=0.0, active_value=0.0, recent_pnl=0.0, funded_count=0, ready_exchange_count=0, exchange_count=0) %}
@@ -35,6 +41,20 @@
 <section class="vault-mobile-shell vault-execution-shell vault-exchange-dashboard">
   <header class="vault-exchange-hero" aria-labelledby="vault-dashboard-title">
     <div class="vault-hero-copy">
+      <div class="vault-brand-lockup">
+        <img
+          src="{{ url_for('static', filename='brand/algv-mascot-square.webp') }}?v={{ vault_visual_v }}"
+          alt=""
+          width="96"
+          height="96"
+          decoding="async"
+          fetchpriority="high"
+        >
+        <div>
+          <span class="vault-brand-wordmark">AlgV</span>
+          <strong>Trade smarter. Move faster.</strong>
+        </div>
+      </div>
       <div class="vault-eyebrow-row">
         <span class="card-kicker">AlgV Vault</span>
         <span class="status-badge vault-cycle-live-badge">1H10</span>
@@ -45,6 +65,28 @@
         <span>{{ active_cycles|length }} active</span>
         <span data-vault-ready-count>{{ vault_metrics.ready_exchange_count }}/{{ vault_metrics.exchange_count }} exchanges ready</span>
         <span>{{ vault_metrics.funded_count }} funded assets</span>
+      </div>
+      <div class="vault-feature-dock" aria-label="Vault PWA capabilities">
+        <span>
+          <svg aria-hidden="true" focusable="false"><use href="#icon-vault"></use></svg>
+          <strong>Focus</strong>
+          <small>Guarded route</small>
+        </span>
+        <span>
+          <svg aria-hidden="true" focusable="false"><use href="#icon-markets"></use></svg>
+          <strong>Speed</strong>
+          <small>Fast preview</small>
+        </span>
+        <span>
+          <svg aria-hidden="true" focusable="false"><use href="#icon-wallet"></use></svg>
+          <strong>Security</strong>
+          <small>Server gates</small>
+        </span>
+        <span>
+          <svg aria-hidden="true" focusable="false"><use href="#icon-convert"></use></svg>
+          <strong>PWA</strong>
+          <small>iPhone safe</small>
+        </span>
       </div>
     </div>
     <div class="vault-hero-terminal" aria-label="Vault portfolio overview">
@@ -319,6 +361,21 @@
           </div>
         </div>
       </section>
+
+      <section class="vault-insight-card vault-brand-panel" aria-label="AlgV mobile PWA profile">
+        <img
+          src="{{ url_for('static', filename='brand/algv-trade-smarter-panel.webp') }}?v={{ vault_visual_v }}"
+          alt=""
+          width="900"
+          height="394"
+          loading="lazy"
+          decoding="async"
+        >
+        <div>
+          <span class="card-kicker">Mobile shell</span>
+          <strong>Install-ready layout with safe-area controls and cached static visuals.</strong>
+        </div>
+      </section>
     </aside>
     </div>
 
@@ -486,5 +543,5 @@
 {% endblock %}
 
 {% block page_scripts %}
-    <script defer src="{{ url_for('static', filename='js/vault.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}-vault-iphone-exchange-4"></script>
+    <script defer src="{{ url_for('static', filename='js/vault.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}-vault-iphone-exchange-6"></script>
 {% endblock %}
