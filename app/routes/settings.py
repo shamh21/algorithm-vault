@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlparse
 
-from flask import Blueprint, flash, redirect, render_template, request, url_for
+import requests
+from flask import Blueprint, Response, current_app, flash, jsonify, redirect, render_template, request, url_for
 
 from ..auth import current_user, require_authenticated_user
 from ..extensions import db
+from ..live_api_internal import is_live_api_internal_request, sign_live_api_internal_headers
 from ..models import AuditLog, Setting, TradingConnection
 from ..runtime import get_current_mode, get_service
 from ..services.connection_health import build_connection_health, latest_connection_health, store_connection_health
@@ -140,10 +143,42 @@ def verify_connection(connection_id: int):
         return redirect(url_for("auth.login"))
     service = get_service("trading_connections")
     try:
-        result = service.verify_connection(user.id, connection_id)
+        existing_connection = service.get_for_user(user.id, connection_id)
     except PermissionError:
+        if _internal_json_requested():
+            return jsonify({"ok": False, "code": "connection_not_found", "message": "Trading connection was not found."}), 404
         flash("Trading connection was not found.", "danger")
         return redirect(url_for("settings.connections"))
+    if existing_connection.provider == "kucoin" and _settings_verify_deferred_for_request():
+        if _settings_live_api_proxy_enabled():
+            return _proxy_kucoin_connection_verify(user.id, existing_connection)
+        if _internal_json_requested():
+            return (
+                jsonify(
+                    {
+                        "ok": False,
+                        "code": "live_api_proxy_required",
+                        "message": _kucoin_fixed_egress_required_message(),
+                        "connection": _connection_payload(existing_connection),
+                    }
+                ),
+                409,
+            )
+        flash(_kucoin_fixed_egress_required_message(), "danger")
+        return redirect(
+            url_for("settings.connection_provider", provider=existing_connection.provider, connection_id=existing_connection.id)
+        )
+    try:
+        result = service.verify_connection(user.id, connection_id)
+    except PermissionError:
+        if _internal_json_requested():
+            return jsonify({"ok": False, "code": "connection_not_found", "message": "Trading connection was not found."}), 404
+        flash("Trading connection was not found.", "danger")
+        return redirect(url_for("settings.connections"))
+    return _finish_verify_connection(result, internal_json=_internal_json_requested())
+
+
+def _finish_verify_connection(result: dict[str, Any], *, internal_json: bool = False):
     connection = result["connection"]
     if connection.is_active or connection.verification_status == "verified":
         snapshot = result.get("snapshot")
@@ -160,7 +195,7 @@ def verify_connection(connection_id: int):
         "trading_connection_verified" if result["ok"] else "trading_connection_verification_failed",
         f"{connection.provider.title()} connection verification {'passed' if result['ok'] else 'failed'}.",
         {
-            "user_id": user.id,
+            "user_id": connection.user_id,
             "trading_connection_id": connection.id,
             "provider": connection.provider,
             "verification_status": connection.verification_status,
@@ -168,11 +203,145 @@ def verify_connection(connection_id: int):
         },
     )
     db.session.commit()
+    if internal_json:
+        return jsonify(_verify_result_payload(result))
     if result["ok"]:
         flash("Connection verified. Enable it to use live wallet, vault, and order workflows.", "success")
     else:
         flash(result.get("error") or "Connection verification failed.", "danger")
     return redirect(url_for("settings.connection_provider", provider=connection.provider, connection_id=connection.id))
+
+
+def _proxy_kucoin_connection_verify(user_id: int, connection: TradingConnection) -> Response:
+    origin = _settings_live_api_internal_origin()
+    if not origin:
+        flash(_kucoin_fixed_egress_required_message(), "danger")
+        return redirect(url_for("settings.connection_provider", provider=connection.provider, connection_id=connection.id))
+    path = f"/settings/connections/{int(connection.id)}/verify"
+    query_string = b"internal_json=1"
+    body = b""
+    headers = {
+        "Accept": "application/json",
+        "X-AlgVault-Forwarded-Origin": _request_origin(),
+        **sign_live_api_internal_headers(
+            current_app.config,
+            method="POST",
+            path=path,
+            query_string=query_string,
+            body=body,
+            user_id=int(user_id),
+        ),
+    }
+    try:
+        upstream = requests.post(
+            f"{origin}{path}?internal_json=1",
+            data=body,
+            headers=headers,
+            timeout=float(current_app.config.get("LIVE_API_PROXY_TIMEOUT_SECONDS", 15.0) or 15.0),
+        )
+        payload = upstream.json()
+    except (requests.RequestException, ValueError) as exc:
+        current_app.logger.warning("KuCoin live API verification proxy failed connection_id=%s error=%s", connection.id, exc)
+        flash("KuCoin verification requires the fixed-egress live API runtime, but the live API proxy is unavailable.", "danger")
+        return redirect(url_for("settings.connection_provider", provider=connection.provider, connection_id=connection.id))
+    message = str(payload.get("message") or payload.get("error") or "")
+    payload_connection = payload.get("connection") if isinstance(payload.get("connection"), dict) else {}
+    provider = str(payload_connection.get("provider") or connection.provider)
+    connection_id = int(payload_connection.get("id") or connection.id)
+    if upstream.status_code >= 400 or not bool(payload.get("ok", False)):
+        flash(message or "KuCoin verification failed on the fixed-egress live API runtime.", "danger")
+    else:
+        flash(message or "Connection verified. Enable it to use live wallet, vault, and order workflows.", "success")
+    return redirect(url_for("settings.connection_provider", provider=provider, connection_id=connection_id))
+
+
+def _verify_result_payload(result: dict[str, Any]) -> dict[str, Any]:
+    connection = result["connection"]
+    snapshot = result.get("snapshot")
+    alerts = list(getattr(snapshot, "alerts", []) or []) if snapshot is not None else []
+    message = (
+        "Connection verified. Enable it to use live wallet, vault, and order workflows."
+        if result.get("ok")
+        else str(result.get("error") or "Connection verification failed.")
+    )
+    return {
+        "ok": bool(result.get("ok", False)),
+        "code": "trading_connection_verified" if result.get("ok") else "trading_connection_verification_failed",
+        "message": message,
+        "error": "" if result.get("ok") else message,
+        "diagnostics": result.get("diagnostics", {}),
+        "snapshot": {"balance_count": len(getattr(snapshot, "balances", []) or []), "alerts": alerts} if snapshot is not None else {},
+        "connection": _connection_payload(connection),
+    }
+
+
+def _connection_payload(connection: TradingConnection) -> dict[str, Any]:
+    return {
+        "id": int(connection.id),
+        "provider": connection.provider,
+        "is_active": bool(connection.is_active),
+        "verification_status": connection.verification_status,
+    }
+
+
+def _internal_json_requested() -> bool:
+    return is_live_api_internal_request() and str(request.args.get("internal_json") or "").strip().lower() in {"1", "true", "yes"}
+
+
+def _settings_verify_deferred_for_request() -> bool:
+    if is_live_api_internal_request():
+        return False
+    live_origin = _settings_public_live_api_origin()
+    internal_origin = _settings_live_api_internal_origin() if _settings_live_api_proxy_enabled() else ""
+    known_live_origins = {origin for origin in (live_origin, internal_origin) if origin}
+    if known_live_origins:
+        return _request_origin() not in known_live_origins
+    return (
+        bool(current_app.config.get("KUCOIN_FIXED_EGRESS_REQUIRED", False))
+        and str(current_app.config.get("DEPLOYMENT_TARGET") or "").lower() == "vercel"
+    )
+
+
+def _settings_live_api_proxy_enabled() -> bool:
+    return bool(
+        current_app.config.get("LIVE_API_PROXY_ENABLED")
+        and _settings_live_api_internal_origin()
+        and str(current_app.config.get("LIVE_API_INTERNAL_TOKEN") or "").strip()
+    )
+
+
+def _settings_public_live_api_origin() -> str:
+    return _origin_from_url(str(current_app.config.get("PUBLIC_LIVE_API_ORIGIN") or ""))
+
+
+def _settings_live_api_internal_origin() -> str:
+    return _origin_from_url(
+        str(current_app.config.get("LIVE_API_INTERNAL_ORIGIN") or current_app.config.get("PUBLIC_LIVE_API_ORIGIN") or "")
+    )
+
+
+def _request_origin() -> str:
+    return _origin_from_url(request.host_url)
+
+
+def _origin_from_url(value: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = urlparse(raw)
+    except Exception:  # noqa: BLE001
+        return raw.rstrip("/")
+    if not parsed.scheme or not parsed.netloc:
+        return raw.rstrip("/")
+    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}".rstrip("/")
+
+
+def _kucoin_fixed_egress_required_message() -> str:
+    return (
+        "KuCoin verification must run from the fixed-egress live API/worker. "
+        "Do not whitelist the browser IP for production; whitelist the server egress IP shown by KuCoin."
+    )
 
 
 @settings_bp.post("/connections/<int:connection_id>/activate")
@@ -402,10 +571,7 @@ def _connection_preview(connection: TradingConnection | None, connection_type: s
 
 def _has_saved_credential(connection: TradingConnection) -> bool:
     return bool(
-        connection.wallet_address
-        or connection.encrypted_api_key
-        or connection.encrypted_api_secret
-        or connection.encrypted_passphrase
+        connection.wallet_address or connection.encrypted_api_key or connection.encrypted_api_secret or connection.encrypted_passphrase
     )
 
 

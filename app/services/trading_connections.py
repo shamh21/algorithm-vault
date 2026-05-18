@@ -18,6 +18,7 @@ from flask import current_app
 
 from ..extensions import db
 from ..models import TradingConnection
+from .connection_health import parse_exchange_failure
 from .hyperliquid_client import ClientSnapshot, HyperliquidClient
 from .live_provider_adapters import (
     BinanceFuturesConnector,
@@ -50,7 +51,13 @@ PROVIDER_SPECS: dict[str, dict[str, Any]] = {
             "Do not paste a seed phrase or your main wallet recovery phrase.",
         ],
         "fields": [
-            {"name": "api_secret", "label": "API Wallet Secret", "type": "password", "required": True, "placeholder": "0x... API wallet/agent secret, encrypted at rest"},
+            {
+                "name": "api_secret",
+                "label": "API Wallet Secret",
+                "type": "password",
+                "required": True,
+                "placeholder": "0x... API wallet/agent secret, encrypted at rest",
+            },
             {"name": "wallet_address", "label": "Account Address", "type": "text", "required": True, "placeholder": "0x..."},
             {"name": "api_key", "label": "Account Label", "type": "text", "required": False, "placeholder": "Optional label or address"},
         ],
@@ -93,7 +100,13 @@ PROVIDER_SPECS: dict[str, dict[str, Any]] = {
             {"name": "api_secret", "label": "API Secret", "type": "password", "required": True, "placeholder": "Encrypted at rest"},
             {"name": "passphrase", "label": "Passphrase", "type": "password", "required": True, "placeholder": "KuCoin API passphrase"},
         ],
-        "capabilities": ["Spot balances", "Spot market metadata", "Spot test orders", "Spot order create/cancel", "Futures execution only when explicitly configured"],
+        "capabilities": [
+            "Spot balances",
+            "Spot market metadata",
+            "Spot test orders",
+            "Spot order create/cancel",
+            "Futures execution only when explicitly configured",
+        ],
     },
     "uniswap": {
         "key": "uniswap",
@@ -111,12 +124,54 @@ PROVIDER_SPECS: dict[str, dict[str, Any]] = {
         "fields": [
             {"name": "wallet_address", "label": "Public Wallet Address", "type": "text", "required": True, "placeholder": "0x..."},
             {"name": "chain_id", "label": "Chain ID", "type": "number", "required": True, "placeholder": "1", "storage": "metadata"},
-            {"name": "delegation_status", "label": "Delegation Status", "type": "text", "required": True, "placeholder": "approved", "storage": "metadata"},
-            {"name": "delegation_expires_at", "label": "Delegation Expiry", "type": "datetime-local", "required": True, "placeholder": "YYYY-MM-DDTHH:MM", "storage": "metadata"},
-            {"name": "daily_loss_usd", "label": "Daily Loss Cap USD", "type": "number", "required": True, "placeholder": "25", "storage": "metadata"},
-            {"name": "allowed_tokens", "label": "Allowed Tokens", "type": "text", "required": True, "placeholder": "ETH,BTC", "storage": "metadata"},
-            {"name": "protocols", "label": "Protocols", "type": "text", "required": False, "placeholder": "V2,V3,V4", "storage": "metadata"},
-            {"name": "session_topic", "label": "WalletConnect Session", "type": "text", "required": True, "placeholder": "Reown session topic/reference", "storage": "metadata"},
+            {
+                "name": "delegation_status",
+                "label": "Delegation Status",
+                "type": "text",
+                "required": True,
+                "placeholder": "approved",
+                "storage": "metadata",
+            },
+            {
+                "name": "delegation_expires_at",
+                "label": "Delegation Expiry",
+                "type": "datetime-local",
+                "required": True,
+                "placeholder": "YYYY-MM-DDTHH:MM",
+                "storage": "metadata",
+            },
+            {
+                "name": "daily_loss_usd",
+                "label": "Daily Loss Cap USD",
+                "type": "number",
+                "required": True,
+                "placeholder": "25",
+                "storage": "metadata",
+            },
+            {
+                "name": "allowed_tokens",
+                "label": "Allowed Tokens",
+                "type": "text",
+                "required": True,
+                "placeholder": "ETH,BTC",
+                "storage": "metadata",
+            },
+            {
+                "name": "protocols",
+                "label": "Protocols",
+                "type": "text",
+                "required": False,
+                "placeholder": "V2,V3,V4",
+                "storage": "metadata",
+            },
+            {
+                "name": "session_topic",
+                "label": "WalletConnect Session",
+                "type": "text",
+                "required": True,
+                "placeholder": "Reown session topic/reference",
+                "storage": "metadata",
+            },
         ],
         "capabilities": ["Delegated swaps", "Permit2-aware routing", "Daily loss cap"],
     },
@@ -135,10 +190,36 @@ PROVIDER_SPECS: dict[str, dict[str, Any]] = {
         ],
         "fields": [
             {"name": "wallet_address", "label": "Owner Wallet Address", "type": "text", "required": True, "placeholder": "dydx1..."},
-            {"name": "api_key", "label": "API Wallet Address", "type": "text", "required": False, "placeholder": "Optional permissioned wallet address"},
-            {"name": "api_secret", "label": "Permissioned Trading Private Key", "type": "password", "required": True, "placeholder": "Encrypted at rest"},
-            {"name": "subaccount_number", "label": "Subaccount Number", "type": "number", "required": True, "placeholder": "0", "storage": "metadata"},
-            {"name": "authenticator_id", "label": "Authenticator ID", "type": "text", "required": True, "placeholder": "Authenticator id", "storage": "metadata"},
+            {
+                "name": "api_key",
+                "label": "API Wallet Address",
+                "type": "text",
+                "required": False,
+                "placeholder": "Optional permissioned wallet address",
+            },
+            {
+                "name": "api_secret",
+                "label": "Permissioned Trading Private Key",
+                "type": "password",
+                "required": True,
+                "placeholder": "Encrypted at rest",
+            },
+            {
+                "name": "subaccount_number",
+                "label": "Subaccount Number",
+                "type": "number",
+                "required": True,
+                "placeholder": "0",
+                "storage": "metadata",
+            },
+            {
+                "name": "authenticator_id",
+                "label": "Authenticator ID",
+                "type": "text",
+                "required": True,
+                "placeholder": "Authenticator id",
+                "storage": "metadata",
+            },
         ],
         "capabilities": ["dYdX perpetuals", "Permissioned order keys", "Positions", "Panic flatten"],
     },
@@ -176,11 +257,9 @@ def _balance_available(balances: list[dict[str, Any]], asset: str) -> float:
 class TradingConnector(Protocol):
     """Provider adapter interface for user-scoped live execution."""
 
-    def can_trade(self, mode: str) -> bool:
-        ...
+    def can_trade(self, mode: str) -> bool: ...
 
-    def account_snapshot(self, mode: str) -> ClientSnapshot:
-        ...
+    def account_snapshot(self, mode: str) -> ClientSnapshot: ...
 
     def place_order(
         self,
@@ -196,8 +275,7 @@ class TradingConnector(Protocol):
         *,
         client_order_id: str | None = None,
         time_in_force: str | None = None,
-    ) -> dict[str, Any]:
-        ...
+    ) -> dict[str, Any]: ...
 
     def cancel_order(
         self,
@@ -206,32 +284,23 @@ class TradingConnector(Protocol):
         exchange_order_id: str,
         *,
         client_order_id: str | None = None,
-    ) -> dict[str, Any]:
-        ...
+    ) -> dict[str, Any]: ...
 
-    def cancel_all_orders(self, mode: str) -> list[dict[str, Any]]:
-        ...
+    def cancel_all_orders(self, mode: str) -> list[dict[str, Any]]: ...
 
-    def flatten_all_positions(self, mode: str) -> list[dict[str, Any]]:
-        ...
+    def flatten_all_positions(self, mode: str) -> list[dict[str, Any]]: ...
 
-    def get_positions(self, mode: str) -> list[dict[str, Any]]:
-        ...
+    def get_positions(self, mode: str) -> list[dict[str, Any]]: ...
 
-    def get_recent_fills(self, mode: str) -> list[dict[str, Any]]:
-        ...
+    def get_recent_fills(self, mode: str) -> list[dict[str, Any]]: ...
 
-    def discover_leveraged_markets(self, mode: str) -> list[dict[str, Any]]:
-        ...
+    def discover_leveraged_markets(self, mode: str) -> list[dict[str, Any]]: ...
 
-    def withdraw_from_bridge(self, mode: str, amount: float, destination: str) -> dict[str, Any]:
-        ...
+    def withdraw_from_bridge(self, mode: str, amount: float, destination: str) -> dict[str, Any]: ...
 
-    def deposit_address(self, mode: str, asset: str, network: str | None = None) -> dict[str, Any]:
-        ...
+    def deposit_address(self, mode: str, asset: str, network: str | None = None) -> dict[str, Any]: ...
 
-    def reserve_funds(self, mode: str, asset: str, amount: float) -> dict[str, Any]:
-        ...
+    def reserve_funds(self, mode: str, asset: str, amount: float) -> dict[str, Any]: ...
 
     def withdraw_to_address(
         self,
@@ -242,11 +311,9 @@ class TradingConnector(Protocol):
         network: str | None = None,
         memo: str | None = None,
         client_reference: str | None = None,
-    ) -> dict[str, Any]:
-        ...
+    ) -> dict[str, Any]: ...
 
-    def transfer_status(self, mode: str, provider_reference: str, transfer_type: str | None = None) -> dict[str, Any]:
-        ...
+    def transfer_status(self, mode: str, provider_reference: str, transfer_type: str | None = None) -> dict[str, Any]: ...
 
     def convert_stablecoin(
         self,
@@ -256,8 +323,7 @@ class TradingConnector(Protocol):
         amount: float,
         max_slippage_bps: float,
         client_reference: str | None = None,
-    ) -> dict[str, Any]:
-        ...
+    ) -> dict[str, Any]: ...
 
 
 class HyperliquidTradingConnector:
@@ -794,7 +860,12 @@ class TradingConnectionService:
                 metadata["provider_diagnostics"] = normalized["diagnostics"]
                 connection.provider_metadata = metadata
             db.session.flush()
-            return {"ok": False, "connection": connection, "error": connection.last_verification_error, "diagnostics": normalized.get("diagnostics", {})}
+            return {
+                "ok": False,
+                "connection": connection,
+                "error": connection.last_verification_error,
+                "diagnostics": normalized.get("diagnostics", {}),
+            }
 
         connection.verification_status = VERIFIED_STATUS
         connection.last_verified_at = datetime.utcnow()
@@ -813,12 +884,37 @@ class TradingConnectionService:
                 "Attach a healthy production Postgres database and set ALGVAULT_RECOVERY_SQLITE_ENABLED=false before verifying live trading."
             )
         if not bool(self.config.get("ENABLE_LIVE_TRADING", False)):
-            raise RuntimeError("Live trading is disabled by server configuration. Set ENABLE_LIVE_TRADING=true only after live readiness is validated.")
+            raise RuntimeError(
+                "Live trading is disabled by server configuration. Set ENABLE_LIVE_TRADING=true only after live readiness is validated."
+            )
 
     def _normalize_provider_verification_error(self, provider: str, exc: Exception) -> dict[str, Any]:
         raw = str(exc or "")
         provider_code = str(getattr(exc, "provider_code", "") or "")
         provider_key = self._normalize_provider(provider)
+        parsed_failure = parse_exchange_failure(raw) if provider_key == "kucoin" else {}
+        if provider_key == "kucoin" and (
+            provider_code == "400006" or parsed_failure.get("provider_code") == "400006" or parsed_failure.get("ip_whitelist_blocked")
+        ):
+            masked_ip = self._mask_ip(raw)
+            diagnostics = {
+                "providerCode": provider_code or parsed_failure.get("provider_code") or ("400006" if "400006" in raw else ""),
+                "serverEgressIp": parsed_failure.get("client_ip") or "",
+                "maskedIp": masked_ip,
+                "egressRegion": os.environ.get("VERCEL_REGION") or os.environ.get("AWS_REGION") or "unknown",
+                "trustedIpMode": "server_egress_only",
+            }
+            diagnostics = {key: value for key, value in diagnostics.items() if value}
+            client_error = (
+                f"Trusted IP mismatch: KuCoin rejected server egress IP {masked_ip or 'reported by KuCoin'}. "
+                "Whitelist the fixed live API/worker egress IP in KuCoin, not the browser/operator IP."
+            )
+            current_app.logger.warning("KuCoin verification trusted-IP mismatch diagnostics=%s", diagnostics)
+            return {
+                "verification_status": ACTION_NEEDED_STATUS,
+                "client_error": client_error,
+                "diagnostics": diagnostics,
+            }
         if provider_key == "kucoin" and (provider_code == "400302" or self._is_kucoin_geo_restriction(raw)):
             detected_area = self._detected_area_from_text(raw) or ("US" if self._mentions_us(raw) else "restricted region")
             diagnostics = {
@@ -872,7 +968,11 @@ class TradingConnectionService:
     @staticmethod
     def _detected_area_from_text(message: str) -> str:
         text = str(message or "")
-        for pattern in (r'"(?:detectedArea|detected_area|area|country|region)"\s*:\s*"?([A-Za-z]{2,32})', r"detected region[:= ]+([A-Za-z]{2,32})", r"current area[:= ]+([A-Za-z]{2,32})"):
+        for pattern in (
+            r'"(?:detectedArea|detected_area|area|country|region)"\s*:\s*"?([A-Za-z]{2,32})',
+            r"detected region[:= ]+([A-Za-z]{2,32})",
+            r"current area[:= ]+([A-Za-z]{2,32})",
+        ):
             match = re.search(pattern, text, flags=re.IGNORECASE)
             if match:
                 return match.group(1)
@@ -930,10 +1030,7 @@ class TradingConnectionService:
         return UnsupportedTradingConnector(credentials.provider)
 
     def _is_verified_tradable(self, connection: TradingConnection) -> bool:
-        return (
-            connection.verification_status == VERIFIED_STATUS
-            and self.provider_spec(connection.provider)["tradable"]
-        )
+        return connection.verification_status == VERIFIED_STATUS and self.provider_spec(connection.provider)["tradable"]
 
     @staticmethod
     def _metadata_for_spec(spec: dict[str, Any]) -> dict[str, Any]:
@@ -1025,7 +1122,15 @@ class TradingConnectionService:
         if str(mode or "").lower() != "live":
             return 0.0
         try:
-            return max(0.0, float(self.config.get("TRADING_CONNECTION_LIVE_SNAPSHOT_CACHE_SECONDS", self.config.get("ONE_H10_ACCOUNT_REFRESH_SECONDS", 20.0)) or 0.0))
+            return max(
+                0.0,
+                float(
+                    self.config.get(
+                        "TRADING_CONNECTION_LIVE_SNAPSHOT_CACHE_SECONDS", self.config.get("ONE_H10_ACCOUNT_REFRESH_SECONDS", 20.0)
+                    )
+                    or 0.0
+                ),
+            )
         except (TypeError, ValueError):
             return 20.0
 
@@ -1033,13 +1138,23 @@ class TradingConnectionService:
         if str(mode or "").lower() != "live":
             return 0.0
         try:
-            return max(self._snapshot_cache_seconds(mode), float(self.config.get("TRADING_CONNECTION_LIVE_SNAPSHOT_STALE_SECONDS", 120.0) or 0.0))
+            return max(
+                self._snapshot_cache_seconds(mode), float(self.config.get("TRADING_CONNECTION_LIVE_SNAPSHOT_STALE_SECONDS", 120.0) or 0.0)
+            )
         except (TypeError, ValueError):
             return 120.0
 
     def _snapshot_backoff_seconds(self) -> float:
         try:
-            return max(1.0, float(self.config.get("TRADING_CONNECTION_LIVE_SNAPSHOT_BACKOFF_SECONDS", self.config.get("ONE_H10_MARKET_DATA_BACKOFF_SECONDS", 30.0)) or 0.0))
+            return max(
+                1.0,
+                float(
+                    self.config.get(
+                        "TRADING_CONNECTION_LIVE_SNAPSHOT_BACKOFF_SECONDS", self.config.get("ONE_H10_MARKET_DATA_BACKOFF_SECONDS", 30.0)
+                    )
+                    or 0.0
+                ),
+            )
         except (TypeError, ValueError):
             return 30.0
 
@@ -1128,7 +1243,9 @@ class TradingConnectionService:
         if re.fullmatch(r"0x[0-9a-fA-F]{64}", value):
             return
         if "..." in value or len(value) < 66:
-            raise ValueError("Hyperliquid API Wallet Secret must be the full 0x private key with 64 hex characters. Do not paste a shortened example.")
+            raise ValueError(
+                "Hyperliquid API Wallet Secret must be the full 0x private key with 64 hex characters. Do not paste a shortened example."
+            )
         if any(character.isspace() for character in value):
             raise ValueError("Hyperliquid API Wallet Secret must be one 0x private key string with no spaces.")
         raise ValueError("Hyperliquid API Wallet Secret must be a 0x private key with exactly 64 hex characters.")
@@ -1164,8 +1281,7 @@ class TradingConnectionService:
             if self._field_required(spec, field_name):
                 label = self._field_label(spec, field_name)
                 raise RuntimeError(
-                    f"Saved {label} cannot be decrypted with current TOTP_ENCRYPTION_KEY. "
-                    "Re-enter or delete this connection."
+                    f"Saved {label} cannot be decrypted with current TOTP_ENCRYPTION_KEY. Re-enter or delete this connection."
                 ) from exc
             return ""
 

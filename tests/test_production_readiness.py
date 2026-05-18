@@ -208,7 +208,7 @@ def test_production_readiness_blocks_failed_active_connection_health(tmp_path, m
         assert payload["connection_health"][0]["client_ip"] == "209.52.132.232"
         assert payload["active_connections"][0]["provider"] == "hyperliquid"
         assert payload["active_connections"][0]["active_connection_id"] == connection.id
-        assert "Whitelist current client IP 209.52.132.232" in payload["active_connections"][0]["actionable_blocker"]
+        assert "Whitelist server egress IP 209.52.132.232" in payload["active_connections"][0]["actionable_blocker"]
 
 
 def test_production_readiness_blocks_stale_encrypted_active_connection(tmp_path) -> None:

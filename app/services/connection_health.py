@@ -87,7 +87,9 @@ def parse_exchange_failure(message: object) -> dict[str, Any]:
     code_match = re.search(r'["\']?code["\']?\s*[:=]\s*["\']?([A-Za-z0-9_-]+)', text)
     if code_match and not parsed["provider_code"]:
         parsed["provider_code"] = code_match.group(1)
-    ip_match = re.search(r"(?:clientIp|client ip|current clientIp|current client ip)\s*(?:is)?\s*:?\s*([0-9]{1,3}(?:\.[0-9]{1,3}){3})", text, re.I)
+    ip_match = re.search(
+        r"(?:clientIp|client ip|current clientIp|current client ip)\s*(?:is)?\s*:?\s*([0-9]{1,3}(?:\.[0-9]{1,3}){3})", text, re.I
+    )
     if ip_match:
         parsed["client_ip"] = ip_match.group(1)
     parsed["ip_whitelist_blocked"] = "invalid request ip" in text.lower() or bool(parsed["client_ip"])
@@ -147,9 +149,14 @@ def operator_connection_message(health: dict[str, Any]) -> str:
     provider = str(health.get("provider") or "exchange").title()
     client_ip = health.get("client_ip")
     if client_ip:
-        return f"{provider} blocked live trading: {reason}. Whitelist current client IP {client_ip} before starting a vault cycle."
+        return (
+            f"{provider} blocked live trading: {reason}. Whitelist server egress IP {client_ip} "
+            "on the exchange API key before starting a vault cycle."
+        )
     if health.get("transient_failure"):
-        return f"{provider} live access is temporarily unavailable: {reason}. Wait for a fresh readiness check before starting a vault cycle."
+        return (
+            f"{provider} live access is temporarily unavailable: {reason}. Wait for a fresh readiness check before starting a vault cycle."
+        )
     return f"{provider} blocked live trading: {reason}"
 
 

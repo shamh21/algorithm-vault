@@ -8,10 +8,16 @@ from cryptography.fernet import Fernet
 
 from app.auth import decrypt_totp_secret, encrypt_totp_secret, password_hash
 from app.extensions import db
+from app.live_api_internal import sign_live_api_internal_headers
 from app.models import Order, Setting, TradingConnection, User
 from app.services.connection_health import build_connection_health, parse_exchange_failure, store_connection_health
 from app.services.hyperliquid_client import ClientSnapshot, HyperliquidClient
-from app.services.live_provider_adapters import BinanceFuturesConnector, KucoinFuturesConnector, ProviderRequestError, UniswapDelegatedConnector
+from app.services.live_provider_adapters import (
+    BinanceFuturesConnector,
+    KucoinFuturesConnector,
+    ProviderRequestError,
+    UniswapDelegatedConnector,
+)
 from app.services.order_manager import OrderIntent, OrderManager
 
 
@@ -28,6 +34,12 @@ def _enable_2fa(user: User) -> str:
     user.two_factor_enabled_at = datetime.utcnow()
     db.session.commit()
     return secret
+
+
+def _login_session(client, user: User) -> None:
+    with client.session_transaction() as session:
+        session["user_id"] = user.id
+        session["two_factor_verified"] = True
 
 
 def _create_connection(app, user: User, *, provider: str = "hyperliquid") -> TradingConnection:
@@ -150,8 +162,40 @@ def test_verify_connection_reports_disabled_live_trading_gate(app) -> None:
     result = service.verify_connection(user.id, connection.id)
 
     assert result["ok"] is False
-    assert result["error"] == "Live trading is disabled by server configuration. Set ENABLE_LIVE_TRADING=true only after live readiness is validated."
+    assert (
+        result["error"]
+        == "Live trading is disabled by server configuration. Set ENABLE_LIVE_TRADING=true only after live readiness is validated."
+    )
     assert connection.verification_status == "action_needed"
+
+
+def test_verify_connection_reports_kucoin_trusted_ip_mismatch(app, monkeypatch) -> None:
+    user = _create_user("kucoin-ip-mismatch")
+    service = app.extensions["services"]["trading_connections"]
+    connection = service.create_or_update(
+        user_id=user.id,
+        provider="kucoin",
+        connection_type="cex_api_key",
+        api_key="kucoin-key",
+        api_secret="kucoin-secret",
+        passphrase="kucoin-passphrase",
+    )
+
+    class IpBlockedConnector:
+        def can_trade(self, mode: str) -> bool:
+            raise RuntimeError('{"code":"400006","msg":"Invalid request ip, the current clientIp is:100.24.12.34"}')
+
+    monkeypatch.setattr(service, "_connector_for_connection", lambda record: IpBlockedConnector())
+
+    result = service.verify_connection(user.id, connection.id)
+
+    assert result["ok"] is False
+    assert connection.verification_status == "action_needed"
+    assert "Trusted IP mismatch" in result["error"]
+    assert "100.24.xxx.xxx" in result["error"]
+    assert "100.24.12.34" not in result["error"]
+    assert result["diagnostics"]["serverEgressIp"] == "100.24.12.34"
+    assert result["diagnostics"]["trustedIpMode"] == "server_egress_only"
 
 
 def test_stale_optional_hyperliquid_label_does_not_block_required_credentials(app) -> None:
@@ -701,12 +745,29 @@ def test_kucoin_connector_normalizes_positions_orders_and_fills() -> None:
     class Session:
         def request(self, method, url, **kwargs):
             if url.endswith("/api/v1/positions"):
-                return Response({"code": "200000", "data": [{"symbol": "XBTUSDTM", "currentQty": 2, "avgEntryPrice": "100", "markPrice": "110", "unrealisedPnl": "1.5"}]})
+                return Response(
+                    {
+                        "code": "200000",
+                        "data": [
+                            {"symbol": "XBTUSDTM", "currentQty": 2, "avgEntryPrice": "100", "markPrice": "110", "unrealisedPnl": "1.5"}
+                        ],
+                    }
+                )
             params = kwargs.get("params") or {}
             if params.get("status") == "active":
-                return Response({"code": "200000", "data": {"items": [{"symbol": "XBTUSDTM", "id": "order-1", "side": "buy", "price": "100", "size": "2"}]}})
+                return Response(
+                    {
+                        "code": "200000",
+                        "data": {"items": [{"symbol": "XBTUSDTM", "id": "order-1", "side": "buy", "price": "100", "size": "2"}]},
+                    }
+                )
             if url.endswith("/api/v1/recentDoneOrders"):
-                return Response({"code": "200000", "data": {"items": [{"symbol": "XBTUSDTM", "side": "sell", "price": "111", "size": "1", "realisedPnl": "2"}]}})
+                return Response(
+                    {
+                        "code": "200000",
+                        "data": {"items": [{"symbol": "XBTUSDTM", "side": "sell", "price": "111", "size": "1", "realisedPnl": "2"}]},
+                    }
+                )
             return Response({"code": "200000", "data": {}})
 
     connector = KucoinFuturesConnector({"ENABLE_LIVE_TRADING": True}, Creds())
@@ -723,7 +784,9 @@ def test_kucoin_connector_normalizes_positions_orders_and_fills() -> None:
 
 
 def test_kucoin_provider_error_redacts_and_categorizes_failures() -> None:
-    error = ProviderRequestError('{"code":"400006","msg":"Invalid request ip, the current clientIp is:209.52.132.232","KC-API-KEY":"secret-key"}')
+    error = ProviderRequestError(
+        '{"code":"400006","msg":"Invalid request ip, the current clientIp is:209.52.132.232","KC-API-KEY":"secret-key"}'
+    )
     parsed = parse_exchange_failure(str(error))
 
     assert "secret-key" not in str(error)
@@ -748,7 +811,9 @@ def test_hyperliquid_rejected_order_sets_local_rejection_reason(app, monkeypatch
             return []
 
     monkeypatch.setattr(app.extensions["services"]["market_data"], "get_mid_price", lambda symbol, mode: 100.0)
-    monkeypatch.setattr(app.extensions["services"]["trading_connections"], "connector_for_user", lambda user_id, connection_id=None: FakeConnector())
+    monkeypatch.setattr(
+        app.extensions["services"]["trading_connections"], "connector_for_user", lambda user_id, connection_id=None: FakeConnector()
+    )
 
     order = manager.place_order(
         OrderIntent(
@@ -828,7 +893,10 @@ def test_hyperliquid_order_size_uses_asset_size_decimals(monkeypatch) -> None:
 
         def order(self, symbol, is_buy, quantity, price, order_type, reduce_only=False):
             captured.update({"quantity": quantity, "price": price})
-            return {"status": "ok", "response": {"type": "order", "data": {"statuses": [{"filled": {"oid": 456, "avgPx": "0.34905", "totalSz": "2"}}]}}}
+            return {
+                "status": "ok",
+                "response": {"type": "order", "data": {"statuses": [{"filled": {"oid": 456, "avgPx": "0.34905", "totalSz": "2"}}]}},
+            }
 
     client = HyperliquidClient(
         {
@@ -932,6 +1000,132 @@ def test_register_2fa_connection_onboarding_then_live_home(app, monkeypatch) -> 
     assert home.status_code == 200
     assert b"Total Wallet Balance" in home.data
     assert b"Past Account P&amp;L" in home.data
+
+
+def test_kucoin_verify_route_blocks_vercel_without_live_api_proxy(app, monkeypatch) -> None:
+    app.config["DEPLOYMENT_TARGET"] = "vercel"
+    app.config["KUCOIN_FIXED_EGRESS_REQUIRED"] = True
+    app.config["LIVE_API_PROXY_ENABLED"] = False
+    app.config["PUBLIC_LIVE_API_ORIGIN"] = ""
+    user = _create_user("kucoin-no-proxy")
+    _enable_2fa(user)
+    service = app.extensions["services"]["trading_connections"]
+    connection = service.create_or_update(
+        user_id=user.id,
+        provider="kucoin",
+        connection_type="cex_api_key",
+        api_key="kucoin-key",
+        api_secret="kucoin-secret",
+        passphrase="kucoin-passphrase",
+    )
+    db.session.commit()
+    monkeypatch.setattr(service, "_connector_for_connection", lambda record: pytest.fail("KuCoin verify should not run from Vercel"))
+    client = app.test_client()
+    _login_session(client, user)
+
+    response = client.post(
+        f"/settings/connections/{connection.id}/verify",
+        follow_redirects=True,
+    )
+
+    assert response.status_code == 200
+    assert db.session.get(TradingConnection, connection.id).verification_status == "needs_verification"
+
+
+def test_kucoin_verify_route_proxies_to_live_api_with_internal_signature(app, monkeypatch) -> None:
+    app.config["DEPLOYMENT_TARGET"] = "vercel"
+    app.config["KUCOIN_FIXED_EGRESS_REQUIRED"] = True
+    app.config["LIVE_API_PROXY_ENABLED"] = True
+    app.config["LIVE_API_INTERNAL_ORIGIN"] = "https://live-api.algvault.test"
+    app.config["LIVE_API_INTERNAL_TOKEN"] = "shared-secret"
+    app.config["PUBLIC_LIVE_API_ORIGIN"] = "https://live-api.algvault.test"
+    user = _create_user("kucoin-proxy")
+    _enable_2fa(user)
+    service = app.extensions["services"]["trading_connections"]
+    connection = service.create_or_update(
+        user_id=user.id,
+        provider="kucoin",
+        connection_type="cex_api_key",
+        api_key="kucoin-key",
+        api_secret="kucoin-secret",
+        passphrase="kucoin-passphrase",
+    )
+    db.session.commit()
+    monkeypatch.setattr(service, "_connector_for_connection", lambda record: pytest.fail("KuCoin verify should use live API proxy"))
+    calls: list[dict[str, object]] = []
+
+    class UpstreamResponse:
+        status_code = 200
+
+        @staticmethod
+        def json() -> dict[str, object]:
+            return {
+                "ok": True,
+                "message": "Connection verified from fixed egress.",
+                "connection": {"id": connection.id, "provider": "kucoin", "verification_status": "verified", "is_active": False},
+            }
+
+    def fake_post(url, *, data, headers, timeout):
+        calls.append({"url": url, "data": data, "headers": headers, "timeout": timeout})
+        return UpstreamResponse()
+
+    monkeypatch.setattr("app.routes.settings.requests.post", fake_post)
+    client = app.test_client()
+    _login_session(client, user)
+
+    response = client.post(f"/settings/connections/{connection.id}/verify")
+
+    assert response.status_code == 302
+    assert "/settings/connections/kucoin" in response.location
+    assert calls
+    assert calls[0]["url"] == f"https://live-api.algvault.test/settings/connections/{connection.id}/verify?internal_json=1"
+    headers = calls[0]["headers"]
+    assert headers["X-AlgVault-User-Id"] == str(user.id)
+    assert headers["X-AlgVault-Internal-Signature"]
+    assert headers["X-AlgVault-Forwarded-Origin"] == "http://localhost"
+
+
+def test_internal_kucoin_verify_route_returns_json(app, monkeypatch) -> None:
+    app.config["LIVE_API_INTERNAL_TOKEN"] = "shared-secret"
+    user = _create_user("kucoin-internal")
+    _enable_2fa(user)
+    service = app.extensions["services"]["trading_connections"]
+    connection = service.create_or_update(
+        user_id=user.id,
+        provider="kucoin",
+        connection_type="cex_api_key",
+        api_key="kucoin-key",
+        api_secret="kucoin-secret",
+        passphrase="kucoin-passphrase",
+    )
+
+    class GoodConnector:
+        def can_trade(self, mode: str) -> bool:
+            return True
+
+        def account_snapshot(self, mode: str) -> ClientSnapshot:
+            return ClientSnapshot(mode, [{"asset": "USDT", "type": "margin", "value": 500.0, "withdrawable": 500.0}], [], [], [], [])
+
+    monkeypatch.setattr(service, "_connector_for_connection", lambda record: GoodConnector())
+    path = f"/settings/connections/{connection.id}/verify"
+    query_string = b"internal_json=1"
+    headers = sign_live_api_internal_headers(
+        app.config,
+        method="POST",
+        path=path,
+        query_string=query_string,
+        body=b"",
+        user_id=user.id,
+    )
+    client = app.test_client()
+
+    response = client.post(f"{path}?internal_json=1", headers=headers)
+
+    payload = response.get_json()
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["connection"]["provider"] == "kucoin"
+    assert db.session.get(TradingConnection, connection.id).verification_status == "verified"
 
 
 def test_unsupported_provider_does_not_satisfy_live_onboarding(app) -> None:

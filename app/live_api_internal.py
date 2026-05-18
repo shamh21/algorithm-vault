@@ -15,6 +15,7 @@ BODY_SHA_HEADER = "X-AlgVault-Internal-Body-SHA256"
 SIGNATURE_HEADER = "X-AlgVault-Internal-Signature"
 
 _LIVE_API_INTERNAL_PATHS = {
+    "/settings/connections",
     "/vault/readiness",
     "/api/vault/readiness",
     "/vault/preview-route",
@@ -26,6 +27,7 @@ _LIVE_API_INTERNAL_PATHS = {
     "/vault/cycles",
 }
 _LIVE_API_INTERNAL_PATH_PREFIXES = (
+    "/settings/connections/",
     "/api/vault/cycles/",
     "/vault/cycles/",
     "/vault/start-status/",

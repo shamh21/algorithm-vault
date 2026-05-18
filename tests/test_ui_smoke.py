@@ -2445,7 +2445,7 @@ def test_live_vault_cycle_blocks_when_exchange_ip_check_fails(app) -> None:
     assert health["can_trade"] is False
     assert health["provider_code"] == "400006"
     assert health["client_ip"] == "209.52.132.232"
-    assert b"Whitelist current client IP 209.52.132.232" in response.data
+    assert b"Whitelist server egress IP 209.52.132.232" in response.data
 
 
 def test_live_vault_cycle_uses_recent_timeout_backoff_before_snapshot(app) -> None:
