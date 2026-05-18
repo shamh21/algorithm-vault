@@ -62,6 +62,7 @@ def test_vercel_static_assets_are_allowlisted_from_committed_static_tree() -> No
     assert headers["/static/css/(.*)"]["Cache-Control"] == "public, max-age=31536000, immutable"
     assert headers["/static/js/app-shell.js"]["Cache-Control"] == "public, max-age=31536000, immutable"
     assert headers["/static/js/vendor/(.*)"]["Cache-Control"] == "public, max-age=31536000, immutable"
+    assert headers["/static/brand/(.*)"]["Cache-Control"] == "public, max-age=31536000, immutable"
     assert headers["/static/js/sw.js"]["Cache-Control"] == "public, max-age=0, must-revalidate"
     assert rewrites["/sw.js"] == "/static/js/sw.js"
     assert rewrites["/icons/(.*)"] == "/static/icons/$1"
