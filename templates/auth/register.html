@@ -2,11 +2,62 @@
 
 {% block title %}Register · Algorithm Vault{% endblock %}
 
+{% block page_styles %}
+  {% set auth_visual_v = current_app.config.get('ASSET_VERSION', '1') ~ '-auth-redblack-pwa-1' %}
+  <link rel="preload" as="image" href="{{ url_for('static', filename='brand/algv-mascot-square.webp') }}?v={{ auth_visual_v }}" fetchpriority="high">
+{% endblock %}
+
 {% block content %}
-<section class="auth-shell">
-  <article class="vault-card auth-card">
-    <span class="card-kicker">{{ "Invite Required" if invite_required else "Secure Signup" }}</span>
-    <h1>Create Account</h1>
+{% set auth_visual_v = current_app.config.get('ASSET_VERSION', '1') ~ '-auth-redblack-pwa-1' %}
+<section class="auth-shell algv-auth-shell algv-auth-register">
+  <aside class="algv-auth-brand-panel" aria-label="AlgV account setup">
+    <div class="algv-auth-brand-lockup">
+      <img
+        src="{{ url_for('static', filename='brand/algv-mascot-square.webp') }}?v={{ auth_visual_v }}"
+        alt=""
+        width="112"
+        height="112"
+        decoding="async"
+        fetchpriority="high"
+      >
+      <div>
+        <span class="algv-auth-wordmark">AlgV</span>
+        <strong>Trade smarter. Move faster.</strong>
+      </div>
+    </div>
+    <div class="algv-auth-copy">
+      <span class="card-kicker">{{ "Invite Required" if invite_required else "Secure Signup" }}</span>
+      <h1>Create your secure access profile</h1>
+      <p>Set up account credentials first. App-based 2FA is required before wallet or Vault access.</p>
+    </div>
+    <div class="algv-auth-dock" aria-label="Signup capabilities">
+      <span>
+        <svg aria-hidden="true" focusable="false"><use href="#icon-login"></use></svg>
+        <strong>2FA</strong>
+      </span>
+      <span>
+        <svg aria-hidden="true" focusable="false"><use href="#icon-vault"></use></svg>
+        <strong>Vault</strong>
+      </span>
+      <span>
+        <svg aria-hidden="true" focusable="false"><use href="#icon-wallet"></use></svg>
+        <strong>Funds</strong>
+      </span>
+      <span>
+        <svg aria-hidden="true" focusable="false"><use href="#icon-markets"></use></svg>
+        <strong>Signals</strong>
+      </span>
+    </div>
+  </aside>
+
+  <article class="vault-card auth-card algv-auth-card">
+    <div class="algv-auth-card-head">
+      <div>
+        <span class="card-kicker">{{ "Invite Required" if invite_required else "Secure Signup" }}</span>
+        <h2>Create account</h2>
+      </div>
+      <span class="status-badge algv-auth-live-badge">iPhone ready</span>
+    </div>
     {% if signup_enabled %}
       <p class="muted">
         {% if invite_required %}
@@ -15,7 +66,7 @@
           Create an account, then configure app-based 2FA before wallet access.
         {% endif %}
       </p>
-      <form method="post" action="{{ url_for('auth.register_post') }}" class="form-grid" data-disable-on-submit>
+      <form method="post" action="{{ url_for('auth.register_post') }}" class="form-grid algv-auth-form" data-disable-on-submit>
         {{ csrf_input()|safe }}
         <label>Username
           <input type="text" name="username" minlength="3" autocomplete="username" required>
@@ -40,7 +91,10 @@
     {% else %}
       <p class="muted">Public sign-up is disabled because <code>SIGNUP_INVITE_CODE</code> is not configured.</p>
     {% endif %}
-    <p class="muted"><a class="text-link" href="{{ url_for('auth.login') }}">Back to sign in</a></p>
+    <div class="algv-auth-foot">
+      <span>Already have access?</span>
+      <a class="text-link" href="{{ url_for('auth.login') }}">Back to sign in</a>
+    </div>
   </article>
 </section>
 {% endblock %}

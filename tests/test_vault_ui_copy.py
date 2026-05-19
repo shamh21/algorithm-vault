@@ -122,8 +122,8 @@ def test_vault_assets_use_explicit_readiness_cache_busters() -> None:
     sw_source = Path("static/js/sw.js").read_text()
 
     assert "vault-iphone-exchange-7" in vault_source
-    assert "algvault-vault-iphone-exchange-7" in base_source
-    assert "algvault-v33-vault-iphone-exchange-7" in sw_source
+    assert "algvault-auth-redblack-pwa-1" in base_source
+    assert "algvault-v34-auth-redblack-pwa-1" in sw_source
     assert "/static/brand/algv-mascot-square.webp" in sw_source
 
 

@@ -63,6 +63,10 @@ def test_login_shell_shows_redacted_operations_snapshot(app) -> None:
 
     assert response.status_code == 200
     assert "Continue to Wallet" in html
+    assert "algv-auth-shell" in html
+    assert "algv-auth-brand-lockup" in html
+    assert "algv-auth-dock" in html
+    assert "algv-mascot-square.webp" in html
     assert "Production Status" in html
     assert "Database" in html
     assert "Withdrawals" in html
@@ -71,6 +75,19 @@ def test_login_shell_shows_redacted_operations_snapshot(app) -> None:
     assert 'maxlength="6"' in html
     assert "WALLET_MPC_SIGNER_TOKEN" not in html
     assert "TREASURY_ENCRYPTION_KEY" not in html
+
+
+def test_register_shell_uses_red_black_pwa_auth_layout(app) -> None:
+    response = app.test_client().get("/register")
+    html = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert "algv-auth-register" in html
+    assert "algv-auth-brand-panel" in html
+    assert "algv-auth-form" in html
+    assert "Create your secure access profile" in html
+    assert "app-based 2FA" in html
+    assert "algv-mascot-square.webp" in html
 
 
 def test_base_template_uses_command_center_bottom_nav() -> None:

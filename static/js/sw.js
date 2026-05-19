@@ -1,4 +1,4 @@
-const CACHE_VERSION = "algvault-v33-vault-iphone-exchange-7";
+const CACHE_VERSION = "algvault-v34-auth-redblack-pwa-1";
 const SHELL_CACHE = `${CACHE_VERSION}-shell`;
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 
