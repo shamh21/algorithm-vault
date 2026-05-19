@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pyotp
@@ -11,6 +12,7 @@ from werkzeug.security import check_password_hash
 
 from app import create_app
 from app.auth import decrypt_totp_secret, encrypt_totp_secret, password_hash
+from app.backtesting.vault_simulator import SimulationInput
 from app.extensions import db
 from app.models import (
     AuditLog,
@@ -794,13 +796,21 @@ def test_admin_with_2fa_can_access_admin_and_user_cannot(app) -> None:
     assert backtests.status_code == 200
     assert b"Paper Vault" in backtests.data
     assert b"Vault backtesting" in backtests.data
+    assert b"Simulation only" in backtests.data
+    assert b"Risk gates preserved" in backtests.data
     assert b"Vault Allocation Assets" in backtests.data
     assert b"Test Allocation Amount" in backtests.data
     assert b"Vault Cycle" in backtests.data
     assert b"Vault Cycle Duration" not in backtests.data
     assert b"Run Backtest" in backtests.data
     assert b"static/js/backtests.js" in backtests.data
+    assert b"backtest-speed-ux-1" in backtests.data
     assert b"static/js/vendor/lightweight-charts.standalone.production.js" in backtests.data
+    assert b'data-chart-mode="quality"' in backtests.data
+    assert b'data-chart-mode="assets"' in backtests.data
+    assert b"backtest-table-wrap" in backtests.data
+    assert b"Data quality --" in backtests.data
+    assert b"Runtime --" in backtests.data
     assert b'name="strategy_name"' not in backtests.data
     assert b'name="leverage"' not in backtests.data
     assert b'name="fee_bps"' not in backtests.data
@@ -809,7 +819,7 @@ def test_admin_with_2fa_can_access_admin_and_user_cannot(app) -> None:
     assert b'name="take_profit_pct"' not in backtests.data
     assert b'name="sizing_mode"' not in backtests.data
     assert b"Auto Universe" in backtests.data
-    assert b"All enabled leveraged pairs" in backtests.data
+    assert b"Portfolio simulation only." in backtests.data
     assert b"Auto-Optimized Metrics" not in backtests.data
     for removed_copy in [
         b"Short-Term Optimizer",
@@ -965,11 +975,15 @@ def test_backtests_json_run_uses_paper_allocation_and_returns_charts(app) -> Non
     assert {"net_pnl", "closed_trades", "open_trades", "average_trade", "profit_factor"} <= set(payload["metrics"])
     assert payload["metrics"]["closed_trades"] >= 0
     assert payload["metrics"]["open_trades"] >= 0
-    assert payload["portfolio_diagnostics"]["allocation_policy"] == "after_cost_pnl_weighted"
+    assert payload["portfolio_diagnostics"]["allocation_policy"] == "ten_x_roi_efficiency_weighted"
     assert "allocation_plan" in payload
     assert "skipped_candidates" in payload
     assert "asset_diagnostics" in payload
     assert "market_history_validation" in payload
+    assert "runtime_diagnostics" in payload
+    assert "data_quality_summary" in payload
+    assert "asset_contribution" in payload
+    assert "strategy_weight_groups" in payload
     assert payload["result"]["screener_source"]
     assert payload["result"]["ml_families_used"]
     assert payload["asset_breakdown"]
@@ -983,10 +997,18 @@ def test_backtests_json_run_uses_paper_allocation_and_returns_charts(app) -> Non
     assert payload["charts"]["drawdown"]
     assert payload["charts"]["growth"]
     assert "trade_timeline" in payload["charts"]
+    assert payload["charts"]["asset_contribution"]
+    assert payload["charts"]["data_quality"]
+    assert payload["runtime_diagnostics"]["max_workers"] >= 1
+    assert payload["runtime_diagnostics"]["cache_misses"]["history"] >= 1
+    assert payload["data_quality_summary"]["valid_candle_count"] >= 30
+    assert payload["data_quality_summary"]["asset_count"] >= 1
+    assert payload["asset_contribution"][0]["asset"]
     assert payload["summary"]["allocation"] == 500.0
     assert payload["summary"]["allocation_assets"] == ["USDC"]
     assert payload["asset_diagnostics"][0]["status"] in {"simulated", "skipped"}
     assert payload["asset_diagnostics"][0]["market_history_validation"]["valid_candle_count"] >= 30
+    assert "data_quality_score" in payload["asset_diagnostics"][0]["market_history_validation"]
     assert payload["simulation_scope"]["creates_vault_cycle"] is False
     assert Order.query.count() == 0
     assert StrategyRun.query.count() == 0
@@ -1007,9 +1029,57 @@ def test_backtests_json_run_uses_paper_allocation_and_returns_charts(app) -> Non
     assert run.parameters["parameters"]["target_multiplier"] == pytest.approx(10.0)
     assert run.parameters["parameters"]["asset_breakdown"]
     assert run.parameters["parameters"]["allocation_plan"]
+    assert run.parameters["parameters"]["runtime_diagnostics"]["max_workers"] >= 1
     assert "leverage" not in run.parameters
     assert "fee_bps" not in run.parameters
     assert run.result["autopilot"]["enabled"] is True
+
+
+def test_backtests_clean_history_and_reuse_cache_between_passes(app) -> None:
+    simulator = app.extensions["services"]["backtest_vault_simulator"]
+    market_data = app.extensions["services"]["market_data"]
+    base_rows = [dict(row) for row in _candles()[:40]]
+    duplicate = dict(base_rows[8])
+    malformed = {"timestamp": 500, "open": 100.0, "high": 99.0, "low": 98.0, "close": 101.0, "volume": 1.0}
+    outlier = {"timestamp": 501, "open": 120.0, "high": 6000.0, "low": 1.0, "close": 5000.0, "volume": 1.0}
+    dirty_rows = list(reversed(base_rows)) + [duplicate, malformed, outlier]
+    calls = {"count": 0}
+
+    def get_candles(symbol: str, timeframe: str, mode: str, limit: int) -> list[dict[str, Any]]:
+        calls["count"] += 1
+        assert symbol == "BTC"
+        assert timeframe == "1m"
+        assert mode == "live"
+        assert limit >= 40
+        return dirty_rows
+
+    market_data.get_candles = get_candles
+    context = simulator._new_run_context(max_assets=2)
+    request_input = SimulationInput(
+        mode="single_asset_adapter",
+        allocation_usd=100.0,
+        provider="hyperliquid",
+        symbol="BTC",
+        venue_symbol="BTC",
+        timeframe="live",
+    )
+
+    first = simulator._load_simulation_history(request_input, context=context)
+    second = simulator._load_simulation_history(request_input, context=context)
+
+    timestamps = [row["timestamp"] for row in first["candles"]]
+    assert calls["count"] == 1
+    assert first == second
+    assert timestamps == sorted(timestamps)
+    assert len(timestamps) == len(set(timestamps)) == 40
+    assert all(row["high"] >= max(row["open"], row["close"]) for row in first["candles"])
+    assert first["validation"]["raw_candle_count"] == len(dirty_rows)
+    assert first["validation"]["valid_candle_count"] == 40
+    assert first["validation"]["duplicate_timestamp_count"] == 1
+    assert first["validation"]["malformed_candle_count"] == 1
+    assert first["validation"]["outlier_candle_count"] == 1
+    assert context.cache_misses["history"] == 1
+    assert context.cache_hits["history"] == 1
 
 
 def test_backtests_after_cost_allocator_skips_higher_raw_return_high_cost_candidate(app, monkeypatch) -> None:
@@ -1053,7 +1123,14 @@ def test_backtests_after_cost_allocator_skips_higher_raw_return_high_cost_candid
         },
     ]
 
-    def fake_result(row: dict[str, Any], *, allocation: float, cycle_duration_minutes: int, user: Any | None = None) -> dict[str, Any]:
+    def fake_result(
+        row: dict[str, Any],
+        *,
+        allocation: float,
+        cycle_duration_minutes: int,
+        user: Any | None = None,
+        context: Any | None = None,
+    ) -> dict[str, Any]:
         roi = 0.08 if row["symbol"] == "BTC" else 0.22
         return {
             "vault_simulation": True,
@@ -1476,6 +1553,28 @@ def test_backtests_page_skips_optimizer_scanner_and_ml_services(app, monkeypatch
     assert b"Paper Vault" in response.data
     assert b"Opportunity Lab" not in response.data
     assert b"Upside Scanner Diagnostics" not in response.data
+
+
+def test_backtests_mobile_ui_assets_have_tables_chart_tabs_and_grouped_rows(app) -> None:
+    _, admin_secret = _create_user(username="backtestmobileui", role="admin")
+    client = app.test_client()
+    _login(client, "backtestmobileui", admin_secret)
+
+    response = client.get("/admin/backtests")
+    js = Path("static/js/backtests.js").read_text()
+    css = Path("static/css/app.css").read_text()
+
+    assert response.status_code == 200
+    assert b'role="tablist"' in response.data
+    assert b'data-chart-mode="drawdown"' in response.data
+    assert b'data-chart-mode="quality"' in response.data
+    assert b"backtest-table-wrap" in response.data
+    assert "backtest-asset-table" in js
+    assert "backtest-strategy-group" in js
+    assert 'number(group.active_count) > 0 ? "open" : ""' in js
+    assert ".backtest-asset-table" in css
+    assert ".backtest-strategy-group" in css
+    assert "@media (max-width: 430px)" in css
 
 
 def test_backtests_form_fallback_persists_without_javascript(app) -> None:

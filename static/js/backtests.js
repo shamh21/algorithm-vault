@@ -10,6 +10,7 @@
     empty: document.querySelector("[data-backtest-empty]"),
     status: document.querySelector("[data-backtest-status]"),
     submit: document.querySelector("[data-backtest-submit]"),
+    submitButtons: Array.from(document.querySelectorAll("[data-backtest-submit], [data-backtest-top-submit]")),
     symbolList: document.querySelector("[data-symbol-list]"),
     universeVenues: document.querySelector("[data-universe-venues]"),
     universeReady: document.querySelector("[data-universe-ready]"),
@@ -25,6 +26,8 @@
     chartHost: document.querySelector("[data-backtest-chart]"),
     chartOverlay: document.querySelector("[data-backtest-overlay]"),
     chartTitle: document.querySelector("[data-chart-title]"),
+    dataQualityPill: document.querySelector("[data-data-quality-pill]"),
+    runtimePill: document.querySelector("[data-runtime-pill]"),
     autopilotConfidence: document.querySelector("[data-autopilot-confidence]"),
     executionScore: document.querySelector("[data-execution-score]"),
     activeStrategies: document.querySelector("[data-active-strategies]"),
@@ -45,7 +48,7 @@
   const compactMoney = new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", notation: "compact", maximumFractionDigits: 1 });
   const percent = new Intl.NumberFormat(undefined, { style: "percent", maximumFractionDigits: 2 });
   const compact = new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 });
-  const state = { symbols: [], allocationAssets: [], selectedAssets: new Set(), payload: null, chartMode: "equity", chart: null, symbolAbort: null };
+  const state = { symbols: [], allocationAssets: [], selectedAssets: new Set(), payload: null, chartMode: "equity", chart: null, symbolAbort: null, loading: false };
 
   const readJson = (node) => {
     if (!node?.textContent?.trim()) return null;
@@ -61,11 +64,16 @@
     refs.status.dataset.state = type;
   };
   const setLoading = (loading) => {
-    if (!refs.submit) return;
-    refs.submit.disabled = loading || !canRun();
-    refs.submit.textContent = loading
-      ? refs.submit.dataset.loadingLabel || "Running backtest..."
-      : refs.submit.dataset.defaultLabel || "Run Backtest";
+    state.loading = Boolean(loading);
+    root.dataset.backtestState = loading ? "loading" : state.payload ? "ready" : "empty";
+    form.setAttribute("aria-busy", loading ? "true" : "false");
+    refs.submitButtons.forEach((button) => {
+      button.disabled = loading || !canRun();
+      button.textContent = loading
+        ? button.dataset.loadingLabel || "Running..."
+        : button.dataset.defaultLabel || "Run Backtest";
+      button.setAttribute("aria-disabled", button.disabled ? "true" : "false");
+    });
     refs.dashboard?.classList.toggle("is-loading", loading);
   };
   const selectedAssetRows = () => state.allocationAssets.filter((row) => state.selectedAssets.has(String(row.asset || "").toUpperCase()));
@@ -81,7 +89,7 @@
     else if (!state.selectedAssets.size) message = "Select at least one Vault allocation asset.";
     else if (cap <= 0) message = "Selected Vault allocation assets have no available allocation balance.";
     else if (allocation <= 0 || allocation > cap) message = `Enter an allocation between $0 and ${money.format(cap)}.`;
-    refs.submit.disabled = Boolean(message);
+    refs.submitButtons.forEach((button) => { button.disabled = Boolean(message) || state.loading; });
     setStatus(message, message ? "error" : "");
   };
 
@@ -107,6 +115,8 @@
     applyAllocationAssets(payload || {});
     renderUniverse(payload || {});
     renderSymbols();
+    refs.symbolList?.setAttribute("aria-busy", "false");
+    refs.assetList?.setAttribute("aria-busy", "false");
     updateSubmitState();
   };
   const loadSymbols = async () => {
@@ -116,6 +126,8 @@
     const url = new URL(apiUrl(urls.symbols), window.location.origin);
     url.searchParams.set("limit", "80");
     refs.symbolList?.classList.add("is-loading");
+    refs.symbolList?.setAttribute("aria-busy", "true");
+    refs.assetList?.setAttribute("aria-busy", "true");
     try {
       const response = await fetch(url, { signal: state.symbolAbort.signal, headers: { Accept: "application/json" } });
       const payload = await parseJsonResponse(response);
@@ -128,6 +140,8 @@
       }
     } finally {
       refs.symbolList?.classList.remove("is-loading");
+      refs.symbolList?.setAttribute("aria-busy", "false");
+      refs.assetList?.setAttribute("aria-busy", "false");
     }
   };
   const renderUniverse = (payload) => {
@@ -236,11 +250,12 @@
     if (refs.empty) refs.empty.hidden = true;
     renderSummary(payload.summary || {});
     renderMetrics(payload.metrics || {});
+    renderQualityRuntime(payload.data_quality_summary || payload.result?.data_quality_summary || {}, payload.runtime_diagnostics || payload.result?.runtime_diagnostics || {});
     renderAutopilot(payload.autopilot || {});
     renderExecution(payload.execution_quality || {}, payload.trade_decision || {}, payload.simulation_scope || {});
     renderPortfolioDiagnostics(payload.portfolio_diagnostics || payload.result?.portfolio_diagnostics || {});
     renderAssetBreakdown(payload.asset_diagnostics || payload.result?.asset_diagnostics || payload.asset_breakdown || payload.result?.asset_breakdown || []);
-    renderStrategyWeights(payload.strategy_weights || payload.result?.strategy_weights || []);
+    renderStrategyWeights(payload.strategy_weight_groups || payload.result?.strategy_weight_groups || [], payload.strategy_weights || payload.result?.strategy_weights || []);
     renderSystemMetrics(payload.system_metrics || {});
     renderChart();
   };
@@ -262,6 +277,18 @@
     setMetric("target_progress", percent.format(number(metrics.target_progress)), number(metrics.target_progress));
     setMetric("objective_gap", percent.format(number(metrics.objective_gap_pct) / 100), number(metrics.objective_gap_pct) * -1);
   };
+  const renderQualityRuntime = (quality, runtime) => {
+    if (refs.dataQualityPill) {
+      const status = String(quality.status || "unknown").replace(/_/g, " ");
+      refs.dataQualityPill.textContent = `Data ${status} · ${percent.format(number(quality.score))}`;
+      refs.dataQualityPill.dataset.state = quality.status || "";
+    }
+    if (refs.runtimePill) {
+      const elapsed = number(runtime.elapsed_ms);
+      const workers = Math.round(number(runtime.max_workers, 1));
+      refs.runtimePill.textContent = `${elapsed >= 1000 ? `${(elapsed / 1000).toFixed(1)}s` : `${Math.round(elapsed)}ms`} · ${workers}w`;
+    }
+  };
   const setMetric = (key, text, polarity = null) => {
     const node = metricNodes[key]; if (!node) return;
     node.textContent = text;
@@ -269,61 +296,77 @@
   };
   const renderAutopilot = (autopilot) => {
     if (refs.autopilotConfidence) refs.autopilotConfidence.textContent = percent.format(number(autopilot.confidence));
-    renderKeyValues(refs.autopilotList, [["Status", autopilot.status || "portfolio-ready"], ["Regime", autopilot.market_regime || "Aggregated"], ["Objective", autopilot.objective || "portfolio vault cycle"], ["Model Stack", Array.isArray(autopilot.model_stack) ? autopilot.model_stack.length : 0]]);
+    renderKeyValues(refs.autopilotList, [["Status", autopilot.status || "ready"], ["Regime", autopilot.market_regime || "aggregate"], ["Models", Array.isArray(autopilot.model_stack) ? autopilot.model_stack.length : 0], ["Active", autopilot.active_strategy_count ?? "--"]]);
   };
   const renderExecution = (execution, tradeDecision = {}, scope = {}) => {
     if (refs.executionScore) refs.executionScore.textContent = percent.format(number(execution.fill_quality));
-    renderKeyValues(refs.executionList, [["Mode", tradeDecision.mode || "backtest"], ["Decision", tradeDecision.label || "Backtest simulation"], ["Worker", scope.queues_worker ? "Queued" : "Not started"], ["Broker Order", tradeDecision.broker_order_submitted || scope.submits_broker_order ? "Submitted" : "No"], ["Venues", execution.venue_count || "--"], ["Pairs", execution.eligible_pair_count || "--"], ["Fees", `${number(execution.fee_bps).toFixed(2)} bps`], ["Slippage", `${number(execution.slippage_bps).toFixed(2)} bps`], ["Liquidity", compactMoney.format(number(execution.liquidity_usd))], ["Max Exposure", compactMoney.format(number(execution.max_exposure_usd))]]);
+    renderKeyValues(refs.executionList, [["Mode", tradeDecision.mode || "backtest"], ["Worker", scope.queues_worker ? "queued" : "none"], ["Broker", tradeDecision.broker_order_submitted || scope.submits_broker_order ? "submitted" : "no"], ["Pairs", execution.eligible_pair_count || "--"], ["Fees", `${number(execution.fee_bps).toFixed(2)} bps`], ["Slippage", `${number(execution.slippage_bps).toFixed(2)} bps`], ["Liquidity", compactMoney.format(number(execution.liquidity_usd))], ["Exposure", compactMoney.format(number(execution.max_exposure_usd))]]);
   };
   const renderPortfolioDiagnostics = (diagnostics) => {
     if (refs.allocationPolicy) refs.allocationPolicy.textContent = String(diagnostics.allocation_policy || "after-cost").replace(/_/g, " ");
     const skipped = diagnostics.skipped_reasons || {};
-    const skippedText = Object.entries(skipped).map(([reason, count]) => `${reason.replace(/_/g, " ")} (${count})`).join(", ") || "None";
-    renderKeyValues(refs.portfolioDiagnostics, [["Allocated", diagnostics.allocated_candidate_count || 0], ["Skipped", diagnostics.skipped_candidate_count || 0], ["Score", number(diagnostics.total_after_cost_score).toFixed(3)], ["Skipped Reasons", skippedText], ["Live Gates", String(diagnostics.live_authority || "server risk gates").replace(/_/g, " ")]]);
+    const skippedText = Object.entries(skipped).map(([reason, count]) => `${reason.replace(/_/g, " ")} (${count})`).join(", ") || "none";
+    renderKeyValues(refs.portfolioDiagnostics, [["Allocated", diagnostics.allocated_candidate_count || 0], ["Skipped", diagnostics.skipped_candidate_count || 0], ["Score", number(diagnostics.total_after_cost_score).toFixed(3)], ["Reasons", skippedText], ["Gates", String(diagnostics.live_authority || "server risk gates").replace(/_/g, " ")]]);
   };
   const renderAssetBreakdown = (rows) => {
     if (!refs.assetBreakdown) return;
     if (refs.activeStrategies) refs.activeStrategies.textContent = `${rows.length} assets`;
     if (!rows.length) { refs.assetBreakdown.innerHTML = '<div class="backtest-symbol-empty">No asset-level results yet.</div>'; return; }
-    refs.assetBreakdown.innerHTML = rows.slice().sort((a, b) => Math.abs(number(b.pnl)) - Math.abs(number(a.pnl))).slice(0, 12).map((row) => {
+    const tableRows = rows.slice().sort((a, b) => Math.abs(number(b.pnl)) - Math.abs(number(a.pnl))).slice(0, 12).map((row) => {
       const status = String(row.status || (row.error ? "failed" : "simulated")).toLowerCase();
       const validation = row.market_history_validation || {};
       const historyText = historyLabel(validation, row.fallback_timeframe);
-      const detail = row.error || row.skip_reason || historyText || row.exchange || row.provider_label || "Enabled venue";
+      const detail = row.error || row.skip_reason || fundingLabel(row) || historyText || row.exchange || row.provider_label || "Enabled venue";
+      const quality = number(validation.data_quality_score, NaN);
       return `
-      <div class="backtest-asset-row is-${escapeHtml(status)}">
-        <div>
+      <tr class="backtest-asset-row is-${escapeHtml(status)}">
+        <th scope="row">
           <strong>${escapeHtml(row.asset || row.symbol || "--")}</strong>
           <small>${escapeHtml(detail)}</small>
           <span class="backtest-history-note">${escapeHtml(historyText)}</span>
-        </div>
-        <div><span>Status</span><strong><em class="backtest-status-chip is-${escapeHtml(status)}">${escapeHtml(row.status_label || status.replace(/_/g, " "))}</em></strong></div>
-        <div><span>PnL</span><strong class="${number(row.pnl) >= 0 ? "positive" : "negative"}">${money.format(number(row.pnl))}</strong></div>
-        <div><span>ROI</span><strong>${percent.format(number(row.roi))}</strong></div>
-        <div><span>Weight</span><strong>${percent.format(number(row.allocation_weight))}</strong></div>
-        <div><span>Net Edge</span><strong>${number(row.net_expected_return_bps).toFixed(1)} bps</strong></div>
-        <div><span>Cost</span><strong>${number(row.cost_drag_bps).toFixed(1)} bps</strong></div>
-        <div><span>Trades</span><strong>${Math.round(number(row.trades ?? row.trade_count))}</strong></div>
-        <div><span>History</span><strong>${escapeHtml(historyCount(validation))}</strong></div>
-        <div><span>Max exposure</span><strong>${compactMoney.format(number(row.max_exposure ?? row.allocation_usd))}</strong></div>
-      </div>`;
+        </th>
+        <td><em class="backtest-status-chip is-${escapeHtml(status)}">${escapeHtml(row.status_label || status.replace(/_/g, " "))}</em></td>
+        <td><strong class="${number(row.pnl) >= 0 ? "positive" : "negative"}">${money.format(number(row.pnl))}</strong></td>
+        <td>${percent.format(number(row.roi))}</td>
+        <td>${percent.format(number(row.allocation_weight))}</td>
+        <td>${number(row.net_expected_return_bps).toFixed(1)} bps</td>
+        <td>${number(row.cost_drag_bps).toFixed(1)} bps</td>
+        <td>${Math.round(number(row.trades ?? row.trade_count))}</td>
+        <td>${Number.isFinite(quality) ? percent.format(quality) : escapeHtml(historyCount(validation))}</td>
+      </tr>`;
     }).join("");
+    refs.assetBreakdown.innerHTML = `
+      <table class="backtest-asset-table">
+        <thead><tr><th>Asset</th><th>Status</th><th>PnL</th><th>ROI</th><th>Weight</th><th>Edge</th><th>Cost</th><th>Trades</th><th>Quality</th></tr></thead>
+        <tbody>${tableRows}</tbody>
+      </table>`;
   };
-  const renderStrategyWeights = (rows) => {
+  const renderStrategyWeights = (groups, rows) => {
     if (!refs.strategyWeights) return;
+    const groupedRows = Array.isArray(groups) && groups.length ? groups : groupStrategyRows(rows);
+    if (groupedRows.length) {
+      if (refs.strategyWeightCount) refs.strategyWeightCount.textContent = `${groupedRows.reduce((total, group) => total + number(group.active_count), 0)} active`;
+      refs.strategyWeights.innerHTML = groupedRows.map((group, index) => {
+        const reasons = group.disabled_reasons || {};
+        const reasonText = Object.entries(reasons).map(([reason, count]) => `${reason.replace(/_/g, " ")} (${count})`).join(", ") || "none";
+        const childRows = Array.isArray(group.rows) ? group.rows : [];
+        return `
+          <details class="backtest-strategy-group" ${number(group.active_count) > 0 ? "open" : ""}>
+            <summary>
+              <span><strong>${escapeHtml(group.label || "Strategy")}</strong><small>${number(group.active_count)} active · ${number(group.disabled_count)} off · ${reasonText}</small></span>
+              <em>${percent.format(number(group.total_weight))}</em>
+            </summary>
+            <div>
+              ${childRows.slice(0, 8).map((row) => strategyRow(row)).join("")}
+            </div>
+          </details>`;
+      }).join("");
+      return;
+    }
     const sorted = rows.slice().sort((a, b) => Number(Boolean(b.enabled)) - Number(Boolean(a.enabled)) || number(b.weight) - number(a.weight)).slice(0, 16);
     if (refs.strategyWeightCount) refs.strategyWeightCount.textContent = `${sorted.filter((row) => row.enabled).length} active`;
     if (!sorted.length) { refs.strategyWeights.innerHTML = '<div class="backtest-symbol-empty">No strategy weights yet.</div>'; return; }
-    refs.strategyWeights.innerHTML = sorted.map((row) => {
-      const enabled = Boolean(row.enabled);
-      const reason = enabled ? `${percent.format(number(row.weight))} weight · ${escapeHtml(row.asset || "Portfolio")}` : escapeHtml(row.disabled_reason || "disabled");
-      return `
-        <div class="backtest-strategy-row${enabled ? "" : " is-disabled"}" style="--weight:${Math.max(0, Math.min(number(row.weight), 1)).toFixed(4)}">
-          <div><strong>${escapeHtml(row.label || row.strategy_name || "Strategy")}</strong><small>${reason}</small></div>
-          <span>${number(row.net_return_after_costs ?? row.total_return).toFixed(4)}</span>
-          <i aria-hidden="true"></i>
-        </div>`;
-    }).join("");
+    refs.strategyWeights.innerHTML = sorted.map((row) => strategyRow(row)).join("");
   };
   const renderSystemMetrics = (metrics) => Object.entries(systemNodes).forEach(([key, node]) => { node.textContent = metrics[key] || node.textContent || "Auto"; });
   const renderKeyValues = (host, rows) => { if (host) host.innerHTML = rows.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(String(value))}</strong></div>`).join(""); };
@@ -378,7 +421,19 @@
     renderAllocationAssets();
     syncAllocation(refs.allocation || refs.slider || { value: 0 });
   });
-  document.querySelectorAll("[data-chart-mode]").forEach((button) => button.addEventListener("click", () => { state.chartMode = button.dataset.chartMode || "equity"; document.querySelectorAll("[data-chart-mode]").forEach((item) => item.classList.toggle("is-active", item === button)); renderChart(); }));
+  document.querySelectorAll("[data-chart-mode]").forEach((button) => {
+    button.setAttribute("role", "tab");
+    button.setAttribute("aria-selected", button.classList.contains("is-active") ? "true" : "false");
+    button.addEventListener("click", () => {
+      state.chartMode = button.dataset.chartMode || "equity";
+      document.querySelectorAll("[data-chart-mode]").forEach((item) => {
+        const active = item === button;
+        item.classList.toggle("is-active", active);
+        item.setAttribute("aria-selected", active ? "true" : "false");
+      });
+      renderChart();
+    });
+  });
   form.addEventListener("submit", submitForm);
   window.addEventListener("resize", () => state.chart?.drawOverlay?.());
   window.addEventListener("online", updateSubmitState); window.addEventListener("offline", updateSubmitState);
@@ -388,7 +443,45 @@
   if (initialPayload?.ok) renderPayload(initialPayload);
   syncAllocation(refs.allocation || { value: 0 });
 
-  function chartLabel(mode) { return { equity: "Portfolio Equity Curve", pnl: "Portfolio PnL", contribution: "PnL by Asset", timeline: "Trade Timeline" }[mode] || "Portfolio Simulation"; }
+  function chartLabel(mode) {
+    return {
+      equity: "Portfolio Equity Curve",
+      pnl: "Portfolio PnL",
+      drawdown: "Drawdown Curve",
+      assets: "Asset Contribution",
+      trades: "Trade Timeline",
+      quality: "Data Quality",
+    }[mode] || "Portfolio Simulation";
+  }
+  function strategyRow(row) {
+    const enabled = Boolean(row.enabled);
+    const objective = `ROI eff ${percent.format(number(row.roi_efficiency_score))} · 10x ${percent.format(number(row.ten_x_target_probability))}`;
+    const reason = enabled ? `${percent.format(number(row.weight))} · ${escapeHtml(row.asset || "Portfolio")} · ${objective}` : escapeHtml(row.disabled_reason || "disabled");
+    return `
+      <div class="backtest-strategy-row${enabled ? "" : " is-disabled"}" style="--weight:${Math.max(0, Math.min(number(row.weight), 1)).toFixed(4)}">
+        <div><strong>${escapeHtml(row.label || row.strategy_name || "Strategy")}</strong><small>${reason}</small></div>
+        <span>${number(row.net_return_after_costs ?? row.total_return).toFixed(4)}</span>
+        <i aria-hidden="true"></i>
+      </div>`;
+  }
+  function groupStrategyRows(rows) {
+    const groups = new Map();
+    rows.forEach((row) => {
+      const label = String(row.label || row.strategy_name || "Strategy");
+      if (!groups.has(label)) groups.set(label, { label, active_count: 0, disabled_count: 0, total_weight: 0, rows: [], disabled_reasons: {} });
+      const group = groups.get(label);
+      group.rows.push(row);
+      if (row.enabled) {
+        group.active_count += 1;
+        group.total_weight += number(row.weight);
+      } else {
+        group.disabled_count += 1;
+        const reason = String(row.disabled_reason || "disabled");
+        group.disabled_reasons[reason] = (group.disabled_reasons[reason] || 0) + 1;
+      }
+    });
+    return Array.from(groups.values()).sort((a, b) => Number(b.active_count > 0) - Number(a.active_count > 0) || b.total_weight - a.total_weight);
+  }
   function historyCount(validation) {
     if (!validation || typeof validation !== "object") return "--";
     const valid = number(validation.valid_candle_count, NaN);
@@ -409,22 +502,116 @@
     if (malformed) parts.push(`${malformed} malformed/duplicate`);
     return parts.join(" · ");
   }
+  function fundingLabel(row) {
+    const fundingAsset = String(row.funding_asset || row.vault_allocation_asset || "").toUpperCase();
+    const collateralAsset = String(row.collateral_asset || row.quote_asset || "").toUpperCase();
+    if (row.conversion_required && fundingAsset && collateralAsset) return `Funded by ${fundingAsset} · paper converts to ${collateralAsset}`;
+    if (fundingAsset && collateralAsset && fundingAsset !== collateralAsset) return `Funded by ${fundingAsset} · collateral ${collateralAsset}`;
+    return fundingAsset ? `Funded by ${fundingAsset}` : "";
+  }
   function escapeHtml(value) { return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
   class BacktestChart {
     constructor(host, overlay, librarySrc) { this.host = host; this.overlay = overlay; this.librarySrc = librarySrc; this.chart = null; this.lineSeries = null; this.payload = null; this.mode = "equity"; this.libraryPromise = null; }
     async render(payload, mode) { this.payload = payload || {}; this.mode = mode || "equity"; try { await this.ensureChart(); this.applyData(); } catch (error) {} this.drawOverlay(); }
     async ensureChart() {
-      if (!this.host || ["contribution", "timeline"].includes(this.mode)) return false;
+      if (!this.host) return false;
+      const canvasOnly = ["assets", "trades", "quality"].includes(this.mode);
+      this.host.hidden = canvasOnly;
+      this.host.setAttribute("aria-hidden", canvasOnly ? "true" : "false");
+      if (canvasOnly) return false;
       const library = await this.loadLibrary(); if (!library?.createChart) return false;
       if (!this.chart) { this.chart = library.createChart(this.host, { autoSize: true, layout: { background: { color: "#05070b" }, textColor: "#8f9bae", fontFamily: "Inter, system-ui, sans-serif" }, grid: { vertLines: { color: "rgba(255,255,255,0.04)" }, horzLines: { color: "rgba(255,255,255,0.055)" } }, rightPriceScale: { borderColor: "rgba(255,255,255,0.08)" }, timeScale: { borderColor: "rgba(255,255,255,0.08)", timeVisible: true, secondsVisible: false }, handleScroll: { horzTouchDrag: true, vertTouchDrag: false }, handleScale: { pinch: true, mouseWheel: false } }); this.lineSeries = this.chart.addLineSeries({ color: "#0ecb81", lineWidth: 2, priceLineVisible: false }); }
       return true;
     }
     loadLibrary() { if (window.LightweightCharts) return Promise.resolve(window.LightweightCharts); if (this.libraryPromise) return this.libraryPromise; this.libraryPromise = new Promise((resolve, reject) => { const script = document.createElement("script"); script.src = this.librarySrc; script.async = true; script.onload = () => resolve(window.LightweightCharts); script.onerror = reject; document.head.append(script); }); return this.libraryPromise; }
-    applyData() { if (!this.chart || !this.lineSeries) return; const series = Array.isArray(this.payload?.charts?.[this.mode]) ? this.payload.charts[this.mode] : []; this.lineSeries.applyOptions({ color: this.mode === "pnl" ? "#f0b90b" : "#0ecb81" }); this.lineSeries.setData(series.map((row, index) => ({ time: this.timeValue(row.x, index), value: number(row.y) }))); this.chart.timeScale?.().fitContent?.(); }
-    drawOverlay() { const canvas = this.overlay; if (!canvas) return; this.resizeCanvas(canvas); const ctx = canvas.getContext("2d"); if (!ctx) return; const dpr = window.devicePixelRatio || 1; const width = canvas.width / dpr; const height = canvas.height / dpr; ctx.clearRect(0, 0, width, height); if (this.mode === "contribution") return this.bars(ctx, width, height); if (this.mode === "timeline") return this.timeline(ctx, width, height); if (!this.chart) this.line(ctx, width, height); }
-    line(ctx, width, height) { const series = Array.isArray(this.payload?.charts?.[this.mode]) ? this.payload.charts[this.mode] : []; if (!series.length) return this.empty(ctx, width, height); const values = series.map((row) => number(row.y)); const min = Math.min(...values); const max = Math.max(...values); ctx.save(); ctx.strokeStyle = this.mode === "pnl" ? "rgba(240,185,11,0.92)" : "rgba(14,203,129,0.9)"; ctx.lineWidth = 2; ctx.beginPath(); series.forEach((row, index) => { const x = (index / Math.max(series.length - 1, 1)) * width; const y = height - ((number(row.y) - min) / Math.max(max - min, 1e-9)) * (height - 24) - 12; if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y); }); ctx.stroke(); ctx.restore(); }
-    bars(ctx, width, height) { const rows = (this.payload?.asset_breakdown || this.payload?.result?.asset_breakdown || []).slice(0, 8); if (!rows.length) return this.empty(ctx, width, height); const max = Math.max(...rows.map((row) => Math.abs(number(row.pnl))), 1); const barH = Math.max(18, (height - 24) / rows.length - 7); ctx.save(); rows.forEach((row, i) => { const value = number(row.pnl); const y = 12 + i * (barH + 7); const w = Math.max(2, Math.abs(value) / max * (width - 120)); ctx.fillStyle = value >= 0 ? "rgba(14,203,129,0.78)" : "rgba(246,70,93,0.78)"; ctx.fillRect(92, y, w, barH); ctx.fillStyle = "rgba(244,247,251,0.88)"; ctx.font = "700 11px Inter, system-ui"; ctx.fillText(String(row.asset || row.symbol || "--").slice(0, 10), 10, y + barH - 4); }); ctx.restore(); }
-    timeline(ctx, width, height) { const rows = (this.payload?.charts?.trade_timeline || []).slice(0, 40); if (!rows.length) return this.empty(ctx, width, height); ctx.save(); ctx.strokeStyle = "rgba(255,255,255,0.16)"; ctx.beginPath(); ctx.moveTo(16, height / 2); ctx.lineTo(width - 16, height / 2); ctx.stroke(); rows.forEach((row, index) => { const x = 16 + (index / Math.max(rows.length - 1, 1)) * (width - 32); ctx.fillStyle = number(row.pnl) >= 0 ? "#0ecb81" : "#f6465d"; ctx.beginPath(); ctx.arc(x, height / 2, 4, 0, Math.PI * 2); ctx.fill(); }); ctx.restore(); }
+    applyData() {
+      if (!this.chart || !this.lineSeries || ["assets", "trades", "quality"].includes(this.mode)) return;
+      const series = Array.isArray(this.payload?.charts?.[this.mode]) ? this.payload.charts[this.mode] : [];
+      const color = this.mode === "pnl" ? "#f0b90b" : this.mode === "drawdown" ? "#f6465d" : "#0ecb81";
+      this.lineSeries.applyOptions({ color });
+      this.lineSeries.setData(series.map((row, index) => ({ time: this.timeValue(row.x, index), value: number(row.y) })));
+      this.chart.timeScale?.().fitContent?.();
+    }
+    drawOverlay() {
+      const canvas = this.overlay; if (!canvas) return;
+      this.resizeCanvas(canvas);
+      const ctx = canvas.getContext("2d"); if (!ctx) return;
+      const dpr = window.devicePixelRatio || 1; const width = canvas.width / dpr; const height = canvas.height / dpr;
+      ctx.clearRect(0, 0, width, height);
+      if (this.mode === "assets") return this.bars(ctx, width, height);
+      if (this.mode === "trades") return this.timeline(ctx, width, height);
+      if (this.mode === "quality") return this.quality(ctx, width, height);
+      if (!this.chart || !window.LightweightCharts) this.line(ctx, width, height);
+    }
+    line(ctx, width, height) {
+      const series = Array.isArray(this.payload?.charts?.[this.mode]) ? this.payload.charts[this.mode] : [];
+      if (!series.length) return this.empty(ctx, width, height);
+      const values = series.map((row) => number(row.y)); const min = Math.min(...values); const max = Math.max(...values);
+      const color = this.mode === "pnl" ? "rgba(240,185,11,0.92)" : this.mode === "drawdown" ? "rgba(246,70,93,0.9)" : "rgba(14,203,129,0.9)";
+      ctx.save(); ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.beginPath();
+      series.forEach((row, index) => {
+        const x = (index / Math.max(series.length - 1, 1)) * width;
+        const y = height - ((number(row.y) - min) / Math.max(max - min, 1e-9)) * (height - 24) - 12;
+        if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      });
+      ctx.stroke(); ctx.restore();
+    }
+    bars(ctx, width, height) {
+      const rows = this.assetRows().slice(0, 10);
+      if (!rows.length) return this.empty(ctx, width, height);
+      const max = Math.max(...rows.map((row) => Math.abs(number(row.pnl))), 1);
+      const barH = Math.max(16, (height - 24) / rows.length - 7);
+      ctx.save();
+      rows.forEach((row, i) => {
+        const value = number(row.pnl); const y = 12 + i * (barH + 7); const labelWidth = Math.min(92, Math.max(58, width * 0.26));
+        const w = Math.max(2, Math.abs(value) / max * Math.max(width - labelWidth - 20, 24));
+        ctx.fillStyle = value >= 0 ? "rgba(14,203,129,0.78)" : "rgba(246,70,93,0.78)";
+        ctx.fillRect(labelWidth, y, w, barH);
+        ctx.fillStyle = "rgba(244,247,251,0.9)";
+        ctx.font = "700 11px Inter, system-ui";
+        ctx.fillText(String(row.asset || row.symbol || "--").slice(0, 10), 10, y + barH - 4);
+      });
+      ctx.restore();
+    }
+    timeline(ctx, width, height) {
+      const rows = (this.payload?.charts?.trade_timeline || []).slice(0, 48);
+      if (!rows.length) return this.empty(ctx, width, height);
+      ctx.save();
+      ctx.strokeStyle = "rgba(255,255,255,0.16)";
+      ctx.beginPath(); ctx.moveTo(16, height / 2); ctx.lineTo(width - 16, height / 2); ctx.stroke();
+      rows.forEach((row, index) => {
+        const x = 16 + (index / Math.max(rows.length - 1, 1)) * (width - 32);
+        const radius = Math.max(3, Math.min(6, Math.sqrt(Math.abs(number(row.pnl))) + 3));
+        ctx.fillStyle = number(row.pnl) >= 0 ? "#0ecb81" : "#f6465d";
+        ctx.beginPath(); ctx.arc(x, height / 2, radius, 0, Math.PI * 2); ctx.fill();
+      });
+      ctx.restore();
+    }
+    quality(ctx, width, height) {
+      const rows = this.qualityRows().slice(0, 10);
+      if (!rows.length) return this.empty(ctx, width, height);
+      const barH = Math.max(16, (height - 24) / rows.length - 7);
+      ctx.save();
+      rows.forEach((row, i) => {
+        const score = Math.max(0, Math.min(number(row.score ?? row.data_quality_score), 1));
+        const y = 12 + i * (barH + 7); const labelWidth = Math.min(92, Math.max(58, width * 0.26));
+        const w = Math.max(2, score * Math.max(width - labelWidth - 20, 24));
+        ctx.fillStyle = score >= 0.9 ? "rgba(14,203,129,0.78)" : score >= 0.72 ? "rgba(240,185,11,0.78)" : "rgba(246,70,93,0.78)";
+        ctx.fillRect(labelWidth, y, w, barH);
+        ctx.fillStyle = "rgba(244,247,251,0.9)";
+        ctx.font = "700 11px Inter, system-ui";
+        ctx.fillText(String(row.asset || row.symbol || "--").slice(0, 10), 10, y + barH - 4);
+      });
+      ctx.restore();
+    }
+    assetRows() {
+      const rows = this.payload?.asset_contribution || this.payload?.charts?.asset_contribution || this.payload?.asset_diagnostics || this.payload?.asset_breakdown || this.payload?.result?.asset_breakdown || [];
+      return Array.isArray(rows) ? rows.slice().sort((a, b) => Math.abs(number(b.pnl)) - Math.abs(number(a.pnl))) : [];
+    }
+    qualityRows() {
+      const rows = this.payload?.charts?.data_quality || this.payload?.data_quality_summary?.assets || this.payload?.asset_diagnostics || [];
+      return Array.isArray(rows) ? rows.map((row) => ({ ...row, score: row.score ?? row.data_quality_score ?? row.market_history_validation?.data_quality_score })) : [];
+    }
     resizeCanvas(canvas) { const rect = canvas.getBoundingClientRect(); const dpr = window.devicePixelRatio || 1; const width = Math.max(1, Math.floor(rect.width * dpr)); const height = Math.max(1, Math.floor(rect.height * dpr)); if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height; canvas.getContext("2d")?.setTransform(dpr, 0, 0, dpr, 0, 0); } }
     empty(ctx, width, height) { ctx.save(); ctx.fillStyle = "rgba(255,255,255,0.58)"; ctx.font = "700 12px Inter, system-ui"; ctx.fillText("Awaiting portfolio data", 16, height / 2); ctx.restore(); }
     timeValue(value, index) { const parsed = number(value, 0); if (parsed > 10000000000) return Math.floor(parsed / 1000); if (parsed > 0) return Math.floor(parsed); return Math.floor(Date.now() / 1000) - (80 - index) * 60; }

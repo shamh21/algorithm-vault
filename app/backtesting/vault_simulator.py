@@ -5,15 +5,18 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
+from threading import Lock
 from typing import Any
 
 from flask import current_app, has_app_context
 
 from ..backtesting.engine import BacktestConfig
+from ..extensions import db
 from ..ml.online_ranker import ONE_H10_HORIZON
 from ..models import BacktestRun, LeveragedMarket
-from ..services.one_h10_quality import ONE_H10_HORIZON_SECONDS, one_h10_quality_thresholds
+from ..services.one_h10_quality import ONE_H10_HORIZON_SECONDS, one_h10_profitability_payload, one_h10_quality_thresholds
 from ..services.provider_assets import normalize_provider, provider_collateral_asset
 from ..services.tradability import book_liquidity_usd, cost_drag_bps, spread_bps, volatility_pct, volatility_regime
 from ..services.vault_allocation_assets import (
@@ -48,6 +51,106 @@ _PUBLIC_TIMEFRAME_VALUES = {item["value"] for item in PUBLIC_TIMEFRAMES}
 _MIN_SIMULATION_CANDLES = 30
 
 
+def one_h10_upside_objective_payload(payload: dict[str, Any] | None, config: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Score a backtest candidate against the 1H10 upside objective without changing live gates."""
+
+    row = payload or {}
+    cfg = config or {}
+    profitability = one_h10_profitability_payload(row, cfg)
+    target_roi_pct = max(_module_safe_float(row.get("target_roi_pct"), _module_safe_float(cfg.get("ML_TARGET_ROI_1H10_PCT"), 1000.0)), 1.0)
+    net_edge_bps = max(
+        _module_safe_float(
+            row.get("execution_adjusted_net_return_bps"),
+            _module_safe_float(row.get("net_expected_return_bps"), _module_safe_float(row.get("expected_return_bps"))),
+        ),
+        0.0,
+    )
+    target_bps = max(target_roi_pct * 100.0, 1.0)
+    expected_capture = _module_bounded(net_edge_bps / target_bps, 0.0, 1.0)
+    roi_efficiency = _module_bounded(
+        expected_capture * 0.56
+        + profitability["profitability_edge_quality"] * 0.22
+        + profitability["profitability_execution_quality"] * 0.14
+        + profitability["profitability_risk_reward_quality"] * 0.08,
+        0.0,
+        1.0,
+    )
+    risk_reward = _module_safe_float(row.get("risk_reward"), 0.0)
+    payoff_asymmetry = _module_bounded(
+        _module_safe_float(row.get("profit_factor"), risk_reward) / 4.0 + _module_safe_float(row.get("win_rate"), 0.0) * 0.25,
+        0.0,
+        1.0,
+    )
+    drawdown = abs(_module_safe_float(row.get("max_drawdown"), _module_safe_float(row.get("drawdown"), 0.0)))
+    drawdown_penalty = _module_bounded(drawdown / 0.35, 0.0, 1.0)
+    fibonacci_quality = _module_bounded(
+        _module_safe_float(row.get("fibonacci_quality"), _module_safe_float(row.get("fibonacci_score"), 0.0)),
+        0.0,
+        1.0,
+    )
+    ten_x_probability = _module_bounded(
+        roi_efficiency * 0.44
+        + expected_capture * 0.24
+        + payoff_asymmetry * 0.12
+        + profitability["profitability_model_agreement"] * 0.10
+        + fibonacci_quality * 0.05
+        + profitability["profitability_liquidity_quality"] * 0.05
+        - drawdown_penalty * 0.18,
+        0.0,
+        1.0,
+    )
+    upside_rank = _module_bounded(
+        profitability["profitability_score"] * 0.34
+        + roi_efficiency * 0.28
+        + ten_x_probability * 0.20
+        + payoff_asymmetry * 0.10
+        + fibonacci_quality * 0.08
+        - drawdown_penalty * 0.12,
+        0.0,
+        1.0,
+    )
+    blockers: list[str] = []
+    if profitability["profitability_score"] < profitability["min_profitability_score"]:
+        blockers.append("low_profitability_score")
+    if drawdown_penalty >= 0.85:
+        blockers.append("drawdown_above_objective")
+    if net_edge_bps <= 0:
+        blockers.append("non_positive_edge")
+    return {
+        **profitability,
+        "upside_rank_score": upside_rank * 100.0,
+        "ten_x_target_probability": ten_x_probability,
+        "upside_target_progress": expected_capture,
+        "expected_roi_capture": expected_capture,
+        "roi_efficiency_score": roi_efficiency,
+        "payoff_asymmetry_quality": payoff_asymmetry,
+        "drawdown_penalty": drawdown_penalty,
+        "fibonacci_quality": fibonacci_quality,
+        "upside_blockers": blockers,
+        "upside_score_breakdown": {
+            "profitability": profitability["profitability_score"],
+            "roi_efficiency": roi_efficiency,
+            "ten_x_probability": ten_x_probability,
+            "expected_capture": expected_capture,
+            "payoff_asymmetry": payoff_asymmetry,
+            "fibonacci_quality": fibonacci_quality,
+            "drawdown_penalty": drawdown_penalty,
+        },
+    }
+
+
+def _module_safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if math.isfinite(parsed) else default
+
+
+def _module_bounded(value: float, floor: float, ceiling: float) -> float:
+    return max(floor, min(value, ceiling))
+
+
 @dataclass(frozen=True, slots=True)
 class SimulationInput:
     mode: str
@@ -70,6 +173,34 @@ class MarketHistoryError(RuntimeError):
     def __init__(self, message: str, validation: dict[str, Any]) -> None:
         self.validation = validation
         super().__init__(message)
+
+
+@dataclass(slots=True)
+class SimulationRunContext:
+    started_at: float
+    max_workers: int
+    history_cache: dict[tuple[Any, ...], dict[str, Any]] = field(default_factory=dict)
+    quote_cache: dict[tuple[Any, ...], dict[str, Any]] = field(default_factory=dict)
+    order_book_cache: dict[tuple[Any, ...], dict[str, Any]] = field(default_factory=dict)
+    market_cache: dict[tuple[Any, ...], Any] = field(default_factory=dict)
+    profile_cache: dict[tuple[Any, ...], dict[str, Any]] = field(default_factory=dict)
+    cache_hits: dict[str, int] = field(default_factory=lambda: {"history": 0, "quote": 0, "order_book": 0, "market": 0, "profile": 0})
+    cache_misses: dict[str, int] = field(default_factory=lambda: {"history": 0, "quote": 0, "order_book": 0, "market": 0, "profile": 0})
+    data_quality: dict[str, int] = field(
+        default_factory=lambda: {
+            "raw_candles": 0,
+            "valid_candles": 0,
+            "malformed_candles": 0,
+            "duplicate_candles": 0,
+            "outlier_candles": 0,
+            "gap_count": 0,
+            "stale_feeds": 0,
+        }
+    )
+    simulated_assets: int = 0
+    provisional_assets: int = 0
+    final_assets: int = 0
+    lock: Any = field(default_factory=Lock, repr=False)
 
 
 class VaultBacktestSimulator:
@@ -207,23 +338,28 @@ class VaultBacktestSimulator:
         venue_symbol: str = "",
         allocation_usd: float = 0.0,
         mode: str = "live",
+        market: Any | None = None,
     ) -> dict[str, Any]:
         symbol_key = str(symbol or "BTC").upper().strip()
         provider_key = normalize_provider(provider, default="global")
         venue_key = str(venue_symbol or symbol_key).upper().strip()
         allocation = max(self._safe_float(allocation_usd), 0.0)
         mid = self._mid_price(venue_key or symbol_key, mode=mode)
-        market = self._market(provider_key, symbol_key, venue_key)
+        market = market if market is not None else self._market(provider_key, symbol_key, venue_key)
         price_source = "market_data"
         if mid <= 0 and market is not None:
-            raw = market.raw if hasattr(market, "raw") else {}
+            raw = self._market_value(market, "raw", {})
+            raw = raw if isinstance(raw, dict) else {}
             mid = self._safe_float(raw.get("mark") or raw.get("markPx") or raw.get("mid") or raw.get("lastTradePrice"))
             price_source = "market_cache" if mid > 0 else "unavailable"
         if mid <= 0:
             price_source = "unavailable"
-        settlement_asset = str(
-            getattr(market, "settlement_asset", "") if market is not None else provider_collateral_asset(provider_key)
-        ).upper() or provider_collateral_asset(provider_key)
+        settlement_asset = (
+            str(self._market_value(market, "settlement_asset", provider_collateral_asset(provider_key))).upper()
+            if market is not None
+            else provider_collateral_asset(provider_key)
+        )
+        settlement_asset = settlement_asset or provider_collateral_asset(provider_key)
         amount = allocation / mid if mid > 0 else 0.0
         precision = 8 if mid >= 1000 else 6
         return {
@@ -272,23 +408,29 @@ class VaultBacktestSimulator:
 
     def run(self, request_input: SimulationInput) -> dict[str, Any]:
         all_rows = self._symbol_rows(user=request_input.user)
-        rows = self._rows_for_selected_assets(all_rows, request_input.allocation_assets)
+        rows = self._rows_with_allocation_funding(all_rows, request_input.allocation_assets)
         if request_input.exchange_ids:
             allowed = set(request_input.exchange_ids)
             rows = [row for row in rows if normalize_provider(row.get("provider"), default="global") in allowed]
         if not rows:
-            raise RuntimeError("Enable an exchange with leveraged pairs to run a vault cycle.")
+            if all_rows:
+                raise RuntimeError("Selected exchange has no enabled leveraged pairs for a vault cycle.")
+            rows = [self._placeholder_asset_row(asset) for asset in request_input.allocation_assets]
         max_assets = max(1, int(self.config.get("BACKTEST_PORTFOLIO_MAX_ASSETS", 6) or 6))
         candidate_rows = self._rank_rows_for_one_h10(rows, user=request_input.user)[:max_assets]
+        context = self._new_run_context(max_assets=max_assets)
+        context.provisional_assets = len(candidate_rows)
+        self._release_database_session()
         provisional_allocation = request_input.allocation_usd / max(len(candidate_rows), 1)
+        provisional_results = self._simulate_asset_rows(
+            candidate_rows,
+            allocation_for_row=lambda _row, _index: provisional_allocation,
+            cycle_duration_minutes=request_input.cycle_duration_minutes,
+            user=request_input.user,
+            context=context,
+        )
         provisional: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]] = []
-        for row in candidate_rows:
-            result = self._simulate_asset_row(
-                row,
-                allocation=provisional_allocation,
-                cycle_duration_minutes=request_input.cycle_duration_minutes,
-                user=request_input.user,
-            )
+        for row, result in zip(candidate_rows, provisional_results, strict=False):
             diagnostic = self._asset_allocation_diagnostic(row, result, provisional_allocation)
             provisional.append((row, result, diagnostic))
 
@@ -297,24 +439,44 @@ class VaultBacktestSimulator:
         allocation_plan: list[dict[str, Any]] = []
         asset_runs: list[dict[str, Any]] = []
         if allocated:
-            total_score = sum(max(self._safe_float(item[2].get("allocation_score")), 0.0) for item in allocated) or 1.0
+            weight_scores = [self._allocation_weight_score(item[2]) for item in allocated]
+            total_score = sum(weight_scores) or 1.0
             running_allocation = 0.0
-            for index, (row, _result, diagnostic) in enumerate(allocated):
-                weight = max(self._safe_float(diagnostic.get("allocation_score")), 0.0) / total_score
+            final_allocations: list[float] = []
+            decisions: list[dict[str, Any]] = []
+            for index, (_row, _result, diagnostic) in enumerate(allocated):
+                weight_score = weight_scores[index] if index < len(weight_scores) else self._allocation_weight_score(diagnostic)
+                weight = weight_score / total_score
                 final_allocation = (
                     request_input.allocation_usd - running_allocation
                     if index == len(allocated) - 1
                     else request_input.allocation_usd * weight
                 )
                 running_allocation += final_allocation
-                final_result = self._simulate_asset_row(
-                    row,
-                    allocation=final_allocation,
-                    cycle_duration_minutes=request_input.cycle_duration_minutes,
-                    user=request_input.user,
+                final_allocations.append(final_allocation)
+                decisions.append(
+                    {
+                        **diagnostic,
+                        "allocated": True,
+                        "allocation_weight": weight,
+                        "allocation_usd": final_allocation,
+                        "selection_rank": index + 1,
+                    }
                 )
+            context.final_assets = len(allocated)
+            final_results = self._simulate_asset_rows(
+                [item[0] for item in allocated],
+                allocation_for_row=lambda _row, index: final_allocations[index],
+                cycle_duration_minutes=request_input.cycle_duration_minutes,
+                user=request_input.user,
+                context=context,
+            )
+            for index, ((row, _result, _diagnostic), final_result) in enumerate(zip(allocated, final_results, strict=False)):
+                final_allocation = final_allocations[index]
+                weight = self._safe_float(decisions[index].get("allocation_weight"))
                 final_diagnostic = self._asset_allocation_diagnostic(row, final_result, final_allocation)
                 decision = {
+                    **decisions[index],
                     **final_diagnostic,
                     "allocated": True,
                     "allocation_weight": weight,
@@ -348,9 +510,16 @@ class VaultBacktestSimulator:
             if isinstance(row.get("market_history_validation"), dict)
         ]
         combined["result"]["portfolio_diagnostics"] = self._portfolio_diagnostics(request_input, allocation_plan, skipped)
+        combined["result"]["runtime_diagnostics"] = self._runtime_diagnostics(context)
+        combined["result"]["data_quality_summary"] = self._data_quality_summary(combined["result"]["asset_diagnostics"], context)
+        combined["result"]["asset_contribution"] = self._asset_contribution_rows(combined["result"]["asset_diagnostics"])
+        combined["result"]["strategy_weight_groups"] = self._strategy_weight_groups(combined["result"].get("strategy_weights", []))
+        combined["result"]["charts"]["asset_contribution"] = combined["result"]["asset_contribution"]
+        combined["result"]["charts"]["data_quality"] = self._data_quality_chart(combined["result"]["asset_diagnostics"])
         combined["parameters"]["parameters"]["allocation_plan"] = allocation_plan
         combined["parameters"]["parameters"]["skipped_candidates"] = skipped
         combined["parameters"]["parameters"]["asset_diagnostics"] = combined["result"]["asset_diagnostics"]
+        combined["parameters"]["parameters"]["runtime_diagnostics"] = combined["result"]["runtime_diagnostics"]
         return {
             "record": {"strategy_name": "portfolio_vault_cycle_auto", "symbol": "PORTFOLIO", "timeframe": "1h10"},
             "parameters": combined["parameters"],
@@ -364,6 +533,7 @@ class VaultBacktestSimulator:
         allocation: float,
         cycle_duration_minutes: int,
         user: Any | None = None,
+        context: SimulationRunContext | None = None,
     ) -> dict[str, Any]:
         single_input = SimulationInput(
             mode="single_asset_adapter",
@@ -386,7 +556,7 @@ class VaultBacktestSimulator:
                     status="skipped",
                     status_label="Skipped",
                 )
-            return self._run_single_asset(single_input, market_row=row)["result"]
+            return self._run_single_asset(single_input, market_row=row, context=context)["result"]
         except MarketHistoryError as exc:
             validation = exc.validation
             return self._failed_asset_result(
@@ -408,22 +578,98 @@ class VaultBacktestSimulator:
                 status_label="Failed",
             )
 
-    def _run_single_asset(self, request_input: SimulationInput, market_row: dict[str, Any] | None = None) -> dict[str, Any]:
-        quote = self.quote_payload(
+    def _new_run_context(self, *, max_assets: int) -> SimulationRunContext:
+        configured = int(self.config.get("BACKTEST_MAX_WORKERS", min(4, max_assets)) or min(4, max_assets))
+        max_workers = max(1, min(configured, max(max_assets, 1), 8))
+        return SimulationRunContext(started_at=time.perf_counter(), max_workers=max_workers)
+
+    def _simulate_asset_rows(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        allocation_for_row: Any,
+        cycle_duration_minutes: int,
+        user: Any | None,
+        context: SimulationRunContext,
+    ) -> list[dict[str, Any]]:
+        if not rows:
+            return []
+        app_context = current_app._get_current_object() if has_app_context() else None
+
+        def run_one(row: dict[str, Any], index: int) -> dict[str, Any]:
+            if app_context is None:
+                return self._simulate_asset_row(
+                    row,
+                    allocation=self._safe_float(allocation_for_row(row, index)),
+                    cycle_duration_minutes=cycle_duration_minutes,
+                    user=user,
+                    context=context,
+                )
+            with app_context.app_context():
+                try:
+                    return self._simulate_asset_row(
+                        row,
+                        allocation=self._safe_float(allocation_for_row(row, index)),
+                        cycle_duration_minutes=cycle_duration_minutes,
+                        user=user,
+                        context=context,
+                    )
+                finally:
+                    self._release_database_session()
+
+        if context.max_workers <= 1 or len(rows) <= 1:
+            return [run_one(row, index) for index, row in enumerate(rows)]
+        results: list[dict[str, Any] | None] = [None] * len(rows)
+        with ThreadPoolExecutor(max_workers=min(context.max_workers, len(rows)), thread_name_prefix="backtest-asset") as executor:
+            futures = {executor.submit(run_one, row, index): index for index, row in enumerate(rows)}
+            for future in as_completed(futures):
+                index = futures[future]
+                try:
+                    results[index] = future.result()
+                except Exception as exc:
+                    results[index] = self._failed_asset_result(
+                        rows[index],
+                        self._safe_float(allocation_for_row(rows[index], index)),
+                        str(exc),
+                        error_code="simulation_error",
+                        status="failed",
+                        status_label="Failed",
+                    )
+        return [result for result in results if isinstance(result, dict)]
+
+    def _run_single_asset(
+        self,
+        request_input: SimulationInput,
+        market_row: dict[str, Any] | None = None,
+        *,
+        context: SimulationRunContext | None = None,
+    ) -> dict[str, Any]:
+        market = (
+            market_row
+            if market_row is not None
+            else self._market_cached(
+                request_input.provider,
+                request_input.symbol,
+                request_input.venue_symbol,
+                context=context,
+            )
+        )
+        quote = self._quote_payload_cached(
             provider=request_input.provider,
             symbol=request_input.symbol,
             venue_symbol=request_input.venue_symbol,
             allocation_usd=request_input.allocation_usd,
             mode="live",
+            market=market,
+            context=context,
         )
-        market = self._market(request_input.provider, request_input.symbol, request_input.venue_symbol)
-        history = self._load_simulation_history(request_input, market_row=market_row)
+        history = self._load_simulation_history(request_input, market_row=market_row, context=context)
         candles = history["candles"]
         validation = history["validation"]
         if validation.get("status") != "ready":
             raise MarketHistoryError(self._market_history_error_message(validation), validation)
-        book = self._order_book(request_input.venue_symbol or request_input.symbol, mode="live")
-        profile = self._market_profile(market, candles, book, quote)
+        book = self._order_book_cached(request_input.venue_symbol or request_input.symbol, mode="live", context=context)
+        profile = self._market_profile_cached(request_input, market, candles, book, quote, validation, context=context)
         auto = self._auto_controls(market, profile)
         strategy_results = self._strategy_results(request_input, candles, auto)
         weights = self._strategy_weights(strategy_results)
@@ -440,10 +686,21 @@ class VaultBacktestSimulator:
                 "objective_gap_pct": objective_fields["objective_gap_pct"],
             }
         )
-        chart = self._projection_chart(request_input, candles, profile)
+        chart = self._projection_chart(request_input, candles, profile, market=market)
         overlays = dict(chart.get("overlays") or {})
         ml_families_used = list(dict.fromkeys((market_row or {}).get("ml_families_used") or self._configured_ml_families()))
         screener_source = str((market_row or {}).get("screener_source") or "active_market_fallback")
+        funding = self._funding_metadata(
+            {
+                **dict(market_row or {}),
+                "provider": request_input.provider,
+                "funding_assets": request_input.allocation_assets,
+                "funding_asset": request_input.allocation_assets[0] if request_input.allocation_assets else request_input.symbol,
+                "collateral_asset": quote.get("quote_asset") or provider_collateral_asset(request_input.provider),
+                "quote_asset": quote.get("quote_asset") or provider_collateral_asset(request_input.provider),
+            },
+            request_input.allocation_usd,
+        )
 
         result = {
             "vault_simulation": True,
@@ -457,6 +714,7 @@ class VaultBacktestSimulator:
                 "provider": request_input.provider,
                 "provider_label": self._provider_label(request_input.provider),
                 "vault_allocation_asset": request_input.allocation_assets[0] if request_input.allocation_assets else request_input.symbol,
+                **funding,
                 "timeframe": self._timeframe_label(request_input.timeframe),
                 "duration": "1H10",
                 "duration_label": "1 hour",
@@ -511,6 +769,7 @@ class VaultBacktestSimulator:
                 "cycle": "AI optimized high-frequency vault cycle",
             },
             "quote": quote,
+            **funding,
             "market_profile": profile,
             "market_history_validation": validation,
             "fallback_timeframe": validation.get("fallback_timeframe", ""),
@@ -546,6 +805,7 @@ class VaultBacktestSimulator:
         provider = normalize_provider(row.get("provider"), default="global")
         symbol = str(row.get("symbol") or "--").upper()
         objective_fields = self._one_h10_objective_fields(ending_balance=allocation, allocation=allocation)
+        funding = self._funding_metadata(row, allocation)
         return {
             "vault_simulation": True,
             **objective_fields,
@@ -557,6 +817,7 @@ class VaultBacktestSimulator:
                 "provider": provider,
                 "provider_label": self._provider_label(provider),
                 "vault_allocation_asset": str(row.get("vault_allocation_asset") or symbol).upper(),
+                **funding,
                 "allocation": allocation,
                 "duration": "1H10",
                 "duration_label": "1 hour",
@@ -603,6 +864,7 @@ class VaultBacktestSimulator:
             "status_label": status_label,
             "error_code": error_code,
             "error": error,
+            **funding,
         }
 
     def _asset_allocation_diagnostic(
@@ -656,8 +918,30 @@ class VaultBacktestSimulator:
         risk_reward = max(net_edge_bps, 0.0) / max(cost_drag_bps, 1.0)
         target_return_bps = max(self.one_h10_target_roi_pct() * 100.0, 1.0)
         target_progress = max(0.0, min(net_edge_bps / target_return_bps, 1.0))
+        upside_payload = one_h10_upside_objective_payload(
+            {
+                **features,
+                **row,
+                **metrics,
+                **execution,
+                "net_expected_return_bps": net_edge_bps,
+                "edge_after_cost_bps": net_edge_bps,
+                "cost_drag_bps": cost_drag_bps,
+                "expected_execution_quality": execution_quality,
+                "liquidity_usd": liquidity,
+                "risk_reward": risk_reward,
+                "target_progress": target_progress,
+                "ml_model_agreement": ml_blend,
+                "target_roi_pct": self.one_h10_target_roi_pct(),
+            },
+            self.config,
+        )
+        upside_rank = self._safe_float(upside_payload.get("upside_rank_score")) / 100.0
+        ten_x_probability = self._safe_float(upside_payload.get("ten_x_target_probability"))
         allocation_score = (
-            max(historical_return, 0.0) * 1.35
+            max(historical_return, 0.0) * 0.95
+            + upside_rank * 0.65
+            + ten_x_probability * 0.28
             + edge_quality * 0.35
             + max(execution_quality - min_execution, 0.0) * 0.22
             + liquidity_score * 0.12
@@ -694,6 +978,18 @@ class VaultBacktestSimulator:
             skip_reason = "non_positive_after_cost_score"
         allocated = not skip_reason and allocation_score > 0
         diagnostic_status = "simulated" if allocated else ("skipped" if result_status == "simulated" else result_status)
+        funding = self._funding_metadata(
+            {
+                **row,
+                "funding_assets": summary.get("funding_assets") or row.get("funding_assets"),
+                "funding_asset": summary.get("funding_asset") or row.get("funding_asset"),
+                "collateral_asset": summary.get("collateral_asset")
+                or summary.get("quote_asset")
+                or row.get("collateral_asset")
+                or row.get("settlement_asset"),
+            },
+            allocation,
+        )
         return {
             "asset": summary.get("symbol") or row.get("symbol") or "--",
             "vault_allocation_asset": summary.get("vault_allocation_asset")
@@ -702,6 +998,7 @@ class VaultBacktestSimulator:
             or "--",
             "provider": summary.get("provider") or normalize_provider(row.get("provider"), default="global"),
             "provider_label": summary.get("provider_label") or self._provider_label(str(row.get("provider") or "global")),
+            **funding,
             "allocation_score": max(allocation_score, 0.0),
             "after_cost_score": max(allocation_score, 0.0),
             "historical_after_cost_roi": historical_return,
@@ -711,6 +1008,16 @@ class VaultBacktestSimulator:
             "expected_execution_quality": execution_quality,
             "risk_reward": risk_reward,
             "target_progress": target_progress,
+            "ten_x_target_probability": ten_x_probability,
+            "upside_rank_score": self._safe_float(upside_payload.get("upside_rank_score")),
+            "upside_target_progress": self._safe_float(upside_payload.get("upside_target_progress")),
+            "expected_roi_capture": self._safe_float(upside_payload.get("expected_roi_capture")),
+            "roi_efficiency_score": self._safe_float(upside_payload.get("roi_efficiency_score")),
+            "payoff_asymmetry_quality": self._safe_float(upside_payload.get("payoff_asymmetry_quality")),
+            "drawdown_penalty": self._safe_float(upside_payload.get("drawdown_penalty")),
+            "upside_blockers": list(upside_payload.get("upside_blockers") or []),
+            "upside_score_breakdown": dict(upside_payload.get("upside_score_breakdown") or {}),
+            "fibonacci_quality": self._safe_float(upside_payload.get("fibonacci_quality")),
             "liquidity_usd": liquidity,
             "liquidity_score": liquidity_score,
             "max_drawdown": self._safe_float(metrics.get("max_drawdown")),
@@ -732,6 +1039,21 @@ class VaultBacktestSimulator:
             "provisional_allocation_usd": allocation,
         }
 
+    def _allocation_weight_score(self, diagnostic: dict[str, Any]) -> float:
+        base_score = max(self._safe_float(diagnostic.get("allocation_score")), 0.0)
+        upside_rank = max(self._safe_float(diagnostic.get("upside_rank_score")), 0.0) / 100.0
+        ten_x_probability = max(self._safe_float(diagnostic.get("ten_x_target_probability")), 0.0)
+        roi_efficiency = max(self._safe_float(diagnostic.get("roi_efficiency_score")), 0.0)
+        expected_capture = max(self._safe_float(diagnostic.get("expected_roi_capture")), 0.0)
+        historical_roi = max(self._safe_float(diagnostic.get("historical_after_cost_roi")), 0.0)
+        drawdown_penalty = max(self._safe_float(diagnostic.get("drawdown_penalty")), 0.0)
+        conviction = (
+            base_score * (1.0 + roi_efficiency * 0.45 + expected_capture * 0.35 + upside_rank * 0.20 + ten_x_probability * 0.15)
+            + historical_roi * 0.75
+        )
+        risk_adjusted = conviction * max(0.35, 1.0 - drawdown_penalty * 0.40)
+        return max(risk_adjusted, 0.0001) ** 1.18
+
     def _portfolio_diagnostics(
         self,
         request_input: SimulationInput,
@@ -744,15 +1066,23 @@ class VaultBacktestSimulator:
             reason = str(row.get("skip_reason") or "not_allocated")
             skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
         total_score = sum(self._safe_float(row.get("allocation_score")) for row in allocated)
+        total_roi_efficiency = sum(self._safe_float(row.get("roi_efficiency_score")) for row in allocated)
+        total_expected_capture = sum(self._safe_float(row.get("expected_roi_capture")) for row in allocated)
         return {
-            "allocation_policy": "after_cost_pnl_weighted",
-            "objective": "1H10 strategy objective",
+            "allocation_policy": "ten_x_roi_efficiency_weighted",
+            "objective": "1H10 10x upside objective",
             "allocation_usd": request_input.allocation_usd,
             "allocated_candidate_count": len(allocated),
             "skipped_candidate_count": len(skipped),
             "skipped_reasons": skipped_reasons,
             "total_after_cost_score": total_score,
+            "average_roi_efficiency_score": total_roi_efficiency / len(allocated) if allocated else 0.0,
+            "average_expected_roi_capture": total_expected_capture / len(allocated) if allocated else 0.0,
+            "target_multiplier": self.one_h10_target_multiplier(),
+            "target_roi_pct": self.one_h10_target_roi_pct(),
             "selected_assets": list(request_input.allocation_assets),
+            "funding_assets": list(request_input.allocation_assets),
+            "conversion_required": any(bool(row.get("conversion_required")) for row in [*allocation_plan, *skipped]),
             "live_authority": "server_risk_gates_preserved",
         }
 
@@ -796,6 +1126,21 @@ class VaultBacktestSimulator:
             if dedupe in seen:
                 continue
             seen.add(dedupe)
+            row_allocation = self._safe_float(decision.get("allocation_usd"), self._safe_float(decision.get("provisional_allocation_usd")))
+            funding = self._funding_metadata(
+                {
+                    **decision,
+                    "provider": provider,
+                    "funding_assets": summary.get("funding_assets") or decision.get("funding_assets"),
+                    "funding_asset": summary.get("funding_asset") or decision.get("funding_asset"),
+                    "collateral_asset": summary.get("collateral_asset")
+                    or summary.get("quote_asset")
+                    or decision.get("collateral_asset")
+                    or quote.get("quote_asset"),
+                    "quote_asset": summary.get("quote_asset") or decision.get("quote_asset") or quote.get("quote_asset"),
+                },
+                row_allocation,
+            )
             rows.append(
                 {
                     "asset": asset,
@@ -803,10 +1148,9 @@ class VaultBacktestSimulator:
                     "provider_label": decision.get("provider_label") or self._provider_label(provider),
                     "venue_symbol": summary.get("venue_symbol") or asset,
                     "vault_allocation_asset": decision.get("vault_allocation_asset") or summary.get("vault_allocation_asset") or asset,
+                    **funding,
                     "allocated": allocated,
-                    "allocation_usd": self._safe_float(
-                        decision.get("allocation_usd"), self._safe_float(decision.get("provisional_allocation_usd"))
-                    ),
+                    "allocation_usd": row_allocation,
                     "allocation_weight": self._safe_float(decision.get("allocation_weight")),
                     "allocation_score": self._safe_float(decision.get("allocation_score")),
                     "trade_count": int(metrics.get("trades") or decision.get("trade_count") or 0),
@@ -826,6 +1170,15 @@ class VaultBacktestSimulator:
                     "net_expected_return_bps": self._safe_float(decision.get("net_expected_return_bps")),
                     "cost_drag_bps": self._safe_float(decision.get("cost_drag_bps")),
                     "expected_execution_quality": self._safe_float(decision.get("expected_execution_quality")),
+                    "ten_x_target_probability": self._safe_float(decision.get("ten_x_target_probability")),
+                    "upside_rank_score": self._safe_float(decision.get("upside_rank_score")),
+                    "upside_target_progress": self._safe_float(decision.get("upside_target_progress")),
+                    "expected_roi_capture": self._safe_float(decision.get("expected_roi_capture")),
+                    "roi_efficiency_score": self._safe_float(decision.get("roi_efficiency_score")),
+                    "payoff_asymmetry_quality": self._safe_float(decision.get("payoff_asymmetry_quality")),
+                    "drawdown_penalty": self._safe_float(decision.get("drawdown_penalty")),
+                    "upside_blockers": list(decision.get("upside_blockers") or []),
+                    "fibonacci_quality": self._safe_float(decision.get("fibonacci_quality")),
                 }
             )
         return rows
@@ -902,6 +1255,17 @@ class VaultBacktestSimulator:
             quote = result.get("quote") if isinstance(result.get("quote"), dict) else {}
             validation = result.get("market_history_validation") if isinstance(result.get("market_history_validation"), dict) else {}
             status = str(allocation_decision.get("status") or result.get("status") or ("failed" if result.get("error") else "simulated"))
+            funding = self._funding_metadata(
+                {
+                    **summary,
+                    "provider": summary.get("provider") or "global",
+                    "funding_assets": summary.get("funding_assets") or result.get("funding_assets") or request_input.allocation_assets,
+                    "funding_asset": summary.get("funding_asset") or result.get("funding_asset"),
+                    "collateral_asset": summary.get("collateral_asset") or summary.get("quote_asset") or quote.get("quote_asset"),
+                    "quote_asset": summary.get("quote_asset") or quote.get("quote_asset"),
+                },
+                asset_allocation,
+            )
             asset_breakdown.append(
                 {
                     "asset": summary.get("symbol") or "--",
@@ -910,6 +1274,7 @@ class VaultBacktestSimulator:
                     "provider": summary.get("provider") or "global",
                     "venue_symbol": summary.get("venue_symbol") or summary.get("symbol") or "--",
                     "quote_asset": summary.get("quote_asset") or quote.get("quote_asset") or "USDC",
+                    **funding,
                     "pnl": pnl,
                     "roi": pnl / max(asset_allocation, 1e-9),
                     "trades": trades,
@@ -926,6 +1291,15 @@ class VaultBacktestSimulator:
                     "net_expected_return_bps": self._safe_float(allocation_decision.get("net_expected_return_bps")),
                     "cost_drag_bps": self._safe_float(allocation_decision.get("cost_drag_bps")),
                     "expected_execution_quality": self._safe_float(allocation_decision.get("expected_execution_quality")),
+                    "ten_x_target_probability": self._safe_float(allocation_decision.get("ten_x_target_probability")),
+                    "upside_rank_score": self._safe_float(allocation_decision.get("upside_rank_score")),
+                    "upside_target_progress": self._safe_float(allocation_decision.get("upside_target_progress")),
+                    "expected_roi_capture": self._safe_float(allocation_decision.get("expected_roi_capture")),
+                    "roi_efficiency_score": self._safe_float(allocation_decision.get("roi_efficiency_score")),
+                    "payoff_asymmetry_quality": self._safe_float(allocation_decision.get("payoff_asymmetry_quality")),
+                    "drawdown_penalty": self._safe_float(allocation_decision.get("drawdown_penalty")),
+                    "upside_blockers": list(allocation_decision.get("upside_blockers") or []),
+                    "fibonacci_quality": self._safe_float(allocation_decision.get("fibonacci_quality")),
                     "skip_reason": str(allocation_decision.get("skip_reason") or ""),
                     "status": status,
                     "status_label": str(
@@ -939,6 +1313,17 @@ class VaultBacktestSimulator:
                     "price_source": str(result.get("price_source") or quote.get("price_source") or ""),
                 }
             )
+        funding_assets = list(
+            dict.fromkeys(asset for row in asset_breakdown for asset in (row.get("funding_assets") or []) if str(asset or "").strip())
+        ) or list(request_input.allocation_assets)
+        conversion_required = any(bool(row.get("conversion_required")) for row in asset_breakdown)
+        conversion_from = list(
+            dict.fromkeys(str(row.get("conversion_from") or "").upper() for row in asset_breakdown if row.get("conversion_from"))
+        )
+        conversion_to = list(
+            dict.fromkeys(str(row.get("conversion_to") or "").upper() for row in asset_breakdown if row.get("conversion_to"))
+        )
+        conversion_amount = sum(self._safe_float(row.get("conversion_amount_usd")) for row in asset_breakdown)
         ending_balance = allocation + total_pnl
         roi = total_pnl / max(allocation, 1e-9)
         objective_fields = self._one_h10_objective_fields(ending_balance=ending_balance, allocation=allocation)
@@ -967,12 +1352,19 @@ class VaultBacktestSimulator:
                 "allocation": allocation,
                 "paper_balance": self.allocation_cap_usd(),
                 "allocation_assets": list(request_input.allocation_assets),
+                "funding_assets": funding_assets,
                 "mode": "all_assets",
                 "eligible_pair_count": len(all_rows),
                 "simulated_pair_count": len(asset_results),
                 "allocated_pair_count": allocated_pair_count,
                 "provider_label": ", ".join(venues) if venues else "All enabled leveraged pairs",
                 "collateral_asset": " + ".join(collateral) if collateral else "USDC",
+                "conversion_required": conversion_required,
+                "conversion_from": " + ".join(conversion_from),
+                "conversion_to": " + ".join(conversion_to),
+                "conversion_amount": conversion_amount,
+                "conversion_amount_usd": conversion_amount,
+                "conversion_status": "simulated" if conversion_required else "not_required",
             },
             "metrics": {
                 "roi": roi,
@@ -1038,6 +1430,13 @@ class VaultBacktestSimulator:
                 "cycle": "AI-optimized multi-asset vault cycle",
             },
             "quote": asset_results[0].get("quote", {}) if len(asset_results) == 1 and isinstance(asset_results[0], dict) else {},
+            "funding_assets": funding_assets,
+            "conversion_required": conversion_required,
+            "conversion_from": " + ".join(conversion_from),
+            "conversion_to": " + ".join(conversion_to),
+            "conversion_amount": conversion_amount,
+            "conversion_amount_usd": conversion_amount,
+            "conversion_status": "simulated" if conversion_required else "not_required",
             "generated_at": self._utc_now(),
         }
         parameters = {
@@ -1045,6 +1444,12 @@ class VaultBacktestSimulator:
             "initial_balance": allocation,
             "allocation_amount_usd": allocation,
             "allocation_assets": list(request_input.allocation_assets),
+            "funding_assets": funding_assets,
+            "conversion_required": conversion_required,
+            "conversion_from": " + ".join(conversion_from),
+            "conversion_to": " + ".join(conversion_to),
+            "conversion_amount": conversion_amount,
+            "conversion_status": "simulated" if conversion_required else "not_required",
             "cycle_id": "1h10",
             "cycle_duration_minutes": request_input.cycle_duration_minutes,
             "exchange_ids": [normalize_provider(item, default="global") for item in request_input.exchange_ids]
@@ -1068,6 +1473,12 @@ class VaultBacktestSimulator:
                 "objective_horizon_seconds": objective_fields["objective_horizon_seconds"],
                 "eligible_pair_count": len(all_rows),
                 "selected_allocation_assets": list(request_input.allocation_assets),
+                "funding_assets": funding_assets,
+                "conversion_required": conversion_required,
+                "conversion_from": " + ".join(conversion_from),
+                "conversion_to": " + ".join(conversion_to),
+                "conversion_amount": conversion_amount,
+                "conversion_status": "simulated" if conversion_required else "not_required",
                 "asset_breakdown": asset_breakdown,
             },
         }
@@ -1100,6 +1511,116 @@ class VaultBacktestSimulator:
             return cleaned
         step = math.ceil(len(cleaned) / 80)
         return cleaned[::step]
+
+    def _runtime_diagnostics(self, context: SimulationRunContext) -> dict[str, Any]:
+        elapsed_ms = max(0.0, (time.perf_counter() - context.started_at) * 1000.0)
+        with context.lock:
+            return {
+                "elapsed_ms": round(elapsed_ms, 2),
+                "max_workers": context.max_workers,
+                "provisional_assets": context.provisional_assets,
+                "final_assets": context.final_assets,
+                "cache_hits": dict(context.cache_hits),
+                "cache_misses": dict(context.cache_misses),
+                "data_quality": dict(context.data_quality),
+            }
+
+    def _data_quality_summary(
+        self,
+        rows: list[dict[str, Any]],
+        context: SimulationRunContext,
+    ) -> dict[str, Any]:
+        validations = [row.get("market_history_validation") for row in rows if isinstance(row.get("market_history_validation"), dict)]
+        total_raw = sum(int(item.get("raw_candle_count") or 0) for item in validations) or context.data_quality.get("raw_candles", 0)
+        total_valid = sum(int(item.get("valid_candle_count") or 0) for item in validations) or context.data_quality.get("valid_candles", 0)
+        malformed = sum(int(item.get("malformed_candle_count") or 0) for item in validations)
+        duplicates = sum(int(item.get("duplicate_timestamp_count") or 0) for item in validations)
+        outliers = sum(int(item.get("outlier_candle_count") or 0) for item in validations)
+        gaps = sum(int(item.get("gap_count") or 0) for item in validations)
+        stale = sum(1 for item in validations if item.get("stale_feed"))
+        degradation = malformed + duplicates + outliers + gaps + stale
+        score = max(0.0, min(1.0, total_valid / max(total_raw, 1) - degradation / max(total_raw, 1)))
+        status = "clean" if degradation == 0 and total_valid >= _MIN_SIMULATION_CANDLES else "degraded" if total_valid else "unavailable"
+        return {
+            "status": status,
+            "score": score,
+            "raw_candle_count": total_raw,
+            "valid_candle_count": total_valid,
+            "malformed_candle_count": malformed,
+            "duplicate_timestamp_count": duplicates,
+            "outlier_candle_count": outliers,
+            "gap_count": gaps,
+            "stale_feed_count": stale,
+            "asset_count": len(rows),
+        }
+
+    def _asset_contribution_rows(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        total_abs_pnl = sum(abs(self._safe_float(row.get("pnl"))) for row in rows) or 1.0
+        return [
+            {
+                "asset": row.get("asset") or row.get("symbol") or "--",
+                "pnl": self._safe_float(row.get("pnl")),
+                "roi": self._safe_float(row.get("roi")),
+                "allocation_weight": self._safe_float(row.get("allocation_weight")),
+                "contribution_pct": abs(self._safe_float(row.get("pnl"))) / total_abs_pnl,
+                "status": row.get("status") or "simulated",
+                "data_quality_score": self._safe_float((row.get("market_history_validation") or {}).get("data_quality_score")),
+            }
+            for row in sorted(rows, key=lambda item: abs(self._safe_float(item.get("pnl"))), reverse=True)
+        ]
+
+    def _data_quality_chart(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        chart_rows: list[dict[str, Any]] = []
+        for row in rows:
+            validation = row.get("market_history_validation") if isinstance(row.get("market_history_validation"), dict) else {}
+            chart_rows.append(
+                {
+                    "asset": row.get("asset") or row.get("symbol") or "--",
+                    "score": self._safe_float(validation.get("data_quality_score")),
+                    "valid": int(validation.get("valid_candle_count") or 0),
+                    "malformed": int(validation.get("malformed_candle_count") or 0),
+                    "duplicates": int(validation.get("duplicate_timestamp_count") or 0),
+                    "outliers": int(validation.get("outlier_candle_count") or 0),
+                    "gaps": int(validation.get("gap_count") or 0),
+                }
+            )
+        return chart_rows
+
+    def _strategy_weight_groups(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        grouped: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            name = str(row.get("label") or row.get("strategy_name") or "Strategy")
+            group = grouped.setdefault(
+                name,
+                {
+                    "label": name,
+                    "active_count": 0,
+                    "disabled_count": 0,
+                    "total_weight": 0.0,
+                    "best_return": -math.inf,
+                    "rows": [],
+                    "disabled_reasons": {},
+                },
+            )
+            enabled = bool(row.get("enabled"))
+            group["active_count"] += 1 if enabled else 0
+            group["disabled_count"] += 0 if enabled else 1
+            group["total_weight"] += self._safe_float(row.get("weight")) if enabled else 0.0
+            group["best_return"] = max(
+                group["best_return"], self._safe_float(row.get("net_return_after_costs"), self._safe_float(row.get("total_return")))
+            )
+            group["rows"].append(dict(row))
+            if not enabled:
+                reason = str(row.get("disabled_reason") or "disabled")
+                reasons = group["disabled_reasons"]
+                reasons[reason] = reasons.get(reason, 0) + 1
+        return [
+            {
+                **group,
+                "best_return": 0.0 if group["best_return"] == -math.inf else group["best_return"],
+            }
+            for group in sorted(grouped.values(), key=lambda item: (item["active_count"] <= 0, -item["total_weight"], item["label"]))
+        ]
 
     def _average_asset_value(self, asset_results: list[dict[str, Any]], section: str, key: str) -> float:
         values = [self._safe_float((item.get(section) or {}).get(key)) for item in asset_results if isinstance(item.get(section), dict)]
@@ -1140,6 +1661,17 @@ class VaultBacktestSimulator:
             ml_score, ml_families = self._ml_decision_blend(enriched, market)
             enriched["ml_blend_score"] = ml_score
             enriched["ml_families_used"] = ml_families
+            upside_payload = one_h10_upside_objective_payload(
+                {
+                    **dict(enriched.get("screener_features") or {}),
+                    **enriched,
+                    "ml_model_agreement": max(0.0, min(ml_score, 1.0)),
+                    "ml_horizon": ONE_H10_HORIZON,
+                    "one_h10_vault": True,
+                },
+                self.config,
+            )
+            enriched.update(upside_payload)
             enriched["objective_score"] = self._one_h10_objective_score(enriched)
             (ranked if key in scored_by_key else fallback).append(enriched)
 
@@ -1183,14 +1715,26 @@ class VaultBacktestSimulator:
         target_return = max(self.one_h10_target_multiplier() - 1.0, 1e-9)
         hit_proxy = min(max(net_edge / target_return, 0.0), 1.0)
         ml_blend = self._safe_float(row.get("ml_blend_score"))
+        upside_rank = self._safe_float(row.get("upside_rank_score")) / 100.0
+        ten_x_probability = self._safe_float(row.get("ten_x_target_probability"))
+        fibonacci_quality = self._safe_float(row.get("fibonacci_quality"))
+        roi_efficiency = self._safe_float(row.get("roi_efficiency_score"))
+        expected_roi_capture = self._safe_float(row.get("expected_roi_capture"))
+        drawdown_penalty = self._safe_float(row.get("drawdown_penalty"))
         return (
-            scanner_score * 0.38
-            + hit_proxy * 0.22
-            + max(net_edge, -0.50) * 0.16
+            scanner_score * 0.20
+            + upside_rank * 0.30
+            + ten_x_probability * 0.16
+            + roi_efficiency * 0.18
+            + expected_roi_capture * 0.16
+            + hit_proxy * 0.14
+            + max(net_edge, -0.50) * 0.12
             + liquidity_capacity * 0.10
             + execution_quality * 0.10
             + ml_blend * 0.12
+            + fibonacci_quality * 0.06
             - drawdown_proxy * 0.04
+            - drawdown_penalty * 0.08
             - cost_drag * 0.08
         )
 
@@ -1212,7 +1756,7 @@ class VaultBacktestSimulator:
             "max_leverage": self._safe_float(row.get("max_leverage"), 1.0),
         }
         if market is not None:
-            context["market_id"] = getattr(market, "id", None)
+            context["market_id"] = self._market_value(market, "id")
         signals: list[float] = []
         used: list[str] = []
         for family in families:
@@ -1241,6 +1785,23 @@ class VaultBacktestSimulator:
             symbol_key,
             str(venue_symbol or symbol_key).upper(),
         )
+
+    @staticmethod
+    def _market_value(market: Any | None, key: str, default: Any = None) -> Any:
+        if market is None:
+            return default
+        if isinstance(market, dict):
+            return market.get(key, default)
+        return getattr(market, key, default)
+
+    @staticmethod
+    def _release_database_session() -> None:
+        if not has_app_context():
+            return
+        try:
+            db.session.remove()
+        except Exception:
+            pass
 
     def response_payload(self, run: BacktestRun) -> dict[str, Any]:
         result = run.result if isinstance(run.result, dict) else {}
@@ -1288,6 +1849,13 @@ class VaultBacktestSimulator:
             "error_code": result.get("error_code", ""),
             "status_label": result.get("status_label", "Simulation complete"),
             "allocation_assets": (result.get("summary") or {}).get("allocation_assets", []),
+            "funding_assets": result.get("funding_assets", (result.get("summary") or {}).get("funding_assets", [])),
+            "conversion_required": bool(result.get("conversion_required", (result.get("summary") or {}).get("conversion_required", False))),
+            "conversion_from": result.get("conversion_from", (result.get("summary") or {}).get("conversion_from", "")),
+            "conversion_to": result.get("conversion_to", (result.get("summary") or {}).get("conversion_to", "")),
+            "conversion_amount": result.get("conversion_amount", (result.get("summary") or {}).get("conversion_amount", 0.0)),
+            "conversion_amount_usd": result.get("conversion_amount_usd", (result.get("summary") or {}).get("conversion_amount_usd", 0.0)),
+            "conversion_status": result.get("conversion_status", (result.get("summary") or {}).get("conversion_status", "")),
             "target_multiplier": result.get("target_multiplier"),
             "target_roi_pct": result.get("target_roi_pct"),
             "objective_horizon_seconds": result.get("objective_horizon_seconds"),
@@ -1298,6 +1866,10 @@ class VaultBacktestSimulator:
             "allocation_plan": result.get("allocation_plan", []),
             "skipped_candidates": result.get("skipped_candidates", []),
             "portfolio_diagnostics": result.get("portfolio_diagnostics", {}),
+            "runtime_diagnostics": result.get("runtime_diagnostics", {}),
+            "data_quality_summary": result.get("data_quality_summary", {}),
+            "asset_contribution": result.get("asset_contribution", []),
+            "strategy_weight_groups": result.get("strategy_weight_groups", []),
             "ml_families_used": result.get("ml_families_used", []),
             "screener_source": result.get("screener_source", ""),
             "result": result,
@@ -1451,6 +2023,68 @@ class VaultBacktestSimulator:
         )
         return rows
 
+    def _rows_with_allocation_funding(
+        self,
+        rows: list[dict[str, Any]],
+        selected_assets: tuple[str, ...],
+    ) -> list[dict[str, Any]]:
+        selected = tuple(dict.fromkeys(normalize_asset(asset) for asset in selected_assets if normalize_asset(asset)))
+        if not selected:
+            return [dict(row) for row in rows]
+        annotated: list[dict[str, Any]] = []
+        for row in rows:
+            collateral = self._row_collateral_asset(row)
+            funding_asset = collateral if collateral in selected else selected[0]
+            funding = self._funding_metadata(
+                {
+                    **row,
+                    "funding_assets": selected,
+                    "funding_asset": funding_asset,
+                    "vault_allocation_asset": funding_asset,
+                    "collateral_asset": collateral,
+                }
+            )
+            annotated.append({**row, **funding})
+        return annotated
+
+    def _row_collateral_asset(self, row: dict[str, Any]) -> str:
+        provider = normalize_provider(row.get("provider"), default="global")
+        return (
+            normalize_asset(row.get("collateral_asset"))
+            or normalize_asset(row.get("settlement_asset"))
+            or normalize_asset(row.get("quote_asset"))
+            or normalize_asset(provider_collateral_asset(provider))
+            or "USDC"
+        )
+
+    def _funding_metadata(self, row: dict[str, Any], allocation_usd: float = 0.0) -> dict[str, Any]:
+        raw_assets = row.get("funding_assets") or row.get("allocation_assets") or []
+        if isinstance(raw_assets, str):
+            raw_assets = [raw_assets]
+        funding_assets = tuple(dict.fromkeys(normalize_asset(asset) for asset in raw_assets if normalize_asset(asset)))
+        funding_asset = normalize_asset(row.get("funding_asset")) or normalize_asset(row.get("vault_allocation_asset"))
+        if not funding_asset and funding_assets:
+            funding_asset = funding_assets[0]
+        if not funding_asset:
+            funding_asset = normalize_asset(row.get("symbol")) or "USDC"
+        if not funding_assets:
+            funding_assets = (funding_asset,)
+        collateral_asset = self._row_collateral_asset(row)
+        conversion_required = bool(funding_asset and collateral_asset and funding_asset != collateral_asset)
+        conversion_amount = max(self._safe_float(allocation_usd), 0.0) if conversion_required else 0.0
+        return {
+            "funding_assets": list(funding_assets),
+            "funding_asset": funding_asset,
+            "vault_allocation_asset": funding_asset,
+            "collateral_asset": collateral_asset,
+            "conversion_required": conversion_required,
+            "conversion_from": funding_asset if conversion_required else "",
+            "conversion_to": collateral_asset if conversion_required else "",
+            "conversion_amount": conversion_amount,
+            "conversion_amount_usd": conversion_amount,
+            "conversion_status": "simulated" if conversion_required else "not_required",
+        }
+
     def _rows_for_selected_assets(self, rows: list[dict[str, Any]], selected_assets: tuple[str, ...]) -> list[dict[str, Any]]:
         selected = tuple(dict.fromkeys(normalize_asset(asset) for asset in selected_assets if normalize_asset(asset)))
         if not selected:
@@ -1565,13 +2199,164 @@ class VaultBacktestSimulator:
                 return market
         return None
 
+    def _market_cached(
+        self,
+        provider: str,
+        symbol: str,
+        venue_symbol: str = "",
+        *,
+        context: SimulationRunContext | None = None,
+    ) -> Any | None:
+        if context is None:
+            return self._market(provider, symbol, venue_symbol)
+        key = self._market_row_key(provider, symbol, venue_symbol)
+        with context.lock:
+            if key in context.market_cache:
+                context.cache_hits["market"] += 1
+                return context.market_cache[key]
+            context.cache_misses["market"] += 1
+        market = self._market(provider, symbol, venue_symbol)
+        with context.lock:
+            context.market_cache[key] = market
+        return market
+
+    def _quote_payload_cached(
+        self,
+        *,
+        provider: str,
+        symbol: str,
+        venue_symbol: str,
+        allocation_usd: float,
+        mode: str,
+        market: Any | None,
+        context: SimulationRunContext | None = None,
+    ) -> dict[str, Any]:
+        if context is None:
+            return self.quote_payload(
+                provider=provider,
+                symbol=symbol,
+                venue_symbol=venue_symbol,
+                allocation_usd=allocation_usd,
+                mode=mode,
+                market=market,
+            )
+        provider_key = normalize_provider(provider, default="global")
+        symbol_key = str(symbol or "BTC").upper().strip()
+        venue_key = str(venue_symbol or symbol_key).upper().strip()
+        key = (provider_key, symbol_key, venue_key, mode)
+        with context.lock:
+            cached = context.quote_cache.get(key)
+            if cached is not None:
+                context.cache_hits["quote"] += 1
+                return self._quote_from_base(cached, allocation_usd)
+            context.cache_misses["quote"] += 1
+        quote = self.quote_payload(
+            provider=provider_key,
+            symbol=symbol_key,
+            venue_symbol=venue_key,
+            allocation_usd=allocation_usd,
+            mode=mode,
+            market=market,
+        )
+        base = {
+            "ok": True,
+            "provider": provider_key,
+            "symbol": symbol_key,
+            "venue_symbol": venue_key,
+            "mid": self._safe_float(quote.get("mid")),
+            "quote_asset": quote.get("quote_asset") or provider_collateral_asset(provider_key),
+            "price_status": quote.get("price_status", "price_unavailable"),
+            "price_source": quote.get("price_source", "unavailable"),
+            "updated_at": quote.get("updated_at") or self._utc_now(),
+        }
+        with context.lock:
+            context.quote_cache[key] = base
+        return self._quote_from_base(base, allocation_usd)
+
+    def _quote_from_base(self, base: dict[str, Any], allocation_usd: float) -> dict[str, Any]:
+        allocation = max(self._safe_float(allocation_usd), 0.0)
+        mid = self._safe_float(base.get("mid"))
+        amount = allocation / mid if mid > 0 else 0.0
+        precision = 8 if mid >= 1000 else 6
+        return {
+            **dict(base),
+            "allocation_usd": allocation,
+            "asset_amount": amount,
+            "asset_amount_formatted": f"{amount:,.{precision}f}",
+        }
+
+    def _order_book_cached(
+        self,
+        symbol: str,
+        *,
+        mode: str,
+        context: SimulationRunContext | None = None,
+    ) -> dict[str, Any]:
+        if context is None:
+            return self._order_book(symbol, mode=mode)
+        key = (str(symbol or "").upper(), mode)
+        with context.lock:
+            cached = context.order_book_cache.get(key)
+            if cached is not None:
+                context.cache_hits["order_book"] += 1
+                return dict(cached)
+            context.cache_misses["order_book"] += 1
+        book = self._order_book(symbol, mode=mode)
+        with context.lock:
+            context.order_book_cache[key] = dict(book)
+        return book
+
+    def _market_profile_cached(
+        self,
+        request_input: SimulationInput,
+        market: Any | None,
+        candles: list[dict[str, Any]],
+        book: dict[str, Any],
+        quote: dict[str, Any],
+        validation: dict[str, Any],
+        *,
+        context: SimulationRunContext | None = None,
+    ) -> dict[str, Any]:
+        if context is None:
+            return self._market_profile(market, candles, book, quote)
+        key = (
+            normalize_provider(request_input.provider, default="global"),
+            str(request_input.venue_symbol or request_input.symbol or "").upper(),
+            validation.get("source_timeframe") or request_input.timeframe,
+            len(candles),
+        )
+        with context.lock:
+            cached = context.profile_cache.get(key)
+            if cached is not None:
+                context.cache_hits["profile"] += 1
+                return dict(cached)
+            context.cache_misses["profile"] += 1
+        profile = self._market_profile(market, candles, book, quote)
+        with context.lock:
+            context.profile_cache[key] = dict(profile)
+        return profile
+
     def _load_simulation_history(
         self,
         request_input: SimulationInput,
         *,
         market_row: dict[str, Any] | None = None,
+        context: SimulationRunContext | None = None,
     ) -> dict[str, Any]:
         symbol = request_input.venue_symbol or request_input.symbol
+        cache_key = (
+            normalize_provider(request_input.provider, default="global"),
+            str(symbol or "").upper(),
+            self.normalize_timeframe(request_input.timeframe),
+            int(getattr(request_input.user, "id", 0) or 0),
+        )
+        if context is not None:
+            with context.lock:
+                cached = context.history_cache.get(cache_key)
+                if cached is not None:
+                    context.cache_hits["history"] += 1
+                    return self._copy_history(cached)
+                context.cache_misses["history"] += 1
         attempts: list[dict[str, Any]] = []
         for candidate in self._history_timeframe_candidates(request_input.timeframe):
             raw_rows, provider_source, provider_error = self._provider_candles(
@@ -1580,10 +2365,11 @@ class VaultBacktestSimulator:
                 limit=int(candidate["limit"]),
                 market_row=market_row,
             )
-            candles = self._prepare_history_candles(raw_rows, candidate)
+            candles, quality = self._prepare_history_candles(raw_rows, candidate)
             validation = self._validate_market_history(
                 raw_rows=raw_rows,
                 candles=candles,
+                quality=quality,
                 requested_timeframe=request_input.timeframe,
                 source_timeframe=str(candidate["source_timeframe"]),
                 provider=request_input.provider,
@@ -1592,18 +2378,25 @@ class VaultBacktestSimulator:
                 provider_error=provider_error,
                 fallback_timeframe=str(candidate.get("fallback_timeframe") or ""),
             )
+            self._record_quality(context, validation)
             attempts.append({"candles": candles, "validation": validation})
             if validation["status"] == "ready":
                 validation["attempts"] = [dict(item["validation"]) for item in attempts]
-                return {"candles": candles, "validation": validation}
+                payload = {"candles": candles, "validation": validation}
+                self._store_history(context, cache_key, payload)
+                return self._copy_history(payload)
 
         best = max(attempts, key=lambda item: int(item["validation"].get("valid_candle_count", 0)), default=None)
         if best is None:
             validation = self._empty_market_history_validation(request_input, symbol)
-            return {"candles": [], "validation": validation}
+            payload = {"candles": [], "validation": validation}
+            self._store_history(context, cache_key, payload)
+            return self._copy_history(payload)
         validation = dict(best["validation"])
         validation["attempts"] = [dict(item["validation"]) for item in attempts]
-        return {"candles": best["candles"], "validation": validation}
+        payload = {"candles": best["candles"], "validation": validation}
+        self._store_history(context, cache_key, payload)
+        return self._copy_history(payload)
 
     def _simulation_candles(self, symbol: str, public_timeframe: str) -> list[dict[str, Any]]:
         request_input = SimulationInput(
@@ -1614,6 +2407,37 @@ class VaultBacktestSimulator:
             timeframe=public_timeframe,
         )
         return list(self._load_simulation_history(request_input)["candles"])
+
+    def _store_history(
+        self,
+        context: SimulationRunContext | None,
+        key: tuple[Any, ...],
+        payload: dict[str, Any],
+    ) -> None:
+        if context is None:
+            return
+        with context.lock:
+            context.history_cache[key] = self._copy_history(payload)
+
+    def _copy_history(self, payload: dict[str, Any]) -> dict[str, Any]:
+        candles = payload.get("candles") if isinstance(payload.get("candles"), list) else []
+        validation = payload.get("validation") if isinstance(payload.get("validation"), dict) else {}
+        return {
+            "candles": [dict(row) for row in candles if isinstance(row, dict)],
+            "validation": self._json_safe(dict(validation)),
+        }
+
+    def _record_quality(self, context: SimulationRunContext | None, validation: dict[str, Any]) -> None:
+        if context is None:
+            return
+        with context.lock:
+            context.data_quality["raw_candles"] += int(validation.get("raw_candle_count") or 0)
+            context.data_quality["valid_candles"] += int(validation.get("valid_candle_count") or 0)
+            context.data_quality["malformed_candles"] += int(validation.get("malformed_candle_count") or 0)
+            context.data_quality["duplicate_candles"] += int(validation.get("duplicate_timestamp_count") or 0)
+            context.data_quality["outlier_candles"] += int(validation.get("outlier_candle_count") or 0)
+            context.data_quality["gap_count"] += int(validation.get("gap_count") or 0)
+            context.data_quality["stale_feeds"] += 1 if validation.get("stale_feed") else 0
 
     def _history_timeframe_candidates(self, public_timeframe: str) -> list[dict[str, Any]]:
         public = self.normalize_timeframe(public_timeframe)
@@ -1692,17 +2516,32 @@ class VaultBacktestSimulator:
                 return None
         return None
 
-    def _prepare_history_candles(self, raw_rows: list[dict[str, Any]], candidate: dict[str, Any]) -> list[dict[str, Any]]:
-        normalized = [self._normalize_candle(row, index) for index, row in enumerate(raw_rows) if isinstance(row, dict)]
+    def _prepare_history_candles(
+        self, raw_rows: list[dict[str, Any]], candidate: dict[str, Any]
+    ) -> tuple[list[dict[str, Any]], dict[str, int]]:
+        normalized: list[dict[str, Any]] = []
+        malformed = 0
+        for index, row in enumerate(raw_rows):
+            if not isinstance(row, dict):
+                malformed += 1
+                continue
+            candle = self._normalize_candle(row, index)
+            if not self._valid_candle(candle):
+                malformed += 1
+                continue
+            normalized.append(candle)
+        cleaned, quality = self._clean_history_candles(normalized)
+        quality["malformed_candle_count"] = quality.get("malformed_candle_count", 0) + malformed
         group_size = max(1, int(candidate.get("group_size") or 1))
-        candles = self._aggregate_candles(normalized, group_size=group_size) if group_size > 1 else normalized
-        return candles[-max(1, int(candidate.get("take") or 160)) :]
+        candles = self._aggregate_candles(cleaned, group_size=group_size) if group_size > 1 else cleaned
+        return candles[-max(1, int(candidate.get("take") or 160)) :], quality
 
     def _validate_market_history(
         self,
         *,
         raw_rows: list[dict[str, Any]],
         candles: list[dict[str, Any]],
+        quality: dict[str, int],
         requested_timeframe: str,
         source_timeframe: str,
         provider: str,
@@ -1711,23 +2550,7 @@ class VaultBacktestSimulator:
         provider_error: str,
         fallback_timeframe: str = "",
     ) -> dict[str, Any]:
-        malformed = max(0, len(raw_rows) - len(candles))
-        by_timestamp: dict[int, dict[str, Any]] = {}
-        duplicate_count = 0
-        for row in candles:
-            timestamp = int(self._safe_float(row.get("timestamp"), -1))
-            close = self._safe_float(row.get("close"))
-            high = self._safe_float(row.get("high"))
-            low = self._safe_float(row.get("low"))
-            open_price = self._safe_float(row.get("open"))
-            if timestamp < 0 or close <= 0 or high <= 0 or low <= 0 or open_price <= 0 or high < low:
-                malformed += 1
-                continue
-            if timestamp in by_timestamp:
-                duplicate_count += 1
-                continue
-            by_timestamp[timestamp] = row
-        cleaned = [by_timestamp[key] for key in sorted(by_timestamp)]
+        cleaned = [row for row in candles if self._valid_candle(row)]
         expected_seconds = self._timeframe_seconds(source_timeframe)
         gaps = []
         for previous, current in zip(cleaned, cleaned[1:], strict=False):
@@ -1735,11 +2558,20 @@ class VaultBacktestSimulator:
             if expected_seconds > 0 and delta > expected_seconds * 3:
                 gaps.append({"from": previous["timestamp"], "to": current["timestamp"], "seconds": delta})
         valid_count = len(cleaned)
+        latest_timestamp = int(self._safe_float(cleaned[-1].get("timestamp"))) if cleaned else 0
+        latest_age = max(0, int(time.time()) - latest_timestamp) if latest_timestamp > 0 else 0
+        stale_after_seconds = max(expected_seconds * 12, 15 * 60)
+        stale = bool(latest_timestamp > 0 and latest_age > stale_after_seconds and self.normalize_timeframe(requested_timeframe) == "live")
         status = "ready" if valid_count >= _MIN_SIMULATION_CANDLES else "insufficient_history"
         error_code = "" if status == "ready" else "insufficient_market_history"
         if provider_error and valid_count <= 0:
             status = "failed"
             error_code = "provider_market_data_unavailable"
+        malformed = int(quality.get("malformed_candle_count", 0))
+        duplicate_count = int(quality.get("duplicate_timestamp_count", 0))
+        outlier_count = int(quality.get("outlier_candle_count", 0))
+        degradation = malformed + duplicate_count + outlier_count + len(gaps) + (1 if stale else 0)
+        quality_score = max(0.0, min(1.0, 1.0 - degradation / max(len(raw_rows), 1)))
         return {
             "status": status,
             "status_label": self._status_label(status),
@@ -1756,8 +2588,13 @@ class VaultBacktestSimulator:
             "required_candle_count": _MIN_SIMULATION_CANDLES,
             "malformed_candle_count": malformed,
             "duplicate_timestamp_count": duplicate_count,
+            "outlier_candle_count": outlier_count,
             "gap_count": len(gaps),
             "gap_examples": gaps[:3],
+            "latest_candle_age_seconds": latest_age,
+            "stale_feed": stale,
+            "data_quality_score": quality_score,
+            "data_quality_status": "degraded" if status == "ready" and degradation else status,
         }
 
     def _empty_market_history_validation(self, request_input: SimulationInput, symbol: str) -> dict[str, Any]:
@@ -1777,8 +2614,13 @@ class VaultBacktestSimulator:
             "required_candle_count": _MIN_SIMULATION_CANDLES,
             "malformed_candle_count": 0,
             "duplicate_timestamp_count": 0,
+            "outlier_candle_count": 0,
             "gap_count": 0,
             "gap_examples": [],
+            "latest_candle_age_seconds": 0,
+            "stale_feed": False,
+            "data_quality_score": 0.0,
+            "data_quality_status": "failed",
         }
 
     def _market_history_error_message(self, validation: dict[str, Any]) -> str:
@@ -1793,6 +2635,58 @@ class VaultBacktestSimulator:
         return (
             f"Insufficient market history for {validation.get('venue_symbol')}: "
             f"{count}/{required} valid {timeframe} candles{fallback_note}."
+        )
+
+    def _clean_history_candles(self, candles: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, int]]:
+        stats = {"malformed_candle_count": 0, "duplicate_timestamp_count": 0, "outlier_candle_count": 0}
+        by_timestamp: dict[int, dict[str, Any]] = {}
+        for _index, candle in sorted(enumerate(candles), key=lambda item: (int(self._safe_float(item[1].get("timestamp"))), item[0])):
+            if not self._valid_candle(candle):
+                stats["malformed_candle_count"] += 1
+                continue
+            timestamp = int(self._safe_float(candle.get("timestamp")))
+            if timestamp in by_timestamp:
+                stats["duplicate_timestamp_count"] += 1
+            by_timestamp[timestamp] = {
+                "timestamp": timestamp,
+                "open": self._safe_float(candle.get("open")),
+                "high": self._safe_float(candle.get("high")),
+                "low": self._safe_float(candle.get("low")),
+                "close": self._safe_float(candle.get("close")),
+                "volume": self._safe_float(candle.get("volume")),
+            }
+        ordered = [by_timestamp[key] for key in sorted(by_timestamp)]
+        cleaned: list[dict[str, Any]] = []
+        previous_close = 0.0
+        max_range_multiple = max(self._safe_float(self.config.get("BACKTEST_OUTLIER_RANGE_MULTIPLE"), 25.0), 2.0)
+        max_jump_multiple = max(self._safe_float(self.config.get("BACKTEST_OUTLIER_JUMP_MULTIPLE"), 12.0), 2.0)
+        for candle in ordered:
+            high = self._safe_float(candle.get("high"))
+            low = self._safe_float(candle.get("low"))
+            close = self._safe_float(candle.get("close"))
+            range_outlier = low > 0 and high / low > max_range_multiple
+            jump_outlier = previous_close > 0 and close > 0 and max(close / previous_close, previous_close / close) > max_jump_multiple
+            if range_outlier or jump_outlier:
+                stats["outlier_candle_count"] += 1
+                continue
+            cleaned.append(candle)
+            previous_close = close
+        return cleaned, stats
+
+    def _valid_candle(self, row: dict[str, Any]) -> bool:
+        timestamp = int(self._safe_float(row.get("timestamp"), -1))
+        close = self._safe_float(row.get("close"))
+        high = self._safe_float(row.get("high"))
+        low = self._safe_float(row.get("low"))
+        open_price = self._safe_float(row.get("open"))
+        return (
+            timestamp >= 0
+            and close > 0
+            and high > 0
+            and low > 0
+            and open_price > 0
+            and high >= max(open_price, close)
+            and low <= min(open_price, close)
         )
 
     def _aggregate_candles(self, candles: list[dict[str, Any]], *, group_size: int) -> list[dict[str, Any]]:
@@ -1836,10 +2730,10 @@ class VaultBacktestSimulator:
         quote: dict[str, Any],
     ) -> dict[str, Any]:
         mid = self._safe_float(quote.get("mid")) or self._safe_float(candles[-1].get("close") if candles else 0.0)
-        spread = self._safe_float(getattr(market, "spread_bps", 0.0) if market is not None else 0.0)
+        spread = self._safe_float(self._market_value(market, "spread_bps", 0.0))
         if spread <= 0:
             spread = spread_bps(book, mid)
-        liquidity = self._safe_float(getattr(market, "liquidity_usd", 0.0) if market is not None else 0.0)
+        liquidity = self._safe_float(self._market_value(market, "liquidity_usd", 0.0))
         if liquidity <= 0:
             liquidity = book_liquidity_usd(book, depth=max(1, int(self.config.get("VAULT_BOOK_DEPTH_LEVELS", 5) or 5)))
         vol = volatility_pct(candles)
@@ -1863,12 +2757,11 @@ class VaultBacktestSimulator:
 
     def _auto_controls(self, market: LeveragedMarket | None, profile: dict[str, Any]) -> dict[str, Any]:
         fee_bps = self._safe_float(
-            getattr(market, "fee_bps", self.config.get("FEE_BPS", 5.0)) if market is not None else self.config.get("FEE_BPS", 5.0), 5.0
+            self._market_value(market, "fee_bps", self.config.get("FEE_BPS", 5.0)),
+            5.0,
         )
         max_exchange = self._safe_float(
-            getattr(market, "max_leverage", self.config.get("MAX_LEVERAGE", 1.0))
-            if market is not None
-            else self.config.get("MAX_LEVERAGE", 1.0),
+            self._market_value(market, "max_leverage", self.config.get("MAX_LEVERAGE", 1.0)),
             1.0,
         )
         configured_max = min(
@@ -1966,7 +2859,8 @@ class VaultBacktestSimulator:
             except Exception as exc:  # noqa: BLE001
                 result = {}
                 error = str(exc)
-            score = self._strategy_score(result, auto)
+            upside_objective = self._strategy_upside_objective(result, auto)
+            score = self._strategy_score(result, auto, upside_objective=upside_objective)
             results.append(
                 {
                     "strategy_name": strategy_name,
@@ -1979,11 +2873,46 @@ class VaultBacktestSimulator:
                     "max_drawdown": self._safe_float(result.get("max_drawdown")) if result else 0.0,
                     "win_rate": self._safe_float(result.get("win_rate")) if result else 0.0,
                     "trade_count": int(result.get("trade_count") or 0) if result else 0,
+                    "ten_x_target_probability": upside_objective.get("ten_x_target_probability", 0.0),
+                    "upside_rank_score": upside_objective.get("upside_rank_score", 0.0),
+                    "expected_roi_capture": upside_objective.get("expected_roi_capture", 0.0),
+                    "roi_efficiency_score": upside_objective.get("roi_efficiency_score", 0.0),
+                    "payoff_asymmetry_quality": upside_objective.get("payoff_asymmetry_quality", 0.0),
+                    "drawdown_penalty": upside_objective.get("drawdown_penalty", 0.0),
+                    "upside_blockers": list(upside_objective.get("upside_blockers") or []),
                 }
             )
         return results
 
-    def _strategy_score(self, result: dict[str, Any], auto: dict[str, Any]) -> float:
+    def _strategy_upside_objective(self, result: dict[str, Any], auto: dict[str, Any]) -> dict[str, Any]:
+        total_return = self._safe_float(result.get("total_return")) if result else 0.0
+        profit_factor = self._safe_float(result.get("profit_factor")) if result else 0.0
+        return one_h10_upside_objective_payload(
+            {
+                **dict(result or {}),
+                **dict(auto or {}),
+                "net_expected_return_bps": total_return * 10_000.0,
+                "execution_adjusted_net_return_bps": total_return * 10_000.0,
+                "gross_expected_return_bps": max(total_return, 0.0) * 10_000.0 + self._safe_float(auto.get("cost_drag_bps")),
+                "cost_drag_bps": self._safe_float(auto.get("cost_drag_bps")),
+                "expected_execution_quality": self._safe_float(auto.get("confidence")),
+                "max_drawdown": self._safe_float(result.get("max_drawdown")) if result else 0.0,
+                "win_rate": self._safe_float(result.get("win_rate")) if result else 0.0,
+                "profit_factor": profit_factor,
+                "risk_reward": max(profit_factor, 0.0),
+                "target_progress": max(0.0, min(total_return / max(self.one_h10_target_multiplier() - 1.0, 1e-9), 1.0)),
+                "target_roi_pct": self.one_h10_target_roi_pct(),
+            },
+            self.config,
+        )
+
+    def _strategy_score(
+        self,
+        result: dict[str, Any],
+        auto: dict[str, Any],
+        *,
+        upside_objective: dict[str, Any] | None = None,
+    ) -> float:
         if not result:
             return -1.0
         total_return = self._safe_float(result.get("total_return"))
@@ -1993,7 +2922,21 @@ class VaultBacktestSimulator:
         cost_penalty = self._safe_float(auto.get("cost_drag_bps")) / 10_000.0
         target_return = max(self.one_h10_target_multiplier() - 1.0, 1e-9)
         target_progress = min(max(total_return / target_return, -1.0), 1.0)
-        return total_return * 0.58 + target_progress * 0.22 - drawdown * 0.50 + win_rate * 0.08 + trades * 0.05 - cost_penalty
+        upside = upside_objective or {}
+        roi_efficiency = self._safe_float(upside.get("roi_efficiency_score"))
+        expected_capture = self._safe_float(upside.get("expected_roi_capture"))
+        ten_x_probability = self._safe_float(upside.get("ten_x_target_probability"))
+        return (
+            total_return * 0.46
+            + target_progress * 0.18
+            + roi_efficiency * 0.12
+            + expected_capture * 0.10
+            + ten_x_probability * 0.08
+            - drawdown * 0.50
+            + win_rate * 0.08
+            + trades * 0.05
+            - cost_penalty
+        )
 
     def _strategy_disable_reason(self, item: dict[str, Any]) -> str:
         if item.get("error"):
@@ -2018,7 +2961,16 @@ class VaultBacktestSimulator:
         active_candidates = [item["strategy_name"] for item in ordered if not self._strategy_disable_reason(item)]
         active_names = set(active_candidates[:4])
         raw_weights = {
-            item["strategy_name"]: max(float(item.get("score", 0.0)) + self._safe_float(item.get("net_return_after_costs")) + 0.01, 0.01)
+            item["strategy_name"]: max(
+                float(item.get("score", 0.0)) * 0.75
+                + self._safe_float(item.get("net_return_after_costs")) * 1.50
+                + self._safe_float(item.get("roi_efficiency_score")) * 0.45
+                + self._safe_float(item.get("expected_roi_capture")) * 0.35
+                + self._safe_float(item.get("ten_x_target_probability")) * 0.20
+                + 0.01,
+                0.01,
+            )
+            ** 1.20
             for item in ordered
             if item["strategy_name"] in active_names
         }
@@ -2040,6 +2992,13 @@ class VaultBacktestSimulator:
                     "net_return_after_costs": item["net_return_after_costs"],
                     "win_rate": item["win_rate"],
                     "trade_count": item["trade_count"],
+                    "ten_x_target_probability": item.get("ten_x_target_probability", 0.0),
+                    "upside_rank_score": item.get("upside_rank_score", 0.0),
+                    "expected_roi_capture": item.get("expected_roi_capture", 0.0),
+                    "roi_efficiency_score": item.get("roi_efficiency_score", 0.0),
+                    "payoff_asymmetry_quality": item.get("payoff_asymmetry_quality", 0.0),
+                    "drawdown_penalty": item.get("drawdown_penalty", 0.0),
+                    "upside_blockers": list(item.get("upside_blockers") or []),
                     "disabled_reason": reason,
                 }
             )
@@ -2180,6 +3139,8 @@ class VaultBacktestSimulator:
         request_input: SimulationInput,
         candles: list[dict[str, Any]],
         profile: dict[str, Any],
+        *,
+        market: Any | None = None,
     ) -> dict[str, Any]:
         fallback = {"candles": self._chart_candles(candles), "overlays": self._fallback_overlays(candles, profile)}
         if self.ml_projection_engine is None:
@@ -2204,7 +3165,9 @@ class VaultBacktestSimulator:
                     symbol=request_input.symbol,
                     allocation_cap_usd=request_input.allocation_usd,
                     available_margin_usd=request_input.allocation_usd,
-                    market=self._market(request_input.provider, request_input.symbol, request_input.venue_symbol),
+                    market=market
+                    if market is not None
+                    else self._market(request_input.provider, request_input.symbol, request_input.venue_symbol),
                 )
             )
         except Exception:

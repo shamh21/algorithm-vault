@@ -10,23 +10,42 @@
 <section
   class="vault-mobile-shell vault-execution-shell backtest-vault-shell"
   data-backtest-root
+  data-backtest-state="{% if latest_payload %}ready{% else %}empty{% endif %}"
   data-symbols-url="{{ url_for('backtests.symbols_api') }}"
   data-chart-lib-src="{{ url_for('static', filename='js/vendor/lightweight-charts.standalone.production.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}"
 >
-  <article class="vault-card vault-start-card vault-command-card backtest-vault-card">
-    <div class="vault-title-row vault-command-head">
-      <div>
+  <article class="vault-card vault-start-card vault-command-card backtest-vault-card" aria-labelledby="backtest-page-title">
+    <div class="vault-title-row vault-command-head backtest-page-header">
+      <div class="backtest-page-copy">
         <span class="card-kicker">Paper Vault</span>
-        <h1>Vault backtesting</h1>
-        <p>Review simulated 1H10 BacktestRun results. This route does not start workers, strategy runs, or broker orders.</p>
+        <h1 id="backtest-page-title">Vault backtesting</h1>
+        <div class="backtest-header-meta" aria-label="Backtest safeguards">
+          <span>Simulation only</span>
+          <span>1H10</span>
+          <span>Risk gates preserved</span>
+        </div>
       </div>
-      <div class="backtest-balance-pill">
-        <span>Paper Cap</span>
-        <strong>${{ "%.0f"|format(paper_balance_usd) }}</strong>
+      <div class="backtest-header-actions">
+        <div class="backtest-balance-pill" role="status" aria-label="Paper allocation cap">
+          <span>Paper Cap</span>
+          <strong>${{ "%.0f"|format(paper_balance_usd) }}</strong>
+        </div>
+        <button
+          type="submit"
+          form="backtest-vault-form"
+          class="primary vault-start-button backtest-run-button backtest-header-run"
+          data-backtest-top-submit
+          data-loading-label="Running..."
+          data-default-label="Run Backtest"
+          aria-label="Run Vault backtest"
+        >
+          Run Backtest
+        </button>
       </div>
     </div>
 
     <form
+      id="backtest-vault-form"
       method="post"
       action="{{ url_for('backtests.run') }}"
       class="form-grid vault-form vault-execution-form backtest-vault-form"
@@ -34,6 +53,7 @@
       data-paper-balance="{{ paper_balance_usd }}"
       data-allocation-cap="{{ allocation_cap_usd }}"
       data-default-allocation-asset="{{ default_allocation_asset }}"
+      aria-busy="false"
     >
       {{ csrf_input()|safe }}
       <input type="hidden" name="mode" value="all_assets">
@@ -46,13 +66,13 @@
           <strong>Vault Allocation Assets</strong>
         </div>
         <div class="backtest-asset-toolbar">
-          <div>
+          <div role="status" aria-live="polite" aria-label="Eligible pair status">
             <span data-universe-ready>Checking</span>
             <strong data-universe-count>{{ initial_symbols.total|default(0) }}</strong>
           </div>
-          <button type="button" class="secondary backtest-use-vault" data-use-vault-allocation>Use Vault Allocation</button>
+          <button type="button" class="secondary backtest-use-vault" data-use-vault-allocation aria-label="Select all funded Vault allocation assets">Use Vault Allocation</button>
         </div>
-        <div class="asset-selector vault-asset-selector backtest-allocation-selector" role="group" aria-label="Vault allocation assets" data-allocation-asset-list>
+        <div class="asset-selector vault-asset-selector backtest-allocation-selector" role="group" aria-label="Vault allocation assets" data-allocation-asset-list aria-busy="false">
           {% for asset in allocation_assets %}
             {% set is_default = asset.asset == default_allocation_asset %}
             <label
@@ -120,7 +140,7 @@
           <span>1H10</span>
           <strong>1H10 strategy objective</strong>
           <small>AI-ranked multi-asset simulation objective</small>
-          <em data-cycle-summary>All enabled leveraged pairs are simulated only; live execution stays on the Vault Cycle path.</em>
+          <em data-cycle-summary>Portfolio simulation only.</em>
         </div>
       </section>
 
@@ -135,7 +155,7 @@
         </div>
         <details class="backtest-eligible-pairs">
           <summary>View eligible pairs</summary>
-          <div class="backtest-symbol-list" aria-label="Eligible leveraged pairs" data-symbol-list>
+          <div class="backtest-symbol-list" role="list" aria-label="Eligible leveraged pairs" data-symbol-list aria-busy="true">
             <div class="backtest-skeleton-row"></div>
             <div class="backtest-skeleton-row"></div>
           </div>
@@ -156,24 +176,24 @@
       <div>
         <span class="card-kicker">Latest Vault Cycle Results</span>
         <h2 data-backtest-title>Portfolio Vault Cycle</h2>
-        <small class="backtest-result-note">Historical simulation results only. No live worker or broker order was started.</small>
+        <div class="backtest-result-flags">
+          <span>Simulation only</span>
+          <span data-data-quality-pill>Data quality --</span>
+          <span data-runtime-pill>Runtime --</span>
+        </div>
       </div>
       <span class="backtest-result-chip" data-backtest-summary>All enabled pairs / 1H10</span>
     </div>
 
     <div class="backtest-metric-strip">
-      <div><span>ROI</span><strong data-metric="roi">0.00%</strong></div>
-      <div><span>PnL</span><strong data-metric="pnl">$0.00</strong></div>
-      <div><span>Win Rate</span><strong data-metric="win_rate">0.00%</strong></div>
-      <div><span>Max Drawdown</span><strong data-metric="max_drawdown">0.00%</strong></div>
-      <div><span>Trades</span><strong data-metric="trades">0</strong></div>
-      <div><span>Closed</span><strong data-metric="closed_trades">0</strong></div>
-      <div><span>Open</span><strong data-metric="open_trades">0</strong></div>
-      <div><span>Fees</span><strong data-metric="fees">$0.00</strong></div>
-      <div><span>Avg Trade</span><strong data-metric="average_trade">$0.00</strong></div>
-      <div><span>Profit Factor</span><strong data-metric="profit_factor">0.00</strong></div>
-      <div><span>Target Progress</span><strong data-metric="target_progress">0.00%</strong></div>
-      <div><span>Objective Gap</span><strong data-metric="objective_gap">0.00%</strong></div>
+      <div class="backtest-metric-card is-primary"><span>ROI</span><strong data-metric="roi">0.00%</strong></div>
+      <div class="backtest-metric-card is-primary"><span>PnL</span><strong data-metric="pnl">$0.00</strong></div>
+      <div class="backtest-metric-card is-primary"><span>Win Rate</span><strong data-metric="win_rate">0.00%</strong></div>
+      <div class="backtest-metric-card is-primary"><span>Drawdown</span><strong data-metric="max_drawdown">0.00%</strong></div>
+      <div class="backtest-metric-card is-secondary"><span>Trades</span><strong data-metric="trades">0</strong></div>
+      <div class="backtest-metric-card is-secondary"><span>Fees</span><strong data-metric="fees">$0.00</strong></div>
+      <div class="backtest-metric-card is-secondary"><span>Avg Trade</span><strong data-metric="average_trade">$0.00</strong></div>
+      <div class="backtest-metric-card is-secondary"><span>Target</span><strong data-metric="target_progress">0.00%</strong></div>
     </div>
 
     <div class="backtest-chart-panel">
@@ -185,8 +205,10 @@
         <div class="backtest-chart-tabs" role="tablist" aria-label="Portfolio simulation chart mode">
           <button type="button" class="is-active" data-chart-mode="equity">Equity</button>
           <button type="button" data-chart-mode="pnl">PnL</button>
-          <button type="button" data-chart-mode="contribution">Assets</button>
-          <button type="button" data-chart-mode="timeline">Timeline</button>
+          <button type="button" data-chart-mode="drawdown">Drawdown</button>
+          <button type="button" data-chart-mode="assets">Assets</button>
+          <button type="button" data-chart-mode="trades">Trades</button>
+          <button type="button" data-chart-mode="quality">Quality</button>
         </div>
       </div>
       <div class="backtest-chart-stage">
@@ -206,7 +228,7 @@
 
       <section class="backtest-intel-panel">
         <div class="backtest-panel-mini-head">
-          <span>Execution Quality</span>
+          <span>Execution</span>
           <strong data-execution-score>--</strong>
         </div>
         <div class="backtest-intel-list" data-execution-list></div>
@@ -214,7 +236,7 @@
 
       <section class="backtest-intel-panel">
         <div class="backtest-panel-mini-head">
-          <span>After-cost Allocation</span>
+          <span>Allocation</span>
           <strong data-allocation-policy>--</strong>
         </div>
         <div class="backtest-intel-list" data-portfolio-diagnostics></div>
@@ -226,7 +248,7 @@
         <span>Asset Contribution</span>
         <strong data-active-strategies>--</strong>
       </div>
-      <div class="backtest-asset-breakdown" data-asset-breakdown></div>
+      <div class="backtest-table-wrap" data-asset-breakdown></div>
     </section>
 
     <section class="backtest-strategy-panel">
@@ -247,5 +269,5 @@
 {% endblock %}
 
 {% block page_scripts %}
-<script defer src="{{ url_for('static', filename='js/backtests.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}-backtest-history-diagnostics-2"></script>
+<script defer src="{{ url_for('static', filename='js/backtests.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}-backtest-speed-ux-1"></script>
 {% endblock %}
