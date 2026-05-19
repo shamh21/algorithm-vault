@@ -26,6 +26,8 @@
     chartHost: document.querySelector("[data-backtest-chart]"),
     chartOverlay: document.querySelector("[data-backtest-overlay]"),
     chartTitle: document.querySelector("[data-chart-title]"),
+    chartStats: document.querySelector("[data-chart-stats]"),
+    resultInsights: document.querySelector("[data-result-insights]"),
     dataQualityPill: document.querySelector("[data-data-quality-pill]"),
     runtimePill: document.querySelector("[data-runtime-pill]"),
     autopilotConfidence: document.querySelector("[data-autopilot-confidence]"),
@@ -251,6 +253,7 @@
     renderSummary(payload.summary || {});
     renderMetrics(payload.metrics || {});
     renderQualityRuntime(payload.data_quality_summary || payload.result?.data_quality_summary || {}, payload.runtime_diagnostics || payload.result?.runtime_diagnostics || {});
+    renderResultInsights(payload);
     renderAutopilot(payload.autopilot || {});
     renderExecution(payload.execution_quality || {}, payload.trade_decision || {}, payload.simulation_scope || {});
     renderPortfolioDiagnostics(payload.portfolio_diagnostics || payload.result?.portfolio_diagnostics || {});
@@ -296,7 +299,7 @@
   };
   const renderAutopilot = (autopilot) => {
     if (refs.autopilotConfidence) refs.autopilotConfidence.textContent = percent.format(number(autopilot.confidence));
-    renderKeyValues(refs.autopilotList, [["Status", autopilot.status || "ready"], ["Regime", autopilot.market_regime || "aggregate"], ["Models", Array.isArray(autopilot.model_stack) ? autopilot.model_stack.length : 0], ["Active", autopilot.active_strategy_count ?? "--"]]);
+    renderKeyValues(refs.autopilotList, [["Status", formatState(autopilot.status || "ready")], ["Regime", formatState(autopilot.market_regime || "aggregate")], ["Models", Array.isArray(autopilot.model_stack) ? autopilot.model_stack.length : 0], ["Active", autopilot.active_strategy_count ?? "--"]]);
   };
   const renderExecution = (execution, tradeDecision = {}, scope = {}) => {
     if (refs.executionScore) refs.executionScore.textContent = percent.format(number(execution.fill_quality));
@@ -305,19 +308,76 @@
   const renderPortfolioDiagnostics = (diagnostics) => {
     if (refs.allocationPolicy) refs.allocationPolicy.textContent = String(diagnostics.allocation_policy || "after-cost").replace(/_/g, " ");
     const skipped = diagnostics.skipped_reasons || {};
-    const skippedText = Object.entries(skipped).map(([reason, count]) => `${reason.replace(/_/g, " ")} (${count})`).join(", ") || "none";
+    const skippedText = Object.entries(skipped).map(([reason, count]) => `${formatReason(reason)} (${count})`).join(", ") || "none";
     renderKeyValues(refs.portfolioDiagnostics, [["Allocated", diagnostics.allocated_candidate_count || 0], ["Skipped", diagnostics.skipped_candidate_count || 0], ["Score", number(diagnostics.total_after_cost_score).toFixed(3)], ["Reasons", skippedText], ["Gates", String(diagnostics.live_authority || "server risk gates").replace(/_/g, " ")]]);
+  };
+  const renderResultInsights = (payload) => {
+    if (!refs.resultInsights) return;
+    const metrics = payload.metrics || {};
+    const diagnostics = payload.portfolio_diagnostics || payload.result?.portfolio_diagnostics || {};
+    const quality = payload.data_quality_summary || payload.result?.data_quality_summary || {};
+    const runtime = payload.runtime_diagnostics || payload.result?.runtime_diagnostics || {};
+    const assets = assetContributionRows(payload);
+    const bestAsset = assets.find((row) => number(row.pnl) > 0) || assets[0] || null;
+    const elapsed = number(runtime.elapsed_ms);
+    const cacheHits = Object.values(runtime.cache_hits || {}).reduce((total, value) => total + number(value), 0);
+    const skipped = number(diagnostics.skipped_candidate_count);
+    const insightRows = [
+      ["Best asset", bestAsset ? `${bestAsset.asset || bestAsset.symbol || "--"} ${money.format(number(bestAsset.pnl))}` : "--", bestAsset && number(bestAsset.pnl) >= 0 ? "positive" : ""],
+      ["Capital", money.format(number(metrics.initial_balance ?? payload.summary?.allocation)), ""],
+      ["Allocated", `${number(diagnostics.allocated_candidate_count, assets.length)} assets`, ""],
+      ["Skipped", `${skipped} assets`, skipped ? "warning" : ""],
+      ["Data", percent.format(number(quality.score)), quality.status === "degraded" ? "warning" : "positive"],
+      ["Runtime", elapsed >= 1000 ? `${(elapsed / 1000).toFixed(1)}s` : `${Math.round(elapsed)}ms`, ""],
+      ["Cache", `${compact.format(cacheHits)} hits`, cacheHits ? "positive" : ""],
+    ];
+    refs.resultInsights.innerHTML = insightRows.map(([label, value, tone]) => `
+      <div class="backtest-insight-chip${tone ? ` is-${tone}` : ""}">
+        <span>${escapeHtml(label)}</span>
+        <strong>${escapeHtml(value)}</strong>
+      </div>`).join("");
   };
   const renderAssetBreakdown = (rows) => {
     if (!refs.assetBreakdown) return;
     if (refs.activeStrategies) refs.activeStrategies.textContent = `${rows.length} assets`;
     if (!rows.length) { refs.assetBreakdown.innerHTML = '<div class="backtest-symbol-empty">No asset-level results yet.</div>'; return; }
-    const tableRows = rows.slice().sort((a, b) => Math.abs(number(b.pnl)) - Math.abs(number(a.pnl))).slice(0, 12).map((row) => {
+    const sortedRows = rows.slice().sort((a, b) => Math.abs(number(b.pnl)) - Math.abs(number(a.pnl))).slice(0, 12);
+    const cards = sortedRows.map((row) => {
       const status = String(row.status || (row.error ? "failed" : "simulated")).toLowerCase();
       const validation = row.market_history_validation || {};
-      const historyText = historyLabel(validation, row.fallback_timeframe);
-      const detail = row.error || row.skip_reason || fundingLabel(row) || historyText || row.exchange || row.provider_label || "Enabled venue";
-      const quality = number(validation.data_quality_score, NaN);
+      const detail = assetDetail(row, validation);
+      const historyText = compactHistoryLabel(validation, row.fallback_timeframe);
+      const qualityText = qualityLabel(validation);
+      const pnl = number(row.pnl);
+      const roi = number(row.roi);
+      const weight = number(row.allocation_weight);
+      return `
+      <article class="backtest-asset-card is-${escapeHtml(status)}">
+        <div class="backtest-asset-card-head">
+          <div>
+            <strong>${escapeHtml(row.asset || row.symbol || "--")}</strong>
+            <small>${escapeHtml(detail)}</small>
+          </div>
+          <em class="backtest-status-chip is-${escapeHtml(status)}">${escapeHtml(statusLabel(row, status))}</em>
+        </div>
+        <div class="backtest-asset-card-metrics">
+          <span><small>PnL</small><strong class="${pnl >= 0 ? "positive" : "negative"}">${money.format(pnl)}</strong></span>
+          <span><small>ROI</small><strong class="${roi >= 0 ? "positive" : "negative"}">${percent.format(roi)}</strong></span>
+          <span><small>Weight</small><strong>${percent.format(weight)}</strong></span>
+          <span><small>Trades</small><strong>${Math.round(number(row.trades ?? row.trade_count))}</strong></span>
+        </div>
+        <div class="backtest-asset-card-foot">
+          <span>${escapeHtml(historyText || "History --")}</span>
+          <span>${escapeHtml(qualityText)}</span>
+        </div>
+      </article>`;
+    }).join("");
+    const tableRows = sortedRows.map((row) => {
+      const status = String(row.status || (row.error ? "failed" : "simulated")).toLowerCase();
+      const validation = row.market_history_validation || {};
+      const historyText = compactHistoryLabel(validation, row.fallback_timeframe);
+      const detail = assetDetail(row, validation);
+      const qualityText = qualityLabel(validation);
       return `
       <tr class="backtest-asset-row is-${escapeHtml(status)}">
         <th scope="row">
@@ -325,17 +385,18 @@
           <small>${escapeHtml(detail)}</small>
           <span class="backtest-history-note">${escapeHtml(historyText)}</span>
         </th>
-        <td><em class="backtest-status-chip is-${escapeHtml(status)}">${escapeHtml(row.status_label || status.replace(/_/g, " "))}</em></td>
+        <td><em class="backtest-status-chip is-${escapeHtml(status)}">${escapeHtml(statusLabel(row, status))}</em></td>
         <td><strong class="${number(row.pnl) >= 0 ? "positive" : "negative"}">${money.format(number(row.pnl))}</strong></td>
         <td>${percent.format(number(row.roi))}</td>
         <td>${percent.format(number(row.allocation_weight))}</td>
         <td>${number(row.net_expected_return_bps).toFixed(1)} bps</td>
         <td>${number(row.cost_drag_bps).toFixed(1)} bps</td>
         <td>${Math.round(number(row.trades ?? row.trade_count))}</td>
-        <td>${Number.isFinite(quality) ? percent.format(quality) : escapeHtml(historyCount(validation))}</td>
+        <td>${escapeHtml(qualityText)}</td>
       </tr>`;
     }).join("");
     refs.assetBreakdown.innerHTML = `
+      <div class="backtest-asset-cards" data-mobile-asset-cards>${cards}</div>
       <table class="backtest-asset-table">
         <thead><tr><th>Asset</th><th>Status</th><th>PnL</th><th>ROI</th><th>Weight</th><th>Edge</th><th>Cost</th><th>Trades</th><th>Quality</th></tr></thead>
         <tbody>${tableRows}</tbody>
@@ -348,12 +409,19 @@
       if (refs.strategyWeightCount) refs.strategyWeightCount.textContent = `${groupedRows.reduce((total, group) => total + number(group.active_count), 0)} active`;
       refs.strategyWeights.innerHTML = groupedRows.map((group, index) => {
         const reasons = group.disabled_reasons || {};
-        const reasonText = Object.entries(reasons).map(([reason, count]) => `${reason.replace(/_/g, " ")} (${count})`).join(", ") || "none";
+        const reasonText = Object.entries(reasons).map(([reason, count]) => `${formatReason(reason)} (${count})`).join(", ") || "All active";
         const childRows = Array.isArray(group.rows) ? group.rows : [];
         return `
           <details class="backtest-strategy-group" ${number(group.active_count) > 0 ? "open" : ""}>
             <summary>
-              <span><strong>${escapeHtml(group.label || "Strategy")}</strong><small>${number(group.active_count)} active · ${number(group.disabled_count)} off · ${reasonText}</small></span>
+              <span class="backtest-strategy-group-copy">
+                <strong>${escapeHtml(group.label || "Strategy")}</strong>
+                <small>
+                  <span class="backtest-strategy-pill is-active">${number(group.active_count)} active</span>
+                  <span class="backtest-strategy-pill">${number(group.disabled_count)} off</span>
+                  <span class="backtest-strategy-reason">${escapeHtml(reasonText)}</span>
+                </small>
+              </span>
               <em>${percent.format(number(group.total_weight))}</em>
             </summary>
             <div>
@@ -370,9 +438,44 @@
   };
   const renderSystemMetrics = (metrics) => Object.entries(systemNodes).forEach(([key, node]) => { node.textContent = metrics[key] || node.textContent || "Auto"; });
   const renderKeyValues = (host, rows) => { if (host) host.innerHTML = rows.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(String(value))}</strong></div>`).join(""); };
+  const renderChartStats = (payload, mode) => {
+    if (!refs.chartStats) return;
+    const metrics = payload.metrics || {};
+    const charts = payload.charts || {};
+    const series = Array.isArray(charts[mode]) ? charts[mode] : [];
+    const values = series.map((row) => number(row.y)).filter(Number.isFinite);
+    const assets = assetContributionRows(payload);
+    const trades = Array.isArray(charts.trade_timeline) ? charts.trade_timeline : [];
+    const qualities = qualityRowsFromPayload(payload);
+    const dataQuality = payload.data_quality_summary || payload.result?.data_quality_summary || {};
+    let rows = [];
+    if (mode === "assets") {
+      const best = assets.find((row) => number(row.pnl) > 0) || assets[0] || {};
+      const skipped = number(payload.portfolio_diagnostics?.skipped_candidate_count || payload.result?.portfolio_diagnostics?.skipped_candidate_count);
+      rows = [["Best", best.asset || best.symbol || "--", "positive"], ["Asset PnL", money.format(number(best.pnl)), number(best.pnl) >= 0 ? "positive" : "negative"], ["Positive", String(assets.filter((row) => number(row.pnl) > 0).length), ""], ["Skipped", String(skipped), skipped ? "warning" : ""]];
+    } else if (mode === "trades") {
+      rows = [["Trades", String(Math.round(number(metrics.trades))), ""], ["Winners", String(trades.filter((row) => number(row.pnl) >= 0).length), "positive"], ["Losers", String(trades.filter((row) => number(row.pnl) < 0).length), "negative"], ["Avg", money.format(number(metrics.average_trade)), ""]];
+    } else if (mode === "quality") {
+      const average = qualities.length ? qualities.reduce((total, row) => total + number(row.score), 0) / qualities.length : number(dataQuality.score);
+      const issues = number(dataQuality.gap_count) + number(dataQuality.malformed_candle_count) + number(dataQuality.duplicate_timestamp_count) + number(dataQuality.outlier_candle_count);
+      rows = [["Score", percent.format(average), average >= 0.9 ? "positive" : "warning"], ["Assets", String(number(dataQuality.asset_count, qualities.length)), ""], ["Valid", compact.format(number(dataQuality.valid_candle_count)), ""], ["Issues", compact.format(issues), issues ? "warning" : "positive"]];
+    } else {
+      const current = values.length ? values[values.length - 1] : 0;
+      const high = values.length ? Math.max(...values) : 0;
+      const low = values.length ? Math.min(...values) : 0;
+      const formatter = mode === "drawdown" ? percent : money;
+      rows = [["Current", formatter.format(current), mode === "drawdown" || current < 0 ? "negative" : "positive"], ["High", formatter.format(high), "positive"], ["Low", formatter.format(low), low < 0 ? "negative" : ""], ["Points", String(series.length), ""]];
+    }
+    refs.chartStats.innerHTML = rows.map(([label, value, tone]) => `
+      <div class="backtest-chart-stat${tone ? ` is-${tone}` : ""}">
+        <span>${escapeHtml(label)}</span>
+        <strong>${escapeHtml(value)}</strong>
+      </div>`).join("");
+  };
 
   const renderChart = async () => {
     if (refs.chartTitle) refs.chartTitle.textContent = chartLabel(state.chartMode);
+    renderChartStats(state.payload || {}, state.chartMode);
     if (!state.chart) state.chart = new BacktestChart(refs.chartHost, refs.chartOverlay, urls.chartLib);
     await state.chart.render(state.payload || {}, state.chartMode);
   };
@@ -453,13 +556,60 @@
       quality: "Data Quality",
     }[mode] || "Portfolio Simulation";
   }
+  function formatReason(value) {
+    const raw = String(value ?? "").trim();
+    if (!raw || raw.toLowerCase() === "none") return "";
+    const normalized = raw.toLowerCase().replace(/[\s-]+/g, "_");
+    const labels = {
+      disabled: "Off",
+      failed: "Failed",
+      insufficient_history: "Insufficient history",
+      negative_after_cost_return: "Negative after-cost return",
+      no_after_cost_trades: "No after-cost trades",
+      no_positive_after_cost_trades: "No after-cost trades",
+      no_trades: "No trades",
+      price_unavailable: "Price unavailable",
+      stale_market_data: "Stale market data",
+      zero_allocation: "No allocation",
+    };
+    if (labels[normalized]) return labels[normalized];
+    return raw.replace(/[_-]+/g, " ").replace(/\s+/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
+  }
+  function formatState(value) {
+    const label = formatReason(value);
+    return label || String(value || "--");
+  }
+  function assetContributionRows(payload) {
+    const rows = payload?.asset_contribution || payload?.charts?.asset_contribution || payload?.asset_diagnostics || payload?.asset_breakdown || payload?.result?.asset_breakdown || [];
+    return Array.isArray(rows) ? rows.slice().sort((a, b) => Math.abs(number(b.pnl)) - Math.abs(number(a.pnl))) : [];
+  }
+  function qualityRowsFromPayload(payload) {
+    const rows = payload?.charts?.data_quality || payload?.data_quality_summary?.assets || payload?.asset_diagnostics || [];
+    return Array.isArray(rows) ? rows.map((row) => ({ ...row, score: row.score ?? row.data_quality_score ?? row.market_history_validation?.data_quality_score })) : [];
+  }
+  function assetDetail(row, validation) {
+    const reason = formatReason(row.error || row.skip_reason || row.disabled_reason || "");
+    if (reason) return reason;
+    return fundingLabel(row) || compactHistoryLabel(validation, row.fallback_timeframe) || row.exchange || row.provider_label || "Enabled venue";
+  }
+  function statusLabel(row, fallback) {
+    return formatReason(row.status_label || fallback || row.status || "simulated") || "Simulated";
+  }
+  function qualityLabel(validation) {
+    const quality = number(validation?.data_quality_score, NaN);
+    if (Number.isFinite(quality)) return percent.format(quality);
+    const count = historyCount(validation);
+    return count === "--" ? "Quality --" : count;
+  }
   function strategyRow(row) {
     const enabled = Boolean(row.enabled);
     const objective = `ROI eff ${percent.format(number(row.roi_efficiency_score))} · 10x ${percent.format(number(row.ten_x_target_probability))}`;
-    const reason = enabled ? `${percent.format(number(row.weight))} · ${escapeHtml(row.asset || "Portfolio")} · ${objective}` : escapeHtml(row.disabled_reason || "disabled");
+    const activeMeta = `${row.asset || "Portfolio"} · ${percent.format(number(row.weight))} weight · ${objective}`;
+    const disabledReason = formatReason(row.disabled_reason || "disabled");
+    const meta = enabled ? escapeHtml(activeMeta) : `<em class="backtest-reason-chip">Off</em>${escapeHtml(disabledReason)}`;
     return `
       <div class="backtest-strategy-row${enabled ? "" : " is-disabled"}" style="--weight:${Math.max(0, Math.min(number(row.weight), 1)).toFixed(4)}">
-        <div><strong>${escapeHtml(row.label || row.strategy_name || "Strategy")}</strong><small>${reason}</small></div>
+        <div><strong>${escapeHtml(row.label || row.strategy_name || "Strategy")}</strong><small>${meta}</small></div>
         <span>${number(row.net_return_after_costs ?? row.total_return).toFixed(4)}</span>
         <i aria-hidden="true"></i>
       </div>`;
@@ -489,25 +639,24 @@
     if (!Number.isFinite(valid) || !Number.isFinite(required)) return "--";
     return `${Math.round(valid)}/${Math.round(required)}`;
   }
-  function historyLabel(validation, fallback) {
-    if (!validation || typeof validation !== "object") return fallback ? `fallback ${fallback}` : "";
+  function compactHistoryLabel(validation, fallback) {
+    if (!validation || typeof validation !== "object") return fallback ? `Fallback ${fallback}` : "";
     const source = validation.source_timeframe || validation.requested_timeframe || "";
     const count = historyCount(validation);
-    const gaps = number(validation.gap_count);
-    const malformed = number(validation.malformed_candle_count) + number(validation.duplicate_timestamp_count);
+    const issues = number(validation.gap_count) + number(validation.malformed_candle_count) + number(validation.duplicate_timestamp_count) + number(validation.outlier_candle_count);
     const parts = [];
-    if (source) parts.push(`${count} ${source} candles`);
+    if (count !== "--") parts.push(`${count} valid`);
+    if (source) parts.push(source);
     if (fallback || validation.fallback_timeframe) parts.push(`fallback ${fallback || validation.fallback_timeframe}`);
-    if (gaps) parts.push(`${gaps} gaps`);
-    if (malformed) parts.push(`${malformed} malformed/duplicate`);
+    if (issues) parts.push(`${issues} issue${issues === 1 ? "" : "s"}`);
     return parts.join(" · ");
   }
   function fundingLabel(row) {
     const fundingAsset = String(row.funding_asset || row.vault_allocation_asset || "").toUpperCase();
     const collateralAsset = String(row.collateral_asset || row.quote_asset || "").toUpperCase();
-    if (row.conversion_required && fundingAsset && collateralAsset) return `Funded by ${fundingAsset} · paper converts to ${collateralAsset}`;
-    if (fundingAsset && collateralAsset && fundingAsset !== collateralAsset) return `Funded by ${fundingAsset} · collateral ${collateralAsset}`;
-    return fundingAsset ? `Funded by ${fundingAsset}` : "";
+    if (row.conversion_required && fundingAsset && collateralAsset) return `${fundingAsset} -> ${collateralAsset} paper`;
+    if (fundingAsset && collateralAsset && fundingAsset !== collateralAsset) return `${fundingAsset} funding · ${collateralAsset} collateral`;
+    return fundingAsset ? `${fundingAsset} funded` : "";
   }
   function escapeHtml(value) { return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
   class BacktestChart {
@@ -538,10 +687,21 @@
       const ctx = canvas.getContext("2d"); if (!ctx) return;
       const dpr = window.devicePixelRatio || 1; const width = canvas.width / dpr; const height = canvas.height / dpr;
       ctx.clearRect(0, 0, width, height);
+      if (["assets", "trades", "quality"].includes(this.mode)) this.grid(ctx, width, height);
       if (this.mode === "assets") return this.bars(ctx, width, height);
       if (this.mode === "trades") return this.timeline(ctx, width, height);
       if (this.mode === "quality") return this.quality(ctx, width, height);
       if (!this.chart || !window.LightweightCharts) this.line(ctx, width, height);
+    }
+    grid(ctx, width, height) {
+      ctx.save();
+      ctx.strokeStyle = "rgba(255,255,255,0.055)";
+      ctx.lineWidth = 1;
+      for (let index = 1; index <= 3; index += 1) {
+        const y = (height / 4) * index;
+        ctx.beginPath(); ctx.moveTo(8, y); ctx.lineTo(width - 8, y); ctx.stroke();
+      }
+      ctx.restore();
     }
     line(ctx, width, height) {
       const series = Array.isArray(this.payload?.charts?.[this.mode]) ? this.payload.charts[this.mode] : [];
@@ -569,7 +729,11 @@
         ctx.fillRect(labelWidth, y, w, barH);
         ctx.fillStyle = "rgba(244,247,251,0.9)";
         ctx.font = "700 11px Inter, system-ui";
+        ctx.textAlign = "left";
         ctx.fillText(String(row.asset || row.symbol || "--").slice(0, 10), 10, y + barH - 4);
+        ctx.textAlign = "right";
+        ctx.fillStyle = "rgba(169,181,200,0.92)";
+        ctx.fillText(money.format(value), width - 10, y + barH - 4);
       });
       ctx.restore();
     }
@@ -579,6 +743,9 @@
       ctx.save();
       ctx.strokeStyle = "rgba(255,255,255,0.16)";
       ctx.beginPath(); ctx.moveTo(16, height / 2); ctx.lineTo(width - 16, height / 2); ctx.stroke();
+      ctx.fillStyle = "rgba(169,181,200,0.92)";
+      ctx.font = "800 11px Inter, system-ui";
+      ctx.fillText(`${rows.length} fills`, 16, 18);
       rows.forEach((row, index) => {
         const x = 16 + (index / Math.max(rows.length - 1, 1)) * (width - 32);
         const radius = Math.max(3, Math.min(6, Math.sqrt(Math.abs(number(row.pnl))) + 3));
@@ -600,7 +767,11 @@
         ctx.fillRect(labelWidth, y, w, barH);
         ctx.fillStyle = "rgba(244,247,251,0.9)";
         ctx.font = "700 11px Inter, system-ui";
+        ctx.textAlign = "left";
         ctx.fillText(String(row.asset || row.symbol || "--").slice(0, 10), 10, y + barH - 4);
+        ctx.textAlign = "right";
+        ctx.fillStyle = "rgba(169,181,200,0.92)";
+        ctx.fillText(percent.format(score), width - 10, y + barH - 4);
       });
       ctx.restore();
     }

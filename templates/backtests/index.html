@@ -196,6 +196,8 @@
       <div class="backtest-metric-card is-secondary"><span>Target</span><strong data-metric="target_progress">0.00%</strong></div>
     </div>
 
+    <div class="backtest-result-insights" data-result-insights aria-label="Backtest highlights"></div>
+
     <div class="backtest-chart-panel">
       <div class="backtest-chart-toolbar">
         <div>
@@ -215,6 +217,7 @@
         <div class="backtest-lightweight-host" data-backtest-chart></div>
         <canvas data-backtest-overlay aria-label="Portfolio equity, contribution, exposure, and trade timeline summaries"></canvas>
       </div>
+      <div class="backtest-chart-stats" data-chart-stats aria-live="polite"></div>
     </div>
 
     <div class="backtest-intel-grid">
@@ -269,5 +272,5 @@
 {% endblock %}
 
 {% block page_scripts %}
-<script defer src="{{ url_for('static', filename='js/backtests.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}-backtest-speed-ux-1"></script>
+<script defer src="{{ url_for('static', filename='js/backtests.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}-backtest-speed-ux-2"></script>
 {% endblock %}

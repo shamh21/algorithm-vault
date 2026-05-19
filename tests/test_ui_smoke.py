@@ -803,11 +803,14 @@ def test_admin_with_2fa_can_access_admin_and_user_cannot(app) -> None:
     assert b"Vault Cycle" in backtests.data
     assert b"Vault Cycle Duration" not in backtests.data
     assert b"Run Backtest" in backtests.data
+    assert b"backtest-ux-1" in backtests.data
     assert b"static/js/backtests.js" in backtests.data
-    assert b"backtest-speed-ux-1" in backtests.data
+    assert b"backtest-speed-ux-2" in backtests.data
     assert b"static/js/vendor/lightweight-charts.standalone.production.js" in backtests.data
     assert b'data-chart-mode="quality"' in backtests.data
     assert b'data-chart-mode="assets"' in backtests.data
+    assert b"data-result-insights" in backtests.data
+    assert b"data-chart-stats" in backtests.data
     assert b"backtest-table-wrap" in backtests.data
     assert b"Data quality --" in backtests.data
     assert b"Runtime --" in backtests.data
@@ -1569,10 +1572,17 @@ def test_backtests_mobile_ui_assets_have_tables_chart_tabs_and_grouped_rows(app)
     assert b'data-chart-mode="drawdown"' in response.data
     assert b'data-chart-mode="quality"' in response.data
     assert b"backtest-table-wrap" in response.data
+    assert b"data-chart-stats" in response.data
     assert "backtest-asset-table" in js
+    assert "backtest-asset-cards" in js
+    assert "formatReason" in js
+    assert "No after-cost trades" in js
     assert "backtest-strategy-group" in js
     assert 'number(group.active_count) > 0 ? "open" : ""' in js
     assert ".backtest-asset-table" in css
+    assert ".backtest-asset-card" in css
+    assert ".backtest-chart-stats" in css
+    assert ".backtest-insight-chip" in css
     assert ".backtest-strategy-group" in css
     assert "@media (max-width: 430px)" in css
 
