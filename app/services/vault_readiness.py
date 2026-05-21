@@ -19,6 +19,7 @@ from ..extensions import db
 from ..ml.online_ranker import ONE_H10_HORIZON
 from ..models import LeveragedMarket, LeveragedMarketFeature, RiskEvent, Setting, TradingConnection, User, WalletBalance
 from .one_h10_quality import ONE_H10_HORIZON_SECONDS
+from .oneinch_funding import OneInchFundingConnector
 from .provider_assets import normalize_provider, provider_collateral_asset
 from .vault_allocation_assets import BASE_VAULT_ALLOCATION_ASSETS, asset_usd_price
 from .worker_lease import in_process_workers_enabled
@@ -470,6 +471,7 @@ class VaultReadinessService:
                     if exchange == "hyperliquid":
                         funding_state = self._hyperliquid_auto_funding_state(
                             user=user,
+                            connection=connection,
                             deposit_asset=deposit_asset,
                             collateral_asset=collateral_asset,
                             settlement_asset=settlement_asset,
@@ -1452,6 +1454,7 @@ class VaultReadinessService:
         self,
         *,
         user: User | None,
+        connection: TradingConnection | None = None,
         deposit_asset: str,
         collateral_asset: str,
         settlement_asset: str,
@@ -1519,6 +1522,29 @@ class VaultReadinessService:
                 "description": f"The wallet does not have enough available {source_asset} to fund Hyperliquid.",
                 "fix_hint": f"Add {source_asset} or reduce the allocation.",
             }
+        if OneInchFundingConnector.enabled(self.config):
+            route = self._oneinch_auto_funding_route(
+                user=user,
+                connection=connection,
+                source_asset=source_asset,
+                amount=requested,
+            )
+            if not route.ready:
+                code = str(route.blockers[0]) if route.blockers else "oneinch_auto_funding_unavailable"
+                return {
+                    "ready": False,
+                    "code": code,
+                    "title": "1inch funding route unavailable",
+                    "description": self._oneinch_blocker_description(code, route),
+                    "fix_hint": "Configure 1inch, Arbitrum token contracts, signer transaction support, and a matching Hyperliquid wallet source.",
+                }
+            return {
+                "ready": True,
+                "code": "hyperliquid_oneinch_auto_funding_ready",
+                "provider": "1inch",
+                "network": route.network,
+                "source_wallet_address": route.source_wallet_address,
+            }
         if not self._conversion_connector_configured(user.id):
             return {
                 "ready": False,
@@ -1528,6 +1554,49 @@ class VaultReadinessService:
                 "fix_hint": "Configure VAULT_CYCLE_CONVERSION_USER_ID and VAULT_CYCLE_CONVERSION_CONNECTION_ID, or verify the configured funding provider.",
             }
         return {"ready": True, "code": "hyperliquid_auto_funding_ready"}
+
+    def _oneinch_auto_funding_route(
+        self,
+        *,
+        user: User,
+        connection: TradingConnection | None,
+        source_asset: str,
+        amount: float,
+    ) -> Any:
+        account_address = str(getattr(connection, "wallet_address", "") or "").strip()
+        wallet_custody = None
+        if has_app_context():
+            wallet_custody = current_app.extensions.get("services", {}).get("wallet_custody")
+        connector = OneInchFundingConnector(
+            self.config,
+            user_id=user.id,
+            wallet_custody=wallet_custody,
+            hyperliquid_account_address=account_address,
+        )
+        return connector.route_check(
+            from_asset=source_asset,
+            to_asset="USDC",
+            amount=amount,
+            hyperliquid_account_address=account_address,
+        )
+
+    @staticmethod
+    def _oneinch_blocker_description(code: str, route: Any) -> str:
+        descriptions = {
+            "oneinch_api_key_missing": "The server-side 1inch API key is not configured.",
+            "oneinch_signer_transactions_disabled": "Server-side wallet conversion signing is disabled.",
+            "wallet_real_custody_disabled": "Real wallet custody is disabled, so 1inch cannot sign the conversion.",
+            "hyperliquid_bridge_source_wallet_mismatch": "The funding wallet address does not match the Hyperliquid account that would receive Bridge2 credit.",
+            "oneinch_source_wallet_network_unsupported": "The configured custody adapter does not support the 1inch funding network.",
+            "oneinch_network_unsupported": "The configured 1inch funding network has no chain id.",
+            "oneinch_network_not_evm": "The configured 1inch funding network is not an EVM network.",
+        }
+        if str(code).startswith("oneinch_source_wallet_insufficient:"):
+            return "No active on-chain wallet has enough confirmed funds for the configured 1inch network."
+        if str(code).endswith("_contract_missing"):
+            return "The source or destination token contract is missing for the configured 1inch network."
+        blockers = ", ".join(str(item) for item in list(getattr(route, "blockers", []) or [])[:3])
+        return descriptions.get(code, blockers or "The 1inch funding route is not ready.")
 
     def _conversion_connector_configured(self, user_id: int) -> bool:
         configured_user_id = int(

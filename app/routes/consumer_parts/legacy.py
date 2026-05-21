@@ -43,6 +43,7 @@ from ...services.connection_health import (
 from ...services.db_retry import commit_with_retry, is_database_locked
 from ...services.market_scanner import ScoredCandidate
 from ...services.one_h10_quality import ONE_H10_HORIZON_SECONDS, one_h10_forecast_live_blockers
+from ...services.oneinch_funding import OneInchFundingConnector
 from ...services.provider_assets import normalize_provider, provider_collateral_asset, provider_feature_context
 from ...services.response_envelope import action_envelope, exception_envelope, readiness_envelope
 from ...services.vault_allocation_assets import (
@@ -3920,7 +3921,30 @@ def _snapshot_free_margin_usd(snapshot, collateral_asset: str) -> float:
     return max(best, fallback, 0.0)
 
 
-def _one_h10_conversion_connector(user) -> tuple[object, str, int | None]:
+def _one_h10_conversion_connector(
+    user,
+    *,
+    source_asset: str = "USDT",
+    hyperliquid_account_address: str = "",
+) -> tuple[object, str, int | None]:
+    if OneInchFundingConnector.enabled(current_app.config):
+        connector = OneInchFundingConnector(
+            current_app.config,
+            user_id=user.id,
+            wallet_custody=get_service("wallet_custody"),
+            hyperliquid_account_address=hyperliquid_account_address,
+        )
+        route = connector.route_check(
+            from_asset=source_asset,
+            to_asset="USDC",
+            amount=0.000001,
+            hyperliquid_account_address=hyperliquid_account_address,
+        )
+        blockers = [item for item in route.blockers if not str(item).startswith("oneinch_source_wallet_insufficient:")]
+        if blockers:
+            raise RuntimeError("; ".join(blockers))
+        return connector, "1inch", None
+
     service = get_service("trading_connections")
     configured_user_id = int(
         current_app.config.get("VAULT_CYCLE_CONVERSION_USER_ID")
@@ -4031,7 +4055,11 @@ def _ensure_one_h10_hyperliquid_funding(
         return {"ready": False, "reason": "hyperliquid_deposit_address_missing"}
 
     try:
-        funding_connector, funding_provider, funding_connection_id = _one_h10_conversion_connector(user)
+        funding_connector, funding_provider, funding_connection_id = _one_h10_conversion_connector(
+            user,
+            source_asset=source,
+            hyperliquid_account_address=destination_address,
+        )
     except Exception as exc:  # noqa: BLE001
         return {"ready": False, "reason": str(exc) or "hyperliquid_auto_funding_connector_missing"}
     if not hasattr(funding_connector, "withdraw_to_address") or (source != "USDC" and not hasattr(funding_connector, "convert_stablecoin")):

@@ -13,7 +13,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime
-from decimal import Decimal, ROUND_DOWN
+from decimal import ROUND_DOWN, Decimal
 from typing import Any, Protocol
 
 from cryptography.fernet import Fernet
@@ -25,9 +25,8 @@ from flask import current_app, has_app_context
 from ..extensions import db
 from ..models import WalletAccount, WalletAddress, WalletAuditLog, WalletBalance, WalletLedgerEvent, WalletTransaction, WalletWithdrawal
 from .failures import WalletBroadcastError, WalletCustodyError
-from .withdrawal_config import automatic_withdrawal_blockers, wallet_withdrawals_enabled
 from .wallet_addresses import validate_withdraw_address
-
+from .withdrawal_config import automatic_withdrawal_blockers, wallet_withdrawals_enabled
 
 EVM_NETWORKS = {"ETHEREUM", "ARBITRUM", "OPTIMISM", "BASE", "POLYGON", "AVALANCHE", "BSC"}
 EVM_ASSETS = {"ETH", "USDC", "USDT"}
@@ -110,7 +109,7 @@ class RealWalletCustodyService:
         self,
         config: dict[str, Any],
         adapters: list[WalletChainAdapter] | None = None,
-        signer_client: "MpcSignerClient | None" = None,
+        signer_client: MpcSignerClient | None = None,
     ) -> None:
         self.config = config
         self.adapters = adapters or [
@@ -827,6 +826,66 @@ class RealWalletCustodyService:
                 context={"withdrawal_id": withdrawal.id, "asset": withdrawal.asset, "network": withdrawal.network},
             ) from exc
 
+    def sign_and_broadcast_evm_transaction(
+        self,
+        *,
+        user_id: int,
+        source_wallet_address_id: int,
+        network: str,
+        transaction: dict[str, Any],
+        mode: str,
+    ) -> BroadcastResult:
+        if str(mode or "").lower() != "live":
+            raise WalletCustodyError("EVM contract transactions can only be broadcast in live mode.", code="wallet_live_mode_required")
+        if not self.enabled:
+            raise WalletCustodyError("Real wallet custody is disabled.", code="wallet_custody_disabled")
+        signing_enabled = bool(self.config.get("WALLET_CONVERSION_SIGNER_TRANSACTIONS_ENABLED", False)) or bool(
+            self.config.get("VAULT_CYCLE_SWAP_BRIDGE_SIGNER_TRANSACTIONS_ENABLED", False)
+        )
+        if not signing_enabled:
+            raise WalletCustodyError(
+                "Vault Cycle conversion transaction signing is disabled.",
+                code="wallet_evm_contract_tx_disabled",
+            )
+        network_name = str(network or "").strip()
+        if self._network_key(network_name) not in EVM_NETWORKS:
+            raise WalletCustodyError(
+                "Only configured EVM networks support conversion transaction signing.",
+                code="wallet_network_unsupported",
+            )
+        source = db.session.get(WalletAddress, int(source_wallet_address_id or 0))
+        if (
+            source is None
+            or int(source.user_id or 0) != int(user_id)
+            or str(source.status or "") != "active"
+            or str(source.network or "").strip() != network_name
+            or self._network_key(source.network) not in EVM_NETWORKS
+        ):
+            raise WalletCustodyError("Source wallet is not active for this EVM transaction.", code="wallet_source_unavailable")
+        if self._mpc_mode():
+            try:
+                return self.signer_client.sign_and_broadcast_evm_transaction(source, network_name, transaction)
+            except WalletCustodyError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                raise WalletBroadcastError(
+                    "EVM contract transaction failed through MPC signer.",
+                    code="mpc_signer_evm_transaction_failed",
+                    context={"wallet_address_id": source.id, "network": network_name},
+                ) from exc
+        adapter = EvmWalletAdapter(self.config)
+        private_key = self._private_key(source)
+        try:
+            return adapter.sign_and_broadcast_transaction(source.address, network_name, transaction, private_key)
+        except WalletCustodyError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise WalletBroadcastError(
+                "EVM contract transaction failed through custody adapter.",
+                code="wallet_evm_transaction_failed",
+                context={"wallet_address_id": source.id, "network": network_name},
+            ) from exc
+
     def release_failed_withdrawal(self, withdrawal: WalletWithdrawal) -> None:
         balance = WalletBalance.query.filter_by(user_id=withdrawal.user_id, asset=withdrawal.asset).one_or_none()
         if balance is None:
@@ -1184,7 +1243,7 @@ class RealWalletCustodyService:
             if solvency_state and str(solvency_state.get("health_status") or "") in {"critical", "emergency"}:
                 return False
             return ready
-        except Exception:
+        except Exception:  # noqa: BLE001
             return False
 
     def _withdrawal_source(self, withdrawal: WalletWithdrawal) -> WalletAddress:
@@ -1593,6 +1652,38 @@ class MpcSignerClient:
             raise WalletCustodyError("MPC signer broadcast response is missing provider_reference.", code="mpc_broadcast_response_invalid")
         return BroadcastResult(status, provider_reference, payload)
 
+    def sign_and_broadcast_evm_transaction(
+        self,
+        source: WalletAddress,
+        network: str,
+        transaction: dict[str, Any],
+    ) -> BroadcastResult:
+        metadata = source.encrypted_metadata or {}
+        signer_key_id = str(metadata.get("signer_key_id") or "").strip()
+        if not signer_key_id:
+            raise WalletCustodyError("MPC source wallet is missing signer_key_id.", code="mpc_source_key_missing")
+        payload = self._post(
+            "/evm/sign-and-broadcast",
+            {
+                "user_id": source.user_id,
+                "source_wallet_address_id": source.id,
+                "source_address": source.address,
+                "network": str(network or "").strip(),
+                "signer_key_id": signer_key_id,
+                "transaction": transaction,
+            },
+        )
+        status = str(payload.get("status") or "submitted").strip() or "submitted"
+        provider_reference = str(
+            payload.get("provider_reference") or payload.get("tx_hash") or payload.get("transaction_hash") or ""
+        ).strip()
+        if not provider_reference and status not in {"failed", "failed_safety_gate"}:
+            raise WalletCustodyError(
+                "MPC signer EVM transaction response is missing provider_reference.",
+                code="mpc_evm_tx_response_invalid",
+            )
+        return BroadcastResult(status, provider_reference, payload)
+
     def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         blockers = self.readiness_blockers()
         if blockers:
@@ -1768,7 +1859,7 @@ class EvmWalletAdapter:
                 "data": data,
             }
         signed = Account.sign_transaction(tx, private_key)
-        raw_tx = getattr(signed, "raw_transaction", None) or getattr(signed, "rawTransaction")
+        raw_tx = getattr(signed, "raw_transaction", None) or signed.rawTransaction
         raw_hex = raw_tx.hex()
         if not raw_hex.startswith("0x"):
             raw_hex = "0x" + raw_hex
@@ -1795,9 +1886,78 @@ class EvmWalletAdapter:
             return BroadcastResult("failed_broadcast_not_found", tx_hash_value, raw)
         return BroadcastResult("submitted", tx_hash_value, raw)
 
+    def sign_and_broadcast_transaction(
+        self,
+        source_address: str,
+        network: str,
+        transaction: dict[str, Any],
+        private_key: str,
+    ) -> BroadcastResult:
+        from_address = Account.from_key(private_key).address
+        if str(from_address).lower() != str(source_address or "").lower():
+            raise RuntimeError("private key does not match requested source wallet")
+        tx = self._normalized_transaction_request(transaction, network, from_address)
+        gas_limit = int(tx.get("gas", 0) or 0)
+        fee_price = int(tx.get("gasPrice") or tx.get("maxFeePerGas") or 0)
+        required_wei = int(tx.get("value", 0) or 0) + gas_limit * fee_price
+        eth_balance_wei = int(str(self._rpc("eth_getBalance", [from_address, "pending"], network=network) or "0x0"), 16)
+        if eth_balance_wei < required_wei:
+            raise RuntimeError("source wallet has insufficient ETH for contract transaction value plus gas")
+        signed = Account.sign_transaction(tx, private_key)
+        raw_tx = getattr(signed, "raw_transaction", None) or signed.rawTransaction
+        raw_hex = raw_tx.hex()
+        if not raw_hex.startswith("0x"):
+            raw_hex = "0x" + raw_hex
+        tx_hash = self._rpc("eth_sendRawTransaction", [raw_hex], network=network)
+        tx_hash_value = str(tx_hash or "")
+        tx_found = self._transaction_visible(tx_hash_value, network)
+        raw = {
+            "tx_hash": tx_hash_value,
+            "source": from_address,
+            "destination": tx.get("to"),
+            "network": network,
+            "chain_id": tx.get("chainId"),
+            "nonce": tx.get("nonce"),
+            "value_wei": tx.get("value"),
+            "gas_limit": gas_limit,
+            "gas_price_wei": tx.get("gasPrice"),
+            "max_fee_per_gas_wei": tx.get("maxFeePerGas"),
+            "max_priority_fee_per_gas_wei": tx.get("maxPriorityFeePerGas"),
+            "raw_transaction": raw_hex,
+            "broadcast_visible": tx_found,
+        }
+        if not tx_hash_value:
+            return BroadcastResult("failed_broadcast_missing_hash", "", raw)
+        if not tx_found:
+            raw["broadcast_visibility"] = "pending_rpc_propagation"
+        return BroadcastResult("submitted", tx_hash_value, raw)
+
     def confirm_transaction(self, provider_reference: str, asset: str, network: str) -> dict[str, Any]:
         receipt = self._rpc("eth_getTransactionReceipt", [provider_reference], network=network)
         return {"confirmed": bool(receipt and receipt.get("status") == "0x1"), "raw": receipt}
+
+    def erc20_allowance(self, owner: str, asset: str, network: str, spender: str) -> int:
+        contract = self._token_contract(asset, network)
+        if not contract:
+            return 0
+        data = (
+            "0xdd62ed3e"
+            + str(owner or "").lower().replace("0x", "").rjust(64, "0")
+            + str(spender or "").lower().replace("0x", "").rjust(64, "0")
+        )
+        raw = self._rpc("eth_call", [{"to": contract, "data": data}, "latest"], network=network)
+        return int(str(raw or "0x0"), 16)
+
+    def approval_transaction(self, asset: str, network: str, spender: str, amount_units: int) -> dict[str, Any]:
+        contract = self._token_contract(asset, network)
+        if not contract:
+            raise RuntimeError(f"{_asset_key(asset)} token contract is not configured")
+        return {
+            "to": contract,
+            "value": "0x0",
+            "data": self._erc20_approve_data(spender, int(amount_units or 0)),
+            "chainId": self._chain_config(network).get("chain_id"),
+        }
 
     def _transaction_visible(self, tx_hash: str, network: str) -> bool:
         if not tx_hash:
@@ -1808,7 +1968,7 @@ class EvmWalletAdapter:
             try:
                 if self._rpc("eth_getTransactionByHash", [tx_hash], network=network):
                     return True
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
             if attempt < attempts - 1 and delay_seconds > 0:
                 time.sleep(delay_seconds)
@@ -1843,7 +2003,7 @@ class EvmWalletAdapter:
                     "base_fee_wei": latest_base,
                     "priority_fee_wei": priority,
                 }
-        except Exception:
+        except Exception:  # noqa: BLE001
             pass
         try:
             rpc_gas_price = int(str(self._rpc("eth_gasPrice", [], network=network) or "0x0"), 16)
@@ -1889,7 +2049,7 @@ class EvmWalletAdapter:
             tx["from"] = estimate_from
         try:
             estimated = int(str(self._rpc("eth_estimateGas", [tx], network=network) or "0x0"), 16)
-        except Exception:
+        except Exception:  # noqa: BLE001
             estimated = fallback
         if estimated <= 0:
             estimated = fallback
@@ -1898,6 +2058,70 @@ class EvmWalletAdapter:
     @staticmethod
     def _erc20_transfer_data(destination: str, amount_units: int) -> str:
         return "0xa9059cbb" + str(destination or "").lower().replace("0x", "").rjust(64, "0") + hex(int(amount_units or 0))[2:].rjust(64, "0")
+
+    @staticmethod
+    def _erc20_approve_data(spender: str, amount_units: int) -> str:
+        return "0x095ea7b3" + str(spender or "").lower().replace("0x", "").rjust(64, "0") + hex(int(amount_units or 0))[2:].rjust(64, "0")
+
+    def _normalized_transaction_request(self, transaction: dict[str, Any], network: str, from_address: str) -> dict[str, Any]:
+        if not isinstance(transaction, dict):
+            raise RuntimeError("transaction request must be an object")
+        destination = str(transaction.get("to") or "").strip()
+        if not re.fullmatch(r"0x[a-fA-F0-9]{40}", destination):
+            raise RuntimeError("transaction destination must be a valid EVM address")
+        data = str(transaction.get("data") or "0x").strip()
+        if not re.fullmatch(r"0x[a-fA-F0-9]*", data):
+            raise RuntimeError("transaction data must be hex encoded")
+        chain_id = self._int_value(transaction.get("chainId") or self._chain_config(network).get("chain_id") or 1)
+        expected_chain_id = int(self._chain_config(network).get("chain_id", chain_id) or chain_id)
+        if expected_chain_id and chain_id != expected_chain_id:
+            raise RuntimeError("transaction chainId does not match configured network")
+        tx = {
+            "chainId": chain_id,
+            "nonce": int(str(self._rpc("eth_getTransactionCount", [from_address, "pending"], network=network) or "0x0"), 16),
+            "to": destination,
+            "value": self._int_value(transaction.get("value") or 0),
+            "data": data,
+        }
+        tx["gas"] = self._int_value(transaction.get("gas") or transaction.get("gasLimit") or 0) or self._estimated_transaction_gas_limit(
+            {**tx, "from": from_address},
+            network,
+        )
+        if transaction.get("maxFeePerGas") is not None or transaction.get("maxPriorityFeePerGas") is not None:
+            max_fee = self._int_value(transaction.get("maxFeePerGas") or self._gas_price_wei(network))
+            tx["maxFeePerGas"] = max_fee
+            tx["maxPriorityFeePerGas"] = self._int_value(transaction.get("maxPriorityFeePerGas") or max(max_fee // 10, 1))
+        else:
+            tx["gasPrice"] = self._int_value(transaction.get("gasPrice") or 0) or self._gas_price_wei(network)
+        return tx
+
+    def _estimated_transaction_gas_limit(self, transaction: dict[str, Any], network: str) -> int:
+        fallback = max(50_000, int(float(self.config.get("WALLET_EVM_FALLBACK_CONTRACT_GAS_LIMIT", 450_000) or 450_000)))
+        buffer = max(1.0, float(self.config.get("WALLET_EVM_GAS_LIMIT_BUFFER_MULTIPLIER", 1.20) or 1.0))
+        rpc_tx = {
+            key: value
+            for key, value in {
+                "from": transaction.get("from"),
+                "to": transaction.get("to"),
+                "value": hex(int(transaction.get("value", 0) or 0)),
+                "data": transaction.get("data") or "0x",
+            }.items()
+            if value is not None
+        }
+        try:
+            estimated = int(str(self._rpc("eth_estimateGas", [rpc_tx], network=network) or "0x0"), 16)
+        except Exception:  # noqa: BLE001
+            estimated = fallback
+        return int(math.ceil(max(estimated, fallback) * buffer))
+
+    @staticmethod
+    def _int_value(value: Any) -> int:
+        if isinstance(value, int):
+            return max(0, value)
+        text = str(value or "0").strip()
+        if not text:
+            return 0
+        return max(0, int(text, 16) if text.lower().startswith("0x") else int(float(text)))
 
     def _rpc_url(self, network: str) -> str:
         chain_config = self._chain_config(network)
