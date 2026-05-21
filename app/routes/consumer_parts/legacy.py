@@ -1533,11 +1533,7 @@ def cycle_detail(cycle_id: int):
     if cycle.status in {"active", "settling"} and _vault_live_api_deferred_for_request():
         summary = get_service("vault_cycle_reporting").status_payload(cycle)
     else:
-        summary = (
-            _cycle_summary(cycle, performance=performance)
-            if cycle.status in {"active", "settling"}
-            else cycle.cycle_summary or _cycle_summary(cycle)
-        )
+        summary = _cycle_display_summary(cycle, performance=performance)
     summary["chart_payload"] = _cycle_chart_payload(cycle, summary)
     return render_template(
         "cycle_detail.html",
@@ -5240,7 +5236,7 @@ def _cycle_summary(cycle: VaultCycle, *, performance: dict[str, float | bool] | 
     orders = _cycle_orders(cycle)
     order_summaries = [_order_summary(order) for order in orders]
     fills = [fill for order in orders for fill in order.fills]
-    no_order_cycle = str(cycle.algorithm_profile or "").upper() == "1H10" and str(cycle.status or "").lower() == "complete" and not orders
+    no_order_cycle = _is_completed_one_h10_no_order_cycle(cycle, orders=orders)
     fees = sum(float(fill.fee or 0.0) + float(getattr(fill, "funding_fee", 0.0) or 0.0) for fill in fills)
     slippage_values = [
         float(order.details.get("slippage_bps", 0.0) or 0.0) for order in orders if order.details.get("slippage_bps") is not None
@@ -5381,6 +5377,20 @@ def _cycle_summary(cycle: VaultCycle, *, performance: dict[str, float | bool] | 
         summary["risk_events"] = vault_cycle_payload.get("risk_events", [])
         summary["settlement"] = vault_cycle_payload.get("settlement", {})
     return summary
+
+
+def _cycle_display_summary(cycle: VaultCycle, *, performance: dict[str, float | bool] | None = None) -> dict[str, object]:
+    if cycle.status in {"active", "settling"}:
+        return _cycle_summary(cycle, performance=performance)
+    if _is_completed_one_h10_no_order_cycle(cycle):
+        return _cycle_summary(cycle)
+    return cycle.cycle_summary or _cycle_summary(cycle)
+
+
+def _is_completed_one_h10_no_order_cycle(cycle: VaultCycle, *, orders: list[Order] | None = None) -> bool:
+    if str(cycle.algorithm_profile or "").upper() != "1H10" or str(cycle.status or "").lower() != "complete":
+        return False
+    return not (orders if orders is not None else _cycle_orders(cycle))
 
 
 def _cycle_settlement_delta_source(cycle: VaultCycle, *, no_order_cycle: bool) -> str:

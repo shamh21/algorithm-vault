@@ -28,6 +28,7 @@ from app.models import (
     WalletBalance,
 )
 from app.routes.consumer import (
+    _cycle_display_summary,
     _cycle_summary,
     _one_h10_live_context,
     _one_h10_ml_readiness,
@@ -2942,6 +2943,14 @@ def test_one_h10_zero_order_completed_cycle_reports_no_trade_settlement_delta(ap
     assert summary["settlement_delta_source"] == "settlement_balance_or_rounding"
     assert summary["completion_label"] == "Completed: no executable setup"
     assert summary["trade_decision"]["stage"] == "completed_no_executable_setup"
+
+    cycle.cycle_summary = {"roi_pct": 0.02, "realized_pnl_usd": 0.005759, "completion_label": ""}
+    db.session.commit()
+    display_summary = _cycle_display_summary(cycle)
+
+    assert display_summary["roi_pct"] == 0.0
+    assert display_summary["realized_pnl_usd"] == 0.0
+    assert display_summary["completion_label"] == "Completed: no executable setup"
 
 
 def test_one_h10_summary_treats_forecast_hold_low_confidence_as_advisory(app) -> None:
