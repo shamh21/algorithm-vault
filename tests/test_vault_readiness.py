@@ -246,7 +246,7 @@ def test_hyperliquid_stale_candles_block_readiness_with_exact_horizon(app, monke
     app.config["ONE_H10_MARKET_DATA_FRESHNESS_SECONDS"] = 60
     user = _user("stalehl")
     connection = _hyperliquid_connection(app, user)
-    _hyperliquid_market_with_features(connection, updated_at=datetime.utcnow() - timedelta(minutes=10))
+    _hyperliquid_market_with_features(connection, updated_at=datetime.utcnow() - timedelta(hours=6))
     db.session.add(WalletBalance(user_id=user.id, asset="USDC", available_balance=35.0, estimated_usd_value=35.0))
     db.session.commit()
     service = app.extensions["services"]["trading_connections"]
@@ -314,6 +314,53 @@ def test_hyperliquid_fresh_candles_allow_readiness_when_connection_is_ready(app,
 
     assert payload["ready"] is True
     assert payload["exchange_status"]["hyperliquid"]["market_data_freshness"]["ready"] is True
+
+
+def test_hyperliquid_four_hour_horizon_uses_horizon_aware_freshness(app, monkeypatch) -> None:
+    _confirm_live(app)
+    app.config["ONE_H10_READINESS_REFRESH_MARKET_DATA"] = False
+    app.config["ONE_H10_MARKET_DATA_FRESHNESS_SECONDS"] = 3600
+    user = _user("fresh4h")
+    connection = _hyperliquid_connection(app, user)
+    market = _hyperliquid_market_with_features(connection, updated_at=datetime.utcnow())
+    for feature in market.feature_rows:
+        if feature.timeframe == "4h":
+            refreshed_at = datetime.utcnow() - timedelta(hours=3, minutes=55)
+            feature.updated_at = refreshed_at
+            payload = dict(feature.features)
+            payload["last_successful_refresh_at"] = refreshed_at.isoformat()
+            feature.features = payload
+    db.session.add(WalletBalance(user_id=user.id, asset="USDC", available_balance=35.0, estimated_usd_value=35.0))
+    db.session.commit()
+    service = app.extensions["services"]["trading_connections"]
+    monkeypatch.setattr(service, "can_trade", lambda user_id, mode, connection_id=None: connection_id == connection.id)
+    monkeypatch.setattr(
+        service,
+        "account_snapshot",
+        lambda user_id, mode, connection_id=None: ClientSnapshot(
+            mode,
+            [{"asset": "USDC", "type": "perp", "value": 35.0, "withdrawable": 35.0}],
+            [],
+            [],
+            [],
+            [],
+        ),
+    )
+
+    payload = get_vault_cycle_readiness(
+        user.id,
+        amount=35,
+        settlement_asset="USDC",
+        live_acknowledged=True,
+        enabled_exchanges=["hyperliquid"],
+        require_market_metadata=True,
+    )
+
+    freshness = payload["exchange_status"]["hyperliquid"]["market_data_freshness"]
+    assert payload["ready"] is True
+    assert freshness["ready"] is True
+    assert "4h" not in freshness["stale_horizons"]
+    assert freshness["markets"][0]["horizons"]["4h"]["max_age_seconds"] == 18000.0
 
 
 def test_kucoin_ready_hyperliquid_blocked_allocates_kucoin_100(app, monkeypatch) -> None:

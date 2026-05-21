@@ -613,7 +613,8 @@ class VaultReadinessService:
                 age = (now - updated_at).total_seconds() if updated_at is not None else None
                 count = int(self._safe_float(features.get("candle_count"), 0.0))
                 candle_counts[timeframe] = max(candle_counts.get(timeframe, 0), count)
-                stale = updated_at is None or (max_age > 0 and age is not None and age > max_age)
+                horizon_max_age = self._horizon_feature_max_age_seconds(timeframe, max_age)
+                stale = updated_at is None or (horizon_max_age > 0 and age is not None and age > horizon_max_age)
                 if stale:
                     stale_horizons.add(timeframe)
                     row_ready = False
@@ -629,6 +630,7 @@ class VaultReadinessService:
                     "stale": stale,
                     "candle_count": count,
                     "age_seconds": age,
+                    "max_age_seconds": horizon_max_age,
                     "last_successful_refresh_at": updated_at.isoformat() if updated_at is not None else None,
                     "source": features.get("market_data_source") or ("cache" if stale else "live"),
                 }
@@ -669,6 +671,31 @@ class VaultReadinessService:
     def _max_feature_age_seconds(self) -> float:
         default = self._safe_float(self.config.get("ONE_H10_FEATURE_REFRESH_SECONDS"), 3600.0)
         return max(0.0, self._safe_float(self.config.get("ONE_H10_MARKET_DATA_FRESHNESS_SECONDS"), default))
+
+    def _horizon_feature_max_age_seconds(self, timeframe: str, base_max_age: float) -> float:
+        base = max(0.0, self._safe_float(base_max_age, 0.0))
+        seconds = self._timeframe_seconds(timeframe)
+        if seconds <= 0:
+            return base
+        return max(base, seconds + base)
+
+    @staticmethod
+    def _timeframe_seconds(timeframe: str) -> float:
+        value = str(timeframe or "").strip().lower()
+        if not value:
+            return 0.0
+        try:
+            amount = float(value[:-1])
+        except ValueError:
+            return 0.0
+        unit = value[-1]
+        if unit == "m":
+            return amount * 60.0
+        if unit == "h":
+            return amount * 3600.0
+        if unit == "d":
+            return amount * 86400.0
+        return 0.0
 
     @staticmethod
     def _parse_datetime(value: Any) -> datetime | None:
