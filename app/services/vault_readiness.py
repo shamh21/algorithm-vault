@@ -259,6 +259,7 @@ class VaultReadinessService:
                 exchange=exchange,
                 enabled=exchange in requested_exchanges,
                 settlement_asset=settlement,
+                deposit_asset=funding_asset,
                 amount=notional_amount,
                 require_market_metadata=require_market_metadata,
                 market_refresh_results=market_refresh_results,
@@ -382,6 +383,7 @@ class VaultReadinessService:
         exchange: str,
         enabled: bool,
         settlement_asset: str,
+        deposit_asset: str,
         amount: float,
         require_market_metadata: bool,
         market_refresh_results: list[dict[str, Any]] | None = None,
@@ -466,16 +468,35 @@ class VaultReadinessService:
                 available_margin = self._snapshot_available_margin(snapshot, collateral_asset)
                 if available_margin <= 0:
                     if exchange == "hyperliquid":
-                        warnings.append(
-                            self._blocker(
-                                "hyperliquid_auto_funding_pending",
-                                "Auto-funded during cycle",
-                                "Collateral is transferred at cycle start and withdrawn after cycle completion.",
-                                "warning",
-                                "Keep Hyperliquid enabled; funding is handled by the Vault Cycle transfer step.",
-                                exchange=exchange,
-                            )
+                        funding_state = self._hyperliquid_auto_funding_state(
+                            user=user,
+                            deposit_asset=deposit_asset,
+                            collateral_asset=collateral_asset,
+                            settlement_asset=settlement_asset,
+                            amount=amount,
                         )
+                        if bool(funding_state.get("ready")):
+                            warnings.append(
+                                self._blocker(
+                                    "hyperliquid_auto_funding_pending",
+                                    "Auto-funded during cycle",
+                                    "USDT is converted to USDC server-side and transferred to Hyperliquid before trading starts.",
+                                    "warning",
+                                    "Keep Hyperliquid enabled; funding is handled by the Vault Cycle transfer step.",
+                                    exchange=exchange,
+                                )
+                            )
+                        else:
+                            blockers.append(
+                                self._blocker(
+                                    str(funding_state.get("code") or "hyperliquid_auto_funding_unavailable"),
+                                    str(funding_state.get("title") or "Hyperliquid auto-funding unavailable"),
+                                    str(funding_state.get("description") or "Hyperliquid has no usable USDC collateral and auto-funding is not ready."),
+                                    "blocker",
+                                    str(funding_state.get("fix_hint") or "Configure and verify the server-side USDT to USDC funding route."),
+                                    exchange=exchange,
+                                )
+                            )
                     else:
                         blockers.append(
                             self._blocker(
@@ -537,7 +558,9 @@ class VaultReadinessService:
             else f"{collateral_asset} collateral available"
             if available_margin > 0
             else f"{collateral_asset} collateral unavailable",
-            "funding_detail": "Collateral is transferred at cycle start and withdrawn after cycle completion." if auto_funded else "",
+            "funding_detail": "USDT is converted to USDC server-side and transferred to Hyperliquid before trading starts."
+            if auto_funded
+            else "",
             "label": label,
             "blockers": blockers,
             "warnings": warnings,
@@ -1424,6 +1447,113 @@ class VaultReadinessService:
             elif asset in stable_assets and collateral in stable_assets:
                 fallback = max(fallback, free_value)
         return max(best, fallback, 0.0)
+
+    def _hyperliquid_auto_funding_state(
+        self,
+        *,
+        user: User | None,
+        deposit_asset: str,
+        collateral_asset: str,
+        settlement_asset: str,
+        amount: float,
+    ) -> dict[str, Any]:
+        source_asset = str(deposit_asset or "").upper().strip()
+        collateral = str(collateral_asset or "").upper().strip()
+        settlement = str(settlement_asset or "").upper().strip()
+        requested = self._safe_float(amount, 0.0)
+        if not bool(self.config.get("VAULT_CYCLE_HYPERLIQUID_AUTO_FUNDING_ENABLED", False)):
+            return {
+                "ready": False,
+                "code": "hyperliquid_auto_funding_disabled",
+                "title": "Hyperliquid auto-funding disabled",
+                "description": "Hyperliquid has no USDC collateral and server-side auto-funding is disabled.",
+                "fix_hint": "Enable VAULT_CYCLE_HYPERLIQUID_AUTO_FUNDING_ENABLED after configuring the conversion and transfer route.",
+            }
+        if collateral != "USDC" or settlement != "USDC":
+            return {
+                "ready": False,
+                "code": "hyperliquid_usdc_settlement_unavailable",
+                "title": "Hyperliquid requires USDC",
+                "description": "Hyperliquid auto-funding only supports USDC collateral and settlement.",
+                "fix_hint": "Select USDC settlement for Hyperliquid.",
+            }
+        if source_asset not in {"USDC", "USDT"}:
+            return {
+                "ready": False,
+                "code": "hyperliquid_auto_funding_source_unsupported",
+                "title": "Unsupported funding asset",
+                "description": "Hyperliquid auto-funding supports USDT or USDC wallet balances only.",
+                "fix_hint": "Use USDT or USDC as the funding balance.",
+            }
+        if requested <= 0:
+            return {
+                "ready": False,
+                "code": "amount_required",
+                "title": "Amount required",
+                "description": "Enter an amount before checking Hyperliquid auto-funding.",
+                "fix_hint": "Enter an allocation amount greater than zero.",
+            }
+        max_auto_fund = self._safe_float(self.config.get("VAULT_CYCLE_HYPERLIQUID_AUTO_FUNDING_MAX_USD"), 0.0)
+        if max_auto_fund > 0 and requested > max_auto_fund + 1e-9:
+            return {
+                "ready": False,
+                "code": "hyperliquid_auto_funding_amount_above_cap",
+                "title": "Auto-funding cap exceeded",
+                "description": "The requested Hyperliquid funding amount is above the configured auto-funding cap.",
+                "fix_hint": "Reduce the amount or raise VAULT_CYCLE_HYPERLIQUID_AUTO_FUNDING_MAX_USD after review.",
+            }
+        if user is None:
+            return {
+                "ready": False,
+                "code": "user_missing",
+                "title": "User required",
+                "description": "Sign in before checking Hyperliquid auto-funding.",
+                "fix_hint": "Sign in and retry.",
+            }
+        balance = self._wallet_balance(user.id, source_asset)
+        if balance is None or float(balance.available_balance or 0.0) + 1e-9 < requested:
+            return {
+                "ready": False,
+                "code": "hyperliquid_auto_funding_balance_unavailable",
+                "title": f"{source_asset} balance unavailable",
+                "description": f"The wallet does not have enough available {source_asset} to fund Hyperliquid.",
+                "fix_hint": f"Add {source_asset} or reduce the allocation.",
+            }
+        if not self._conversion_connector_configured(user.id):
+            return {
+                "ready": False,
+                "code": "hyperliquid_auto_funding_connector_missing",
+                "title": "Funding connector missing",
+                "description": "Hyperliquid auto-funding requires a verified server-side connector that can convert and withdraw USDC.",
+                "fix_hint": "Configure VAULT_CYCLE_CONVERSION_USER_ID and VAULT_CYCLE_CONVERSION_CONNECTION_ID, or verify the configured funding provider.",
+            }
+        return {"ready": True, "code": "hyperliquid_auto_funding_ready"}
+
+    def _conversion_connector_configured(self, user_id: int) -> bool:
+        configured_user_id = int(
+            self.config.get("VAULT_CYCLE_CONVERSION_USER_ID")
+            or self.config.get("PLATFORM_TREASURY_CONVERSION_USER_ID")
+            or 0
+        )
+        configured_connection_id = int(
+            self.config.get("VAULT_CYCLE_CONVERSION_CONNECTION_ID")
+            or self.config.get("PLATFORM_TREASURY_CONVERSION_CONNECTION_ID")
+            or 0
+        )
+        if configured_user_id > 0 and configured_connection_id > 0:
+            connection = db.session.get(TradingConnection, configured_connection_id)
+            return bool(
+                connection is not None
+                and int(connection.user_id) == configured_user_id
+                and normalize_provider(connection.provider) != "hyperliquid"
+                and connection.is_active
+                and connection.verification_status == "verified"
+            )
+        provider = normalize_provider(self.config.get("VAULT_CYCLE_CONVERSION_PROVIDER", "kucoin"))
+        if provider == "hyperliquid":
+            return False
+        connection = self._connection_for(user_id, provider)
+        return bool(connection is not None and connection.is_active and connection.verification_status == "verified")
 
     def _wallet_balance(self, user_id: int | None, asset: str) -> WalletBalance | None:
         if user_id is None:

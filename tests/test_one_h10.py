@@ -1401,6 +1401,73 @@ class _PassingOneH10Forecast:
         }
 
 
+class _AutoFundingHyperliquidConnector:
+    def deposit_address(self, mode: str, asset: str, network: str | None = None) -> dict[str, Any]:
+        return {
+            "asset": asset,
+            "network": network or "Arbitrum",
+            "address": "0x" + ("9" * 40),
+            "status": "available",
+        }
+
+
+class _AutoFundingConversionConnector:
+    def __init__(self, funded: dict[str, bool]) -> None:
+        self.funded = funded
+        self.conversions: list[dict[str, Any]] = []
+        self.withdrawals: list[dict[str, Any]] = []
+
+    def convert_stablecoin(
+        self,
+        mode: str,
+        from_asset: str,
+        to_asset: str,
+        amount: float,
+        max_slippage_bps: float,
+        client_reference: str | None = None,
+    ) -> dict[str, Any]:
+        self.conversions.append(
+            {
+                "mode": mode,
+                "from_asset": from_asset,
+                "to_asset": to_asset,
+                "amount": amount,
+                "client_reference": client_reference,
+            }
+        )
+        return {
+            "status": "confirmed",
+            "provider_reference": f"convert-{client_reference}",
+            "confirmed_amount": amount,
+        }
+
+    def withdraw_to_address(
+        self,
+        mode: str,
+        asset: str,
+        amount: float,
+        destination: str,
+        network: str | None = None,
+        client_reference: str | None = None,
+    ) -> dict[str, Any]:
+        self.withdrawals.append(
+            {
+                "mode": mode,
+                "asset": asset,
+                "amount": amount,
+                "destination": destination,
+                "network": network,
+                "client_reference": client_reference,
+            }
+        )
+        self.funded["ready"] = True
+        return {
+            "status": "confirmed",
+            "provider_reference": f"withdraw-{client_reference}",
+            "confirmed_amount": amount,
+        }
+
+
 def test_one_h10_forecast_uses_profit_ml_suite_for_sizing_exits_and_execution(app) -> None:
     app.config["ONE_H10_ML_FORECAST_FAMILIES"] = [
         "pytorch_fibonacci",
@@ -1684,6 +1751,98 @@ def test_one_h10_start_creates_provider_tagged_legs(app, monkeypatch) -> None:
             "persist_features": True,
         }
     ]
+
+
+def test_one_h10_start_auto_funds_hyperliquid_usdc_from_usdt(app, monkeypatch) -> None:
+    _confirm_one_h10_live(app)
+    app.config["ML_ALL_AREAS_ENABLED"] = False
+    app.config["ONE_H10_BOOTSTRAP_LIVE_ENABLED"] = True
+    app.config["ONE_H10_REQUIRE_PROMOTED_ML"] = False
+    app.config["ONE_H10_START_SYNC_FEATURES"] = False
+    app.config["VAULT_CYCLE_HYPERLIQUID_AUTO_FUNDING_ENABLED"] = True
+    app.config["VAULT_CYCLE_HYPERLIQUID_AUTO_FUNDING_TIMEOUT_SECONDS"] = 0.0
+    app.config["VAULT_CYCLE_HYPERLIQUID_AUTO_FUNDING_MAX_USD"] = 100.0
+    app.config["VAULT_MAX_ASSET_EXPOSURE_PCT"] = 1.0
+    app.config["VAULT_MAX_DURATION_EXPOSURE_PCT"] = 1.0
+    app.config["VAULT_MAX_STRATEGY_EXPOSURE_PCT"] = 1.0
+    app.config["VAULT_MAX_SYMBOL_EXPOSURE_PCT"] = 1.0
+    user, secret = _create_user("hlautofundstart")
+    db.session.add(WalletBalance(user_id=user.id, asset="USDT", available_balance=35.0, estimated_usd_value=35.0))
+    hyperliquid = _connection(app, user, "hyperliquid", active=True)
+    conversion = _connection(app, user, "kucoin", active=True)
+    app.config["VAULT_CYCLE_CONVERSION_USER_ID"] = user.id
+    app.config["VAULT_CYCLE_CONVERSION_CONNECTION_ID"] = conversion.id
+    _one_h10_market("BTC", updated_at=datetime.utcnow())
+    db.session.commit()
+
+    funded = {"ready": False}
+    funding_connector = _AutoFundingConversionConnector(funded)
+    hyperliquid_connector = _AutoFundingHyperliquidConnector()
+    service = app.extensions["services"]["trading_connections"]
+    monkeypatch.setattr(service, "can_trade", lambda user_id, mode, connection_id=None: connection_id == hyperliquid.id)
+
+    def snapshot(user_id: int, mode: str, connection_id: int | None = None) -> ClientSnapshot:
+        if connection_id == hyperliquid.id and funded["ready"]:
+            return ClientSnapshot(mode, [{"asset": "USDC", "type": "margin", "value": 35.0, "withdrawable": 35.0}], [], [], [], [])
+        if connection_id == conversion.id:
+            return ClientSnapshot(mode, [{"asset": "USDT", "type": "futures", "value": 35.0, "withdrawable": 35.0}], [], [], [], [])
+        return ClientSnapshot(mode, [], [], [], [], [])
+
+    monkeypatch.setattr(service, "account_snapshot", snapshot)
+    monkeypatch.setattr(
+        service,
+        "connector_for_user",
+        lambda user_id, connection_id=None: hyperliquid_connector if connection_id == hyperliquid.id else funding_connector,
+    )
+    monkeypatch.setitem(app.extensions["services"], "one_h10_forecast", _PassingOneH10Forecast())
+    market_data = app.extensions["services"]["market_data"]
+    market_data.get_mid_price = lambda symbol, mode: 100.0
+    market_data.get_order_book = lambda symbol, mode: {"levels": [[{"px": "99.9", "sz": "1000"}], [{"px": "100.1", "sz": "1000"}]]}
+    market_data.get_candles = lambda symbol, timeframe, mode, limit: _candles(limit)
+
+    started: list[int] = []
+    app.extensions["services"]["strategy_manager"].start = lambda run_id: started.append(run_id)
+    client = app.test_client()
+    _login(client, user.username, secret)
+
+    response = client.post(
+        "/vault/start-cycle",
+        data={
+            "deposit_amount": "35",
+            "deposit_asset": "USDT",
+            "settlement_asset": "USDC",
+            "lock_duration": "1",
+            "providers": "hyperliquid",
+            "providers_submitted": "1",
+            "one_h10_live_ack": "on",
+            "idempotency_key": "auto-fund-hyperliquid",
+        },
+        headers={"Accept": "application/json"},
+    )
+
+    payload = response.get_json()
+    assert response.status_code == 201, payload
+    assert payload["code"] == "vault_cycle_started"
+    assert funding_connector.conversions == [
+        {
+            "mode": "live",
+            "from_asset": "USDT",
+            "to_asset": "USDC",
+            "amount": pytest.approx(35.0),
+            "client_reference": funding_connector.conversions[0]["client_reference"],
+        }
+    ]
+    assert funding_connector.withdrawals[0]["asset"] == "USDC"
+    cycle = VaultCycle.query.filter_by(user_id=user.id).one()
+    assert cycle.deposit_asset == "USDT"
+    assert cycle.settlement_asset == "USDC"
+    history = cycle.selection_metadata["exchange_allocation_history"][0]
+    assert history["auto_funding"]["status"] == "confirmed"
+    assert history["auto_funding"]["source_asset"] == "USDT"
+    balance = WalletBalance.query.filter_by(user_id=user.id, asset="USDT").one()
+    assert balance.available_balance == pytest.approx(0.0)
+    assert balance.locked_balance == pytest.approx(35.0)
+    assert started
 
 
 def test_vault_routing_preview_reports_provider_allocations_without_creating_cycle(app, monkeypatch) -> None:

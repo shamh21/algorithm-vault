@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import threading
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -794,6 +795,8 @@ def start_cycle():
             or "No verified 1H10 trading connection is currently healthy enough for live execution."
         )
     if live_block_reason:
+        if _wants_start_json_response():
+            return _vault_start_error_response("verified_connection_missing", "Verified connection missing", live_block_reason)
         flash(live_block_reason, "danger")
         if connection is not None:
             return redirect(url_for("settings.connection_provider", provider=connection.provider, connection_id=connection.id))
@@ -828,12 +831,22 @@ def start_cycle():
             selection=selection,
             connections=connections,
             starting_value_usd=starting_value_usd,
+            deposit_asset=asset,
             settlement_asset=settlement_asset,
             allowed_symbols=allowed_symbols,
             connection_blockers=connection_blockers,
+            idempotency_key=idempotency_key,
+            execute_auto_funding=False,
         )
         if not one_h10_legs:
-            flash(_one_h10_allocation_failure_message(allocation_blockers), "warning")
+            failure_message = _one_h10_allocation_failure_message(allocation_blockers)
+            if _wants_start_json_response():
+                return _vault_start_error_response(
+                    "one_h10_allocation_unavailable",
+                    "No executable 1H10 allocation",
+                    failure_message,
+                )
+            flash(failure_message, "warning")
             return redirect(url_for("consumer.vault"))
         selection.legs[:] = one_h10_legs
         coherence_payload = cycle_coherence_payload_from_forecasts(
@@ -861,8 +874,37 @@ def start_cycle():
         )
     block_reason = _cycle_start_block_reason(user, asset, duration_hours, starting_value_usd, selection)
     if block_reason:
+        if _wants_start_json_response():
+            return _vault_start_error_response("vault_cycle_start_blocked", "Vault cycle blocked", block_reason)
         flash(block_reason, "warning")
         return redirect(url_for("consumer.vault"))
+    if is_one_h10:
+        allocation_history, funding_blockers = _finalize_one_h10_auto_funding(
+            user=user,
+            connections=connections,
+            allocation_history=allocation_history,
+            deposit_asset=asset,
+            idempotency_key=idempotency_key,
+        )
+        if funding_blockers:
+            allocation_blockers = [*allocation_blockers, *funding_blockers]
+            failure_message = _one_h10_allocation_failure_message(funding_blockers)
+            if _wants_start_json_response():
+                return _vault_start_error_response(
+                    "one_h10_auto_funding_unavailable",
+                    "Hyperliquid funding unavailable",
+                    failure_message,
+                )
+            flash(failure_message, "warning")
+            return redirect(url_for("consumer.vault"))
+        selection.metadata.update(
+            {
+                "exchange_allocation_history": allocation_history,
+                "provider_allocation_history": allocation_history,
+                "provider_skip_reasons": allocation_blockers,
+                "blocker_categories": _blocker_categories_from_reasons(allocation_blockers),
+            }
+        )
     now = datetime.utcnow()
 
     balance.available_balance = float(balance.available_balance) - amount
@@ -3878,15 +3920,312 @@ def _snapshot_free_margin_usd(snapshot, collateral_asset: str) -> float:
     return max(best, fallback, 0.0)
 
 
+def _one_h10_conversion_connector(user) -> tuple[object, str, int | None]:
+    service = get_service("trading_connections")
+    configured_user_id = int(
+        current_app.config.get("VAULT_CYCLE_CONVERSION_USER_ID")
+        or current_app.config.get("PLATFORM_TREASURY_CONVERSION_USER_ID")
+        or 0
+    )
+    configured_connection_id = int(
+        current_app.config.get("VAULT_CYCLE_CONVERSION_CONNECTION_ID")
+        or current_app.config.get("PLATFORM_TREASURY_CONVERSION_CONNECTION_ID")
+        or 0
+    )
+    if configured_user_id > 0 and configured_connection_id > 0:
+        connection = db.session.get(TradingConnection, configured_connection_id)
+        if (
+            connection is None
+            or int(connection.user_id) != configured_user_id
+            or not connection.is_active
+            or connection.verification_status != "verified"
+            or normalize_provider(connection.provider) == "hyperliquid"
+        ):
+            raise RuntimeError("hyperliquid_auto_funding_connector_not_verified")
+        return service.connector_for_user(configured_user_id, configured_connection_id), normalize_provider(connection.provider), connection.id
+
+    provider = normalize_provider(current_app.config.get("VAULT_CYCLE_CONVERSION_PROVIDER", "kucoin"))
+    if provider == "hyperliquid":
+        raise RuntimeError("hyperliquid_auto_funding_connector_missing")
+    connection = (
+        TradingConnection.query.filter_by(user_id=user.id, provider=provider, is_active=True, verification_status="verified")
+        .order_by(TradingConnection.updated_at.desc())
+        .first()
+    )
+    if connection is None:
+        raise RuntimeError("hyperliquid_auto_funding_connector_missing")
+    return service.connector_for_user(user.id, connection.id), provider, connection.id
+
+
+def _one_h10_hyperliquid_funding_key(
+    *,
+    user_id: int,
+    idempotency_key: str,
+    connection_id: int,
+    source_asset: str,
+    amount: float,
+) -> str:
+    key = str(idempotency_key or "").strip() or uuid.uuid4().hex
+    return (
+        f"one_h10_hyperliquid_funding:{int(user_id)}:{key[:80]}:"
+        f"{int(connection_id)}:{source_asset.upper()}:{float(amount or 0.0):.6f}"
+    )
+
+
+def _ensure_one_h10_hyperliquid_funding(
+    *,
+    user,
+    connection: TradingConnection,
+    source_asset: str,
+    collateral_asset: str,
+    amount: float,
+    idempotency_key: str,
+) -> dict[str, object]:
+    source = str(source_asset or "").upper().strip()
+    collateral = str(collateral_asset or "").upper().strip()
+    requested = max(0.0, float(amount or 0.0))
+    if collateral != "USDC":
+        return {"ready": False, "reason": "hyperliquid_usdc_collateral_required"}
+    if source not in {"USDT", "USDC"}:
+        return {"ready": False, "reason": "hyperliquid_auto_funding_source_unsupported"}
+    if requested <= 0:
+        return {"ready": False, "reason": "amount_required"}
+    if not bool(current_app.config.get("VAULT_CYCLE_HYPERLIQUID_AUTO_FUNDING_ENABLED", False)):
+        return {"ready": False, "reason": "hyperliquid_auto_funding_disabled"}
+    cap = float(current_app.config.get("VAULT_CYCLE_HYPERLIQUID_AUTO_FUNDING_MAX_USD", 0.0) or 0.0)
+    if cap > 0 and requested > cap + 1e-9:
+        return {"ready": False, "reason": "hyperliquid_auto_funding_amount_above_cap", "cap": cap}
+    source_balance = WalletBalance.query.filter_by(user_id=user.id, asset=source).one_or_none()
+    if source_balance is None or float(source_balance.available_balance or 0.0) + 1e-9 < requested:
+        return {"ready": False, "reason": "hyperliquid_auto_funding_balance_unavailable", "source_asset": source}
+
+    service = get_service("trading_connections")
+    funding_key = _one_h10_hyperliquid_funding_key(
+        user_id=user.id,
+        idempotency_key=idempotency_key,
+        connection_id=connection.id,
+        source_asset=source,
+        amount=requested,
+    )
+    existing = Setting.get_json(funding_key, {})
+    if isinstance(existing, dict) and existing.get("status") == "confirmed":
+        snapshot = service.account_snapshot(user.id, "live", connection.id)
+        available = _snapshot_free_margin_usd(snapshot, collateral)
+        if available + 1e-9 >= requested:
+            return {"ready": True, "available_margin_usd": available, **existing}
+        return {"ready": False, "reason": "hyperliquid_auto_funding_pending", **existing}
+    if isinstance(existing, dict) and existing.get("status") in {"submitted", "pending"}:
+        return {"ready": False, "reason": "hyperliquid_auto_funding_pending", **existing}
+
+    hyperliquid_connector = service.connector_for_user(user.id, connection.id)
+    try:
+        destination = hyperliquid_connector.deposit_address(
+            "live",
+            "USDC",
+            network=str(current_app.config.get("VAULT_CYCLE_HYPERLIQUID_AUTO_FUNDING_NETWORK", "Arbitrum") or "Arbitrum"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {"ready": False, "reason": "hyperliquid_deposit_address_unavailable", "error": str(exc)}
+    destination_address = str((destination or {}).get("address") or "").strip()
+    if not destination_address:
+        return {"ready": False, "reason": "hyperliquid_deposit_address_missing"}
+
+    try:
+        funding_connector, funding_provider, funding_connection_id = _one_h10_conversion_connector(user)
+    except Exception as exc:  # noqa: BLE001
+        return {"ready": False, "reason": str(exc) or "hyperliquid_auto_funding_connector_missing"}
+    if not hasattr(funding_connector, "withdraw_to_address") or (source != "USDC" and not hasattr(funding_connector, "convert_stablecoin")):
+        return {
+            "ready": False,
+            "reason": "hyperliquid_auto_funding_connector_unsupported",
+            "funding_provider": funding_provider,
+            "funding_connection_id": funding_connection_id,
+        }
+
+    payload: dict[str, object] = {
+        "status": "pending",
+        "source_asset": source,
+        "collateral_asset": collateral,
+        "requested_amount": requested,
+        "funding_provider": funding_provider,
+        "funding_connection_id": funding_connection_id,
+        "hyperliquid_connection_id": connection.id,
+        "destination_network": str(destination.get("network") or current_app.config.get("VAULT_CYCLE_HYPERLIQUID_AUTO_FUNDING_NETWORK", "Arbitrum")),
+        "submitted_at": datetime.utcnow().isoformat(),
+    }
+    Setting.set_json(funding_key, payload)
+    db.session.add(
+        AuditLog(
+            user_id=user.id,
+            trading_connection_id=connection.id,
+            category="vault_cycle",
+            action="one_h10_hyperliquid_auto_funding_started",
+            message="Started server-side Hyperliquid USDC auto-funding for 1H10.",
+        )
+    )
+    db.session.flush()
+    commit_with_retry()
+
+    try:
+        converted_amount = requested
+        conversion: dict[str, object] | None = None
+        if source != "USDC":
+            conversion = funding_connector.convert_stablecoin(
+                "live",
+                source,
+                "USDC",
+                requested,
+                float(current_app.config.get("VAULT_CYCLE_STABLECOIN_MAX_SLIPPAGE_BPS", 10.0) or 10.0),
+                client_reference=f"{funding_key}:convert",
+            )
+            converted_amount = max(0.0, float((conversion or {}).get("confirmed_amount", requested) or 0.0))
+            if converted_amount <= 0:
+                raise RuntimeError("hyperliquid_auto_funding_conversion_unconfirmed")
+        withdrawal = funding_connector.withdraw_to_address(
+            "live",
+            "USDC",
+            converted_amount,
+            destination_address,
+            network=str(destination.get("network") or current_app.config.get("VAULT_CYCLE_HYPERLIQUID_AUTO_FUNDING_NETWORK", "Arbitrum")),
+            client_reference=f"{funding_key}:withdraw-usdc",
+        )
+    except Exception as exc:  # noqa: BLE001
+        payload.update({"status": "failed", "reason": str(exc), "failed_at": datetime.utcnow().isoformat()})
+        Setting.set_json(funding_key, payload)
+        db.session.add(
+            AuditLog(
+                user_id=user.id,
+                trading_connection_id=connection.id,
+                category="vault_cycle",
+                action="one_h10_hyperliquid_auto_funding_failed",
+                message="Hyperliquid USDC auto-funding failed before cycle start.",
+            )
+        )
+        db.session.flush()
+        commit_with_retry()
+        return {"ready": False, "reason": str(exc), **payload}
+
+    payload.update(
+        {
+            "status": str((withdrawal or {}).get("status") or "submitted"),
+            "converted_amount": converted_amount,
+            "conversion_provider_reference": str((conversion or {}).get("provider_reference") or "") if conversion else "",
+            "withdrawal_provider_reference": str((withdrawal or {}).get("provider_reference") or ""),
+            "withdrawal_status": str((withdrawal or {}).get("status") or ""),
+        }
+    )
+    Setting.set_json(funding_key, payload)
+    db.session.flush()
+    commit_with_retry()
+
+    timeout = max(0.0, float(current_app.config.get("VAULT_CYCLE_HYPERLIQUID_AUTO_FUNDING_TIMEOUT_SECONDS", 45.0) or 0.0))
+    poll_seconds = min(max(0.5, float(current_app.config.get("VAULT_CYCLE_HYPERLIQUID_AUTO_FUNDING_POLL_SECONDS", 2.0) or 2.0)), 10.0)
+    deadline = time.monotonic() + timeout
+    available = 0.0
+    while True:
+        snapshot = service.account_snapshot(user.id, "live", connection.id)
+        available = _snapshot_free_margin_usd(snapshot, collateral)
+        if available + 1e-9 >= min(requested, converted_amount):
+            payload.update({"status": "confirmed", "confirmed_amount": available, "confirmed_at": datetime.utcnow().isoformat()})
+            Setting.set_json(funding_key, payload)
+            db.session.add(
+                AuditLog(
+                    user_id=user.id,
+                    trading_connection_id=connection.id,
+                    category="vault_cycle",
+                    action="one_h10_hyperliquid_auto_funding_confirmed",
+                    message="Hyperliquid USDC auto-funding confirmed before 1H10 cycle start.",
+                )
+            )
+            db.session.flush()
+            commit_with_retry()
+            return {"ready": True, "available_margin_usd": available, **payload}
+        if time.monotonic() >= deadline:
+            payload.update(
+                {
+                    "status": "submitted",
+                    "reason": "hyperliquid_auto_funding_pending",
+                    "observed_available_margin_usd": available,
+                    "last_checked_at": datetime.utcnow().isoformat(),
+                }
+            )
+            Setting.set_json(funding_key, payload)
+            db.session.flush()
+            commit_with_retry()
+            return {"ready": False, "reason": "hyperliquid_auto_funding_pending", **payload}
+        time.sleep(poll_seconds)
+
+
+def _finalize_one_h10_auto_funding(
+    *,
+    user,
+    connections: list[TradingConnection],
+    allocation_history: list[dict[str, object]],
+    deposit_asset: str,
+    idempotency_key: str,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    blockers: list[dict[str, object]] = []
+    connection_by_id = {int(connection.id): connection for connection in connections if connection.id is not None}
+    finalized_history: list[dict[str, object]] = []
+    for provider_history in allocation_history:
+        history = dict(provider_history)
+        auto_funding = dict(history.get("auto_funding") or {})
+        if not bool(auto_funding.get("required")) or str(auto_funding.get("status") or "") != "deferred":
+            finalized_history.append(history)
+            continue
+        connection_id = int(history.get("trading_connection_id") or 0)
+        connection = db.session.get(TradingConnection, connection_id) or connection_by_id.get(connection_id)
+        if connection is None:
+            reason = "hyperliquid_auto_funding_connection_missing"
+            blockers.append(
+                {
+                    "provider": history.get("provider"),
+                    "trading_connection_id": connection_id,
+                    "reason": reason,
+                    "auto_funding": {"ready": False, "reason": reason},
+                }
+            )
+            history["auto_funding"] = {"ready": False, "reason": reason}
+            finalized_history.append(history)
+            continue
+        amount = _one_h10_float(history.get("allocation_cap_usd"), 0.0)
+        funding_result = _ensure_one_h10_hyperliquid_funding(
+            user=user,
+            connection=connection,
+            source_asset=str(auto_funding.get("source_asset") or deposit_asset or "USDC"),
+            collateral_asset=str(history.get("collateral_asset") or "USDC"),
+            amount=amount,
+            idempotency_key=idempotency_key,
+        )
+        history["auto_funding"] = funding_result
+        if bool(funding_result.get("ready")):
+            history["available_margin_usd"] = _one_h10_float(funding_result.get("available_margin_usd"), amount)
+        else:
+            reason = str(funding_result.get("reason") or "hyperliquid_auto_funding_unavailable")
+            blockers.append(
+                {
+                    "provider": history.get("provider"),
+                    "trading_connection_id": connection_id,
+                    "reason": reason,
+                    "auto_funding": funding_result,
+                }
+            )
+        finalized_history.append(history)
+    return finalized_history, blockers
+
+
 def _one_h10_provider_legs(
     *,
     user,
     selection,
     connections: list[TradingConnection],
     starting_value_usd: float,
+    deposit_asset: str = "USDC",
     settlement_asset: str,
     allowed_symbols: list[str],
     connection_blockers: list[dict[str, object]],
+    idempotency_key: str = "",
+    execute_auto_funding: bool = True,
 ) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]]:
     trading_connections = get_service("trading_connections")
     market_service = get_service("leveraged_markets")
@@ -3917,9 +4256,18 @@ def _one_h10_provider_legs(
             blockers.append({"provider": provider, "trading_connection_id": connection.id, "reason": "; ".join(alerts)})
             continue
         available = _snapshot_free_margin_usd(snapshot, collateral)
+        auto_funding: dict[str, object] = {}
         if available <= 0:
-            blockers.append({"provider": provider, "trading_connection_id": connection.id, "reason": "insufficient_free_margin"})
-            continue
+            if provider == "hyperliquid" and collateral == "USDC" and str(settlement_asset or "").upper() == "USDC":
+                auto_funding = {
+                    "required": True,
+                    "source_asset": str(deposit_asset or settlement_asset or "USDC").upper(),
+                    "reason": "hyperliquid_usdc_auto_funding_required",
+                }
+                available = max(float(starting_value_usd or 0.0), 0.0)
+            else:
+                blockers.append({"provider": provider, "trading_connection_id": connection.id, "reason": "insufficient_free_margin"})
+                continue
         markets = market_service.active_markets(provider=provider, symbols=None)
         ranked = scanner.score_one_h10_markets(
             markets,
@@ -3987,6 +4335,7 @@ def _one_h10_provider_legs(
                 "trading_connection_id": connection.id,
                 "collateral_asset": collateral,
                 "available_margin_usd": available,
+                "auto_funding": auto_funding,
                 "markets": markets,
                 "ranked": ranked,
                 "scanner_diagnostics": diagnostics,
@@ -4024,6 +4373,7 @@ def _one_h10_provider_legs(
             "trading_connection_id": connection_id,
             "collateral_asset": provider_allocation["collateral_asset"],
             "available_margin_usd": available,
+            "allocation_cap_usd": provider_cap,
             "allocated_usd": 0.0,
             "settlement_asset": settlement_asset,
             "scanner_diagnostics": provider_allocation.get("scanner_diagnostics", {}),
@@ -4163,6 +4513,66 @@ def _one_h10_provider_legs(
         if accepted_rows and allocation_score_total <= 0:
             allocation_score_total = float(len(accepted_rows))
 
+        auto_funding = dict(provider_allocation.get("auto_funding") or {})
+        if accepted_rows and bool(auto_funding.get("required")):
+            if not execute_auto_funding:
+                provider_history["auto_funding"] = {
+                    **auto_funding,
+                    "ready": True,
+                    "status": "deferred",
+                    "reason": "hyperliquid_auto_funding_deferred_until_start_checks_pass",
+                }
+                provider_history["available_margin_usd"] = available
+            else:
+                funding_connection = db.session.get(TradingConnection, connection_id) or next(
+                    (item for item in connections if int(item.id) == connection_id),
+                    None,
+                )
+                if funding_connection is None:
+                    blockers.append(
+                        {
+                            "provider": provider,
+                            "trading_connection_id": connection_id,
+                            "reason": "hyperliquid_auto_funding_connection_missing",
+                        }
+                    )
+                    allocation_history.append(provider_history)
+                    continue
+                funding_result = _ensure_one_h10_hyperliquid_funding(
+                    user=user,
+                    connection=funding_connection,
+                    source_asset=str(auto_funding.get("source_asset") or deposit_asset or "USDC"),
+                    collateral_asset=str(provider_allocation["collateral_asset"]),
+                    amount=provider_cap,
+                    idempotency_key=idempotency_key,
+                )
+                provider_history["auto_funding"] = funding_result
+                if not bool(funding_result.get("ready")):
+                    reason = str(funding_result.get("reason") or "hyperliquid_auto_funding_unavailable")
+                    blockers.append(
+                        {
+                            "provider": provider,
+                            "trading_connection_id": connection_id,
+                            "reason": reason,
+                            "auto_funding": funding_result,
+                        }
+                    )
+                    provider_history["legs"].append(
+                        {
+                            "symbol": "USDC",
+                            "provider_symbol": "USDC",
+                            "allocation_cap_usd": 0.0,
+                            "market_status": "auto_funding_blocked",
+                            "skip_reason": reason,
+                        }
+                    )
+                    allocation_history.append(provider_history)
+                    continue
+                funded_available = _one_h10_float(funding_result.get("available_margin_usd"), 0.0)
+                available = funded_available
+                provider_cap = min(available, provider_cap)
+                provider_history["available_margin_usd"] = available
+
         for row in accepted_rows:
             candidate = row["candidate"]
             leg = dict(row["leg"] if isinstance(row.get("leg"), dict) else {})
@@ -4287,6 +4697,7 @@ def _one_h10_provider_legs(
                     "liquidity_usd": candidate_features.get("liquidity_usd", getattr(market, "liquidity_usd", 0.0)),
                     "spread_bps": candidate_features.get("spread_bps", getattr(market, "spread_bps", 0.0)),
                     "funding_rate": candidate_features.get("funding_rate", getattr(market, "funding_rate", 0.0)),
+                    "hyperliquid_auto_funding": provider_history.get("auto_funding", {}),
                 }
             )
             next_leg = dict(leg)

@@ -740,8 +740,12 @@ def _ready_hyperliquid_zero_collateral(app, monkeypatch, user: User) -> TradingC
 
 def test_hyperliquid_zero_collateral_is_ready_auto_funded(app, monkeypatch) -> None:
     _confirm_live(app)
+    app.config["VAULT_CYCLE_HYPERLIQUID_AUTO_FUNDING_ENABLED"] = True
     user = _user("hlautofunded")
     _ready_hyperliquid_zero_collateral(app, monkeypatch, user)
+    conversion = _kucoin_connection(app, user)
+    app.config["VAULT_CYCLE_CONVERSION_USER_ID"] = user.id
+    app.config["VAULT_CYCLE_CONVERSION_CONNECTION_ID"] = conversion.id
 
     payload = get_vault_cycle_readiness(user.id, amount=10, live_acknowledged=True, enabled_exchanges=["hyperliquid"])
 
@@ -753,7 +757,7 @@ def test_hyperliquid_zero_collateral_is_ready_auto_funded(app, monkeypatch) -> N
     assert status["funding_status"] == "auto_funded"
     assert "hyperliquid_settlement_balance_unavailable" not in _codes(payload)
     assert "Auto-funded during vault cycle" in status["funding_label"]
-    assert "Collateral is transferred at cycle start" in status["funding_detail"]
+    assert "server-side" in status["funding_detail"]
 
 
 def test_hyperliquid_missing_wallet_returns_needs_wallet(app, monkeypatch) -> None:
@@ -842,8 +846,12 @@ def test_kucoin_verification_400302_stores_safe_geo_diagnostics(app, monkeypatch
 
 def test_routing_preview_providers_include_new_readiness_fields(app, monkeypatch) -> None:
     _confirm_live(app)
+    app.config["VAULT_CYCLE_HYPERLIQUID_AUTO_FUNDING_ENABLED"] = True
     user = _user("previewfields")
     _ready_hyperliquid_zero_collateral(app, monkeypatch, user)
+    conversion = _kucoin_connection(app, user)
+    app.config["VAULT_CYCLE_CONVERSION_USER_ID"] = user.id
+    app.config["VAULT_CYCLE_CONVERSION_CONNECTION_ID"] = conversion.id
     client = app.test_client()
     _login(client, user)
 
@@ -861,7 +869,7 @@ def test_routing_preview_providers_include_new_readiness_fields(app, monkeypatch
     assert provider["readiness_state"] == "ready_auto_funded"
     assert provider["funding_status"] == "auto_funded"
     assert provider["funding_label"] == "Auto-funded during vault cycle"
-    assert provider["funding_detail"] == "Collateral is transferred at cycle start and withdrawn after cycle completion."
+    assert "server-side" in provider["funding_detail"]
     assert payload["can_start"] is True
     assert payload["objective"]["horizon_seconds"] == app.config["ONE_H10_HORIZON_SECONDS"]
     assert "hard_blockers" in payload
