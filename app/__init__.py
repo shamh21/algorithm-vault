@@ -116,6 +116,7 @@ from .services.strategy_runner import StrategyManager
 from .services.trading_connections import TradingConnectionService
 from .services.vault_activity import VaultCycleActivityService
 from .services.vault_cycle_allocator import VaultCycleAllocator
+from .services.vault_cycle_bridge import VaultCycleSwapBridgeService
 from .services.vault_cycle_orchestrator import VaultCycleOrchestrator
 from .services.vault_cycle_reporting import VaultCycleReportingService
 from .services.vault_cycle_settlement import VaultCycleSettlementService
@@ -279,6 +280,7 @@ def create_app(test_config: dict | None = None) -> Flask:
         ml_decision_engine,
     )
     vault_cycle_allocator = VaultCycleAllocator(app.config, trading_connections, leveraged_markets, market_scanner)
+    vault_cycle_swap_bridge = VaultCycleSwapBridgeService(app.config, wallet_custody)
     vault_cycle_transfers = VaultCycleTransferService(app.config, trading_connections)
     vault_cycle_settlement = VaultCycleSettlementService(
         app.config,
@@ -356,6 +358,7 @@ def create_app(test_config: dict | None = None) -> Flask:
         "self_custody_wallet": self_custody_wallet,
         "strategy_manager": strategy_manager,
         "vault_cycle_allocator": vault_cycle_allocator,
+        "vault_cycle_swap_bridge": vault_cycle_swap_bridge,
         "vault_cycle_transfers": vault_cycle_transfers,
         "vault_cycle_settlement": vault_cycle_settlement,
         "vault_cycle_trading_enforcer": vault_cycle_trading_enforcer,

@@ -188,6 +188,63 @@ def _parse_json_object(value: str | None) -> dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
 
+def _merge_nested_defaults(value: dict[str, Any], defaults: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(value or {})
+    for key, default_value in defaults.items():
+        existing = merged.get(key)
+        if isinstance(existing, dict) and isinstance(default_value, dict):
+            nested = dict(existing)
+            for nested_key, nested_default in default_value.items():
+                if nested.get(nested_key) in {None, ""}:
+                    nested[nested_key] = nested_default
+            merged[key] = nested
+        elif existing in {None, ""}:
+            merged[key] = default_value
+    return merged
+
+
+_APP_WIDE_SWAP_PROVIDER_KEYS = {"lifi", "li.fi", "li_fi", "swap_bridge", "vault_cycle_swap_bridge", "app_wide"}
+
+
+def _wallet_conversion_swap_bridge_enabled() -> bool:
+    wallet_enabled = _as_bool(os.getenv("WALLET_CONVERSION_PROVIDER_ENABLED"), default=False)
+    wallet_kind = str(os.getenv("WALLET_CONVERSION_PROVIDER_KIND", "") or "").strip().lower()
+    return wallet_enabled and wallet_kind in _APP_WIDE_SWAP_PROVIDER_KEYS
+
+
+def _vault_cycle_bridge_enabled() -> bool:
+    return (
+        _as_bool(os.getenv("VAULT_CYCLE_SWAP_BRIDGE_ENABLED"), default=False)
+        or _as_bool(os.getenv("VAULT_CYCLE_HYPERLIQUID_WALLET_FUNDING_ENABLED"), default=False)
+        or _wallet_conversion_swap_bridge_enabled()
+    )
+
+
+def _evm_network_defaults_for_vault_cycle() -> dict[str, Any]:
+    if not _vault_cycle_bridge_enabled():
+        return {}
+    arbitrum_rpc = os.getenv("WALLET_ARBITRUM_RPC_URL", "https://arbitrum-one-rpc.publicnode.com").strip()
+    return {
+        "ARBITRUM": {
+            "rpc_url": arbitrum_rpc or "https://arbitrum-one-rpc.publicnode.com",
+            "chain_id": 42161,
+        }
+    }
+
+
+def _evm_token_defaults_for_vault_cycle() -> dict[str, Any]:
+    if not _vault_cycle_bridge_enabled():
+        return {}
+    return {
+        "ARBITRUM": {
+            "USDC": "0xaf88d065e77c8cC2239327C5EDb3A432268e5831",
+            "USDC_DECIMALS": 6,
+            "USDT": "0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9",
+            "USDT_DECIMALS": 6,
+        }
+    }
+
+
 def _normalize_mode(value: str | None, enable_live: bool) -> str:
     normalized = str(value or "paper").strip().lower()
     if normalized == "paper":
@@ -787,13 +844,36 @@ class BaseConfig:
         2.0,
     )
     VAULT_CYCLE_ONEINCH_API_TIMEOUT_SECONDS = _as_float(os.getenv("VAULT_CYCLE_ONEINCH_API_TIMEOUT_SECONDS"), 12.0)
+    VAULT_CYCLE_HYPERLIQUID_WALLET_FUNDING_ENABLED = _as_bool(
+        os.getenv("VAULT_CYCLE_HYPERLIQUID_WALLET_FUNDING_ENABLED"),
+        default=_vault_cycle_bridge_enabled(),
+    )
+    VAULT_CYCLE_SWAP_BRIDGE_ENABLED = _as_bool(
+        os.getenv("VAULT_CYCLE_SWAP_BRIDGE_ENABLED"),
+        default=_vault_cycle_bridge_enabled(),
+    )
+    VAULT_CYCLE_SWAP_BRIDGE_PROVIDER = os.getenv("VAULT_CYCLE_SWAP_BRIDGE_PROVIDER", "lifi").strip().lower() or "lifi"
+    VAULT_CYCLE_SWAP_BRIDGE_SIGNER_TRANSACTIONS_ENABLED = _as_bool(
+        os.getenv("VAULT_CYCLE_SWAP_BRIDGE_SIGNER_TRANSACTIONS_ENABLED"),
+        default=_as_bool(os.getenv("WALLET_CONVERSION_SIGNER_TRANSACTIONS_ENABLED"), default=False),
+    )
+    VAULT_CYCLE_SWAP_BRIDGE_SLIPPAGE = _as_float(os.getenv("VAULT_CYCLE_SWAP_BRIDGE_SLIPPAGE"), 0.003)
+    VAULT_CYCLE_SWAP_BRIDGE_ORDER = os.getenv("VAULT_CYCLE_SWAP_BRIDGE_ORDER", "FASTEST").strip() or "FASTEST"
+    VAULT_CYCLE_SWAP_BRIDGE_STATUS_POLL_ATTEMPTS = _as_int(os.getenv("VAULT_CYCLE_SWAP_BRIDGE_STATUS_POLL_ATTEMPTS"), 1)
+    VAULT_CYCLE_SWAP_BRIDGE_STATUS_POLL_SECONDS = _as_float(os.getenv("VAULT_CYCLE_SWAP_BRIDGE_STATUS_POLL_SECONDS"), 5.0)
+    VAULT_CYCLE_SWAP_BRIDGE_RECEIPT_POLL_ATTEMPTS = _as_int(os.getenv("VAULT_CYCLE_SWAP_BRIDGE_RECEIPT_POLL_ATTEMPTS"), 1)
+    VAULT_CYCLE_SWAP_BRIDGE_RECEIPT_POLL_SECONDS = _as_float(os.getenv("VAULT_CYCLE_SWAP_BRIDGE_RECEIPT_POLL_SECONDS"), 2.0)
+    LIFI_API_URL = os.getenv("LIFI_API_URL", "https://li.quest/v1").strip() or "https://li.quest/v1"
+    LIFI_API_KEY = os.getenv("LIFI_API_KEY", "").strip()
+    LIFI_API_TIMEOUT_SECONDS = _as_float(os.getenv("LIFI_API_TIMEOUT_SECONDS"), 12.0)
     VAULT_CYCLE_HYPERLIQUID_BRIDGE_REQUIRES_SOURCE_ACCOUNT = _as_bool(
         os.getenv("VAULT_CYCLE_HYPERLIQUID_BRIDGE_REQUIRES_SOURCE_ACCOUNT"),
         default=True,
     )
     VAULT_CYCLE_HYPERLIQUID_AUTO_FUNDING_ENABLED = _as_bool(
-        os.getenv("VAULT_CYCLE_HYPERLIQUID_AUTO_FUNDING_ENABLED", os.getenv("VAULT_CYCLE_HYPERLIQUID_WALLET_FUNDING_ENABLED")),
-        default=False,
+        os.getenv("VAULT_CYCLE_HYPERLIQUID_AUTO_FUNDING_ENABLED")
+        or os.getenv("VAULT_CYCLE_HYPERLIQUID_WALLET_FUNDING_ENABLED"),
+        default=_vault_cycle_bridge_enabled(),
     )
     VAULT_CYCLE_HYPERLIQUID_AUTO_FUNDING_MAX_USD = _as_float(
         os.getenv("VAULT_CYCLE_HYPERLIQUID_AUTO_FUNDING_MAX_USD"),
@@ -1045,8 +1125,14 @@ class BaseConfig:
     WALLET_WITHDRAWAL_FEE_MAX_ETH = _as_float(os.getenv("WALLET_WITHDRAWAL_FEE_MAX_ETH"), 0.0)
     WALLET_MAX_SWEEP_ETH = _as_float(os.getenv("WALLET_MAX_SWEEP_ETH"), 0.0)
     WALLET_EVM_RPC_URL = os.getenv("WALLET_EVM_RPC_URL", "").strip()
-    WALLET_EVM_NETWORKS = _parse_json_object(os.getenv("WALLET_EVM_NETWORKS_JSON"))
-    WALLET_EVM_TOKEN_CONTRACTS = _parse_json_object(os.getenv("WALLET_EVM_TOKEN_CONTRACTS_JSON"))
+    WALLET_EVM_NETWORKS = _merge_nested_defaults(
+        _parse_json_object(os.getenv("WALLET_EVM_NETWORKS_JSON")),
+        _evm_network_defaults_for_vault_cycle(),
+    )
+    WALLET_EVM_TOKEN_CONTRACTS = _merge_nested_defaults(
+        _parse_json_object(os.getenv("WALLET_EVM_TOKEN_CONTRACTS_JSON")),
+        _evm_token_defaults_for_vault_cycle(),
+    )
     WALLET_EVM_MIN_GAS_PRICE_GWEI = _as_float(os.getenv("WALLET_EVM_MIN_GAS_PRICE_GWEI"), 2.0)
     WALLET_BROADCAST_VERIFY_ATTEMPTS = int(_as_float(os.getenv("WALLET_BROADCAST_VERIFY_ATTEMPTS"), 10))
     WALLET_BROADCAST_VERIFY_DELAY_SECONDS = _as_float(os.getenv("WALLET_BROADCAST_VERIFY_DELAY_SECONDS"), 2.0)
@@ -1475,6 +1561,19 @@ class BaseConfig:
             "VAULT_CYCLE_ONEINCH_CONFIRMATION_ATTEMPTS": cls.VAULT_CYCLE_ONEINCH_CONFIRMATION_ATTEMPTS,
             "VAULT_CYCLE_ONEINCH_CONFIRMATION_POLL_SECONDS": cls.VAULT_CYCLE_ONEINCH_CONFIRMATION_POLL_SECONDS,
             "VAULT_CYCLE_ONEINCH_API_TIMEOUT_SECONDS": cls.VAULT_CYCLE_ONEINCH_API_TIMEOUT_SECONDS,
+            "VAULT_CYCLE_HYPERLIQUID_WALLET_FUNDING_ENABLED": cls.VAULT_CYCLE_HYPERLIQUID_WALLET_FUNDING_ENABLED,
+            "VAULT_CYCLE_SWAP_BRIDGE_ENABLED": cls.VAULT_CYCLE_SWAP_BRIDGE_ENABLED,
+            "VAULT_CYCLE_SWAP_BRIDGE_PROVIDER": cls.VAULT_CYCLE_SWAP_BRIDGE_PROVIDER,
+            "VAULT_CYCLE_SWAP_BRIDGE_SIGNER_TRANSACTIONS_ENABLED": cls.VAULT_CYCLE_SWAP_BRIDGE_SIGNER_TRANSACTIONS_ENABLED,
+            "VAULT_CYCLE_SWAP_BRIDGE_SLIPPAGE": cls.VAULT_CYCLE_SWAP_BRIDGE_SLIPPAGE,
+            "VAULT_CYCLE_SWAP_BRIDGE_ORDER": cls.VAULT_CYCLE_SWAP_BRIDGE_ORDER,
+            "VAULT_CYCLE_SWAP_BRIDGE_STATUS_POLL_ATTEMPTS": cls.VAULT_CYCLE_SWAP_BRIDGE_STATUS_POLL_ATTEMPTS,
+            "VAULT_CYCLE_SWAP_BRIDGE_STATUS_POLL_SECONDS": cls.VAULT_CYCLE_SWAP_BRIDGE_STATUS_POLL_SECONDS,
+            "VAULT_CYCLE_SWAP_BRIDGE_RECEIPT_POLL_ATTEMPTS": cls.VAULT_CYCLE_SWAP_BRIDGE_RECEIPT_POLL_ATTEMPTS,
+            "VAULT_CYCLE_SWAP_BRIDGE_RECEIPT_POLL_SECONDS": cls.VAULT_CYCLE_SWAP_BRIDGE_RECEIPT_POLL_SECONDS,
+            "LIFI_API_URL": cls.LIFI_API_URL,
+            "LIFI_API_KEY": "[configured]" if cls.LIFI_API_KEY else "",
+            "LIFI_API_TIMEOUT_SECONDS": cls.LIFI_API_TIMEOUT_SECONDS,
             "VAULT_CYCLE_HYPERLIQUID_BRIDGE_REQUIRES_SOURCE_ACCOUNT": cls.VAULT_CYCLE_HYPERLIQUID_BRIDGE_REQUIRES_SOURCE_ACCOUNT,
             "VAULT_CYCLE_HYPERLIQUID_AUTO_FUNDING_ENABLED": cls.VAULT_CYCLE_HYPERLIQUID_AUTO_FUNDING_ENABLED,
             "VAULT_CYCLE_HYPERLIQUID_AUTO_FUNDING_MAX_USD": cls.VAULT_CYCLE_HYPERLIQUID_AUTO_FUNDING_MAX_USD,

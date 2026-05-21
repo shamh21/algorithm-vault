@@ -7,10 +7,21 @@ import pytest
 
 from app.auth import encrypt_totp_secret, password_hash
 from app.extensions import db
-from app.models import LeveragedMarket, LeveragedMarketFeature, Setting, TradingConnection, User, VaultCycle, WalletBalance
+from app.models import (
+    LeveragedMarket,
+    LeveragedMarketFeature,
+    Setting,
+    TradingConnection,
+    User,
+    VaultCycle,
+    WalletAccount,
+    WalletAddress,
+    WalletBalance,
+)
 from app.routes.consumer import _persist_cycle_start_cycle_idempotency
 from app.services.hyperliquid_client import ClientSnapshot
 from app.services.vault_readiness import get_vault_cycle_readiness
+from app.services.wallet_custody import EvmWalletAdapter
 
 
 def _user(username: str = "vaultready") -> User:
@@ -52,6 +63,23 @@ def _kucoin_connection(app, user: User) -> TradingConnection:
     connection.is_active = True
     db.session.commit()
     return connection
+
+
+def _wallet_address(user: User, asset: str, network: str, address: str) -> WalletAddress:
+    account = WalletAccount(user_id=user.id, provider="self_custody", asset=asset, network=network, status="active")
+    db.session.add(account)
+    db.session.flush()
+    wallet = WalletAddress(
+        wallet_account_id=account.id,
+        user_id=user.id,
+        asset=asset,
+        network=network,
+        address=address,
+        status="active",
+    )
+    db.session.add(wallet)
+    db.session.flush()
+    return wallet
 
 
 def _missing_hyperliquid(user: User) -> TradingConnection:
@@ -758,6 +786,57 @@ def test_hyperliquid_zero_collateral_is_ready_auto_funded(app, monkeypatch) -> N
     assert "hyperliquid_settlement_balance_unavailable" not in _codes(payload)
     assert "Auto-funded during vault cycle" in status["funding_label"]
     assert "server-side" in status["funding_detail"]
+
+
+def test_hyperliquid_usdt_funding_uses_app_wide_conversion(app, monkeypatch) -> None:
+    _confirm_live(app)
+    app.config.update(
+        {
+            "VAULT_CYCLE_HYPERLIQUID_AUTO_FUNDING_ENABLED": True,
+            "VAULT_CYCLE_HYPERLIQUID_WALLET_FUNDING_ENABLED": True,
+            "VAULT_CYCLE_SWAP_BRIDGE_ENABLED": True,
+            "VAULT_CYCLE_SWAP_BRIDGE_SIGNER_TRANSACTIONS_ENABLED": True,
+            "WALLET_REAL_CUSTODY_ENABLED": True,
+            "LIFI_API_URL": "https://li.quest/v1",
+            "WALLET_EVM_NETWORKS": {"ARBITRUM": {"rpc_url": "https://arb.example.invalid", "chain_id": 42161}},
+            "WALLET_EVM_TOKEN_CONTRACTS": {
+                "ARBITRUM": {
+                    "USDT": "0x" + ("1" * 40),
+                    "USDT_DECIMALS": 6,
+                    "USDC": "0x" + ("2" * 40),
+                    "USDC_DECIMALS": 6,
+                }
+            },
+        }
+    )
+    user = _user("hlappwide")
+    _ready_hyperliquid_zero_collateral(app, monkeypatch, user)
+    db.session.add(WalletBalance(user_id=user.id, asset="USDT", available_balance=35.0, estimated_usd_value=35.0))
+    _wallet_address(user, "USDT", "Arbitrum", "0x" + ("3" * 40))
+    db.session.commit()
+    monkeypatch.setattr(
+        EvmWalletAdapter,
+        "get_balance",
+        lambda self, address, asset, network: type("Snapshot", (), {"checked": True, "amount": 35.0})(),
+    )
+
+    payload = get_vault_cycle_readiness(
+        user.id,
+        amount=35,
+        deposit_asset="USDT",
+        settlement_asset="USDC",
+        live_acknowledged=True,
+        enabled_exchanges=["hyperliquid"],
+    )
+
+    status = payload["exchange_status"]["hyperliquid"]
+    assert payload["ready"] is True, payload["active_blockers"]
+    assert payload["can_start"] is True, payload["active_blockers"]
+    assert status["ready"] is True
+    assert status["funding_status"] == "auto_funded"
+    assert status["funding_label"] == "Auto-funded during vault cycle"
+    assert status["warnings"][0]["code"] == "hyperliquid_auto_funding_pending"
+    assert "hyperliquid_auto_funding_connector_missing" not in _codes(payload)
 
 
 def test_hyperliquid_missing_wallet_returns_needs_wallet(app, monkeypatch) -> None:

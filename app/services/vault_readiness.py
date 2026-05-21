@@ -184,7 +184,7 @@ class VaultReadinessService:
         if user is not None:
             verified_funding = self._verified_spendable_amount(user.id, funding_asset)
             if verified_funding is not None:
-                available_funding = verified_funding
+                available_funding = max(available_funding, verified_funding)
         price, price_warning = self._asset_usd_price(funding_asset)
         if price_warning is not None:
             warnings.append(price_warning)
@@ -1522,6 +1522,28 @@ class VaultReadinessService:
                 "description": f"The wallet does not have enough available {source_asset} to fund Hyperliquid.",
                 "fix_hint": f"Add {source_asset} or reduce the allocation.",
             }
+        app_wide_route = self._app_wide_auto_funding_route(
+            user=user,
+            source_asset=source_asset,
+            amount=requested,
+        )
+        if bool(app_wide_route.get("configured")):
+            if not bool(app_wide_route.get("ready")):
+                code = str(app_wide_route.get("code") or "app_wide_auto_funding_unavailable")
+                return {
+                    "ready": False,
+                    "code": code,
+                    "title": "App-wide funding route unavailable",
+                    "description": self._app_wide_blocker_description(code, app_wide_route),
+                    "fix_hint": "Verify app-wide conversion, LI.FI, wallet custody, token contracts, signer transactions, and on-chain source funds.",
+                }
+            return {
+                "ready": True,
+                "code": "hyperliquid_app_wide_auto_funding_ready",
+                "provider": str(app_wide_route.get("provider") or "lifi"),
+                "network": str(app_wide_route.get("source_network") or ""),
+                "source_wallet_address": str(app_wide_route.get("source_wallet_address") or ""),
+            }
         if OneInchFundingConnector.enabled(self.config):
             route = self._oneinch_auto_funding_route(
                 user=user,
@@ -1554,6 +1576,122 @@ class VaultReadinessService:
                 "fix_hint": "Configure VAULT_CYCLE_CONVERSION_USER_ID and VAULT_CYCLE_CONVERSION_CONNECTION_ID, or verify the configured funding provider.",
             }
         return {"ready": True, "code": "hyperliquid_auto_funding_ready"}
+
+    def _app_wide_auto_funding_route(self, *, user: User, source_asset: str, amount: float) -> dict[str, Any]:
+        if not bool(self.config.get("VAULT_CYCLE_SWAP_BRIDGE_ENABLED", False)):
+            return {"configured": False, "ready": False, "code": "app_wide_conversion_disabled"}
+        try:
+            service = self._swap_bridge_service()
+        except Exception as exc:  # noqa: BLE001
+            return {"configured": True, "ready": False, "code": "app_wide_conversion_service_missing", "reason": str(exc)}
+        blockers = list(getattr(service, "readiness_blockers", lambda: [])() or [])
+        if blockers:
+            return {"configured": True, "ready": False, "code": "app_wide_conversion_not_ready", "blockers": blockers}
+        source = str(source_asset or "").upper().strip()
+        for source_network in self._candidate_networks_for_asset(source):
+            try:
+                if not service.supports_route(
+                    from_asset=source,
+                    from_network=source_network,
+                    to_asset="USDC",
+                    to_network="Arbitrum",
+                ):
+                    continue
+                wallet = service.source_wallet_for(
+                    user_id=user.id,
+                    asset=source,
+                    network=source_network,
+                    amount=max(0.0, float(amount or 0.0)),
+                )
+            except Exception as exc:  # noqa: BLE001
+                blockers.append(str(exc))
+                continue
+            return {
+                "configured": True,
+                "ready": True,
+                "provider": "lifi",
+                "source_network": source_network,
+                "source_wallet_address": wallet.address,
+            }
+        return {
+            "configured": True,
+            "ready": False,
+            "code": "app_wide_conversion_route_unavailable",
+            "blockers": list(dict.fromkeys(blockers)),
+        }
+
+    @staticmethod
+    def _app_wide_blocker_description(code: str, route: dict[str, Any]) -> str:
+        descriptions = {
+            "app_wide_conversion_service_missing": "The app-wide conversion service is not registered in the server runtime.",
+            "app_wide_conversion_not_ready": "The app-wide conversion provider is configured but not ready for server-side execution.",
+            "app_wide_conversion_route_unavailable": "No verified app-wide USDT/USDC route can produce Arbitrum USDC for Hyperliquid funding.",
+        }
+        blockers = ", ".join(str(item) for item in list(route.get("blockers") or [])[:3])
+        if "app_wide_source_wallet_insufficient" in blockers:
+            return "No active server-held wallet has enough confirmed on-chain funds on a supported app-wide conversion network."
+        return descriptions.get(code, blockers or "The app-wide conversion route is not ready.")
+
+    def _swap_bridge_service(self) -> Any:
+        if has_app_context():
+            service = current_app.extensions.get("services", {}).get("vault_cycle_swap_bridge")
+            if service is not None:
+                return service
+        from .vault_cycle_bridge import VaultCycleSwapBridgeService
+
+        return VaultCycleSwapBridgeService(self.config)
+
+    def _candidate_networks_for_asset(self, asset: str) -> list[str]:
+        asset_key = str(asset or "").upper().strip()
+        if not asset_key:
+            return []
+        candidates = [self._default_network_for_asset(asset_key)]
+        token_contracts = self.config.get("WALLET_EVM_TOKEN_CONTRACTS") or {}
+        if isinstance(token_contracts, dict):
+            for network, tokens in token_contracts.items():
+                if not isinstance(tokens, dict):
+                    continue
+                if asset_key == "ETH" or str(tokens.get(asset_key) or "").strip():
+                    candidates.append(self._network_label(network))
+        networks = self.config.get("WALLET_EVM_NETWORKS") or {}
+        if asset_key == "ETH" and isinstance(networks, dict):
+            candidates.extend(self._network_label(network) for network in networks)
+        return self._dedupe_networks(candidates)
+
+    def _default_network_for_asset(self, asset: str) -> str:
+        mapping = self.config.get("VAULT_CYCLE_DEFAULT_NETWORK_BY_ASSET") or {}
+        asset_key = str(asset or "").upper().strip()
+        if isinstance(mapping, dict) and str(mapping.get(asset_key) or "").strip():
+            return str(mapping[asset_key]).strip()
+        if asset_key in {"USDC", "USDT"} and bool(self.config.get("VAULT_CYCLE_SWAP_BRIDGE_ENABLED", False)):
+            return "Arbitrum"
+        return self._default_network(asset_key)
+
+    @staticmethod
+    def _network_label(network: str) -> str:
+        network_key = "".join(ch for ch in str(network or "").upper() if ch.isalnum())
+        return {
+            "ETHEREUM": "Ethereum",
+            "ARBITRUM": "Arbitrum",
+            "OPTIMISM": "Optimism",
+            "BASE": "Base",
+            "POLYGON": "Polygon",
+            "AVALANCHE": "Avalanche",
+            "BSC": "BSC",
+        }.get(network_key, str(network or "").strip())
+
+    @staticmethod
+    def _dedupe_networks(networks: list[str]) -> list[str]:
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for network in networks:
+            value = str(network or "").strip()
+            key = "".join(ch for ch in value.upper() if ch.isalnum())
+            if not value or key in seen:
+                continue
+            seen.add(key)
+            deduped.append(value)
+        return deduped
 
     def _oneinch_auto_funding_route(
         self,

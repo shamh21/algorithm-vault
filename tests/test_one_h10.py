@@ -25,6 +25,8 @@ from app.models import (
     User,
     VaultAllocationLeg,
     VaultCycle,
+    WalletAccount,
+    WalletAddress,
     WalletBalance,
 )
 from app.routes.consumer import (
@@ -38,6 +40,7 @@ from app.routes.consumer import (
 from app.services.hyperliquid_client import ClientSnapshot
 from app.services.one_h10_quality import one_h10_forecast_live_blockers, one_h10_profitability_payload
 from app.services.order_manager import OrderIntent
+from app.services.wallet_custody import BroadcastResult
 from app.strategies.base import Signal
 
 
@@ -75,6 +78,23 @@ def _connection(app, user: User, provider: str, *, active: bool = False) -> Trad
     connection.is_active = active
     db.session.commit()
     return connection
+
+
+def _wallet_address(user: User, asset: str, network: str, address: str) -> WalletAddress:
+    account = WalletAccount(user_id=user.id, provider="self_custody", asset=asset, network=network, status="active")
+    db.session.add(account)
+    db.session.flush()
+    wallet = WalletAddress(
+        wallet_account_id=account.id,
+        user_id=user.id,
+        asset=asset,
+        network=network,
+        address=address,
+        status="active",
+    )
+    db.session.add(wallet)
+    db.session.flush()
+    return wallet
 
 
 def _confirm_one_h10_live(app) -> None:
@@ -1842,6 +1862,125 @@ def test_one_h10_start_auto_funds_hyperliquid_usdc_from_usdt(app, monkeypatch) -
     balance = WalletBalance.query.filter_by(user_id=user.id, asset="USDT").one()
     assert balance.available_balance == pytest.approx(0.0)
     assert balance.locked_balance == pytest.approx(35.0)
+    assert started
+
+
+def test_one_h10_start_uses_app_wide_conversion_for_hyperliquid_funding(app, monkeypatch) -> None:
+    _confirm_one_h10_live(app)
+    app.config["ML_ALL_AREAS_ENABLED"] = False
+    app.config["ONE_H10_BOOTSTRAP_LIVE_ENABLED"] = True
+    app.config["ONE_H10_REQUIRE_PROMOTED_ML"] = False
+    app.config["ONE_H10_START_SYNC_FEATURES"] = False
+    app.config["VAULT_CYCLE_HYPERLIQUID_AUTO_FUNDING_ENABLED"] = True
+    app.config["VAULT_CYCLE_HYPERLIQUID_WALLET_FUNDING_ENABLED"] = True
+    app.config["VAULT_CYCLE_SWAP_BRIDGE_ENABLED"] = True
+    app.config["VAULT_CYCLE_SWAP_BRIDGE_SIGNER_TRANSACTIONS_ENABLED"] = True
+    app.config["VAULT_CYCLE_HYPERLIQUID_AUTO_FUNDING_TIMEOUT_SECONDS"] = 0.0
+    app.config["VAULT_CYCLE_HYPERLIQUID_AUTO_FUNDING_MAX_USD"] = 100.0
+    app.config["VAULT_MAX_ASSET_EXPOSURE_PCT"] = 1.0
+    app.config["VAULT_MAX_DURATION_EXPOSURE_PCT"] = 1.0
+    app.config["VAULT_MAX_STRATEGY_EXPOSURE_PCT"] = 1.0
+    app.config["VAULT_MAX_SYMBOL_EXPOSURE_PCT"] = 1.0
+    user, secret = _create_user("hlappwidefund")
+    db.session.add(WalletBalance(user_id=user.id, asset="USDT", available_balance=35.0, estimated_usd_value=35.0))
+    source_wallet = _wallet_address(user, "USDT", "Arbitrum", "0x" + ("3" * 40))
+    usdc_wallet = _wallet_address(user, "USDC", "Arbitrum", "0x" + ("4" * 40))
+    hyperliquid = _connection(app, user, "hyperliquid", active=True)
+    _one_h10_market("BTC", updated_at=datetime.utcnow())
+    db.session.commit()
+
+    funded = {"ready": False}
+    hyperliquid_connector = _AutoFundingHyperliquidConnector()
+    service = app.extensions["services"]["trading_connections"]
+    monkeypatch.setattr(service, "can_trade", lambda user_id, mode, connection_id=None: connection_id == hyperliquid.id)
+
+    def snapshot(user_id: int, mode: str, connection_id: int | None = None) -> ClientSnapshot:
+        if connection_id == hyperliquid.id and funded["ready"]:
+            return ClientSnapshot(mode, [{"asset": "USDC", "type": "margin", "value": 35.0, "withdrawable": 35.0}], [], [], [], [])
+        return ClientSnapshot(mode, [], [], [], [], [])
+
+    class FakeAppWideBridge:
+        def __init__(self) -> None:
+            self.executions: list[dict[str, Any]] = []
+
+        def readiness_blockers(self) -> list[str]:
+            return []
+
+        def supports_route(self, **_kwargs) -> bool:
+            return True
+
+        def source_wallet_for(self, **_kwargs):
+            return source_wallet
+
+        def execute(self, **kwargs):
+            self.executions.append(kwargs)
+            return SimpleNamespace(
+                status="confirmed",
+                provider_status=SimpleNamespace(confirmed_amount=35.0),
+                route_tx=SimpleNamespace(provider_reference="swap-tx"),
+                approval_tx=None,
+            )
+
+        def erc20_transfer_transaction(self, **kwargs):
+            return {"to": "0x" + ("5" * 40), "data": "0xa9059cbb", "value": "0x0", "chainId": 42161, **kwargs}
+
+        def hyperliquid_bridge2_address(self) -> str:
+            return "0x2Df1c51E09aECF9cacB7bc98cB1742757f163dF7"
+
+    class FakeFundingCustody:
+        def __init__(self) -> None:
+            self.evm_transactions: list[dict[str, Any]] = []
+
+        def get_or_create_address(self, **_kwargs):
+            return usdc_wallet
+
+        def sign_and_broadcast_evm_transaction(self, **kwargs):
+            self.evm_transactions.append(kwargs)
+            funded["ready"] = True
+            return BroadcastResult("submitted", "bridge-tx", {"tx_hash": "bridge-tx"})
+
+    bridge = FakeAppWideBridge()
+    custody = FakeFundingCustody()
+    monkeypatch.setattr(service, "account_snapshot", snapshot)
+    monkeypatch.setattr(service, "connector_for_user", lambda user_id, connection_id=None: hyperliquid_connector)
+    monkeypatch.setitem(app.extensions["services"], "vault_cycle_swap_bridge", bridge)
+    monkeypatch.setitem(app.extensions["services"], "wallet_custody", custody)
+    monkeypatch.setitem(app.extensions["services"], "one_h10_forecast", _PassingOneH10Forecast())
+    market_data = app.extensions["services"]["market_data"]
+    market_data.get_mid_price = lambda symbol, mode: 100.0
+    market_data.get_order_book = lambda symbol, mode: {"levels": [[{"px": "99.9", "sz": "1000"}], [{"px": "100.1", "sz": "1000"}]]}
+    market_data.get_candles = lambda symbol, timeframe, mode, limit: _candles(limit)
+
+    started: list[int] = []
+    app.extensions["services"]["strategy_manager"].start = lambda run_id: started.append(run_id)
+    client = app.test_client()
+    _login(client, user.username, secret)
+
+    response = client.post(
+        "/vault/start-cycle",
+        data={
+            "deposit_amount": "35",
+            "deposit_asset": "USDT",
+            "settlement_asset": "USDC",
+            "lock_duration": "1",
+            "providers": "hyperliquid",
+            "providers_submitted": "1",
+            "one_h10_live_ack": "on",
+            "idempotency_key": "app-wide-auto-fund-hyperliquid",
+        },
+        headers={"Accept": "application/json"},
+    )
+
+    payload = response.get_json()
+    assert response.status_code == 201, payload
+    assert bridge.executions[0]["from_asset"] == "USDT"
+    assert bridge.executions[0]["to_asset"] == "USDC"
+    assert custody.evm_transactions[0]["source_wallet_address_id"] == usdc_wallet.id
+    cycle = VaultCycle.query.filter_by(user_id=user.id).one()
+    history = cycle.selection_metadata["exchange_allocation_history"][0]
+    assert history["auto_funding"]["status"] == "confirmed"
+    assert history["auto_funding"]["funding_provider"] == "lifi"
+    assert history["auto_funding"]["swap_provider_reference"] == "swap-tx"
     assert started
 
 

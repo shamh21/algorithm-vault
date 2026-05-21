@@ -59,6 +59,7 @@ from ...services.vault_allocation_assets import (
     asset_usd_price as shared_asset_usd_price,
 )
 from ...services.vault_coherence import cycle_coherence_payload_from_forecasts, extract_cycle_coherence_payload
+from ...services.vault_cycle_bridge import VaultCycleSwapBridgeService
 from ...services.vault_readiness import get_vault_cycle_readiness
 from ...services.wallet_addresses import generate_deposit_address, use_real_addresses, validate_withdraw_address
 from ...services.withdrawal_config import wallet_withdrawals_enabled
@@ -3921,6 +3922,80 @@ def _snapshot_free_margin_usd(snapshot, collateral_asset: str) -> float:
     return max(best, fallback, 0.0)
 
 
+def _one_h10_swap_bridge_service():
+    service = get_service("vault_cycle_swap_bridge")
+    if service is not None:
+        return service
+    return VaultCycleSwapBridgeService(current_app.config, get_service("wallet_custody"))
+
+
+def _one_h10_network_key(network: str) -> str:
+    return "".join(ch for ch in str(network or "").upper() if ch.isalnum())
+
+
+def _one_h10_network_label(network: str) -> str:
+    return {
+        "ETHEREUM": "Ethereum",
+        "ARBITRUM": "Arbitrum",
+        "OPTIMISM": "Optimism",
+        "BASE": "Base",
+        "POLYGON": "Polygon",
+        "AVALANCHE": "Avalanche",
+        "BSC": "BSC",
+    }.get(_one_h10_network_key(network), str(network or "").strip())
+
+
+def _one_h10_default_funding_network(asset: str) -> str:
+    asset_key = str(asset or "").upper().strip()
+    mapping = current_app.config.get("VAULT_CYCLE_DEFAULT_NETWORK_BY_ASSET") or {}
+    if isinstance(mapping, dict) and str(mapping.get(asset_key) or "").strip():
+        return str(mapping[asset_key]).strip()
+    if asset_key in {"USDC", "USDT"} and bool(current_app.config.get("VAULT_CYCLE_SWAP_BRIDGE_ENABLED", False)):
+        return "Arbitrum"
+    return "Ethereum"
+
+
+def _one_h10_funding_network_candidates(asset: str) -> list[str]:
+    asset_key = str(asset or "").upper().strip()
+    if not asset_key:
+        return []
+    candidates = [_one_h10_default_funding_network(asset_key)]
+    token_contracts = current_app.config.get("WALLET_EVM_TOKEN_CONTRACTS") or {}
+    if isinstance(token_contracts, dict):
+        for network, tokens in token_contracts.items():
+            if not isinstance(tokens, dict):
+                continue
+            if asset_key == "ETH" or str(tokens.get(asset_key) or "").strip():
+                candidates.append(_one_h10_network_label(str(network)))
+    networks = current_app.config.get("WALLET_EVM_NETWORKS") or {}
+    if asset_key == "ETH" and isinstance(networks, dict):
+        candidates.extend(_one_h10_network_label(str(network)) for network in networks)
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for network in candidates:
+        key = _one_h10_network_key(network)
+        if not network or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(network)
+    return deduped
+
+
+def _one_h10_app_wide_funding_source(user, source_asset: str, amount: float):
+    bridge = _one_h10_swap_bridge_service()
+    source = str(source_asset or "").upper().strip()
+    blockers: list[str] = []
+    for network in _one_h10_funding_network_candidates(source):
+        try:
+            if not bridge.supports_route(from_asset=source, from_network=network, to_asset="USDC", to_network="Arbitrum"):
+                continue
+            wallet = bridge.source_wallet_for(user_id=user.id, asset=source, network=network, amount=amount)
+            return bridge, wallet, network
+        except Exception as exc:  # noqa: BLE001
+            blockers.append(str(exc))
+    raise RuntimeError("; ".join(dict.fromkeys(blockers)) or "app_wide_conversion_route_unavailable")
+
+
 def _one_h10_conversion_connector(
     user,
     *,
@@ -3996,6 +4071,182 @@ def _one_h10_hyperliquid_funding_key(
     )
 
 
+def _ensure_one_h10_app_wide_funding(
+    *,
+    user,
+    connection: TradingConnection,
+    source_asset: str,
+    collateral_asset: str,
+    requested: float,
+    funding_key: str,
+    destination_address: str,
+) -> dict[str, object] | None:
+    if not bool(current_app.config.get("VAULT_CYCLE_SWAP_BRIDGE_ENABLED", False)):
+        return None
+    try:
+        bridge = _one_h10_swap_bridge_service()
+        blockers = list(getattr(bridge, "readiness_blockers", lambda: [])() or [])
+        if blockers:
+            return {
+                "ready": False,
+                "reason": "app_wide_conversion_not_ready",
+                "blockers": blockers,
+                "funding_provider": "lifi",
+            }
+        bridge, source_wallet, source_network = _one_h10_app_wide_funding_source(user, source_asset, requested)
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "ready": False,
+            "reason": str(exc) or "app_wide_conversion_route_unavailable",
+            "funding_provider": "lifi",
+        }
+
+    payload: dict[str, object] = {
+        "status": "pending",
+        "source_asset": source_asset,
+        "collateral_asset": collateral_asset,
+        "requested_amount": requested,
+        "funding_provider": "lifi",
+        "funding_connection_id": None,
+        "hyperliquid_connection_id": connection.id,
+        "hyperliquid_account_address": destination_address,
+        "source_network": source_network,
+        "destination_network": "Arbitrum",
+        "submitted_at": datetime.utcnow().isoformat(),
+    }
+    Setting.set_json(funding_key, payload)
+    db.session.add(
+        AuditLog(
+            user_id=user.id,
+            trading_connection_id=connection.id,
+            category="vault_cycle",
+            action="one_h10_hyperliquid_app_wide_funding_started",
+            message="Started app-wide server-side Hyperliquid USDC funding for 1H10.",
+        )
+    )
+    db.session.flush()
+    commit_with_retry()
+
+    try:
+        converted_amount = requested
+        swap_provider_reference = ""
+        custody = get_service("wallet_custody")
+        if str(source_asset or "").upper() == "USDC" and _one_h10_network_key(source_network) == "ARBITRUM":
+            arb_usdc_wallet = source_wallet
+        else:
+            arb_usdc_wallet = custody.get_or_create_address(user_id=user.id, asset="USDC", network="Arbitrum")
+            execution = bridge.execute(
+                user_id=user.id,
+                from_wallet=source_wallet,
+                from_asset=source_asset,
+                from_network=source_network,
+                to_asset="USDC",
+                to_network="Arbitrum",
+                amount=requested,
+                to_address=arb_usdc_wallet.address,
+                mode="live",
+            )
+            swap_provider_reference = str(getattr(getattr(execution, "route_tx", None), "provider_reference", "") or "")
+            converted_amount = max(0.0, float(getattr(getattr(execution, "provider_status", None), "confirmed_amount", 0.0) or 0.0))
+            payload.update(
+                {
+                    "swap_status": str(getattr(execution, "status", "") or "submitted"),
+                    "swap_provider_reference": swap_provider_reference,
+                    "converted_amount": converted_amount,
+                }
+            )
+            if str(getattr(execution, "status", "") or "") not in {"confirmed", "complete"}:
+                payload.update({"status": "submitted", "reason": "app_wide_conversion_pending"})
+                Setting.set_json(funding_key, payload)
+                db.session.flush()
+                commit_with_retry()
+                return {"ready": False, "reason": "app_wide_conversion_pending", **payload}
+        bridge_amount = min(max(0.0, converted_amount), requested)
+        if bridge_amount <= 0:
+            raise RuntimeError("app_wide_conversion_produced_no_usdc")
+        bridge_tx = bridge.erc20_transfer_transaction(
+            asset="USDC",
+            network="Arbitrum",
+            destination=bridge.hyperliquid_bridge2_address(),
+            amount=bridge_amount,
+        )
+        broadcast = custody.sign_and_broadcast_evm_transaction(
+            user_id=user.id,
+            source_wallet_address_id=arb_usdc_wallet.id,
+            network="Arbitrum",
+            transaction=bridge_tx,
+            mode="live",
+        )
+    except Exception as exc:  # noqa: BLE001
+        payload.update({"status": "failed", "reason": str(exc), "failed_at": datetime.utcnow().isoformat()})
+        Setting.set_json(funding_key, payload)
+        db.session.add(
+            AuditLog(
+                user_id=user.id,
+                trading_connection_id=connection.id,
+                category="vault_cycle",
+                action="one_h10_hyperliquid_app_wide_funding_failed",
+                message="App-wide Hyperliquid USDC funding failed before cycle start.",
+            )
+        )
+        db.session.flush()
+        commit_with_retry()
+        return {"ready": False, "reason": str(exc), **payload}
+
+    payload.update(
+        {
+            "status": str(broadcast.status or "submitted"),
+            "converted_amount": bridge_amount,
+            "swap_provider_reference": swap_provider_reference,
+            "withdrawal_provider_reference": str(broadcast.provider_reference or ""),
+            "withdrawal_status": str(broadcast.status or ""),
+            "bridge_contract": bridge.hyperliquid_bridge2_address(),
+            "credit_rule": "Hyperliquid credits native Arbitrum USDC Bridge2 deposits to the sending account.",
+        }
+    )
+    Setting.set_json(funding_key, payload)
+    db.session.flush()
+    commit_with_retry()
+
+    service = get_service("trading_connections")
+    timeout = max(0.0, float(current_app.config.get("VAULT_CYCLE_HYPERLIQUID_AUTO_FUNDING_TIMEOUT_SECONDS", 45.0) or 0.0))
+    poll_seconds = min(max(0.5, float(current_app.config.get("VAULT_CYCLE_HYPERLIQUID_AUTO_FUNDING_POLL_SECONDS", 2.0) or 2.0)), 10.0)
+    deadline = time.monotonic() + timeout
+    available = 0.0
+    while True:
+        snapshot = service.account_snapshot(user.id, "live", connection.id)
+        available = _snapshot_free_margin_usd(snapshot, collateral_asset)
+        if available + 1e-9 >= min(requested, bridge_amount):
+            payload.update({"status": "confirmed", "confirmed_amount": available, "confirmed_at": datetime.utcnow().isoformat()})
+            Setting.set_json(funding_key, payload)
+            db.session.add(
+                AuditLog(
+                    user_id=user.id,
+                    trading_connection_id=connection.id,
+                    category="vault_cycle",
+                    action="one_h10_hyperliquid_app_wide_funding_confirmed",
+                    message="App-wide Hyperliquid USDC funding confirmed before 1H10 cycle start.",
+                )
+            )
+            db.session.flush()
+            commit_with_retry()
+            return {"ready": True, "available_margin_usd": available, **payload}
+        if time.monotonic() >= deadline:
+            payload.update(
+                {
+                    "status": "submitted",
+                    "reason": "hyperliquid_auto_funding_pending",
+                    "observed_available_margin_usd": available,
+                    "last_checked_at": datetime.utcnow().isoformat(),
+                }
+            )
+            Setting.set_json(funding_key, payload)
+            db.session.flush()
+            commit_with_retry()
+            return {"ready": False, "reason": "hyperliquid_auto_funding_pending", **payload}
+        time.sleep(poll_seconds)
+
+
 def _ensure_one_h10_hyperliquid_funding(
     *,
     user,
@@ -4053,6 +4304,18 @@ def _ensure_one_h10_hyperliquid_funding(
     destination_address = str((destination or {}).get("address") or "").strip()
     if not destination_address:
         return {"ready": False, "reason": "hyperliquid_deposit_address_missing"}
+
+    app_wide_result = _ensure_one_h10_app_wide_funding(
+        user=user,
+        connection=connection,
+        source_asset=source,
+        collateral_asset=collateral,
+        requested=requested,
+        funding_key=funding_key,
+        destination_address=destination_address,
+    )
+    if app_wide_result is not None:
+        return app_wide_result
 
     try:
         funding_connector, funding_provider, funding_connection_id = _one_h10_conversion_connector(
