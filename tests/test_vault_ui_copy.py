@@ -147,3 +147,13 @@ def test_vault_template_server_renders_provider_readiness_fallbacks() -> None:
     assert "is-auto-funded" in source
     assert "is-restricted" in source
     assert "funding_detail" in source
+
+
+def test_public_overview_compatibility_routes_remain_available(app) -> None:
+    client = app.test_client()
+
+    for path in ("/overview/", "/features/", "/pricing/", "/mobile/", "/connectivity/", "/security/"):
+        response = client.get(path)
+        assert response.status_code == 200
+        assert b"AlgVault" in response.data
+        assert b"guaranteed" not in response.data.lower()

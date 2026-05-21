@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+
+{% block title %}{{ public_page.title }}{% endblock %}
+
+{% block content %}
+<section class="home-hero" aria-labelledby="public-overview-title">
+  <div class="hero-copy">
+    <span class="card-kicker">{{ public_page.kicker }}</span>
+    <h1 id="public-overview-title">{{ public_page.headline }}</h1>
+    <p>{{ public_page.summary }}</p>
+    <div class="hero-actions">
+      <a class="button-link primary" href="{{ url_for('auth.login') }}">{{ public_page.primary }}</a>
+      <a class="button-link" href="{{ url_for('auth.register') }}">{{ public_page.secondary }}</a>
+    </div>
+  </div>
+  <article class="vault-card" aria-label="Platform status">
+    <span class="card-kicker">Platform</span>
+    <h2>Risk-aware automation</h2>
+    <p>AlgVault surfaces readiness, broker connectivity, market-data freshness, orders, fills, and settlement state before a cycle is treated as executable.</p>
+  </article>
+</section>
+
+<section class="metric-grid" aria-label="AlgVault overview">
+  {% for title, body in public_page.points %}
+    <article class="metric-card">
+      <span>{{ title }}</span>
+      <strong>{{ body }}</strong>
+    </article>
+  {% endfor %}
+</section>
+{% endblock %}

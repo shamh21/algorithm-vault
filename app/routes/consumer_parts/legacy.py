@@ -76,6 +76,86 @@ VAULT_PROVIDER_LABELS = {
     "dydx": "dYdX",
     "uniswap": "Uniswap",
 }
+_PUBLIC_COMPAT_PAGES = {
+    "overview": {
+        "title": "AlgVault | Automated Trading Platform",
+        "kicker": "Automated trading platform",
+        "headline": "AlgVault",
+        "summary": "Mobile-first strategy monitoring, broker connectivity, vault activity, and risk-aware execution controls.",
+        "primary": "Sign in",
+        "secondary": "Create account",
+        "points": (
+            ("Execution controls", "Server-side readiness gates, broker checks, and order-state visibility."),
+            ("Vault diagnostics", "Fresh-market-data status, strategy confidence, fill tracking, and settlement clarity."),
+            ("Wallet visibility", "Portfolio balances, asset conversion paths, and account activity in one PWA shell."),
+        ),
+    },
+    "features": {
+        "title": "AlgVault Features",
+        "kicker": "Platform features",
+        "headline": "Trading automation with clear controls",
+        "summary": "Review readiness, allocation, market data, orders, fills, and settlement state before relying on a cycle.",
+        "primary": "Sign in",
+        "secondary": "Create account",
+        "points": (
+            ("Readiness first", "Stale data, disconnected brokers, and invalid trade setup states stay visible."),
+            ("Cycle reporting", "Vault pages separate wallet deltas, mark estimates, fees, and realized trading PnL."),
+            ("Provider routing", "Hyperliquid and KuCoin routing stays behind server-side validation."),
+        ),
+    },
+    "pricing": {
+        "title": "AlgVault Pricing",
+        "kicker": "Access",
+        "headline": "Private beta access",
+        "summary": "AlgVault account access is controlled while live trading infrastructure and custody workflows mature.",
+        "primary": "Sign in",
+        "secondary": "Create account",
+        "points": (
+            ("No public guarantee claims", "Trading outcomes depend on market conditions, risk limits, and broker execution."),
+            ("User control", "Accounts keep broker and wallet actions behind authenticated server-side controls."),
+            ("Operational visibility", "Diagnostics explain when automation is ready, blocked, or waiting."),
+        ),
+    },
+    "mobile": {
+        "title": "AlgVault Mobile PWA",
+        "kicker": "Mobile PWA",
+        "headline": "A compact trading command center",
+        "summary": "The AlgVault PWA is built for quick checks on readiness, wallet status, vault cycles, and provider state.",
+        "primary": "Sign in",
+        "secondary": "Create account",
+        "points": (
+            ("Installable shell", "App-like navigation, safe areas, and mobile-first trading views."),
+            ("Fast status checks", "Cycle state, balances, and provider readiness are designed for scanning."),
+            ("Explicit blocked states", "Offline, stale, disconnected, and no-trade states are not shown as success."),
+        ),
+    },
+    "connectivity": {
+        "title": "AlgVault Connectivity",
+        "kicker": "Broker connectivity",
+        "headline": "Server-side provider integrations",
+        "summary": "Broker/API connectivity, signing, trade submission, fills, and wallet-sensitive actions remain server-side.",
+        "primary": "Sign in",
+        "secondary": "Create account",
+        "points": (
+            ("Hyperliquid support", "Perpetual market data and order paths stay behind readiness and safety checks."),
+            ("Provider health", "Connection state and broker availability are part of cycle readiness."),
+            ("No browser secrets", "Credentials, signing material, and trade submission do not move into frontend code."),
+        ),
+    },
+    "security": {
+        "title": "AlgVault Security",
+        "kicker": "Security posture",
+        "headline": "Authenticated controls and fail-closed workflows",
+        "summary": "AlgVault keeps trading, wallet, and broker-sensitive operations behind authenticated server-side gates.",
+        "primary": "Sign in",
+        "secondary": "Create account",
+        "points": (
+            ("Two-factor access", "Account-sensitive workflows require authenticated sessions."),
+            ("Safety gates", "Readiness, risk, broker, precision, and settlement checks stay authoritative on the server."),
+            ("Clear audit states", "Blocked, skipped, stale, and no-fill outcomes are reported plainly."),
+        ),
+    },
+}
 ASSET_NETWORKS = DEFAULT_ASSET_NETWORKS
 _CYCLE_START_JOBS: dict[str, dict[str, object]] = {}
 _CYCLE_START_IDEMPOTENCY: dict[tuple[int, str], str] = {}
@@ -1464,6 +1544,18 @@ def cycle_detail(cycle_id: int):
         cycle=cycle,
         summary=summary,
     )
+
+
+@consumer_bp.route("/overview/", methods=["GET"], defaults={"page": "overview"}, strict_slashes=False)
+@consumer_bp.route("/features/", methods=["GET"], defaults={"page": "features"}, strict_slashes=False)
+@consumer_bp.route("/pricing/", methods=["GET"], defaults={"page": "pricing"}, strict_slashes=False)
+@consumer_bp.route("/mobile/", methods=["GET"], defaults={"page": "mobile"}, strict_slashes=False)
+@consumer_bp.route("/connectivity/", methods=["GET"], defaults={"page": "connectivity"}, strict_slashes=False)
+@consumer_bp.route("/security/", methods=["GET"], defaults={"page": "security"}, strict_slashes=False)
+def legacy_public_overview(page: str):
+    page_key = str(page or "overview").strip().lower()
+    public_page = _PUBLIC_COMPAT_PAGES.get(page_key, _PUBLIC_COMPAT_PAGES["overview"])
+    return render_template("marketing/overview.html", public_page=public_page, public_page_key=page_key)
 
 
 @consumer_bp.get("/dashboard")
