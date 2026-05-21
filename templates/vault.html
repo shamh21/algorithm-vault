@@ -257,6 +257,24 @@
                   <span>Strategy coherence active</span>
                 {% endif %}
               </div>
+              {% set diagnostics = cycle.cycle_summary.get("one_h10_diagnostics", {}) %}
+              {% if diagnostics %}
+                {% set freshness = diagnostics.get("market_data_freshness", {}) %}
+                <div class="vault-cycle-risk-mini" data-cycle-diagnostics>
+                  <span>{{ diagnostics.get("active_blocker") or "No active blocker" }}</span>
+                  <span>
+                    {% if freshness.get("stale_horizons") %}
+                      Stale {{ freshness.get("stale_horizons")|join(", ") }}
+                    {% elif freshness.get("missing_horizons") %}
+                      Missing {{ freshness.get("missing_horizons")|join(", ") }}
+                    {% elif freshness.get("insufficient_horizons") %}
+                      Insufficient {{ freshness.get("insufficient_horizons")|join(", ") }}
+                    {% else %}
+                      Orders {{ diagnostics.get("order_count", 0) }} · Fills {{ diagnostics.get("fill_count", 0) }}
+                    {% endif %}
+                  </span>
+                </div>
+              {% endif %}
               <span class="sr-only" data-cycle-next>
                 Next evaluation {{ cycle_status.get("nextScheduled1h10Cycle", "pending") }}
               </span>

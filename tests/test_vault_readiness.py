@@ -7,7 +7,7 @@ import pytest
 
 from app.auth import encrypt_totp_secret, password_hash
 from app.extensions import db
-from app.models import LeveragedMarket, Setting, TradingConnection, User, VaultCycle, WalletBalance
+from app.models import LeveragedMarket, LeveragedMarketFeature, Setting, TradingConnection, User, VaultCycle, WalletBalance
 from app.routes.consumer import _persist_cycle_start_cycle_idempotency
 from app.services.hyperliquid_client import ClientSnapshot
 from app.services.vault_readiness import get_vault_cycle_readiness
@@ -65,6 +65,62 @@ def _missing_hyperliquid(user: User) -> TradingConnection:
     db.session.add(connection)
     db.session.commit()
     return connection
+
+
+def _hyperliquid_connection(app, user: User) -> TradingConnection:
+    connection = app.extensions["services"]["trading_connections"].create_or_update(
+        user_id=user.id,
+        provider="hyperliquid",
+        connection_type="cex_api_key",
+        api_secret="0x" + ("1" * 64),
+        wallet_address="0x" + ("2" * 40),
+        is_active=True,
+    )
+    connection.verification_status = "verified"
+    connection.is_active = True
+    db.session.commit()
+    return connection
+
+
+def _hyperliquid_market_with_features(connection: TradingConnection, *, updated_at: datetime, candle_count: int = 120) -> LeveragedMarket:
+    market = LeveragedMarket(
+        provider="hyperliquid",
+        trading_connection_id=connection.id,
+        venue_symbol="BTC",
+        symbol="BTC",
+        status="active",
+        settlement_asset="USDC",
+        max_leverage=3,
+        liquidity_usd=1_000_000,
+        spread_bps=1.0,
+        last_seen_at=datetime.utcnow(),
+    )
+    db.session.add(market)
+    db.session.flush()
+    for timeframe in ("15m", "1h", "4h"):
+        feature = LeveragedMarketFeature(
+            leveraged_market_id=market.id,
+            provider="hyperliquid",
+            symbol="BTC",
+            timeframe=timeframe,
+            updated_at=updated_at,
+        )
+        feature.features = {
+            "candle_count": candle_count,
+            "last_successful_refresh_at": updated_at.isoformat(),
+            "market_data_source": "live",
+            "close": 100.0,
+            "trend_strength": 0.01,
+            "ema_trend": 1.0,
+            "macd_histogram": 0.2,
+            "rsi": 55,
+            "volatility": 0.01,
+            "spread_bps": 1.0,
+            "liquidity_usd": 1_000_000,
+        }
+        db.session.add(feature)
+    db.session.commit()
+    return market
 
 
 def _ready_kucoin(app, monkeypatch, user: User) -> TradingConnection:
@@ -182,6 +238,82 @@ def test_hyperliquid_missing_credentials_has_specific_blocker(app) -> None:
     payload = get_vault_cycle_readiness(user.id, amount=10, live_acknowledged=True, enabled_exchanges=["hyperliquid"])
 
     assert "hyperliquid_credentials_missing" in _codes(payload)
+
+
+def test_hyperliquid_stale_candles_block_readiness_with_exact_horizon(app, monkeypatch) -> None:
+    _confirm_live(app)
+    app.config["ONE_H10_READINESS_REFRESH_MARKET_DATA"] = False
+    app.config["ONE_H10_MARKET_DATA_FRESHNESS_SECONDS"] = 60
+    user = _user("stalehl")
+    connection = _hyperliquid_connection(app, user)
+    _hyperliquid_market_with_features(connection, updated_at=datetime.utcnow() - timedelta(minutes=10))
+    db.session.add(WalletBalance(user_id=user.id, asset="USDC", available_balance=35.0, estimated_usd_value=35.0))
+    db.session.commit()
+    service = app.extensions["services"]["trading_connections"]
+    monkeypatch.setattr(service, "can_trade", lambda user_id, mode, connection_id=None: connection_id == connection.id)
+    monkeypatch.setattr(
+        service,
+        "account_snapshot",
+        lambda user_id, mode, connection_id=None: ClientSnapshot(
+            mode,
+            [{"asset": "USDC", "type": "perp", "value": 35.0, "withdrawable": 35.0}],
+            [],
+            [],
+            [],
+            [],
+        ),
+    )
+
+    payload = get_vault_cycle_readiness(
+        user.id,
+        amount=35,
+        settlement_asset="USDC",
+        live_acknowledged=True,
+        enabled_exchanges=["hyperliquid"],
+        require_market_metadata=True,
+    )
+
+    assert payload["ready"] is False
+    assert "stale_candles" in _codes(payload)
+    freshness = payload["exchange_status"]["hyperliquid"]["market_data_freshness"]
+    assert freshness["stale_horizons"] == ["15m", "1h", "4h"]
+
+
+def test_hyperliquid_fresh_candles_allow_readiness_when_connection_is_ready(app, monkeypatch) -> None:
+    _confirm_live(app)
+    app.config["ONE_H10_READINESS_REFRESH_MARKET_DATA"] = False
+    app.config["ONE_H10_MARKET_DATA_FRESHNESS_SECONDS"] = 3600
+    user = _user("freshhl")
+    connection = _hyperliquid_connection(app, user)
+    _hyperliquid_market_with_features(connection, updated_at=datetime.utcnow())
+    db.session.add(WalletBalance(user_id=user.id, asset="USDC", available_balance=35.0, estimated_usd_value=35.0))
+    db.session.commit()
+    service = app.extensions["services"]["trading_connections"]
+    monkeypatch.setattr(service, "can_trade", lambda user_id, mode, connection_id=None: connection_id == connection.id)
+    monkeypatch.setattr(
+        service,
+        "account_snapshot",
+        lambda user_id, mode, connection_id=None: ClientSnapshot(
+            mode,
+            [{"asset": "USDC", "type": "perp", "value": 35.0, "withdrawable": 35.0}],
+            [],
+            [],
+            [],
+            [],
+        ),
+    )
+
+    payload = get_vault_cycle_readiness(
+        user.id,
+        amount=35,
+        settlement_asset="USDC",
+        live_acknowledged=True,
+        enabled_exchanges=["hyperliquid"],
+        require_market_metadata=True,
+    )
+
+    assert payload["ready"] is True
+    assert payload["exchange_status"]["hyperliquid"]["market_data_freshness"]["ready"] is True
 
 
 def test_kucoin_ready_hyperliquid_blocked_allocates_kucoin_100(app, monkeypatch) -> None:

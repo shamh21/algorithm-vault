@@ -16,6 +16,7 @@ ONE_H10_HARD_BLOCKERS = frozenset(
         "forecast_stale",
         "low_confidence",
         "low_edge_after_costs",
+        "edge_below_fee_slippage_buffer",
         "cost_drag_above_threshold",
         "high_slippage",
         "poor_execution_quality",
@@ -23,6 +24,9 @@ ONE_H10_HARD_BLOCKERS = frozenset(
         "low_liquidity_capacity",
         "low_profitability_score",
         "stale_market_data",
+        "stale_candles",
+        "missing_candles",
+        "insufficient_candles",
         "features_stale",
         "missing_fibonacci_features",
         "ml_not_ready",
@@ -38,6 +42,7 @@ ONE_H10_REASON_CODES = {
     "forecast_stale": "STALE_MARKET_DATA",
     "low_confidence": "LOW_CONFIDENCE",
     "low_edge_after_costs": "BELOW_EDGE_THRESHOLD",
+    "edge_below_fee_slippage_buffer": "BELOW_EDGE_THRESHOLD",
     "cost_drag_above_threshold": "HIGH_SLIPPAGE",
     "high_slippage": "HIGH_SLIPPAGE",
     "poor_execution_quality": "HIGH_SLIPPAGE",
@@ -45,6 +50,9 @@ ONE_H10_REASON_CODES = {
     "low_liquidity_capacity": "LOW_LIQUIDITY",
     "low_profitability_score": "BELOW_EDGE_THRESHOLD",
     "stale_market_data": "STALE_MARKET_DATA",
+    "stale_candles": "STALE_MARKET_DATA",
+    "missing_candles": "STALE_MARKET_DATA",
+    "insufficient_candles": "STALE_MARKET_DATA",
     "features_stale": "STALE_MARKET_DATA",
     "missing_fibonacci_features": "STALE_MARKET_DATA",
     "ml_not_ready": "LOW_CONFIDENCE",
@@ -64,6 +72,7 @@ def one_h10_quality_thresholds(config: dict[str, Any] | None) -> dict[str, float
             0.0,
             _safe_float(payload.get("ONE_H10_MIN_EDGE_AFTER_COST_BPS"), min_edge_default),
         ),
+        "edge_buffer_bps": max(0.0, _safe_float(payload.get("ONE_H10_EDGE_BUFFER_BPS"), 2.0)),
         "max_cost_drag_bps": max(
             1.0,
             _safe_float(payload.get("ONE_H10_MAX_COST_DRAG_BPS"), max_cost_default),
@@ -206,7 +215,7 @@ def one_h10_forecast_live_blockers(
     if net_edge is None:
         net_edge = _optional_float(forecast.get("expected_return_bps"))
     if forecast.get("expected_net_edge_passed") is False:
-        blockers.append("low_edge_after_costs")
+        blockers.append("edge_below_fee_slippage_buffer")
     elif actionable and net_edge is None:
         blockers.append("forecast_edge_unavailable")
     elif net_edge is not None and net_edge < thresholds["min_edge_after_cost_bps"]:
@@ -254,6 +263,8 @@ def one_h10_reason_code(reason: str | None) -> str:
         return "RISK_ENGINE_BLOCKED"
     if normalized.startswith("one_h10_forecast_blocked:"):
         normalized = normalized.split(":", 1)[1].split(",", 1)[0].strip()
+    if ":" in normalized:
+        normalized = normalized.split(":", 1)[0].strip()
     return ONE_H10_REASON_CODES.get(normalized, "RISK_ENGINE_BLOCKED")
 
 

@@ -5,16 +5,16 @@ from __future__ import annotations
 import logging
 import re
 import time
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timedelta
-from typing import Any, Iterable
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from sqlalchemy.exc import IntegrityError
 
 from ..extensions import db
 from ..models import LeveragedMarket, LeveragedMarketFeature, Setting, TradingConnection
 from .provider_assets import normalize_provider, provider_collateral_asset
-
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +114,9 @@ class LeveragedMarketDiscoveryService:
         attempted_before = budget.attempted if budget is not None else 0
         skipped_before = budget.skipped if budget is not None else 0
         reasons_before = len(budget.reasons) if budget is not None else 0
-        cursor_before = self._feature_cursor(provider, connection.id) if persist_features and str(feature_scope or "").lower() == "all" else 0
+        cursor_before = (
+            self._feature_cursor(provider, connection.id) if persist_features and str(feature_scope or "").lower() == "all" else 0
+        )
         try:
             connector = self.trading_connections.connector_for_user(connection.user_id, connection.id)
             raw_markets = connector.discover_leveraged_markets(mode)
@@ -338,8 +340,13 @@ class LeveragedMarketDiscoveryService:
                     funding={"funding_rate": market.funding_rate},
                     provider_context={"provider": market.provider, "collateral_asset": market.settlement_asset},
                 )
+                latest_candle_at = self._latest_candle_datetime(candles)
                 payload["feature_schema_version"] = "1h10_feature_v1"
                 payload["ml_namespace"] = "1h10"
+                payload["market_data_source"] = "live"
+                payload["last_successful_refresh_at"] = (
+                    latest_candle_at.isoformat() if latest_candle_at is not None else datetime.utcnow().isoformat()
+                )
                 payload["fibonacci_timing"] = self._fibonacci_timing_features(candles)
                 payload["order_book_imbalance"] = self._order_book_imbalance(order_book)
                 feature = LeveragedMarketFeature.query.filter_by(leveraged_market_id=market.id, timeframe=str(timeframe)).one_or_none()
@@ -367,7 +374,15 @@ class LeveragedMarketDiscoveryService:
 
     def _feature_candles(self, symbol: str, timeframe: str) -> list[dict[str, Any]]:
         try:
-            return self.market_data.get_candles(symbol, timeframe, mode="live", limit=240, retry=False)
+            return self.market_data.get_candles(
+                symbol,
+                timeframe,
+                mode="live",
+                limit=240,
+                retry=False,
+                force_refresh=True,
+                allow_stale_on_error=False,
+            )
         except TypeError as exc:
             if not self._looks_like_retry_kwarg_error(exc):
                 raise
@@ -547,3 +562,16 @@ class LeveragedMarketDiscoveryService:
             return float(value)
         except (TypeError, ValueError):
             return default
+
+    @classmethod
+    def _latest_candle_datetime(cls, candles: list[dict[str, Any]]) -> datetime | None:
+        timestamps = [cls._safe_float(row.get("timestamp", row.get("time"))) for row in candles if isinstance(row, dict)]
+        timestamps = [value for value in timestamps if value > 0]
+        if not timestamps:
+            return None
+        latest = max(timestamps)
+        if latest < 946_684_800:
+            return None
+        if latest > 10_000_000_000:
+            latest /= 1000.0
+        return datetime.fromtimestamp(latest, tz=UTC).replace(tzinfo=None)

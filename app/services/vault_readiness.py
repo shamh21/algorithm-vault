@@ -10,14 +10,14 @@ import json
 import logging
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from flask import current_app, has_app_context
 
 from ..extensions import db
 from ..ml.online_ranker import ONE_H10_HORIZON
-from ..models import LeveragedMarket, RiskEvent, Setting, TradingConnection, User, WalletBalance
+from ..models import LeveragedMarket, LeveragedMarketFeature, RiskEvent, Setting, TradingConnection, User, WalletBalance
 from .one_h10_quality import ONE_H10_HORIZON_SECONDS
 from .provider_assets import normalize_provider, provider_collateral_asset
 from .vault_allocation_assets import BASE_VAULT_ALLOCATION_ASSETS, asset_usd_price
@@ -247,6 +247,10 @@ class VaultReadinessService:
             )
 
         active_blockers.extend(self._critical_safety_event_blockers(user.id if user else None))
+        market_refresh_results = self._refresh_one_h10_market_data(
+            user.id if user else None,
+            requested_exchanges,
+        )
 
         exchange_status: dict[str, dict[str, Any]] = {}
         for exchange in VAULT_READINESS_EXCHANGES:
@@ -257,6 +261,7 @@ class VaultReadinessService:
                 settlement_asset=settlement,
                 amount=notional_amount,
                 require_market_metadata=require_market_metadata,
+                market_refresh_results=market_refresh_results,
             )
 
         ready_exchanges = [
@@ -320,6 +325,7 @@ class VaultReadinessService:
                 "summary": routing_summary,
             },
             "ml_readiness": ml_readiness,
+            "market_refresh_results": market_refresh_results,
             "idempotency_key": str(idempotency_key or ""),
         }
         self._log_exchange_decisions(exchange_status)
@@ -378,6 +384,7 @@ class VaultReadinessService:
         settlement_asset: str,
         amount: float,
         require_market_metadata: bool,
+        market_refresh_results: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         label = EXCHANGE_LABELS.get(exchange, exchange.title())
         blockers: list[dict[str, Any]] = []
@@ -386,6 +393,7 @@ class VaultReadinessService:
         collateral_asset = provider_collateral_asset(exchange)
         available_margin = 0.0
         markets = self._active_markets(exchange, connection.id if connection is not None else None)
+        market_freshness = self._one_h10_market_freshness(exchange, markets, market_refresh_results or [])
 
         if not enabled:
             blockers.append(
@@ -482,7 +490,7 @@ class VaultReadinessService:
 
         if exchange == "hyperliquid":
             market_warnings, market_blockers = self._hyperliquid_specific_blockers(
-                connection, settlement_asset, markets, require_market_metadata
+                connection, settlement_asset, markets, require_market_metadata, market_freshness
             )
             warnings.extend(market_warnings)
             blockers.extend(market_blockers)
@@ -533,8 +541,149 @@ class VaultReadinessService:
             "label": label,
             "blockers": blockers,
             "warnings": warnings,
+            "market_data_freshness": market_freshness,
             "trading_connection_id": connection.id if connection is not None else None,
         }
+
+    def _refresh_one_h10_market_data(self, user_id: int | None, exchanges: list[str]) -> list[dict[str, Any]]:
+        if user_id is None or not bool(self.config.get("ONE_H10_READINESS_REFRESH_MARKET_DATA", True)):
+            return []
+        if not any(exchange in {"hyperliquid", "kucoin"} for exchange in exchanges):
+            return []
+        if not has_app_context():
+            return []
+        try:
+            service = current_app.extensions.get("services", {}).get("leveraged_markets")
+        except RuntimeError:
+            return []
+        if service is None:
+            return []
+        try:
+            logger.info("1H10 market data refresh start user_id=%s exchanges=%s", user_id, ",".join(exchanges))
+            rows = list(service.sync_for_user(user_id, mode="live", feature_scope="all", persist_features=True))
+            db.session.flush()
+            logger.info("1H10 market data refresh end user_id=%s rows=%s", user_id, len(rows))
+            return rows
+        except Exception as exc:  # noqa: BLE001
+            db.session.rollback()
+            logger.warning("1H10 market data refresh failed user_id=%s: %s", user_id, exc)
+            return [{"skipped": True, "reason": str(exc), "provider": "global"}]
+
+    def _one_h10_market_freshness(
+        self,
+        provider: str,
+        markets: list[LeveragedMarket],
+        refresh_results: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        if provider not in {"hyperliquid", "kucoin"}:
+            return {}
+        required = self._required_feature_timeframes()
+        max_age = self._max_feature_age_seconds()
+        min_candles = max(0, int(self._safe_float(self.config.get("ONE_H10_MIN_CANDLES_PER_HORIZON"), 40.0)))
+        market_ids = [int(market.id) for market in markets if market.id is not None]
+        feature_rows = (
+            LeveragedMarketFeature.query.filter(LeveragedMarketFeature.leveraged_market_id.in_(market_ids)).all() if market_ids else []
+        )
+        by_market: dict[int, dict[str, LeveragedMarketFeature]] = {}
+        for row in feature_rows:
+            by_market.setdefault(int(row.leveraged_market_id), {})[str(row.timeframe)] = row
+        now = datetime.utcnow()
+        eligible_markets = 0
+        stale_horizons: set[str] = set()
+        missing_horizons: set[str] = set()
+        insufficient_horizons: set[str] = set()
+        candle_counts: dict[str, int] = {}
+        last_refresh: datetime | None = None
+        max_age_seconds = 0.0
+        market_rows: list[dict[str, Any]] = []
+        for market in markets[:25]:
+            rows = by_market.get(int(market.id or 0), {})
+            row_ready = True
+            horizon_rows: dict[str, dict[str, Any]] = {}
+            for timeframe in required:
+                feature = rows.get(timeframe)
+                if feature is None:
+                    missing_horizons.add(timeframe)
+                    row_ready = False
+                    candle_counts[timeframe] = max(candle_counts.get(timeframe, 0), 0)
+                    horizon_rows[timeframe] = {"missing": True, "stale": True, "candle_count": 0, "age_seconds": None}
+                    continue
+                features = dict(feature.features or {})
+                updated_at = self._parse_datetime(features.get("last_successful_refresh_at") or feature.updated_at)
+                age = (now - updated_at).total_seconds() if updated_at is not None else None
+                count = int(self._safe_float(features.get("candle_count"), 0.0))
+                candle_counts[timeframe] = max(candle_counts.get(timeframe, 0), count)
+                stale = updated_at is None or (max_age > 0 and age is not None and age > max_age)
+                if stale:
+                    stale_horizons.add(timeframe)
+                    row_ready = False
+                if count < min_candles:
+                    insufficient_horizons.add(timeframe)
+                    row_ready = False
+                if updated_at is not None and (last_refresh is None or updated_at > last_refresh):
+                    last_refresh = updated_at
+                if age is not None:
+                    max_age_seconds = max(max_age_seconds, age)
+                horizon_rows[timeframe] = {
+                    "missing": False,
+                    "stale": stale,
+                    "candle_count": count,
+                    "age_seconds": age,
+                    "last_successful_refresh_at": updated_at.isoformat() if updated_at is not None else None,
+                    "source": features.get("market_data_source") or ("cache" if stale else "live"),
+                }
+            if row_ready:
+                eligible_markets += 1
+            market_rows.append(
+                {
+                    "symbol": market.symbol,
+                    "venue_symbol": market.venue_symbol,
+                    "ready": row_ready,
+                    "horizons": horizon_rows,
+                }
+            )
+        provider_refresh = [row for row in refresh_results if str(row.get("provider") or "").lower() in {provider, "global"}]
+        return {
+            "provider": provider,
+            "ready": bool(eligible_markets > 0),
+            "markets_checked": len(markets),
+            "eligible_markets": eligible_markets,
+            "required_horizons": required,
+            "stale_horizons": sorted(stale_horizons),
+            "missing_horizons": sorted(missing_horizons),
+            "insufficient_horizons": sorted(insufficient_horizons),
+            "candle_count_by_horizon": candle_counts,
+            "last_successful_refresh_at": last_refresh.isoformat() if last_refresh is not None else None,
+            "age_seconds": max_age_seconds if last_refresh is not None else None,
+            "source": "live" if any(int(row.get("features_attempted", 0) or 0) > 0 for row in provider_refresh) else "cache",
+            "refresh_results": provider_refresh[:3],
+            "markets": market_rows[:5],
+        }
+
+    def _required_feature_timeframes(self) -> list[str]:
+        raw = self.config.get("ONE_H10_REQUIRED_FEATURE_TIMEFRAMES", ["15m", "1h", "4h"])
+        if isinstance(raw, str):
+            raw = [item.strip() for item in raw.split(",") if item.strip()]
+        return [str(item).strip() for item in (raw or []) if str(item).strip()]
+
+    def _max_feature_age_seconds(self) -> float:
+        default = self._safe_float(self.config.get("ONE_H10_FEATURE_REFRESH_SECONDS"), 3600.0)
+        return max(0.0, self._safe_float(self.config.get("ONE_H10_MARKET_DATA_FRESHNESS_SECONDS"), default))
+
+    @staticmethod
+    def _parse_datetime(value: Any) -> datetime | None:
+        if isinstance(value, datetime):
+            return value.replace(tzinfo=None)
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(UTC).replace(tzinfo=None)
+        return parsed
 
     def _exchange_readiness_state(
         self,
@@ -783,6 +932,7 @@ class VaultReadinessService:
         settlement_asset: str,
         markets: list[LeveragedMarket],
         require_market_metadata: bool,
+        market_freshness: dict[str, Any] | None = None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         warnings: list[dict[str, Any]] = []
         blockers: list[dict[str, Any]] = []
@@ -828,6 +978,33 @@ class VaultReadinessService:
                     "Hyperliquid supported markets are not loaded for 1H10 routing.",
                     "blocker" if require_market_metadata else "warning",
                     "Refresh market discovery before routing to Hyperliquid.",
+                    exchange="hyperliquid",
+                )
+            )
+        elif require_market_metadata and not bool((market_freshness or {}).get("ready", False)):
+            freshness = market_freshness or {}
+            stale = [str(item) for item in freshness.get("stale_horizons", []) if str(item)]
+            missing = [str(item) for item in freshness.get("missing_horizons", []) if str(item)]
+            insufficient = [str(item) for item in freshness.get("insufficient_horizons", []) if str(item)]
+            if missing:
+                code = "missing_candles"
+                title = "Hyperliquid candles missing"
+                detail = f"Missing required Hyperliquid candle horizon: {', '.join(missing[:4])}."
+            elif insufficient:
+                code = "insufficient_candles"
+                title = "Hyperliquid candles insufficient"
+                detail = f"Insufficient Hyperliquid candle history for: {', '.join(insufficient[:4])}."
+            else:
+                code = "stale_candles"
+                title = "Hyperliquid candles stale"
+                detail = f"Stale Hyperliquid candle horizon: {', '.join(stale[:4]) or 'required horizon'}."
+            blockers.append(
+                self._blocker(
+                    code,
+                    title,
+                    detail,
+                    "blocker",
+                    "Refresh Hyperliquid market data and retry; execution remains blocked until fresh candles pass.",
                     exchange="hyperliquid",
                 )
             )

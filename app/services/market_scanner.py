@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from statistics import mean
 from typing import Any
 
@@ -491,6 +492,10 @@ class MarketScannerService:
             if not feature_payload:
                 rejected.append(self._diagnostic_row(symbol, "one_h10_feature_missing", source=provider_key))
                 continue
+            freshness_blockers = self._one_h10_freshness_blockers(feature_payload)
+            if freshness_blockers:
+                rejected.append(self._diagnostic_row(symbol, ",".join(freshness_blockers), source=provider_key))
+                continue
             liquidity = max(self._float(feature_payload.get("liquidity_usd")), self._float(market.liquidity_usd))
             spread = self._float(feature_payload.get("spread_bps"), self._float(market.spread_bps))
             if bool(self.config.get("ONE_H10_REJECT_ZERO_SPREAD", True)) and spread <= 0:
@@ -503,6 +508,9 @@ class MarketScannerService:
                 rejected.append(self._diagnostic_row(symbol, "spread_above_threshold", source=provider_key))
                 continue
             edge_payload = self._one_h10_market_edge_payload(feature_payload, liquidity=liquidity, spread_bps=spread)
+            if not bool(edge_payload.get("expected_net_edge_passed", False)):
+                rejected.append(self._diagnostic_row(symbol, "edge_below_fee_slippage_buffer", source=provider_key))
+                continue
             feature_payload = {**feature_payload, **edge_payload}
             score, score_breakdown = self._one_h10_market_score(feature_payload, liquidity=liquidity, spread_bps=spread)
             features = {
@@ -573,6 +581,14 @@ class MarketScannerService:
         payload["one_h10_feature_timeframes"] = sorted(rows_by_timeframe)
         payload["one_h10_feature_updated_at"] = str(getattr(preferred, "updated_at", "") or "")
         payload["one_h10_horizon_features"] = {}
+        freshness = self._one_h10_freshness_report(rows_by_timeframe)
+        payload["one_h10_market_data_freshness"] = freshness
+        payload["one_h10_stale_horizons"] = freshness["stale_horizons"]
+        payload["one_h10_missing_horizons"] = freshness["missing_horizons"]
+        payload["one_h10_insufficient_horizons"] = freshness["insufficient_horizons"]
+        payload["one_h10_candle_count_by_horizon"] = freshness["candle_count_by_horizon"]
+        payload["stale_data"] = bool(freshness["stale_horizons"] or freshness["missing_horizons"] or freshness["insufficient_horizons"])
+        payload["stale_data_age_seconds"] = freshness["max_age_seconds"]
         for timeframe, row in rows_by_timeframe.items():
             features = dict(row.features or {})
             payload["one_h10_horizon_features"][timeframe] = {
@@ -600,6 +616,108 @@ class MarketScannerService:
                     payload[prefix + key] = features.get(key)
         return payload
 
+    def _one_h10_freshness_report(self, rows_by_timeframe: dict[str, LeveragedMarketFeature]) -> dict[str, Any]:
+        required = self._one_h10_required_timeframes()
+        max_age = self._one_h10_max_feature_age_seconds()
+        min_candles = max(0, int(self._float(self.config.get("ONE_H10_MIN_CANDLES_PER_HORIZON"), 40.0)))
+        now = datetime.now(UTC)
+        horizons: dict[str, dict[str, Any]] = {}
+        stale: list[str] = []
+        missing: list[str] = []
+        insufficient: list[str] = []
+        candle_counts: dict[str, int] = {}
+        latest_refresh: datetime | None = None
+        max_age_seconds = 0.0
+        for timeframe in required:
+            row = rows_by_timeframe.get(timeframe)
+            if row is None:
+                missing.append(timeframe)
+                candle_counts[timeframe] = 0
+                horizons[timeframe] = {
+                    "timeframe": timeframe,
+                    "source": "missing",
+                    "stale": True,
+                    "missing": True,
+                    "candle_count": 0,
+                    "age_seconds": None,
+                    "last_successful_refresh_at": None,
+                }
+                continue
+            features = dict(row.features or {})
+            updated_at = self._parse_datetime(features.get("last_successful_refresh_at") or row.updated_at)
+            age = (now - updated_at).total_seconds() if updated_at is not None else None
+            count = int(self._float(features.get("candle_count"), 0.0))
+            candle_counts[timeframe] = count
+            is_stale = updated_at is None or (max_age > 0 and age is not None and age > max_age)
+            if is_stale:
+                stale.append(timeframe)
+            if count < min_candles:
+                insufficient.append(timeframe)
+            if updated_at is not None and (latest_refresh is None or updated_at > latest_refresh):
+                latest_refresh = updated_at
+            if age is not None:
+                max_age_seconds = max(max_age_seconds, age)
+            horizons[timeframe] = {
+                "timeframe": timeframe,
+                "source": features.get("market_data_source") or ("cache" if is_stale else "live"),
+                "stale": is_stale,
+                "missing": False,
+                "candle_count": count,
+                "age_seconds": age,
+                "last_successful_refresh_at": updated_at.isoformat() if updated_at is not None else None,
+            }
+        return {
+            "required_horizons": required,
+            "horizons": horizons,
+            "stale_horizons": stale,
+            "missing_horizons": missing,
+            "insufficient_horizons": insufficient,
+            "candle_count_by_horizon": candle_counts,
+            "last_successful_refresh_at": latest_refresh.isoformat() if latest_refresh is not None else None,
+            "max_age_seconds": max_age_seconds,
+            "source": "live" if not stale and not missing and not insufficient else "cache",
+        }
+
+    def _one_h10_freshness_blockers(self, payload: dict[str, Any]) -> list[str]:
+        freshness = payload.get("one_h10_market_data_freshness") if isinstance(payload.get("one_h10_market_data_freshness"), dict) else {}
+        blockers: list[str] = []
+        missing = [str(item) for item in freshness.get("missing_horizons", []) if str(item)]
+        stale = [str(item) for item in freshness.get("stale_horizons", []) if str(item)]
+        insufficient = [str(item) for item in freshness.get("insufficient_horizons", []) if str(item)]
+        if missing:
+            blockers.append("missing_candles:" + ",".join(missing))
+        if stale:
+            blockers.append("stale_candles:" + ",".join(stale))
+        if insufficient:
+            blockers.append("insufficient_candles:" + ",".join(insufficient))
+        return blockers
+
+    def _one_h10_required_timeframes(self) -> list[str]:
+        raw = self.config.get("ONE_H10_REQUIRED_FEATURE_TIMEFRAMES", ["15m", "1h", "4h"])
+        if isinstance(raw, str):
+            raw = [item.strip() for item in raw.split(",") if item.strip()]
+        return [str(item) for item in (raw or []) if str(item).strip()]
+
+    def _one_h10_max_feature_age_seconds(self) -> float:
+        default = self._float(self.config.get("ONE_H10_FEATURE_REFRESH_SECONDS"), 3600.0)
+        return max(0.0, self._float(self.config.get("ONE_H10_MARKET_DATA_FRESHNESS_SECONDS"), default))
+
+    @staticmethod
+    def _parse_datetime(value: Any) -> datetime | None:
+        if isinstance(value, datetime):
+            parsed = value
+        else:
+            raw = str(value or "").strip()
+            if not raw:
+                return None
+            try:
+                parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
+
     def _one_h10_market_edge_payload(self, features: dict[str, Any], *, liquidity: float, spread_bps: float) -> dict[str, float]:
         close = max(self._float(features.get("close")), 1.0)
         trend_bps = abs(self._float(features.get("trend_strength"))) * 10_000.0
@@ -623,6 +741,10 @@ class MarketScannerService:
         configured_cost = self._float(features.get("cost_drag_bps"), -1.0)
         drag = max(configured_cost, implied_cost) if configured_cost >= 0 else implied_cost
         net_expected = gross_expected - drag
+        fee_bps = self._float(self.config.get("FEE_BPS"), 5.0)
+        slippage_bps = self._float(self.config.get("SIM_SLIPPAGE_BPS"), 8.0)
+        edge_buffer_bps = max(0.0, self._float(self.config.get("ONE_H10_EDGE_BUFFER_BPS"), 2.0))
+        gross_edge_threshold = fee_bps + slippage_bps + edge_buffer_bps
         min_edge = max(
             0.0, self._float(self.config.get("ONE_H10_MIN_EDGE_AFTER_COST_BPS"), self._float(self.config.get("NET_ROI_MIN_EDGE_BPS"), 4.0))
         )
@@ -664,9 +786,12 @@ class MarketScannerService:
             "execution_adjusted_net_return_bps": execution_adjusted_edge,
             "edge_after_cost_bps": net_expected,
             "cost_drag_bps": drag,
+            "edge_buffer_bps": edge_buffer_bps,
+            "gross_edge_threshold_bps": gross_edge_threshold,
+            "expected_net_edge_passed": gross_expected > gross_edge_threshold and net_expected > edge_buffer_bps,
             "risk_reward": risk_reward,
-            "estimated_fee_bps": self._float(self.config.get("FEE_BPS"), 5.0),
-            "estimated_slippage_bps": self._float(self.config.get("SIM_SLIPPAGE_BPS"), 8.0),
+            "estimated_fee_bps": fee_bps,
+            "estimated_slippage_bps": slippage_bps,
             "min_expected_edge_after_cost_bps": min_edge,
             "max_cost_drag_bps": max_cost,
             "expected_execution_quality": execution_quality,

@@ -337,7 +337,7 @@ class OneH10ForecastService:
             "execution_quality": quality["execution_quality"],
             "expected_execution_quality": quality["execution_quality"],
             "capital_efficiency_score": quality["capital_efficiency_score"],
-            "expected_net_edge_passed": quality["net_expected_return_bps"] >= quality["min_edge_bps"],
+            "expected_net_edge_passed": bool(quality.get("expected_net_edge_passed", False)),
             "min_expected_edge_after_cost_bps": quality["min_edge_bps"],
             "max_cost_drag_bps": quality["max_cost_drag_bps"],
             "risk_reward": risk_reward,
@@ -536,7 +536,7 @@ class OneH10ForecastService:
             "execution_quality": quality["execution_quality"],
             "expected_execution_quality": quality["execution_quality"],
             "capital_efficiency_score": quality["capital_efficiency_score"],
-            "expected_net_edge_passed": quality["net_expected_return_bps"] >= quality["min_edge_bps"],
+            "expected_net_edge_passed": bool(quality.get("expected_net_edge_passed", False)),
             "min_expected_edge_after_cost_bps": quality["min_edge_bps"],
             "max_cost_drag_bps": quality["max_cost_drag_bps"],
             "risk_reward": risk_reward,
@@ -694,6 +694,8 @@ class OneH10ForecastService:
         thresholds = one_h10_quality_thresholds(self.config)
         max_cost = thresholds["max_cost_drag_bps"]
         min_edge = thresholds["min_edge_after_cost_bps"]
+        edge_buffer = thresholds["edge_buffer_bps"]
+        gross_edge_threshold = fee + slippage + edge_buffer
         net_expected = self._safe_float(gross_expected_bps) - cost_drag
         execution_adjusted_net = net_expected
 
@@ -727,6 +729,8 @@ class OneH10ForecastService:
             blockers.append("high_slippage")
         if net_expected < min_edge:
             blockers.append("low_edge_after_costs")
+        if self._safe_float(gross_expected_bps) <= gross_edge_threshold or net_expected <= edge_buffer:
+            blockers.append("edge_below_fee_slippage_buffer")
         if liquidity > 0 and capital_efficiency < 0.25:
             blockers.append("low_liquidity_capacity")
         if bool(context.get("stale_data", False)):
@@ -748,6 +752,9 @@ class OneH10ForecastService:
             "cost_drag_bps": cost_drag,
             "max_cost_drag_bps": max_cost,
             "min_edge_bps": min_edge,
+            "edge_buffer_bps": edge_buffer,
+            "gross_edge_threshold_bps": gross_edge_threshold,
+            "expected_net_edge_passed": self._safe_float(gross_expected_bps) > gross_edge_threshold and net_expected > edge_buffer,
             "gross_expected_return_bps": self._safe_float(gross_expected_bps),
             "net_expected_return_bps": net_expected,
             "execution_adjusted_net_return_bps": execution_adjusted_net,

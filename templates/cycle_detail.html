@@ -19,6 +19,10 @@
 {% set cycle_charts = summary.get("chart_payload", {}) %}
 {% set value_chart = cycle_charts.get("value", {}) %}
 {% set pnl_chart = cycle_charts.get("pnl", {}) %}
+{% set no_trade_completion = summary.get("completion_kind") == "no_executable_setup" %}
+{% set diagnostics = summary.get("one_h10_diagnostics", {}) %}
+{% set freshness = diagnostics.get("market_data_freshness", {}) if diagnostics else {} %}
+{% set trading_roi_pct = summary.get("trading_roi_pct", summary.get("roi_pct", 0)) %}
 
 <section class="cycle-detail-shell">
   <header class="cycle-detail-header">
@@ -49,10 +53,16 @@
         <strong class="{{ 'positive' if total_pnl >= 0 else 'negative' }}">${{ "%.2f"|format(total_pnl) }}</strong>
       </div>
       <div class="cycle-hero-metric">
-        <span>ROI</span>
-        <strong class="{{ 'positive' if roi_pct >= 0 else 'negative' }}">{{ "%.2f"|format(roi_pct) }}%</strong>
+        <span>{% if no_trade_completion %}Trading ROI{% else %}ROI{% endif %}</span>
+        <strong class="{{ 'positive' if trading_roi_pct >= 0 else 'negative' }}">{{ "%.2f"|format(trading_roi_pct) }}%</strong>
       </div>
     </div>
+    {% if no_trade_completion %}
+      <div class="trade-empty-state" role="status">
+        <strong>{{ summary.get("completion_label", "Completed: no executable setup") }}</strong>
+        <span>No orders or fills were recorded. Settlement delta source: {{ summary.get("settlement_delta_source", "unknown").replace("_", " ") }}.</span>
+      </div>
+    {% endif %}
 
     <div class="cycle-metric-groups">
       <section class="cycle-metric-group" aria-labelledby="cycle-allocation-heading">
@@ -93,6 +103,13 @@
             <dd>{{ "%.6f"|format(final_settlement_amount) }} {{ cycle.settlement_asset }}</dd>
           </div>
           <div class="cycle-metric">
+            <dt>Settlement Delta</dt>
+            <dd class="{{ 'positive' if summary.get('settlement_delta_usd', 0) >= 0 else 'negative' }}">
+              ${{ "%.2f"|format(summary.get("settlement_delta_usd", 0)) }}
+              · {{ summary.get("settlement_delta_source", "unknown").replace("_", " ") }}
+            </dd>
+          </div>
+          <div class="cycle-metric">
             <dt>Objective</dt>
             <dd>${{ "%.2f"|format(summary.get("target_amount_usd", 0)) }}</dd>
           </div>
@@ -130,6 +147,36 @@
       </section>
     </div>
   </article>
+
+  {% if diagnostics %}
+    <section class="trade-activity-card" aria-labelledby="cycle-diagnostics-heading">
+      <div class="cycle-section-heading">
+        <div>
+          <span class="card-kicker">1H10 Diagnostics</span>
+          <h2 id="cycle-diagnostics-heading">{{ diagnostics.get("active_blocker", "No active blocker").replace("_", " ") }}</h2>
+        </div>
+        <span class="metric-pill metric-pill-muted">{{ diagnostics.get("order_state", "no_orders").replace("_", " ")|title }}</span>
+      </div>
+      <dl class="cycle-metric-grid">
+        <div class="cycle-metric">
+          <dt>Freshness Source</dt>
+          <dd>{{ freshness.get("source", "unknown")|title }}</dd>
+        </div>
+        <div class="cycle-metric">
+          <dt>Stale Horizon</dt>
+          <dd>{{ freshness.get("stale_horizons", [])|join(", ") or "None" }}</dd>
+        </div>
+        <div class="cycle-metric">
+          <dt>Missing Horizon</dt>
+          <dd>{{ freshness.get("missing_horizons", [])|join(", ") or "None" }}</dd>
+        </div>
+        <div class="cycle-metric">
+          <dt>Orders / Fills</dt>
+          <dd>{{ diagnostics.get("order_count", 0) }} / {{ diagnostics.get("fill_count", 0) }}</dd>
+        </div>
+      </dl>
+    </section>
+  {% endif %}
 
   <section class="cycle-analytics-grid" aria-label="Cycle analytics">
     <article class="mini-chart-card" data-chart-card aria-labelledby="cycle-value-chart-title">

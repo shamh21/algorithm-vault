@@ -102,6 +102,59 @@ def _candles(count: int = 80) -> list[dict[str, Any]]:
     return rows
 
 
+def _one_h10_feature_payload(*, updated_at: datetime, candle_count: int = 120, trend_strength: float = 0.01) -> dict[str, Any]:
+    return {
+        "candle_count": candle_count,
+        "last_successful_refresh_at": updated_at.isoformat(),
+        "market_data_source": "live",
+        "close": 100.0,
+        "trend_strength": trend_strength,
+        "ema_trend": 1.0,
+        "macd_histogram": 0.2,
+        "rsi": 55.0,
+        "volatility": 0.01,
+        "atr_pct": 0.01,
+        "spread_bps": 1.0,
+        "liquidity_usd": 1_000_000.0,
+        "fibonacci_confluence": {"score": 1.0, "cluster_count": 3},
+        "volume_spike": {"ratio": 2.0},
+        "order_book_imbalance": 0.4,
+        "funding_rate": 0.0001,
+    }
+
+
+def _one_h10_market(symbol: str, *, updated_at: datetime, trend_strength: float = 0.01, candle_count: int = 120) -> LeveragedMarket:
+    market = LeveragedMarket(
+        provider="hyperliquid",
+        venue_symbol=symbol,
+        symbol=symbol,
+        status="active",
+        settlement_asset="USDC",
+        max_leverage=3.0,
+        liquidity_usd=1_000_000,
+        spread_bps=1.0,
+        last_seen_at=datetime.utcnow(),
+    )
+    db.session.add(market)
+    db.session.flush()
+    for timeframe in ("15m", "1h", "4h"):
+        feature = LeveragedMarketFeature(
+            leveraged_market_id=market.id,
+            provider="hyperliquid",
+            symbol=symbol,
+            timeframe=timeframe,
+            updated_at=updated_at,
+        )
+        feature.features = _one_h10_feature_payload(
+            updated_at=updated_at,
+            trend_strength=trend_strength,
+            candle_count=candle_count,
+        )
+        db.session.add(feature)
+    db.session.commit()
+    return market
+
+
 def test_one_h10_selector_uses_separate_ml_namespace(app) -> None:
     selector = app.extensions["services"]["vault_strategy_selector"]
     market_data = app.extensions["services"]["market_data"]
@@ -468,13 +521,7 @@ def test_hyperliquid_public_market_data_can_disable_retries(app, monkeypatch) ->
 
 
 def _feature(market: LeveragedMarket, *, score: float = 1.0, rsi: float = 55.0, liquidity: float = 100_000.0) -> LeveragedMarketFeature:
-    feature = LeveragedMarketFeature(
-        leveraged_market=market,
-        provider=market.provider,
-        symbol=market.symbol,
-        timeframe="15m",
-    )
-    feature.features = {
+    base_features = {
         "ml_namespace": "1h10",
         "rsi": rsi,
         "ema_fast": 101.0,
@@ -493,9 +540,23 @@ def _feature(market: LeveragedMarket, *, score: float = 1.0, rsi: float = 55.0, 
         "fibonacci_levels": {"retracements": {"61.8": 100.0}},
         "fibonacci_timing": {"fib_time_13": 1},
         "volume_spike": {"ratio": 2.0},
+        "candle_count": 120,
+        "last_successful_refresh_at": datetime.utcnow().isoformat(),
+        "market_data_source": "live",
     }
-    db.session.add(feature)
-    return feature
+    primary = None
+    for timeframe in ("15m", "1h", "4h"):
+        feature = LeveragedMarketFeature(
+            leveraged_market=market,
+            provider=market.provider,
+            symbol=market.symbol,
+            timeframe=timeframe,
+        )
+        feature.features = {**base_features, "timeframe": timeframe}
+        db.session.add(feature)
+        if timeframe == "15m":
+            primary = feature
+    return primary
 
 
 def test_one_h10_scanner_rejects_zero_spread_features(app) -> None:
@@ -555,7 +616,7 @@ def test_one_h10_ml_training_rows_use_persisted_feature_namespace(app) -> None:
     engine = MLDecisionEngine(app.config)
     rows = engine.training_rows("pytorch_fibonacci", "1h10", objective="one_h10")
 
-    assert len(rows) == 2
+    assert len(rows) == 6
     assert {row.provider for row in rows} == {"hyperliquid", "kucoin"}
     assert all(row.source == "one_h10_feature_bootstrap:pytorch_fibonacci" for row in rows)
     assert engine._objective("one_h10") == "one_h10"
@@ -626,6 +687,33 @@ def test_one_h10_scanner_ranks_all_persisted_markets_not_allowed_symbols_only(ap
     assert [candidate.symbol for candidate in ranked] == ["DOGE", "BTC"]
     assert ranked[0].features["ml_horizon"] == "1h10"
     assert ranked[0].features["fibonacci_levels"]["retracements"]["61.8"] == 100.0
+
+
+def test_one_h10_scanner_rejects_stale_required_horizon(app) -> None:
+    app.config["ONE_H10_MARKET_DATA_FRESHNESS_SECONDS"] = 60
+    market = _one_h10_market("BTC", updated_at=datetime.utcnow() - timedelta(minutes=10))
+
+    ranked = app.extensions["services"]["market_scanner"].score_one_h10_markets([market], provider="hyperliquid")
+
+    assert ranked == []
+    assert app.extensions["services"]["market_scanner"].last_scan_diagnostics["rejection_breakdown"] == {"stale_candles:15m,1h,4h": 1}
+
+
+def test_one_h10_scanner_rejects_edge_below_cost_buffer_and_ranks_net_edge(app) -> None:
+    app.config["ONE_H10_MARKET_DATA_FRESHNESS_SECONDS"] = 3600
+    weak = _one_h10_market("WEAK", updated_at=datetime.utcnow(), trend_strength=0.0001)
+    strong = _one_h10_market("STRONG", updated_at=datetime.utcnow(), trend_strength=0.02)
+    for feature in weak.feature_rows:
+        payload = dict(feature.features)
+        payload["cost_drag_bps"] = 250.0
+        feature.features = payload
+    db.session.commit()
+
+    ranked = app.extensions["services"]["market_scanner"].score_one_h10_markets([weak, strong], provider="hyperliquid", limit=2)
+
+    assert [candidate.symbol for candidate in ranked] == ["STRONG"]
+    assert ranked[0].features["expected_net_edge_passed"] is True
+    assert app.extensions["services"]["market_scanner"].last_scan_diagnostics["rejection_breakdown"]["edge_below_fee_slippage_buffer"] == 1
 
 
 def test_one_h10_provider_legs_skip_forecast_blocked_candidates(app, monkeypatch) -> None:
@@ -1574,9 +1662,7 @@ def test_one_h10_start_creates_provider_tagged_legs(app, monkeypatch) -> None:
     assert all((leg.details.get("one_h10_forecast") or {}).get("ml_namespace") == "1h10" for leg in legs)
     assert all(db.session.get(StrategyRun, leg.strategy_run_id).parameters["one_h10_forecast"]["ml_horizon"] == "1h10" for leg in legs)
     assert all(float(leg.details.get("allocation_score") or 0.0) > 0 for leg in legs)
-    assert all(
-        db.session.get(StrategyRun, leg.strategy_run_id).parameters["forecast_profitability_score"] is not None for leg in legs
-    )
+    assert all(db.session.get(StrategyRun, leg.strategy_run_id).parameters["forecast_profitability_score"] is not None for leg in legs)
     assert all(
         db.session.get(StrategyRun, leg.strategy_run_id).parameters["forecast_execution_adjusted_net_return_bps"] is not None
         for leg in legs
@@ -1594,7 +1680,7 @@ def test_one_h10_start_creates_provider_tagged_legs(app, monkeypatch) -> None:
             "user_id": user.id,
             "mode": "live",
             "feature_scope": "all",
-            "persist_features": False,
+            "persist_features": True,
         }
     ]
 
@@ -2215,7 +2301,7 @@ def test_one_h10_risk_rejects_low_edge_forecast_before_live_order(app) -> None:
 
     assert decision.approved is False
     assert decision.rule_name == "one_h10_signal_quality_blocked"
-    assert "low_edge_after_costs" in decision.details["blockers"]
+    assert "edge_below_fee_slippage_buffer" in decision.details["blockers"]
     assert decision.details["decision_reason_code"] == "BELOW_EDGE_THRESHOLD"
 
 
@@ -2804,6 +2890,58 @@ def test_one_h10_cycle_summary_reports_target_roi_and_allocation_history(app) ->
     assert "slippage_too_high" in summary["blocker_categories"]
     assert summary["rejected_intents"][0]["client_order_id"] == "rejected-1h10"
     assert summary["rejected_order_count"] == 1
+
+
+def test_one_h10_zero_order_completed_cycle_reports_no_trade_settlement_delta(app) -> None:
+    user, _ = _create_user("notradecomplete")
+    cycle = VaultCycle(
+        user_id=user.id,
+        deposit_asset="USDT",
+        deposit_amount=35.0,
+        settlement_asset="USDT",
+        lock_duration_hours=1,
+        lock_duration_seconds=3600,
+        status="complete",
+        execution_substatus="complete",
+        algorithm_profile="1H10",
+        started_at=datetime.utcnow() - timedelta(hours=1),
+        unlocks_at=datetime.utcnow(),
+        settled_at=datetime.utcnow(),
+        starting_value_usd=35.0,
+        current_estimated_value_usd=35.005759,
+        final_settlement_amount=35.005759,
+    )
+    cycle.selection_metadata = {
+        "provider_skip_reasons": [{"provider": "hyperliquid", "reason": "one_h10_forecast_blocked:low_confidence,features_stale"}],
+        "exchange_allocation_history": [
+            {
+                "provider": "hyperliquid",
+                "allocated_usd": 0.0,
+                "legs": [
+                    {
+                        "symbol": "BTC",
+                        "allocation_cap_usd": 0.0,
+                        "skip_reason": "one_h10_forecast_blocked:low_confidence,features_stale",
+                    }
+                ],
+            }
+        ],
+    }
+    db.session.add(cycle)
+    db.session.commit()
+
+    summary = _cycle_summary(cycle)
+
+    assert summary["order_count"] == 0
+    assert summary["fill_count"] == 0
+    assert summary["realized_pnl_usd"] == 0.0
+    assert summary["total_pnl_usd"] == 0.0
+    assert summary["roi_pct"] == 0.0
+    assert summary["trading_roi_pct"] == 0.0
+    assert summary["settlement_delta_usd"] == pytest.approx(0.005759)
+    assert summary["settlement_delta_source"] == "settlement_balance_or_rounding"
+    assert summary["completion_label"] == "Completed: no executable setup"
+    assert summary["trade_decision"]["stage"] == "completed_no_executable_setup"
 
 
 def test_one_h10_summary_treats_forecast_hold_low_confidence_as_advisory(app) -> None:

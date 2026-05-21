@@ -131,6 +131,28 @@
     });
   }
 
+  function renderCycleDiagnostics(card, diagnostics) {
+    const container = card.querySelector("[data-cycle-diagnostics]");
+    if (!container) return;
+    clearElement(container);
+    const freshness = diagnostics?.market_data_freshness || {};
+    const stale = Array.isArray(freshness.stale_horizons) ? freshness.stale_horizons : [];
+    const missing = Array.isArray(freshness.missing_horizons) ? freshness.missing_horizons : [];
+    const insufficient = Array.isArray(freshness.insufficient_horizons) ? freshness.insufficient_horizons : [];
+    const detail = stale.length
+      ? `Stale ${stale.join(", ")}`
+      : missing.length
+        ? `Missing ${missing.join(", ")}`
+        : insufficient.length
+          ? `Insufficient ${insufficient.join(", ")}`
+          : `Orders ${numberValue(diagnostics?.order_count, 0)} · Fills ${numberValue(diagnostics?.fill_count, 0)}`;
+    [diagnostics?.active_blocker || "No active blocker", detail].forEach((text) => {
+      const item = document.createElement("span");
+      item.textContent = String(text || "");
+      container.appendChild(item);
+    });
+  }
+
   function renderCycleTradeDecision(card, decision) {
     const container = card.querySelector("[data-cycle-trade-decision]");
     if (!container) return;
@@ -160,6 +182,7 @@
     updateText(card, "[data-cycle-next]", `Next evaluation ${status.nextScheduled1h10Cycle || "pending"}`);
     renderCycleTradeDecision(card, tradeDecision);
     renderCycleRiskNotes(card, coherence.riskNotes || []);
+    renderCycleDiagnostics(card, payload?.one_h10_diagnostics || {});
     card.classList.toggle("is-stale", Boolean(status.stale));
     card.classList.toggle("is-error", hasError);
     card.classList.remove("is-loading");

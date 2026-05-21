@@ -3839,6 +3839,13 @@ def _one_h10_provider_legs(
             limit=int(current_app.config.get("ONE_H10_MAX_PROVIDER_LEGS", 3) or 3),
         )
         diagnostics = dict(getattr(scanner, "last_scan_diagnostics", {}) or {})
+        current_app.logger.info(
+            "1H10 scanner provider=%s markets=%s ranked=%s rejected=%s",
+            provider,
+            len(markets),
+            len(ranked),
+            len(diagnostics.get("rejected", []) or []),
+        )
         if not ranked:
             fallback_symbols = [str(leg.get("symbol") or "").upper() for leg in base_legs if str(leg.get("symbol") or "").strip()]
             fallback_symbols.extend(str(symbol or "").upper() for symbol in allowed_symbols if str(symbol or "").strip())
@@ -4002,6 +4009,15 @@ def _one_h10_provider_legs(
                     market=market,
                 )
                 candidate_features["one_h10_forecast"] = forecast
+                current_app.logger.info(
+                    "1H10 forecast provider=%s symbol=%s confidence=%.4f blockers=%s",
+                    provider,
+                    symbol,
+                    _one_h10_float(forecast.get("confidence") if isinstance(forecast, dict) else 0.0),
+                    ",".join(str(item) for item in (forecast.get("decision_blockers", []) or []) if str(item))
+                    if isinstance(forecast, dict)
+                    else "",
+                )
             live_blockers = _one_h10_forecast_live_blockers(forecast)
             if live_blockers:
                 reason = "one_h10_forecast_blocked:" + ",".join(live_blockers)
@@ -4018,6 +4034,7 @@ def _one_h10_provider_legs(
                         "scanner_score": candidate.score,
                         "scanner_source": candidate.source,
                         "score_breakdown": candidate.score_breakdown or {},
+                        "scanner_features": candidate_features,
                         "forecast": forecast,
                         "skip_reason": reason,
                     }
@@ -4084,6 +4101,16 @@ def _one_h10_provider_legs(
                     market=market if isinstance(market, LeveragedMarket) else None,
                 )
                 candidate_features["one_h10_forecast"] = forecast
+                current_app.logger.info(
+                    "1H10 allocation forecast provider=%s symbol=%s allocation=%.4f confidence=%.4f blockers=%s",
+                    provider,
+                    symbol,
+                    allocation_cap,
+                    _one_h10_float(forecast.get("confidence") if isinstance(forecast, dict) else 0.0),
+                    ",".join(str(item) for item in (forecast.get("decision_blockers", []) or []) if str(item))
+                    if isinstance(forecast, dict)
+                    else "",
+                )
             live_blockers = _one_h10_forecast_live_blockers(forecast)
             if live_blockers:
                 reason = "one_h10_forecast_blocked:" + ",".join(live_blockers)
@@ -4101,6 +4128,7 @@ def _one_h10_provider_legs(
                         "scanner_source": getattr(candidate, "source", ""),
                         "allocation_score": allocation_score,
                         "score_breakdown": getattr(candidate, "score_breakdown", {}) or {},
+                        "scanner_features": candidate_features,
                         "forecast": forecast,
                         "skip_reason": reason,
                     }
@@ -4212,6 +4240,7 @@ def _one_h10_provider_legs(
                     "allocation_score": allocation_score,
                     "allocation_method": "net_expectancy",
                     "score_breakdown": candidate.score_breakdown or {},
+                    "scanner_features": candidate_features,
                     "forecast": forecast,
                 }
             )
@@ -5119,6 +5148,7 @@ def _cycle_summary(cycle: VaultCycle, *, performance: dict[str, float | bool] | 
     orders = _cycle_orders(cycle)
     order_summaries = [_order_summary(order) for order in orders]
     fills = [fill for order in orders for fill in order.fills]
+    no_order_cycle = str(cycle.algorithm_profile or "").upper() == "1H10" and str(cycle.status or "").lower() == "complete" and not orders
     fees = sum(float(fill.fee or 0.0) + float(getattr(fill, "funding_fee", 0.0) or 0.0) for fill in fills)
     slippage_values = [
         float(order.details.get("slippage_bps", 0.0) or 0.0) for order in orders if order.details.get("slippage_bps") is not None
@@ -5138,7 +5168,11 @@ def _cycle_summary(cycle: VaultCycle, *, performance: dict[str, float | bool] | 
     if final_settlement_value <= 0:
         final_settlement_value = float(cycle.current_estimated_value_usd or 0.0) / max(settlement_price, 1e-9)
     final_settlement_usd = final_settlement_value * settlement_price
-    roi_pct = ((final_settlement_usd - starting_value) / max(starting_value, 1e-9)) * 100.0 if starting_value > 0 else 0.0
+    settlement_delta_usd = final_settlement_usd - starting_value
+    settlement_delta_pct = (settlement_delta_usd / max(starting_value, 1e-9)) * 100.0 if starting_value > 0 else 0.0
+    trading_roi_pct = (float(performance["total_pnl"]) / max(starting_value, 1e-9)) * 100.0 if starting_value > 0 else 0.0
+    roi_pct = 0.0 if no_order_cycle else settlement_delta_pct
+    settlement_delta_source = _cycle_settlement_delta_source(cycle, no_order_cycle=no_order_cycle)
     target_amount_usd = float(
         cycle.selection_metadata.get(
             "target_amount_usd",
@@ -5183,6 +5217,24 @@ def _cycle_summary(cycle: VaultCycle, *, performance: dict[str, float | bool] | 
         "final_settlement_amount": final_settlement_value,
         "final_settlement_value_usd": final_settlement_usd,
         "roi_pct": roi_pct,
+        "trading_roi_pct": trading_roi_pct,
+        "settlement_delta_usd": settlement_delta_usd,
+        "settlement_delta_pct": settlement_delta_pct,
+        "settlement_delta_source": settlement_delta_source,
+        "completion_kind": "no_executable_setup" if no_order_cycle else "",
+        "completion_label": "Completed: no executable setup" if no_order_cycle else "",
+        "settlement": {
+            "starting_value_usd": starting_value,
+            "final_value_usd": final_settlement_usd,
+            "delta_usd": settlement_delta_usd,
+            "delta_pct": settlement_delta_pct,
+            "delta_source": settlement_delta_source,
+            "realized_trading_pnl_usd": 0.0 if no_order_cycle else float(performance["realized_pnl"]),
+            "trading_pnl_usd": 0.0 if no_order_cycle else float(performance["total_pnl"]),
+            "fees_usd": fees,
+            "order_count": len(orders),
+            "fill_count": len(fills),
+        },
         "execution_mode": cycle.execution_mode,
         "algorithm_profile": cycle.algorithm_profile,
         "symbols": sorted({order.symbol for order in orders} | {leg.symbol for leg in cycle.allocation_legs}),
@@ -5191,9 +5243,9 @@ def _cycle_summary(cycle: VaultCycle, *, performance: dict[str, float | bool] | 
         "trades_taken": len(orders),
         "fill_count": len(fills),
         "fees_usd": fees,
-        "realized_pnl_usd": float(performance["realized_pnl"]),
-        "unrealized_pnl_usd": float(performance["unrealized_pnl"]),
-        "total_pnl_usd": float(performance["total_pnl"]),
+        "realized_pnl_usd": 0.0 if no_order_cycle else float(performance["realized_pnl"]),
+        "unrealized_pnl_usd": 0.0 if no_order_cycle else float(performance["unrealized_pnl"]),
+        "total_pnl_usd": 0.0 if no_order_cycle else float(performance["total_pnl"]),
         "max_leverage": max(leverages),
         "avg_leverage": sum(leverages) / len(leverages),
         "risk_reward": (sum(reward_risks) / len(reward_risks)) if reward_risks else 0.0,
@@ -5217,6 +5269,7 @@ def _cycle_summary(cycle: VaultCycle, *, performance: dict[str, float | bool] | 
         "blocker_categories": blocker_categories,
         "ranked_candidates": ranked_candidates,
         "skipped_symbols": _cycle_skipped_symbols(cycle),
+        "one_h10_diagnostics": _cycle_one_h10_diagnostics(cycle, orders, trade_decision, trade_decision_legs),
         "rejected_intents": rejected_intents,
         "submitted_order_count": sum(
             1 for order in order_summaries if str(order.get("status") or "").lower() in {"submitted", "open", "filled"}
@@ -5236,6 +5289,105 @@ def _cycle_summary(cycle: VaultCycle, *, performance: dict[str, float | bool] | 
         summary["risk_events"] = vault_cycle_payload.get("risk_events", [])
         summary["settlement"] = vault_cycle_payload.get("settlement", {})
     return summary
+
+
+def _cycle_settlement_delta_source(cycle: VaultCycle, *, no_order_cycle: bool) -> str:
+    explicit = str(cycle.selection_metadata.get("settlement_delta_source") or "").strip()
+    if explicit:
+        return explicit
+    if no_order_cycle:
+        if float(cycle.final_settlement_amount or 0.0) > 0:
+            return "settlement_balance_or_rounding"
+        if float(cycle.current_estimated_value_usd or 0.0) > 0:
+            return "mark_estimate"
+        return "no_trade"
+    return "realized_trading" if _cycle_orders(cycle) else "mark_estimate"
+
+
+def _cycle_one_h10_diagnostics(
+    cycle: VaultCycle,
+    orders: list[Order],
+    trade_decision: dict[str, object],
+    trade_decision_legs: list[dict[str, object]],
+) -> dict[str, object]:
+    if str(cycle.algorithm_profile or "").upper() != "1H10":
+        return {}
+    forecast_blockers = _cycle_forecast_blockers(cycle)
+    provider_reasons = _blocker_categories_from_reasons(cycle.selection_metadata.get("provider_skip_reasons", []) or [])
+    freshness = _cycle_market_data_freshness(cycle)
+    active_blocker = ""
+    if freshness.get("stale_horizons"):
+        active_blocker = "stale_candles:" + ",".join([str(item) for item in freshness.get("stale_horizons", [])])
+    elif freshness.get("missing_horizons"):
+        active_blocker = "missing_candles:" + ",".join([str(item) for item in freshness.get("missing_horizons", [])])
+    elif freshness.get("insufficient_horizons"):
+        active_blocker = "insufficient_candles:" + ",".join([str(item) for item in freshness.get("insufficient_horizons", [])])
+    elif forecast_blockers:
+        active_blocker = str(forecast_blockers[0])
+    elif provider_reasons:
+        active_blocker = str(provider_reasons[0])
+    elif not orders and str(cycle.status or "").lower() == "complete":
+        active_blocker = "no_executable_setup"
+    return {
+        "active_blocker": active_blocker,
+        "market_data_freshness": freshness,
+        "forecast_blockers": forecast_blockers,
+        "provider_blockers": provider_reasons,
+        "order_state": "submitted" if any(order.status in {"submitted", "open", "filled"} for order in orders) else "no_orders",
+        "order_count": len(orders),
+        "fill_count": sum(len(order.fills) for order in orders),
+        "trade_decision_stage": trade_decision.get("stage"),
+        "leg_stages": [row.get("stage") for row in trade_decision_legs],
+        "broker_submit_reachable": bool(trade_decision.get("broker_order_submitted")),
+    }
+
+
+def _cycle_market_data_freshness(cycle: VaultCycle) -> dict[str, object]:
+    freshness_rows: list[dict[str, object]] = []
+    for leg in cycle.allocation_legs:
+        details = leg.details
+        features = details.get("scanner_features") if isinstance(details.get("scanner_features"), dict) else {}
+        freshness = features.get("one_h10_market_data_freshness") if isinstance(features.get("one_h10_market_data_freshness"), dict) else {}
+        if freshness:
+            freshness_rows.append(freshness)
+    for provider in (
+        cycle.selection_metadata.get("provider_allocation_history", cycle.selection_metadata.get("exchange_allocation_history", [])) or []
+    ):
+        if not isinstance(provider, dict):
+            continue
+        for leg in provider.get("legs", []) or []:
+            if not isinstance(leg, dict):
+                continue
+            forecast = leg.get("forecast") if isinstance(leg.get("forecast"), dict) else {}
+            scanner_features = leg.get("scanner_features") if isinstance(leg.get("scanner_features"), dict) else {}
+            for payload in (scanner_features, forecast):
+                freshness = (
+                    payload.get("one_h10_market_data_freshness") if isinstance(payload.get("one_h10_market_data_freshness"), dict) else {}
+                )
+                if freshness:
+                    freshness_rows.append(freshness)
+    stale = sorted({str(item) for row in freshness_rows for item in (row.get("stale_horizons", []) or []) if str(item)})
+    missing = sorted({str(item) for row in freshness_rows for item in (row.get("missing_horizons", []) or []) if str(item)})
+    insufficient = sorted({str(item) for row in freshness_rows for item in (row.get("insufficient_horizons", []) or []) if str(item)})
+    counts: dict[str, int] = {}
+    last_refresh = ""
+    age_seconds = 0.0
+    for row in freshness_rows:
+        for key, value in (row.get("candle_count_by_horizon", {}) or {}).items():
+            counts[str(key)] = max(counts.get(str(key), 0), int(_one_h10_float(value)))
+        refreshed = str(row.get("last_successful_refresh_at") or "")
+        if refreshed and refreshed > last_refresh:
+            last_refresh = refreshed
+        age_seconds = max(age_seconds, _one_h10_float(row.get("max_age_seconds"), _one_h10_float(row.get("age_seconds"))))
+    return {
+        "source": "live" if freshness_rows and not stale and not missing and not insufficient else "cache",
+        "stale_horizons": stale,
+        "missing_horizons": missing,
+        "insufficient_horizons": insufficient,
+        "candle_count_by_horizon": counts,
+        "last_successful_refresh_at": last_refresh,
+        "age_seconds": age_seconds,
+    }
 
 
 def _cycle_ranked_candidates(cycle: VaultCycle) -> list[dict[str, object]]:
@@ -5399,6 +5551,8 @@ def _cycle_trade_decision(
         stage = "waiting_for_signal"
     elif runtime_notice:
         stage = "blocked"
+    elif str(cycle.status or "").lower() == "complete" and not order_summaries:
+        stage = "completed_no_executable_setup"
     else:
         stage = "pending"
 
@@ -5409,6 +5563,8 @@ def _cycle_trade_decision(
             break
     if not reason and runtime_notice:
         reason = str(runtime_notice.get("message") or runtime_notice.get("blocker_category") or "")
+    if not reason and stage == "completed_no_executable_setup":
+        reason = "No orders or fills were recorded for this completed cycle."
     reason = _sanitize_cycle_reason(reason)
     labels = {
         "placed": "Order placed",
@@ -5418,6 +5574,7 @@ def _cycle_trade_decision(
         "skipped": "Signal skipped",
         "queued_for_worker": "Queued for worker",
         "waiting_for_signal": "Waiting for signal",
+        "completed_no_executable_setup": "Completed: no executable setup",
         "pending": "Collecting data",
     }
     messages = {
@@ -5428,13 +5585,20 @@ def _cycle_trade_decision(
         "skipped": "The latest 1H10 signal resolved to no trade.",
         "queued_for_worker": "The run is queued for the dedicated strategy worker; no signal can place an order until the worker starts it.",
         "waiting_for_signal": "The strategy worker is active and waiting for an actionable 1H10 signal.",
+        "completed_no_executable_setup": "No live order was submitted because no 1H10 setup passed the executable gates.",
         "pending": "The cycle has not reached an order decision yet.",
     }
     return {
         "stage": stage,
         "label": labels.get(stage, "Trade decision"),
         "mode": cycle.execution_mode,
-        "status": "success" if stage == "placed" else "error" if stage == "failed" else "blocked" if stage == "blocked" else "pending",
+        "status": "success"
+        if stage == "placed"
+        else "error"
+        if stage == "failed"
+        else "blocked"
+        if stage in {"blocked", "completed_no_executable_setup"}
+        else "pending",
         "message": messages.get(stage, ""),
         "reason": reason,
         "order_count": len(order_summaries),

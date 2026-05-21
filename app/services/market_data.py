@@ -40,6 +40,8 @@ class MarketDataService:
         mode: str = "testnet",
         limit: int | None = None,
         retry: bool = True,
+        force_refresh: bool = False,
+        allow_stale_on_error: bool = True,
     ) -> list[dict[str, Any]]:
         self._validate_symbol(symbol)
 
@@ -49,20 +51,21 @@ class MarketDataService:
 
         candle_limit = self._resolve_limit(limit)
         cache_key = ("candles", str(mode or "testnet"), symbol.upper(), timeframe, candle_limit)
-        cached = self._cache_get(cache_key, mode)
-        if cached is not None:
-            return [dict(row) for row in cached]
-        backoff_error = self._failure_backoff_error(cache_key, mode)
-        if backoff_error:
-            stale = self._cache_get_stale(cache_key, mode)
-            if stale is not None:
-                self._stale_serves += 1
-                return [dict(row) for row in stale]
-            raise RuntimeError(backoff_error)
+        if not force_refresh:
+            cached = self._cache_get(cache_key, mode)
+            if cached is not None:
+                return [dict(row) for row in cached]
+            backoff_error = self._failure_backoff_error(cache_key, mode)
+            if backoff_error:
+                stale = self._cache_get_stale(cache_key, mode) if allow_stale_on_error else None
+                if stale is not None:
+                    self._stale_serves += 1
+                    return [dict(row) for row in stale]
+                raise RuntimeError(backoff_error)
         is_owner, inflight = self._claim_inflight(cache_key)
         if not is_owner:
             inflight.wait(timeout=2.0)
-            cached = self._cache_get(cache_key, mode)
+            cached = None if force_refresh else self._cache_get(cache_key, mode)
             if cached is not None:
                 return [dict(row) for row in cached]
         interval = TIMEFRAME_TO_DELTA[timeframe]
@@ -80,7 +83,7 @@ class MarketDataService:
                 retry=retry and str(mode or "").lower() != "live",
             )
         except Exception as exc:  # noqa: BLE001
-            stale = self._cache_get_stale(cache_key, mode)
+            stale = self._cache_get_stale(cache_key, mode) if allow_stale_on_error else None
             if stale is not None and self._looks_transient_provider_error(exc):
                 self._stale_serves += 1
                 return [dict(row) for row in stale]
@@ -96,6 +99,64 @@ class MarketDataService:
         result = sorted(candles, key=lambda candle: candle["timestamp"])[-candle_limit:]
         self._cache_set(cache_key, result, mode)
         return [dict(row) for row in result]
+
+    def candle_freshness_report(
+        self,
+        symbol: str,
+        timeframe: str,
+        *,
+        mode: str = "live",
+        limit: int | None = None,
+        max_age_seconds: float | None = None,
+        force_refresh: bool = True,
+    ) -> dict[str, Any]:
+        """Fetch candles and return freshness metadata without serving stale fallback."""
+
+        started_at = datetime.now(UTC)
+        candle_limit = self._resolve_limit(limit)
+        max_age = float(
+            max_age_seconds
+            if max_age_seconds is not None
+            else self.config.get("ONE_H10_MARKET_DATA_FRESHNESS_SECONDS", self.config.get("MARKET_DATA_LIVE_STALE_SECONDS", 300.0)) or 0.0
+        )
+        try:
+            candles = self.get_candles(
+                symbol,
+                timeframe,
+                mode=mode,
+                limit=candle_limit,
+                retry=False,
+                force_refresh=force_refresh,
+                allow_stale_on_error=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "symbol": str(symbol or "").upper(),
+                "timeframe": timeframe,
+                "source": "error",
+                "ok": False,
+                "stale": True,
+                "error": str(exc),
+                "candle_count": 0,
+                "age_seconds": None,
+                "last_successful_refresh_at": None,
+                "checked_at": started_at.isoformat(),
+            }
+        latest = self._latest_candle_datetime(candles)
+        age_seconds = (started_at - latest).total_seconds() if latest is not None else None
+        stale = latest is None or (max_age > 0 and age_seconds is not None and age_seconds > max_age)
+        return {
+            "symbol": str(symbol or "").upper(),
+            "timeframe": timeframe,
+            "source": "live" if force_refresh else "cache",
+            "ok": bool(candles) and not stale,
+            "stale": stale,
+            "error": "",
+            "candle_count": len(candles),
+            "age_seconds": age_seconds,
+            "last_successful_refresh_at": latest.isoformat() if latest is not None else None,
+            "checked_at": started_at.isoformat(),
+        }
 
     def get_mid_price(self, symbol: str, mode: str) -> float:
         self._validate_symbol(symbol)
@@ -261,6 +322,19 @@ class MarketDataService:
             if not self._looks_like_retry_kwarg_error(exc):
                 raise
             return self.client.get_candles(mode, symbol, timeframe, start_ms, end_ms)
+
+    @classmethod
+    def _latest_candle_datetime(cls, candles: list[dict[str, Any]]) -> datetime | None:
+        timestamps = [cls._safe_float(row.get("timestamp", row.get("time"))) for row in candles if isinstance(row, dict)]
+        timestamps = [value for value in timestamps if value > 0]
+        if not timestamps:
+            return None
+        latest = max(timestamps)
+        if latest < 946_684_800:
+            return None
+        if latest > 10_000_000_000:
+            latest /= 1000.0
+        return datetime.fromtimestamp(latest, tz=UTC)
 
     def _client_get_order_book(self, mode: str, symbol: str, *, retry: bool) -> dict[str, Any]:
         try:
