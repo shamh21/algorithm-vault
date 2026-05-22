@@ -10,6 +10,12 @@
     "WALLET_XRP_RPC_URL": "https://s1.ripple.com:51234/",
     "WALLET_REQUIRED_CONFIRMATIONS_JSON": "{\"ethereum\":12,\"bitcoin\":2,\"solana\":32,\"xrpledger\":1}"
   },
+  "crons": [
+    {
+      "path": "/api/worker/run",
+      "schedule": "* * * * *"
+    }
+  ],
   "builds": [
     {
       "src": "static/**/*",
