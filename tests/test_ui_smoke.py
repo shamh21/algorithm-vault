@@ -165,12 +165,13 @@ class _PassingOneH10Forecast:
         available_margin_usd: float = 0.0,
         market: Any = None,
     ) -> dict[str, Any]:
+        provider_floor = 10.0 if str(provider).lower() == "hyperliquid" else 5.0
         suggested_notional = min(
             value
             for value in [
-                float(allocation_cap_usd or 5.0),
-                float(available_margin_usd or allocation_cap_usd or 5.0),
-                5.0,
+                float(allocation_cap_usd or provider_floor),
+                float(available_margin_usd or allocation_cap_usd or provider_floor),
+                provider_floor,
             ]
             if value > 0
         )
@@ -2221,6 +2222,7 @@ def test_one_hour_vault_cycle_uses_short_horizon_strategy(app, monkeypatch) -> N
     legs = VaultAllocationLeg.query.filter_by(vault_cycle_id=cycle.id).all()
     assert legs
     assert sum(float(leg.allocation_cap_usd or 0.0) for leg in legs) == pytest.approx(50.0)
+    assert all(float(leg.allocation_cap_usd or 0.0) >= 10.0 for leg in legs)
     assert run.parameters["allocation_cap_usd"] <= 50
     assert run.parameters["one_h10_all_pairs"] is True
     assert run.parameters["ml_horizon"] == "1h10"

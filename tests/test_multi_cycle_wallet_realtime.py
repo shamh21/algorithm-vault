@@ -12,32 +12,27 @@ from app.models import (
     Fill,
     Order,
     Setting,
+    User,
     VaultCycle,
     WalletAddress,
     WalletAuditLog,
     WalletBalance,
     WalletTransaction,
     WalletWithdrawal,
-    User,
 )
+from app.services.hyperliquid_client import ClientSnapshot
 from app.services.order_manager import OrderIntent
 from app.services.self_custody_wallet import AddressBalance
-from app.services.hyperliquid_client import ClientSnapshot
 
 
 def _candles():
-    return [
-        {"timestamp": index, "open": 100, "high": 101, "low": 99, "close": 100 + index * 0.01, "volume": 1000}
-        for index in range(80)
-    ]
+    return [{"timestamp": index, "open": 100, "high": 101, "low": 99, "close": 100 + index * 0.01, "volume": 1000} for index in range(80)]
 
 
 def _patch_market_data(app) -> None:
     market_data = app.extensions["services"]["market_data"]
     market_data.get_mid_price = lambda symbol, mode: 100.0
-    market_data.get_order_book = lambda symbol, mode: {
-        "levels": [[{"px": "99.95", "sz": "1000"}], [{"px": "100.05", "sz": "1000"}]]
-    }
+    market_data.get_order_book = lambda symbol, mode: {"levels": [[{"px": "99.95", "sz": "1000"}], [{"px": "100.05", "sz": "1000"}]]}
     market_data.get_candles = lambda symbol, timeframe, mode, limit: _candles()
 
 
@@ -105,12 +100,13 @@ class _PassingOneH10Forecast:
         available_margin_usd: float = 0.0,
         market: Any = None,
     ) -> dict[str, Any]:
+        provider_floor = 10.0 if str(provider).lower() == "hyperliquid" else 5.0
         suggested_notional = min(
             value
             for value in [
-                float(allocation_cap_usd or 5.0),
-                float(available_margin_usd or allocation_cap_usd or 5.0),
-                5.0,
+                float(allocation_cap_usd or provider_floor),
+                float(available_margin_usd or allocation_cap_usd or provider_floor),
+                provider_floor,
             ]
             if value > 0
         )
@@ -222,9 +218,9 @@ def test_cycle_settlement_persists_trade_risk_leverage_reward_summary(app, monke
     _start_cycle(client, "100", "1")
     cycle = VaultCycle.query.filter_by(user_id=user.id).one()
     leg = cycle.allocation_legs[0]
-    app.extensions["services"]["order_manager"].current_position = (
-        lambda symbol, *args, **kwargs: {"unrealized_pnl": 2.0 if symbol == leg.symbol else 0.0}
-    )
+    app.extensions["services"]["order_manager"].current_position = lambda symbol, *args, **kwargs: {
+        "unrealized_pnl": 2.0 if symbol == leg.symbol else 0.0
+    }
     order = Order(
         user_id=user.id,
         trading_connection_id=cycle.trading_connection_id,
@@ -348,11 +344,7 @@ def test_one_hour_high_return_mode_still_respects_risk_gates(app) -> None:
 def test_self_custody_disabled_by_default_and_secret_columns_absent(app) -> None:
     service = app.extensions["services"]["self_custody_wallet"]
     forbidden = {"private_key", "mnemonic", "seed", "xpub", "derivation"}
-    model_columns = {
-        name.lower()
-        for model in (WalletAddress, WalletWithdrawal)
-        for name in model.__table__.columns.keys()
-    }
+    model_columns = {column.name.lower() for model in (WalletAddress, WalletWithdrawal) for column in model.__table__.columns}
 
     assert service.enabled is False
     assert service.validate_address("Ethereum", "0xcfc7d08f480E6F8c3631268ed49B44cdff389677")
@@ -432,8 +424,12 @@ def test_realtime_market_falls_back_to_http_and_uses_fresh_websocket_cache(app) 
     messages = service.subscription_messages("BTC", user="0x1111111111111111111111111111111111111111")
     app.config["REALTIME_MARKET_ENABLED"] = True
     service.ingest_message({"channel": "allMids", "data": {"mids": {"BTC": "101"}}})
-    service.ingest_message({"channel": "l2Book", "data": {"coin": "BTC", "levels": [[{"px": "100", "sz": "5"}], [{"px": "102", "sz": "5"}]]}})
-    service.ingest_message({"channel": "trades", "data": [{"coin": "BTC", "px": "100", "sz": "1"}, {"coin": "BTC", "px": "101", "sz": "1"}]})
+    service.ingest_message(
+        {"channel": "l2Book", "data": {"coin": "BTC", "levels": [[{"px": "100", "sz": "5"}], [{"px": "102", "sz": "5"}]]}}
+    )
+    service.ingest_message(
+        {"channel": "trades", "data": [{"coin": "BTC", "px": "100", "sz": "1"}, {"coin": "BTC", "px": "101", "sz": "1"}]}
+    )
     cached = service.snapshot("BTC", "testnet", timeframe="1m")
 
     assert fallback["source"] == "http"

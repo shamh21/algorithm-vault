@@ -808,8 +808,9 @@ def test_one_h10_provider_legs_weight_accepted_forecasts_by_allocation_score(app
 
     allocations = {leg["symbol"]: leg["allocation_cap_usd"] for leg in legs}
     assert set(allocations) == {"DOGE", "BTC"}
-    assert allocations["DOGE"] == pytest.approx(90.0)
-    assert allocations["BTC"] == pytest.approx(10.0)
+    assert allocations["DOGE"] == pytest.approx(82.0)
+    assert allocations["BTC"] == pytest.approx(18.0)
+    assert all(amount >= 10.0 for amount in allocations.values())
     assert all(leg["allocation_score"] > 0 for leg in legs)
     assert any(row["skip_reason"].endswith("low_profitability_score") for row in history[0]["legs"] if row.get("symbol") == "SKIP")
     assert any("low_profitability_score" in str(row.get("reason")) for row in blockers)

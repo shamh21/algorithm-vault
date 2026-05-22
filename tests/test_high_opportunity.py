@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pyotp
@@ -32,7 +32,7 @@ def _book(spread: float = 0.1, size: str = "1000") -> dict[str, Any]:
 
 
 def _candles(count: int = 100, step: float = 0.08) -> list[dict[str, Any]]:
-    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    start = datetime(2026, 1, 1, tzinfo=UTC)
     price = 100.0
     rows = []
     for index in range(count):
@@ -51,7 +51,7 @@ def _candles(count: int = 100, step: float = 0.08) -> list[dict[str, Any]]:
 
 
 def _correlated_pair_candles(symbol: str, count: int = 120) -> list[dict[str, Any]]:
-    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    start = datetime(2026, 1, 1, tzinfo=UTC)
     rows = []
     for index in range(count):
         base = 100.0 + index * 0.08 + (index % 7) * 0.03
@@ -152,12 +152,13 @@ class _PassingOneH10Forecast:
         available_margin_usd: float = 0.0,
         market: Any = None,
     ) -> dict[str, Any]:
+        provider_floor = 10.0 if str(provider).lower() == "hyperliquid" else 5.0
         suggested_notional = min(
             value
             for value in [
-                float(allocation_cap_usd or 5.0),
-                float(available_margin_usd or allocation_cap_usd or 5.0),
-                5.0,
+                float(allocation_cap_usd or provider_floor),
+                float(available_margin_usd or allocation_cap_usd or provider_floor),
+                provider_floor,
             ]
             if value > 0
         )
@@ -408,10 +409,7 @@ def test_market_data_cache_reuses_provider_snapshots(app) -> None:
 
     def candles(mode, symbol, timeframe, start_ms, end_ms):
         calls["candles"] += 1
-        return [
-            {"t": index + 1, "o": "100", "h": "101", "l": "99", "c": str(100 + index), "v": "10"}
-            for index in range(5)
-        ]
+        return [{"t": index + 1, "o": "100", "h": "101", "l": "99", "c": str(100 + index), "v": "10"} for index in range(5)]
 
     def book(mode, symbol):
         calls["book"] += 1
@@ -864,11 +862,7 @@ def test_enhanced_ensemble_skips_hard_rejected_candidate_despite_high_score(app)
     )
 
     assert {candidate.ranking.strategy_name for candidate in ranked} == {"rsi_mean_reversion", "volatility_breakout"}
-    assert {
-        item.get("skip_reason")
-        for item in skipped
-        if item.get("strategy_name") == "scalping"
-    } == {"ranking_has_no_trade_reason"}
+    assert {item.get("skip_reason") for item in skipped if item.get("strategy_name") == "scalping"} == {"ranking_has_no_trade_reason"}
 
 
 def test_enhanced_ensemble_fails_closed_when_confluence_missing(app) -> None:

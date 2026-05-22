@@ -675,6 +675,15 @@ def start_cycle():
     is_one_h10 = _is_one_h10_duration(duration_seconds, duration_hours)
 
     requested_providers = _requested_provider_keys() if is_one_h10 else []
+    if is_one_h10 and not _request_value("providers_submitted", ""):
+        active_providers = [
+            normalize_provider(connection.provider)
+            for connection in _cycle_trading_connections(user, is_one_h10, providers=None)
+            if normalize_provider(connection.provider)
+        ]
+        if active_providers:
+            active_provider_set = set(active_providers)
+            requested_providers = [provider for provider in requested_providers if provider in active_provider_set]
     if is_one_h10 and _wants_start_json_response():
         readiness = get_vault_cycle_readiness(
             user.id,
@@ -700,7 +709,7 @@ def start_cycle():
             deposit_asset=asset,
             settlement_asset=settlement_asset,
             duration_seconds=duration_seconds,
-            providers=_requested_provider_keys(),
+            providers=requested_providers,
             allowed_symbols=_requested_allowed_symbols(),
             idempotency_key=idempotency_key,
             success_message="Vault Cycle started with dynamic exchange allocation.",
@@ -4109,9 +4118,20 @@ def _one_h10_provider_legs(
                 }
             )
 
+        accepted_rows = _one_h10_min_order_compatible_rows(
+            accepted_rows,
+            provider=provider,
+            provider_cap=provider_cap,
+            provider_history=provider_history,
+            blockers=blockers,
+            connection_id=connection_id,
+        )
         allocation_score_total = sum(max(_one_h10_float(row.get("allocation_score")), 0.0) for row in accepted_rows)
         if accepted_rows and allocation_score_total <= 0:
             allocation_score_total = float(len(accepted_rows))
+        min_order_notional = _one_h10_provider_min_order_notional_usd(provider)
+        floor_total = min_order_notional * len(accepted_rows) if min_order_notional > 0 else 0.0
+        distributable_cap = max(0.0, provider_cap - floor_total)
 
         for row in accepted_rows:
             candidate = row["candidate"]
@@ -4125,7 +4145,7 @@ def _one_h10_provider_legs(
             weight = allocation_score / allocation_score_total if allocation_score_total > 0 else 0.0
             if weight <= 0:
                 weight = 1.0 / max(len(accepted_rows), 1)
-            allocation_cap = provider_cap * weight
+            allocation_cap = min_order_notional + distributable_cap * weight if min_order_notional > 0 else provider_cap * weight
             if allocation_cap <= 0:
                 continue
             forecast = dict(row.get("forecast") or {})
@@ -4272,6 +4292,115 @@ def _one_h10_provider_legs(
             )
         allocation_history.append(provider_history)
     return generated, allocation_history, blockers
+
+
+def _one_h10_min_order_compatible_rows(
+    accepted_rows: list[dict[str, object]],
+    *,
+    provider: str,
+    provider_cap: float,
+    provider_history: dict[str, object],
+    blockers: list[dict[str, object]],
+    connection_id: int,
+) -> list[dict[str, object]]:
+    min_order_notional = _one_h10_provider_min_order_notional_usd(provider)
+    provider_history["min_order_notional_usd"] = min_order_notional
+    if min_order_notional <= 0 or not accepted_rows:
+        return accepted_rows
+    max_executable_legs = int(max(provider_cap, 0.0) // min_order_notional)
+    if max_executable_legs <= 0:
+        for row in accepted_rows:
+            _record_one_h10_min_order_pruned_row(
+                row,
+                provider=provider,
+                provider_history=provider_history,
+                blockers=blockers,
+                connection_id=connection_id,
+                reason="one_h10_provider_budget_below_min_order_notional",
+                provider_cap=provider_cap,
+                min_order_notional=min_order_notional,
+            )
+        provider_history["floor_pruned_count"] = len(accepted_rows)
+        return []
+    if len(accepted_rows) <= max_executable_legs:
+        return accepted_rows
+    ranked_rows = sorted(
+        accepted_rows,
+        key=lambda row: max(_one_h10_float(row.get("allocation_score")), 0.0),
+        reverse=True,
+    )
+    kept = ranked_rows[:max_executable_legs]
+    kept_ids = {id(row) for row in kept}
+    for row in accepted_rows:
+        if id(row) in kept_ids:
+            continue
+        _record_one_h10_min_order_pruned_row(
+            row,
+            provider=provider,
+            provider_history=provider_history,
+            blockers=blockers,
+            connection_id=connection_id,
+            reason="one_h10_min_order_budget_pruned",
+            provider_cap=provider_cap,
+            min_order_notional=min_order_notional,
+        )
+    provider_history["floor_pruned_count"] = len(accepted_rows) - len(kept)
+    return kept
+
+
+def _record_one_h10_min_order_pruned_row(
+    row: dict[str, object],
+    *,
+    provider: str,
+    provider_history: dict[str, object],
+    blockers: list[dict[str, object]],
+    connection_id: int,
+    reason: str,
+    provider_cap: float,
+    min_order_notional: float,
+) -> None:
+    candidate = row.get("candidate")
+    market = row.get("market")
+    symbol = str(row.get("symbol") or getattr(candidate, "symbol", "") or "").upper()
+    venue_symbol = str(row.get("venue_symbol") or symbol)
+    leg_rows = provider_history.setdefault("legs", [])
+    if isinstance(leg_rows, list):
+        leg_rows.append(
+            {
+                "symbol": symbol,
+                "app_symbol": symbol,
+                "venue_symbol": venue_symbol,
+                "provider_symbol": venue_symbol,
+                "allocation_cap_usd": 0.0,
+                "market_id": getattr(market, "id", None),
+                "market_status": str(row.get("market_status") or "fallback_configured"),
+                "scanner_score": getattr(candidate, "score", 0.0),
+                "scanner_source": getattr(candidate, "source", ""),
+                "allocation_score": max(_one_h10_float(row.get("allocation_score")), 0.0),
+                "forecast": dict(row.get("forecast") or {}),
+                "skip_reason": reason,
+                "provider_cap_usd": provider_cap,
+                "min_order_notional_usd": min_order_notional,
+            }
+        )
+    blockers.append(
+        {
+            "provider": provider,
+            "trading_connection_id": connection_id,
+            "symbol": symbol,
+            "venue_symbol": venue_symbol,
+            "reason": reason,
+            "provider_cap_usd": provider_cap,
+            "min_order_notional_usd": min_order_notional,
+        }
+    )
+
+
+def _one_h10_provider_min_order_notional_usd(provider: str) -> float:
+    normalized = normalize_provider(provider)
+    if normalized == "hyperliquid":
+        return max(0.0, _one_h10_float(current_app.config.get("HYPERLIQUID_MIN_ORDER_VALUE_USD", 10.0)))
+    return max(0.0, _one_h10_float(current_app.config.get("ONE_H10_MIN_ORDER_NOTIONAL_USD", 0.0)))
 
 
 def _one_h10_forecast_live_blockers(forecast: dict[str, object] | None) -> list[str]:
