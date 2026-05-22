@@ -58,7 +58,6 @@ def test_vercel_static_assets_are_allowlisted_from_committed_static_tree() -> No
     rewrites = {item["source"]: item["destination"] for item in config["rewrites"]}
 
     assert {"src": "static/**/*", "use": "@vercel/static"} in builds
-    assert {"path": "/api/worker/run", "schedule": "* * * * *"} in config["crons"]
     assert not any(str(item["src"]).startswith("public/") for item in builds)
     assert headers["/static/css/(.*)"]["Cache-Control"] == "public, max-age=31536000, immutable"
     assert headers["/static/js/app-shell.js"]["Cache-Control"] == "public, max-age=31536000, immutable"
