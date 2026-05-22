@@ -4243,3 +4243,714 @@ button.secondary {
     stroke-dashoffset: 0;
   }
 }
+
+/* Premium connectivity landing */
+.page-shell:has(.connectivity-landing) {
+  width: min(1180px, calc(100% - 2rem - var(--safe-left) - var(--safe-right)));
+}
+
+body:has(.connectivity-landing) .site-header::before {
+  inset-inline: 0;
+}
+
+.connectivity-landing {
+  position: relative;
+  isolation: isolate;
+  display: grid;
+  gap: 1rem;
+  padding: 1rem 0 2rem;
+  overflow: hidden;
+}
+
+.connectivity-landing > * {
+  min-width: 0;
+}
+
+.connectivity-landing::before {
+  content: "";
+  position: absolute;
+  inset: -5rem calc((100vw - 100%) / -2) auto;
+  z-index: -3;
+  height: 37rem;
+  pointer-events: none;
+  background:
+    linear-gradient(115deg, transparent 0 46%, rgba(255, 45, 45, 0.18) 52%, transparent 72%),
+    linear-gradient(180deg, rgba(255, 45, 45, 0.08), transparent 66%);
+}
+
+.connectivity-hero,
+.connectivity-panel,
+.connectivity-final-cta {
+  position: relative;
+  z-index: 1;
+}
+
+.connectivity-hero {
+  min-height: min(650px, calc(100svh - 86px));
+  display: grid;
+  grid-template-columns: minmax(0, 0.98fr) minmax(360px, 0.86fr);
+  align-items: center;
+  gap: 2rem;
+  padding: 1.8rem 0 1.2rem;
+  overflow: hidden;
+}
+
+.connectivity-grid,
+.connectivity-orbit {
+  position: absolute;
+  pointer-events: none;
+}
+
+.connectivity-grid {
+  inset: -1rem calc((100vw - 100%) / -2) -1rem;
+  z-index: -3;
+  opacity: 0.58;
+  background:
+    linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.018) 1px, transparent 1px);
+  background-size: 42px 42px;
+  mask-image: radial-gradient(circle at 64% 42%, #000, transparent 70%);
+}
+
+.connectivity-orbit {
+  z-index: -2;
+  border: 1px solid rgba(255, 45, 45, 0.12);
+  border-radius: 8px;
+  box-shadow: 0 0 60px rgba(255, 45, 45, 0.08);
+}
+
+.connectivity-orbit--one {
+  right: 1%;
+  top: 18%;
+  width: min(42vw, 33rem);
+  height: 18rem;
+}
+
+.connectivity-orbit--two {
+  right: 4%;
+  bottom: 10%;
+  width: min(34vw, 26rem);
+  height: 11rem;
+  transform: rotate(12deg);
+}
+
+.connectivity-hero__copy {
+  min-width: 0;
+  display: grid;
+  gap: 1rem;
+}
+
+.connectivity-hero h1 {
+  max-width: 20ch;
+  margin: 0;
+  color: #ffffff;
+  font-size: 3.85rem;
+  line-height: 0.96;
+  letter-spacing: 0;
+}
+
+.connectivity-hero p {
+  max-width: 42rem;
+  margin: 0;
+  color: var(--muted-strong);
+  font-size: 1.04rem;
+  line-height: 1.64;
+  overflow-wrap: break-word;
+}
+
+.connectivity-trust-row,
+.connectivity-hero__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.62rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.connectivity-trust-pill {
+  position: relative;
+  min-height: 42px;
+  padding-inline: 0.78rem;
+}
+
+.connectivity-trust-pill::before {
+  content: "";
+  width: 0.48rem;
+  height: 0.48rem;
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow: 0 0 0 4px rgba(255, 45, 45, 0.12);
+}
+
+.connectivity-hero__actions .button-link {
+  min-width: 12.5rem;
+}
+
+.connectivity-hero__visual {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+  min-height: 24rem;
+  display: grid;
+  align-items: center;
+  justify-items: center;
+}
+
+.connection-overview-card,
+.connectivity-panel,
+.provider-connection-card,
+.connectivity-status-row,
+.connectivity-activity-row,
+.connectivity-control-card,
+.connectivity-final-cta {
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background:
+    linear-gradient(180deg, rgba(18, 23, 30, 0.95), rgba(6, 8, 11, 0.98)),
+    #06080b;
+  box-shadow: var(--shadow), inset 0 1px 0 rgba(255, 255, 255, 0.045);
+}
+
+.connection-overview-card,
+.connectivity-panel,
+.connectivity-final-cta {
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.connection-overview-card::before,
+.connectivity-panel::before,
+.connectivity-final-cta::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(255, 45, 45, 0.62), transparent);
+}
+
+.connection-overview-card {
+  position: relative;
+  width: min(100%, 430px);
+  display: grid;
+  gap: 1.1rem;
+  padding: 1.35rem;
+  border-color: rgba(255, 45, 45, 0.28);
+}
+
+.connection-overview-card__header,
+.connectivity-section-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.connection-overview-card__header {
+  align-items: center;
+}
+
+.connection-overview-card__header span,
+.connectivity-section-head a {
+  color: #ffffff;
+  font-size: 0.86rem;
+  font-weight: 850;
+}
+
+.connection-overview-card__header strong {
+  color: #48d875;
+  font-size: 0.76rem;
+  text-transform: uppercase;
+}
+
+.connection-overview-card__body {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 1.25rem;
+}
+
+.connection-health-ring {
+  width: 8.2rem;
+  aspect-ratio: 1;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  border-radius: 999px;
+  background:
+    radial-gradient(circle, #0b1015 0 58%, transparent 59%),
+    conic-gradient(#42d96f 0 288deg, #ffb156 288deg 318deg, #ff2d3f 318deg 360deg);
+  box-shadow: 0 0 44px rgba(66, 217, 111, 0.22);
+}
+
+.connection-health-ring span {
+  color: #ffffff;
+  font-size: 2rem;
+  font-weight: 920;
+  line-height: 1;
+}
+
+.connection-health-ring strong {
+  color: var(--muted-strong);
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.connection-status-list {
+  display: grid;
+  margin: 0;
+}
+
+.connection-status-list div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 1rem;
+  min-height: 3rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.connection-status-list div:last-child {
+  border-bottom: 0;
+}
+
+.connection-status-list dt,
+.connection-status-list dd {
+  margin: 0;
+}
+
+.connection-status-list dt {
+  position: relative;
+  padding-left: 1rem;
+  color: var(--muted-strong);
+  font-size: 0.82rem;
+  font-weight: 820;
+}
+
+.connection-status-list dt::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 0.42rem;
+  height: 0.42rem;
+  border-radius: 999px;
+  transform: translateY(-50%);
+}
+
+.connection-status-list .is-connected dt::before,
+.provider-connection-status.is-connected::before,
+.activity-dot.is-connected {
+  background: #42d96f;
+}
+
+.connection-status-list .is-degraded dt::before,
+.provider-connection-status.is-degraded::before,
+.activity-dot.is-degraded {
+  background: #ffb156;
+}
+
+.connection-status-list .is-disconnected dt::before {
+  background: #ff2d3f;
+}
+
+.connection-status-list dd {
+  color: #ffffff;
+  font-weight: 900;
+}
+
+.connection-overview-link,
+.connectivity-panel-link,
+.connectivity-section-head a {
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  color: #ffffff;
+  text-decoration: none;
+  font-size: 0.86rem;
+  font-weight: 850;
+}
+
+.connection-overview-link,
+.connectivity-panel-link {
+  padding: 0.72rem 0.85rem;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.connectivity-shield-glow {
+  position: absolute;
+  right: 0.7rem;
+  bottom: 0.1rem;
+  width: 7rem;
+  aspect-ratio: 0.86;
+  display: grid;
+  place-items: center;
+  filter: drop-shadow(0 0 38px rgba(255, 45, 45, 0.38));
+}
+
+.connectivity-shield-glow__shield,
+.connectivity-final-cta__shield {
+  display: grid;
+  place-items: center;
+  color: #ff263a;
+  font-weight: 950;
+  line-height: 1;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.02)),
+    #10141a;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  clip-path: polygon(50% 0, 91% 16%, 84% 74%, 50% 100%, 16% 74%, 9% 16%);
+}
+
+.connectivity-shield-glow__shield {
+  width: 6.25rem;
+  height: 7.2rem;
+  font-size: 3.3rem;
+}
+
+.connectivity-panel {
+  position: relative;
+  display: grid;
+  gap: 1rem;
+  padding: 1.15rem;
+}
+
+.connectivity-section-head h2,
+.connectivity-final-cta h2 {
+  margin: 0;
+  color: #ffffff;
+  font-size: 1.55rem;
+  line-height: 1.12;
+  letter-spacing: 0;
+}
+
+.connectivity-section-head p,
+.connectivity-final-cta p,
+.provider-connection-card p,
+.connectivity-status-row p,
+.connectivity-activity-row p,
+.connectivity-control-card p {
+  margin: 0;
+  color: var(--muted-strong);
+  line-height: 1.52;
+}
+
+.connectivity-section-head {
+  min-width: 0;
+}
+
+.connectivity-section-head > div {
+  min-width: 0;
+  display: grid;
+  gap: 0.28rem;
+}
+
+.provider-connection-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.78rem;
+}
+
+.provider-connection-card {
+  min-width: 0;
+  min-height: 6.2rem;
+  display: grid;
+  grid-template-columns: 2.45rem minmax(0, 1fr);
+  gap: 0.78rem;
+  align-items: center;
+  padding: 0.9rem;
+}
+
+.provider-connection-mark,
+.provider-activity-mark,
+.connectivity-row-icon,
+.connectivity-control-icon {
+  display: inline-grid;
+  place-items: center;
+  border-radius: 999px;
+  color: #ffffff;
+  background: rgba(255, 45, 45, 0.12);
+  border: 1px solid rgba(255, 45, 45, 0.24);
+}
+
+.provider-connection-mark {
+  width: 2.45rem;
+  height: 2.45rem;
+  font-size: 0.78rem;
+  font-weight: 950;
+}
+
+.provider-connection-card h3,
+.connectivity-status-row h3,
+.connectivity-activity-row h3,
+.connectivity-control-card h3 {
+  margin: 0;
+  color: #ffffff;
+  font-size: 0.98rem;
+  line-height: 1.18;
+  letter-spacing: 0;
+}
+
+.provider-connection-status {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.38rem;
+  margin-top: 0.42rem;
+  color: #48d875;
+  font-size: 0.76rem;
+  font-weight: 850;
+}
+
+.provider-connection-status::before,
+.activity-dot {
+  content: "";
+  width: 0.42rem;
+  height: 0.42rem;
+  border-radius: 999px;
+  flex: 0 0 auto;
+}
+
+.provider-connection-status.is-degraded {
+  color: #ffb156;
+}
+
+.provider-connection-status.is-available {
+  color: var(--muted-strong);
+}
+
+.provider-connection-status.is-available::before {
+  background: #8b95a3;
+}
+
+.connectivity-ops-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 1rem;
+}
+
+.connectivity-status-list,
+.connectivity-activity-list,
+.connectivity-control-grid {
+  display: grid;
+  gap: 0.62rem;
+}
+
+.connectivity-status-row,
+.connectivity-activity-row {
+  min-width: 0;
+  display: grid;
+  align-items: center;
+  gap: 0.72rem;
+  padding: 0.72rem;
+  background: rgba(255, 255, 255, 0.025);
+  box-shadow: none;
+}
+
+.connectivity-status-row {
+  grid-template-columns: 2.4rem minmax(0, 1fr) auto;
+}
+
+.connectivity-row-icon,
+.connectivity-control-icon {
+  width: 2.4rem;
+  height: 2.4rem;
+}
+
+.connectivity-row-icon svg,
+.connectivity-control-icon svg {
+  width: 1.05rem;
+  height: 1.05rem;
+}
+
+.connectivity-operational-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 2rem;
+  padding: 0.35rem 0.58rem;
+  border: 1px solid rgba(66, 217, 111, 0.2);
+  border-radius: 999px;
+  color: #48d875;
+  background: rgba(66, 217, 111, 0.08);
+  font-size: 0.74rem;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.connectivity-activity-row {
+  grid-template-columns: 2.3rem minmax(0, 1fr) auto auto;
+}
+
+.provider-activity-mark {
+  width: 2.3rem;
+  height: 2.3rem;
+  font-size: 0.68rem;
+  font-weight: 920;
+}
+
+.connectivity-activity-row time {
+  color: var(--muted);
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+.activity-dot {
+  display: inline-block;
+}
+
+.connectivity-control-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.connectivity-control-card {
+  min-width: 0;
+  min-height: 7rem;
+  display: grid;
+  grid-template-columns: 2.4rem minmax(0, 1fr);
+  gap: 0.78rem;
+  align-items: center;
+  padding: 0.9rem;
+}
+
+.connectivity-final-cta.public-cta-block {
+  width: 100%;
+  grid-template-columns: auto minmax(0, 1fr) minmax(210px, 0.35fr);
+  align-items: center;
+  gap: 1.5rem;
+  margin-top: 0.1rem;
+  padding: 1.35rem;
+  border-color: rgba(255, 45, 45, 0.32);
+  background:
+    linear-gradient(115deg, rgba(255, 45, 45, 0.18), transparent 34%),
+    linear-gradient(180deg, rgba(18, 23, 30, 0.98), rgba(6, 8, 11, 0.98));
+}
+
+.connectivity-final-cta__shield {
+  width: 5.5rem;
+  height: 6.3rem;
+  font-size: 2.9rem;
+}
+
+.connectivity-final-cta .public-cta-actions {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.68rem;
+  min-width: 0;
+}
+
+@media (max-width: 1080px) {
+  .connectivity-hero {
+    grid-template-columns: 1fr;
+    min-height: auto;
+  }
+
+  .connectivity-hero__visual {
+    min-height: 20rem;
+  }
+
+  .provider-connection-grid,
+  .connectivity-control-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 820px) {
+  .page-shell:has(.connectivity-landing) {
+    width: min(1180px, calc(100% - 1.1rem - var(--safe-left) - var(--safe-right)));
+  }
+
+  .connectivity-landing {
+    padding-top: 0.7rem;
+  }
+
+  .connectivity-landing > * {
+    width: 100%;
+  }
+
+  .connectivity-hero {
+    gap: 1rem;
+    padding-top: 1rem;
+  }
+
+  .connectivity-hero h1 {
+    max-width: 12ch;
+    font-size: 2.72rem;
+  }
+
+  .connectivity-hero p {
+    font-size: 0.98rem;
+  }
+
+  .connectivity-trust-row {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .connectivity-hero__actions,
+  .connectivity-ops-grid,
+  .connectivity-final-cta.public-cta-block {
+    grid-template-columns: 1fr;
+  }
+
+  .connectivity-hero__actions .button-link,
+  .connectivity-final-cta .button-link {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .connection-overview-card__body,
+  .provider-connection-grid,
+  .connectivity-control-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .connection-health-ring {
+    justify-self: center;
+  }
+
+  .connectivity-shield-glow {
+    right: 1rem;
+    bottom: -1rem;
+    width: 5.5rem;
+  }
+
+  .connectivity-section-head {
+    display: grid;
+  }
+
+  .connectivity-section-head h2,
+  .connectivity-final-cta h2 {
+    font-size: 1.42rem;
+  }
+
+  .connectivity-status-row {
+    grid-template-columns: 2.4rem minmax(0, 1fr);
+  }
+
+  .connectivity-operational-badge {
+    grid-column: 2;
+    justify-self: start;
+  }
+
+  .connectivity-activity-row {
+    grid-template-columns: 2.3rem minmax(0, 1fr) auto;
+  }
+
+  .connectivity-activity-row time {
+    grid-column: 2;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .provider-connection-card,
+  .connectivity-status-row,
+  .connectivity-activity-row,
+  .connectivity-control-card {
+    transition: none;
+    transform: none !important;
+  }
+}

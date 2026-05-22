@@ -403,21 +403,21 @@ PUBLIC_PAGES: dict[str, PublicSeoPage] = {
         endpoint="consumer.public_connectivity",
         path="/connectivity/",
         nav_label="Connectivity",
-        title="Connectivity | AlgVault Broker and API Integrations",
+        title="Connectivity | AlgVault Secure Broker and Exchange Connections",
         description=(
-            "AlgVault presents broker/API connectivity, secure authentication, exchange connections, "
-            "webhook and event systems, synchronization, and monitoring in a concise operating view."
+            "AlgVault monitors broker, data source, and exchange connectivity through validated, encrypted, "
+            "and continuously supervised public operating states."
         ),
         eyebrow="Connectivity",
-        heading="Provider connections with readiness before execution",
+        heading="Secure connections. Operational clarity.",
         lead=(
-            "AlgVault treats connectivity as operational infrastructure: authentication, synchronization, "
-            "provider health, and live blockers stay visible before automation proceeds."
+            "Connect brokers, data sources, and exchanges through AlgVault's monitored gateway. Every connection "
+            "is validated, encrypted, and continuously supervised."
         ),
-        primary_label="Review security",
-        primary_href="/security/",
-        secondary_label="View features",
-        secondary_href="/features/",
+        primary_label="Review connectivity",
+        primary_href="#supported-connections",
+        secondary_label="Security model",
+        secondary_href="/security/",
         highlights=(
             {"label": "Broker/API", "value": "Checked", "detail": "Provider status appears before sensitive workflows."},
             {"label": "Auth", "value": "Secure", "detail": "Credentials stay behind protected server flows."},
@@ -496,12 +496,12 @@ PUBLIC_PAGES: dict[str, PublicSeoPage] = {
         ),
         cta={
             "kicker": "Connectivity",
-            "title": "Keep provider state visible and server-authoritative",
-            "body": "AlgVault treats connectivity as operating context, not an invisible background dependency.",
-            "primary_label": "Review security",
-            "primary_href": "/security/",
-            "secondary_label": "View features",
-            "secondary_href": "/features/",
+            "title": "Connect with confidence",
+            "body": "AlgVault continuously monitors your connections so you can focus on execution, not infrastructure.",
+            "primary_label": "Review connectivity",
+            "primary_href": "#supported-connections",
+            "secondary_label": "Security model",
+            "secondary_href": "/security/",
         },
     ),
     "security": PublicSeoPage(

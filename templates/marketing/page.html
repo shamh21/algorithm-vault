@@ -384,11 +384,196 @@
     </section>
   </section>
 {% elif page.key == "connectivity" %}
-  {{ public_ui.public_hero(page, "public-page-title", public_seo_pages) }}
-  {{ public_ui.public_metrics(page) }}
-  {{ public_ui.public_status(page, "Connection flow in three steps", "Connectivity flow") }}
-  {{ public_ui.public_cards(page, "Integration surfaces", compact=True) }}
-  {{ public_ui.public_sections(page, stacked=True) }}
+  <section class="connectivity-landing" aria-labelledby="connectivity-page-title">
+    <section class="connectivity-hero" aria-label="Connectivity overview">
+      <span class="connectivity-grid" aria-hidden="true"></span>
+      <span class="connectivity-orbit connectivity-orbit--one" aria-hidden="true"></span>
+      <span class="connectivity-orbit connectivity-orbit--two" aria-hidden="true"></span>
+      <div class="connectivity-hero__copy">
+        <span class="card-kicker">{{ page.eyebrow }}</span>
+        <h1 id="connectivity-page-title">{{ page.heading }}</h1>
+        <p>{{ page.lead }}</p>
+        <ul class="connectivity-trust-row" aria-label="Connectivity trust signals">
+          <li class="public-trust-badge connectivity-trust-pill">Encrypted</li>
+          <li class="public-trust-badge connectivity-trust-pill">Monitored</li>
+          <li class="public-trust-badge connectivity-trust-pill">Resilient</li>
+          <li class="public-trust-badge connectivity-trust-pill">Transparent</li>
+        </ul>
+        <div class="connectivity-hero__actions" aria-label="Connectivity actions">
+          <a class="button-link primary" href="{{ page.primary_href }}">{{ page.primary_label }}</a>
+          <a class="button-link secondary" href="{{ page.secondary_href }}">{{ page.secondary_label }}</a>
+        </div>
+      </div>
+
+      <aside class="connectivity-hero__visual" aria-label="Connection overview visual">
+        <div class="connection-overview-card">
+          <div class="connection-overview-card__header">
+            <span>Connection overview</span>
+            <strong>Gateway live</strong>
+          </div>
+          <div class="connection-overview-card__body">
+            <div class="connection-health-ring" aria-label="12 monitored connections">
+              <span>12</span>
+              <strong>Connections</strong>
+            </div>
+            <dl class="connection-status-list" aria-label="Connection status counts">
+              <div class="is-connected">
+                <dt>Connected</dt>
+                <dd>10</dd>
+              </div>
+              <div class="is-degraded">
+                <dt>Degraded</dt>
+                <dd>1</dd>
+              </div>
+              <div class="is-disconnected">
+                <dt>Disconnected</dt>
+                <dd>1</dd>
+              </div>
+            </dl>
+          </div>
+          <a class="connection-overview-link" href="#supported-connections">View all connections</a>
+        </div>
+        <div class="connectivity-shield-glow" aria-hidden="true">
+          <span class="connectivity-shield-glow__shield">A</span>
+        </div>
+      </aside>
+    </section>
+
+    <section class="connectivity-panel" id="supported-connections" aria-labelledby="supported-connections-title">
+      <div class="connectivity-section-head">
+        <div>
+          <h2 id="supported-connections-title">Supported connections</h2>
+          <p>Connect to leading brokers, exchanges, and data providers.</p>
+        </div>
+        <a href="/register" aria-label="Create access to review all providers">View all providers</a>
+      </div>
+      {% set connection_providers = [
+        {"name": "Interactive Brokers", "type": "Broker", "status": "Connected", "mark": "IB", "key": "interactive-brokers"},
+        {"name": "Tradovate", "type": "Broker", "status": "Available", "mark": "TV", "key": "tradovate"},
+        {"name": "Binance", "type": "Exchange", "status": "Connected", "mark": "BN", "key": "binance"},
+        {"name": "Coinbase Exchange", "type": "Exchange", "status": "Connected", "mark": "CB", "key": "coinbase"},
+        {"name": "Bybit", "type": "Exchange", "status": "Available", "mark": "BY", "key": "bybit"},
+        {"name": "Kraken", "type": "Exchange", "status": "Degraded", "mark": "KR", "key": "kraken"},
+        {"name": "OANDA", "type": "Broker", "status": "Connected", "mark": "OA", "key": "oanda"},
+        {"name": "dxFeed", "type": "Data", "status": "Connected", "mark": "DX", "key": "dxfeed"},
+        {"name": "TradingView", "type": "Data", "status": "Connected", "mark": "TV", "key": "tradingview"},
+        {"name": "Polygon.io", "type": "Data", "status": "Connected", "mark": "PG", "key": "polygon"},
+        {"name": "Alpaca", "type": "Broker", "status": "Available", "mark": "AP", "key": "alpaca"},
+        {"name": "More providers", "type": "Browse all integrations", "status": "Available", "mark": "+", "key": "more"}
+      ] %}
+      <div class="provider-connection-grid" aria-label="Supported provider statuses">
+        {% for provider in connection_providers %}
+          <article class="provider-connection-card provider-connection-card--{{ provider.key }}">
+            <span class="provider-connection-mark" aria-hidden="true">{{ provider.mark }}</span>
+            <div>
+              <h3>{{ provider.name }}</h3>
+              <p>{{ provider.type }}</p>
+              <span class="provider-connection-status is-{{ provider.status|lower }}">{{ provider.status }}</span>
+            </div>
+          </article>
+        {% endfor %}
+      </div>
+    </section>
+
+    <div class="connectivity-ops-grid">
+      <section class="connectivity-panel" aria-labelledby="live-connectivity-status-title">
+        <div class="connectivity-section-head">
+          <div>
+            <h2 id="live-connectivity-status-title">Live connectivity status</h2>
+            <p>Public operational posture without account-sensitive details.</p>
+          </div>
+        </div>
+        {% set operational_rows = [
+          {"label": "Broker Gateway", "detail": "All systems operational", "icon": "icon-vault"},
+          {"label": "Market Data", "detail": "Low latency feed active", "icon": "icon-markets"},
+          {"label": "Order Routing", "detail": "Execution path verified", "icon": "icon-convert"},
+          {"label": "Account Sync", "detail": "Positions and balances updated", "icon": "icon-activity"},
+          {"label": "Notifications", "detail": "Delivery channels active", "icon": "icon-alert"}
+        ] %}
+        <div class="connectivity-status-list" role="list" aria-label="Operational systems">
+          {% for row in operational_rows %}
+            <article class="connectivity-status-row" role="listitem">
+              <span class="connectivity-row-icon" aria-hidden="true"><svg class="topnav-icon"><use href="#{{ row.icon }}"></use></svg></span>
+              <div>
+                <h3>{{ row.label }}</h3>
+                <p>{{ row.detail }}</p>
+              </div>
+              <span class="connectivity-operational-badge">Operational</span>
+            </article>
+          {% endfor %}
+        </div>
+        <a class="connectivity-panel-link" href="/login">View status dashboard</a>
+      </section>
+
+      <section class="connectivity-panel" aria-labelledby="recent-connectivity-activity-title">
+        <div class="connectivity-section-head">
+          <div>
+            <h2 id="recent-connectivity-activity-title">Recent activity</h2>
+            <p>Sample connection events only.</p>
+          </div>
+          <a href="/login" aria-label="Sign in to view activity logs">View all logs</a>
+        </div>
+        {% set activity_rows = [
+          {"provider": "Interactive Brokers", "event": "Connection established", "time": "2m ago", "tone": "connected", "mark": "IB"},
+          {"provider": "Binance", "event": "Heartbeat successful", "time": "3m ago", "tone": "connected", "mark": "BN"},
+          {"provider": "Kraken", "event": "Reconnected", "time": "7m ago", "tone": "connected", "mark": "KR"},
+          {"provider": "OANDA", "event": "Authentication refreshed", "time": "11m ago", "tone": "connected", "mark": "OA"},
+          {"provider": "Bybit", "event": "Temporary latency detected", "time": "18m ago", "tone": "degraded", "mark": "BY"}
+        ] %}
+        <div class="connectivity-activity-list" role="list" aria-label="Recent non-sensitive connection activity">
+          {% for activity in activity_rows %}
+            <article class="connectivity-activity-row" role="listitem">
+              <span class="provider-activity-mark" aria-hidden="true">{{ activity.mark }}</span>
+              <div>
+                <h3>{{ activity.provider }}</h3>
+                <p>{{ activity.event }}</p>
+              </div>
+              <time>{{ activity.time }}</time>
+              <span class="activity-dot is-{{ activity.tone }}" aria-label="{{ activity.tone }} activity"></span>
+            </article>
+          {% endfor %}
+        </div>
+      </section>
+    </div>
+
+    <section class="connectivity-panel connectivity-security" aria-labelledby="security-control-title">
+      <div class="connectivity-section-head">
+        <div>
+          <h2 id="security-control-title">Security and control</h2>
+          <p>Connection security is built into every layer.</p>
+        </div>
+      </div>
+      {% set control_cards = [
+        {"title": "Read-only by default", "body": "You control permissions. Trade only when enabled.", "icon": "icon-shield"},
+        {"title": "Encrypted transport", "body": "All data is encrypted in transit and at rest.", "icon": "icon-vault"},
+        {"title": "Least-privilege access", "body": "Only the data and actions you approve are allowed.", "icon": "icon-user-plus"},
+        {"title": "Session monitoring", "body": "Active sessions are tracked and logged in real time.", "icon": "icon-activity"}
+      ] %}
+      <div class="connectivity-control-grid">
+        {% for card in control_cards %}
+          <article class="connectivity-control-card">
+            <span class="connectivity-control-icon" aria-hidden="true"><svg class="topnav-icon"><use href="#{{ card.icon }}"></use></svg></span>
+            <div>
+              <h3>{{ card.title }}</h3>
+              <p>{{ card.body }}</p>
+            </div>
+          </article>
+        {% endfor %}
+      </div>
+    </section>
+
+    <section class="connectivity-final-cta public-cta-block" aria-labelledby="connectivity-final-title">
+      <span class="connectivity-final-cta__shield" aria-hidden="true">A</span>
+      <div>
+        <h2 id="connectivity-final-title">{{ page.cta.title }}</h2>
+        <p>{{ page.cta.body }}</p>
+      </div>
+      <div class="public-cta-actions" aria-label="Connectivity next actions">
+        <a class="button-link primary" href="{{ page.cta.primary_href }}">{{ page.cta.primary_label }}</a>
+        <a class="button-link secondary" href="{{ page.cta.secondary_href }}">{{ page.cta.secondary_label }}</a>
+      </div>
+    </section>
+  </section>
 {% elif page.key == "security" %}
   {{ public_ui.public_hero(page, "public-page-title", public_seo_pages) }}
   {{ public_ui.public_metrics(page) }}
@@ -403,7 +588,7 @@
   {{ public_ui.public_status(page) }}
   {{ public_ui.public_sections(page, stacked=True) }}
 {% endif %}
-{% if page.key != "features" and page.key != "mobile" %}
+{% if page.key != "features" and page.key != "mobile" and page.key != "connectivity" %}
   {{ public_ui.public_cta(page) }}
 {% endif %}
 {% endblock %}
