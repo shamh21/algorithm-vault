@@ -248,6 +248,9 @@ class BaseConfig:
     WORKER_STRATEGY_STARTER_ENABLED = _as_bool(os.getenv("WORKER_STRATEGY_STARTER_ENABLED"), default=True)
     WORKER_VAULT_ENFORCEMENT_ENABLED = _as_bool(os.getenv("WORKER_VAULT_ENFORCEMENT_ENABLED"), default=True)
     WORKER_TREASURY_SOLVENCY_ENABLED = _as_bool(os.getenv("WORKER_TREASURY_SOLVENCY_ENABLED"), default=True)
+    CRON_SECRET = os.getenv("CRON_SECRET", "").strip()
+    VERCEL_WORKER_STRATEGY_WINDOW_SECONDS = max(1, _as_int(os.getenv("VERCEL_WORKER_STRATEGY_WINDOW_SECONDS"), 8))
+    WORKER_STRATEGY_RUN_WINDOW_SECONDS = max(0, _as_int(os.getenv("WORKER_STRATEGY_RUN_WINDOW_SECONDS"), 0))
     SECRET_KEY = os.getenv("FLASK_SECRET_KEY", "dev-secret-change-me")
     ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin").strip() or "admin"
     ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "").strip()

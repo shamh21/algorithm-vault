@@ -6,6 +6,7 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
+import hmac
 import json
 import logging
 import os
@@ -579,6 +580,50 @@ def _register_operational_routes(app: Flask) -> None:
     def ops_status():
         return jsonify(_operational_status(app))
 
+    @app.get("/api/worker/run")
+    def vercel_worker_run():
+        secret = str(app.config.get("CRON_SECRET", "") or "").strip()
+        if not secret:
+            return jsonify({"ok": False, "error": "worker_cron_secret_not_configured"}), 503
+        expected = f"Bearer {secret}"
+        supplied = request.headers.get("Authorization", "")
+        if not hmac.compare_digest(supplied, expected):
+            return jsonify({"ok": False, "error": "unauthorized"}), 401
+        if bool(app.config.get("ENABLE_IN_PROCESS_WORKERS", False)):
+            return jsonify({"ok": False, "error": "in_process_workers_must_stay_disabled"}), 409
+        if not bool(app.config.get("WORKER_PROCESS_CONFIGURED", False)):
+            return jsonify({"ok": False, "error": "worker_process_not_configured"}), 409
+
+        job_filter, invalid_jobs = _requested_worker_jobs()
+        if invalid_jobs:
+            return jsonify({"ok": False, "error": "invalid_worker_job", "invalid_jobs": invalid_jobs}), 400
+
+        previous_window = app.config.get("WORKER_STRATEGY_RUN_WINDOW_SECONDS", 0)
+        app.config["WORKER_STRATEGY_RUN_WINDOW_SECONDS"] = int(app.config.get("VERCEL_WORKER_STRATEGY_WINDOW_SECONDS", 20) or 20)
+        try:
+            from .workers.runner import _run_due_jobs
+
+            lease_service = WorkerLeaseService(app.config, owner_id=_vercel_worker_owner_id())
+            results = _run_due_jobs(lease_service, job_filter=job_filter)
+        except Exception as exc:  # noqa: BLE001
+            db.session.rollback()
+            app.logger.exception("Vercel worker invocation failed")
+            return jsonify({"ok": False, "error": "worker_run_failed", "error_type": exc.__class__.__name__}), 500
+        finally:
+            app.config["WORKER_STRATEGY_RUN_WINDOW_SECONDS"] = previous_window
+            db.session.remove()
+
+        safe_results = [_summarize_worker_result(row) for row in results]
+        return jsonify(
+            {
+                "ok": all(bool(row.get("ok")) for row in results),
+                "ran_at": datetime.utcnow().isoformat(),
+                "runner": "vercel_cron",
+                "job_count": len(safe_results),
+                "results": safe_results,
+            }
+        )
+
 
 def _register_error_handlers(app: Flask) -> None:
     @app.errorhandler(HTTPException)
@@ -606,6 +651,59 @@ def _register_error_handlers(app: Flask) -> None:
             500,
             {"Content-Type": "text/html; charset=utf-8"},
         )
+
+
+def _requested_worker_jobs() -> tuple[set[str] | None, list[str]]:
+    allowed = {"strategy_starter", "vault_cycle_enforcement", "treasury_solvency"}
+    requested: list[str] = []
+    for raw in request.args.getlist("job") + request.args.getlist("jobs"):
+        requested.extend(part.strip() for part in str(raw or "").split(","))
+    jobs = {job for job in requested if job and job != "all"}
+    invalid = sorted(job for job in jobs if job not in allowed)
+    if invalid:
+        return None, invalid
+    return (jobs or None), []
+
+
+def _vercel_worker_owner_id() -> str:
+    region = str(os.getenv("VERCEL_REGION") or os.getenv("AWS_REGION") or "unknown").strip() or "unknown"
+    deployment = str(os.getenv("VERCEL_DEPLOYMENT_ID") or os.getenv("VERCEL_URL") or "local").strip() or "local"
+    return f"vercel-cron:{region}:{deployment[:24]}:{os.getpid()}"
+
+
+def _summarize_worker_result(row: dict[str, Any]) -> dict[str, Any]:
+    result = row.get("result") if isinstance(row.get("result"), dict) else {}
+    summary: dict[str, Any] = {
+        "job_name": str(row.get("job_name") or ""),
+        "ok": bool(row.get("ok", False)),
+        "status": str(row.get("status") or ""),
+    }
+    if row.get("lease_name"):
+        summary["lease_name"] = str(row.get("lease_name"))
+
+    job_name = summary["job_name"]
+    if job_name == "strategy_starter":
+        summary["started_count"] = _safe_count(result.get("started_count"))
+        summary["lease_blocked_count"] = len(result.get("lease_blocked_run_ids") or [])
+        summary["windowed_run_count"] = len(result.get("windowed_runs") or [])
+        summary["thread_alive_count"] = sum(
+            1 for item in (result.get("windowed_runs") or []) if isinstance(item, dict) and item.get("thread_alive")
+        )
+    elif job_name == "vault_cycle_enforcement":
+        summary["cycle_count"] = _safe_count(result.get("cycle_count"))
+    elif job_name == "treasury_solvency":
+        summary["processed"] = summary["status"] in {"complete", "duplicate"}
+
+    if not summary["ok"] and summary["status"] == "failed":
+        summary["error"] = "worker_job_failed"
+    return summary
+
+
+def _safe_count(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _operational_status(app: Flask) -> dict[str, Any]:

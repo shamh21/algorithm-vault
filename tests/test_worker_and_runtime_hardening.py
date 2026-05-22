@@ -506,6 +506,46 @@ def test_ops_status_reports_dedicated_worker_missing_for_queued_runs(app) -> Non
     assert "dedicated worker has queued/starting strategy runs" in workers["blockers"][0]
 
 
+def test_vercel_worker_endpoint_requires_cron_secret(app) -> None:
+    response = app.test_client().get("/api/worker/run")
+
+    assert response.status_code == 503
+    assert response.get_json()["error"] == "worker_cron_secret_not_configured"
+
+
+def test_vercel_worker_endpoint_rejects_invalid_bearer(app) -> None:
+    app.config["CRON_SECRET"] = "cron-secret"
+
+    response = app.test_client().get("/api/worker/run", headers={"Authorization": "Bearer wrong-secret"})
+
+    assert response.status_code == 401
+    assert response.get_json()["error"] == "unauthorized"
+
+
+def test_vercel_worker_endpoint_runs_sanitized_one_shot_job(app) -> None:
+    app.config.update(
+        {
+            "CRON_SECRET": "cron-secret",
+            "ENABLE_IN_PROCESS_WORKERS": False,
+            "WORKER_PROCESS_CONFIGURED": True,
+            "VERCEL_WORKER_STRATEGY_WINDOW_SECONDS": 1,
+        }
+    )
+
+    response = app.test_client().get("/api/worker/run?job=strategy_starter", headers={"Authorization": "Bearer cron-secret"})
+    payload = response.get_json()
+    body = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert payload["ok"] is True
+    assert payload["runner"] == "vercel_cron"
+    assert payload["results"][0]["job_name"] == "strategy_starter"
+    assert payload["results"][0]["status"] == "complete"
+    assert payload["results"][0]["started_count"] == 0
+    assert "cron-secret" not in body
+    assert "started_run_ids" not in body
+
+
 def test_wallet_withdrawals_auto_enable_for_ready_live_real_custody() -> None:
     config = {
         "APP_MODE": "live",

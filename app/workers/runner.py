@@ -82,6 +82,7 @@ def _run_due_jobs(lease_service: WorkerLeaseService, *, job_filter: set[str] | N
 
 def _strategy_starter_job() -> dict[str, Any]:
     manager = get_service("strategy_manager")
+    strategy_window_seconds = float(manager.config.get("WORKER_STRATEGY_RUN_WINDOW_SECONDS", 0) or 0)
     runs = (
         StrategyRun.query.filter(StrategyRun.manual_enabled.is_(True))
         .filter(StrategyRun.status.in_(["queued", "starting", "running"]))
@@ -91,13 +92,29 @@ def _strategy_starter_job() -> dict[str, Any]:
     )
     started: list[int] = []
     lease_blocked: list[int] = []
+    windowed: list[dict[str, Any]] = []
     for run in runs:
-        started_result = manager.start(int(run.id))
+        if strategy_window_seconds > 0:
+            started_window = manager.run_for_window(int(run.id), max_seconds=strategy_window_seconds)
+            started_result = bool(started_window.get("started", False))
+            windowed.append(
+                {
+                    "run_id": int(run.id),
+                    "started": started_result,
+                    "thread_alive": bool(started_window.get("thread_alive", False)),
+                }
+            )
+        else:
+            started_result = manager.start(int(run.id))
         if started_result is False:
             lease_blocked.append(int(run.id))
             continue
         started.append(int(run.id))
-    return {"started_run_ids": started, "started_count": len(started), "lease_blocked_run_ids": lease_blocked}
+    payload: dict[str, Any] = {"started_run_ids": started, "started_count": len(started), "lease_blocked_run_ids": lease_blocked}
+    if strategy_window_seconds > 0:
+        payload["strategy_window_seconds"] = strategy_window_seconds
+        payload["windowed_runs"] = windowed
+    return payload
 
 
 def _vault_cycle_enforcement_job() -> dict[str, Any]:

@@ -7,6 +7,7 @@ import json
 import logging
 import threading
 import time
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -124,6 +125,29 @@ class StrategyManager:
         self._stop_events[run_id] = stop_event
         thread.start()
         return True
+
+    def run_for_window(self, run_id: int, *, max_seconds: float) -> dict[str, Any]:
+        """Run a strategy thread for a bounded serverless execution window."""
+
+        started = self.start(run_id)
+        thread = self._threads.get(run_id)
+        deadline = time.monotonic() + max(0.1, float(max_seconds or 0.1))
+        while thread is not None and thread.is_alive():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            thread.join(timeout=min(0.5, remaining))
+        event = self._stop_events.get(run_id)
+        if event is not None:
+            event.set()
+        if thread is not None and thread.is_alive() and threading.current_thread() is not thread:
+            thread.join(timeout=min(1.0, max(0.1, float(self.config.get("STRATEGY_POLL_SECONDS", 20) or 20))))
+        still_running = bool(thread is not None and thread.is_alive())
+        return {
+            "started": bool(started),
+            "thread_alive": still_running,
+            "window_seconds": max_seconds,
+        }
 
     def stop(self, run_id: int) -> None:
         event = self._stop_events.get(run_id)
@@ -563,10 +587,8 @@ class StrategyManager:
     def _clear_loop_state(self, run_id: int) -> None:
         with self._loop_state_guard:
             self._loop_state_by_run.pop(run_id, None)
-        try:
+        with suppress(RuntimeError):
             self._lease_service.release_strategy_run(run_id)
-        except RuntimeError:
-            pass
 
     def _record_loop_tick(self, loop_state: _LoopRuntimeState) -> None:
         loop_state.ticks_total += 1
@@ -1165,7 +1187,7 @@ class StrategyManager:
             return None
         try:
             return trading_connections.connector_for_user(run.user_id, run.trading_connection_id)
-        except Exception:
+        except Exception:  # noqa: BLE001
             return None
 
     @staticmethod
