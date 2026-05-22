@@ -470,6 +470,42 @@ def test_worker_status_handles_timezone_aware_heartbeats(monkeypatch) -> None:
     assert status["max_lease_lag_seconds"] >= 0
 
 
+def test_ops_status_reports_dedicated_worker_missing_for_queued_runs(app) -> None:
+    with app.app_context():
+        app.config.update(
+            {
+                "ENABLE_LIVE_TRADING": True,
+                "WORKER_PROCESS_CONFIGURED": True,
+                "ENABLE_IN_PROCESS_WORKERS": False,
+                "WORKER_STRATEGY_STARTER_ENABLED": True,
+            }
+        )
+        user = User(username="missing-worker", password_hash="hash", role="user")
+        db.session.add(user)
+        db.session.flush()
+        run = StrategyRun(
+            user_id=user.id,
+            strategy_name="scalping",
+            symbol="BTC",
+            timeframe="1m",
+            mode="live",
+            status="starting",
+            manual_enabled=True,
+        )
+        run.parameters = {"one_h10_vault": True, "algorithm_profile": "1H10"}
+        db.session.add(run)
+        db.session.commit()
+
+        response = app.test_client().get("/ops/status")
+        payload = response.get_json()
+
+    workers = payload["workers"]
+    assert workers["health"] == "blocked"
+    assert workers["dedicated_worker_expected"] is True
+    assert workers["queued_or_starting_strategy_count"] == 1
+    assert "dedicated worker has queued/starting strategy runs" in workers["blockers"][0]
+
+
 def test_wallet_withdrawals_auto_enable_for_ready_live_real_custody() -> None:
     config = {
         "APP_MODE": "live",

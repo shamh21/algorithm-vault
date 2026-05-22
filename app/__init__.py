@@ -15,7 +15,7 @@ import time
 from typing import Any
 
 from dotenv import load_dotenv
-from flask import Flask, Response, jsonify, request, send_from_directory
+from flask import Flask, Response, has_app_context, jsonify, request, send_from_directory
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError
@@ -632,7 +632,7 @@ def _operational_status(app: Flask) -> dict[str, Any]:
         },
     }
     payload["database_recovery"] = _database_recovery_status(app)
-    payload["workers"] = _worker_status(now)
+    payload["workers"] = _worker_status(now, app)
     payload["trading"] = _trading_status(now, app)
     payload["wallets"] = _wallet_status()
     payload["models"] = _model_status()
@@ -853,27 +853,106 @@ def _safe_setting_json(key: str, default: Any) -> Any:
         return default
 
 
-def _worker_status(now: datetime) -> dict[str, Any]:
+def _worker_status(now: datetime, app: Flask | None = None) -> dict[str, Any]:
+    poll_seconds = 15
+    lease_ttl_seconds = 120
+    dedicated_expected = False
+    enabled_jobs = {
+        "strategy_starter": True,
+        "vault_cycle_enforcement": True,
+        "treasury_solvency": True,
+    }
+    if app is not None:
+        poll_seconds = max(1, int(app.config.get("WORKER_POLL_SECONDS", 15) or 15))
+        lease_ttl_seconds = max(1, int(app.config.get("WORKER_LEASE_TTL_SECONDS", 120) or 120))
+        dedicated_expected = (
+            bool(app.config.get("ENABLE_LIVE_TRADING", False))
+            and bool(app.config.get("WORKER_PROCESS_CONFIGURED", False))
+            and not bool(app.config.get("ENABLE_IN_PROCESS_WORKERS", False))
+        )
+        enabled_jobs = {
+            "strategy_starter": bool(app.config.get("WORKER_STRATEGY_STARTER_ENABLED", True)),
+            "vault_cycle_enforcement": bool(app.config.get("WORKER_VAULT_ENFORCEMENT_ENABLED", True)),
+            "treasury_solvency": bool(app.config.get("WORKER_TREASURY_SOLVENCY_ENABLED", True)),
+        }
+    stale_after = max(60, poll_seconds * 6, lease_ttl_seconds)
+    expected_leases = [f"{name}:singleton" for name, enabled in enabled_jobs.items() if enabled]
     try:
         leases = WorkerLease.query.order_by(WorkerLease.lease_name.asc()).all()
         rows: list[dict[str, Any]] = []
         max_lag = 0.0
+        recent_expected = 0
+        active_expected = 0
+        seen_expected: set[str] = set()
         for lease in leases:
             lag = _elapsed_seconds(now, lease.heartbeat_at) if lease.heartbeat_at else None
             if lag is not None:
                 max_lag = max(max_lag, lag)
+            is_expected = lease.lease_name in expected_leases
+            is_recent = lag is not None and lag <= stale_after
+            if is_expected:
+                seen_expected.add(lease.lease_name)
+                recent_expected += 1 if is_recent else 0
+                active_expected += 1 if lease.status == "active" else 0
             rows.append(
                 {
                     "lease_name": lease.lease_name,
                     "status": lease.status,
                     "heartbeat_lag_seconds": lag,
                     "expires_at": lease.expires_at.isoformat() if lease.expires_at else None,
+                    "expected": is_expected,
+                    "recent": is_recent,
                 }
             )
-        return {"available": True, "leases": rows, "max_lease_lag_seconds": max_lag}
+        queued_count = 0
+        running_count = 0
+        if app is not None:
+            queued_count = StrategyRun.query.filter(StrategyRun.status.in_(["queued", "starting"])).count()
+            running_count = StrategyRun.query.filter_by(status="running").count()
+        missing_expected = [name for name in expected_leases if name not in seen_expected]
+        stale_expected = [
+            str(row["lease_name"])
+            for row in rows
+            if row.get("expected") and row.get("heartbeat_lag_seconds") is not None and float(row["heartbeat_lag_seconds"]) > stale_after
+        ]
+        blockers: list[str] = []
+        if dedicated_expected and queued_count > 0 and recent_expected == 0:
+            blockers.append("dedicated worker has queued/starting strategy runs but no recent worker heartbeat")
+        if dedicated_expected and missing_expected and not rows:
+            blockers.append("dedicated worker has not recorded any worker lease heartbeat")
+        health = "healthy"
+        if blockers:
+            health = "blocked"
+        elif dedicated_expected and recent_expected == 0:
+            health = "no_recent_heartbeat"
+        elif stale_expected:
+            health = "stale"
+        return {
+            "available": True,
+            "health": health,
+            "blockers": blockers,
+            "dedicated_worker_expected": dedicated_expected,
+            "expected_leases": expected_leases,
+            "missing_expected_leases": missing_expected,
+            "stale_expected_leases": stale_expected,
+            "recent_expected_lease_count": recent_expected,
+            "active_expected_lease_count": active_expected,
+            "queued_or_starting_strategy_count": queued_count,
+            "running_strategy_count": running_count,
+            "stale_after_seconds": stale_after,
+            "leases": rows,
+            "max_lease_lag_seconds": max_lag,
+        }
     except Exception:  # noqa: BLE001
-        db.session.rollback()
-        return {"available": False, "leases": [], "max_lease_lag_seconds": None}
+        if has_app_context():
+            db.session.rollback()
+        return {
+            "available": False,
+            "health": "unavailable",
+            "blockers": ["worker status query failed"],
+            "leases": [],
+            "max_lease_lag_seconds": None,
+        }
 
 
 def _elapsed_seconds(now: datetime, then: datetime) -> float:

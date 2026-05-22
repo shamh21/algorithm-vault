@@ -31,6 +31,7 @@ from ...models import (
     WalletAddress,
     WalletBalance,
     WalletTransaction,
+    WorkerLease,
 )
 from ...runtime import get_current_mode, get_service, market_mode_for
 from ...services.connection_health import (
@@ -5351,6 +5352,11 @@ def _cycle_worker_status(cycle: VaultCycle, leg_decisions: list[dict[str, object
     decision_queued_count = sum(1 for row in leg_decisions if row.get("stage") == "queued_for_worker")
     in_process = in_process_workers_enabled(current_app.config)
     queue = "in_process" if in_process else "dedicated_worker"
+    runtime = _cycle_worker_runtime_health(
+        queued_or_starting_count=max(queued_count + starting_count, decision_queued_count),
+        running_count=running_count,
+        in_process=in_process,
+    )
     return {
         "worker_mode": str(current_app.config.get("WORKER_MODE", "web") or "web"),
         "worker_process_configured": bool(current_app.config.get("WORKER_PROCESS_CONFIGURED", False)),
@@ -5360,8 +5366,61 @@ def _cycle_worker_status(cycle: VaultCycle, leg_decisions: list[dict[str, object
         "queued_run_count": max(queued_count, decision_queued_count),
         "starting_run_count": starting_count,
         "running_run_count": running_count,
+        "runtime_health": runtime,
         "live_order_path": "VaultCycle -> StrategyRun -> Worker -> RiskEngine -> OrderManager",
     }
+
+
+def _cycle_worker_runtime_health(*, queued_or_starting_count: int, running_count: int, in_process: bool) -> dict[str, object]:
+    if in_process:
+        return {
+            "health": "in_process",
+            "blockers": [],
+            "recent_heartbeat": True,
+            "queued_or_starting_strategy_count": queued_or_starting_count,
+            "running_strategy_count": running_count,
+        }
+    poll_seconds = max(1, int(current_app.config.get("WORKER_POLL_SECONDS", 15) or 15))
+    lease_ttl_seconds = max(1, int(current_app.config.get("WORKER_LEASE_TTL_SECONDS", 120) or 120))
+    stale_after = max(60, poll_seconds * 6, lease_ttl_seconds)
+    expected_lease = "strategy_starter:singleton"
+    now = datetime.utcnow()
+    try:
+        lease = WorkerLease.query.filter_by(lease_name=expected_lease).one_or_none()
+    except Exception:  # noqa: BLE001
+        db.session.rollback()
+        return {
+            "health": "unavailable",
+            "blockers": ["worker lease status query failed"],
+            "recent_heartbeat": False,
+            "queued_or_starting_strategy_count": queued_or_starting_count,
+            "running_strategy_count": running_count,
+        }
+    heartbeat_lag = _seconds_since(now, lease.heartbeat_at) if lease and lease.heartbeat_at else None
+    recent = heartbeat_lag is not None and heartbeat_lag <= stale_after
+    blockers: list[str] = []
+    if queued_or_starting_count > 0 and not recent:
+        blockers.append("strategy run is queued/starting but no recent dedicated worker heartbeat was observed")
+    health = "blocked" if blockers else "healthy" if recent else "no_recent_heartbeat"
+    return {
+        "health": health,
+        "blockers": blockers,
+        "recent_heartbeat": recent,
+        "expected_lease": expected_lease,
+        "lease_status": str(lease.status or "") if lease else "",
+        "heartbeat_lag_seconds": heartbeat_lag,
+        "stale_after_seconds": stale_after,
+        "queued_or_starting_strategy_count": queued_or_starting_count,
+        "running_strategy_count": running_count,
+    }
+
+
+def _seconds_since(now: datetime, then: datetime) -> float:
+    if now.tzinfo is None and then.tzinfo is not None:
+        now = now.replace(tzinfo=UTC)
+    elif now.tzinfo is not None and then.tzinfo is None:
+        then = then.replace(tzinfo=UTC)
+    return max(0.0, (now - then).total_seconds())
 
 
 def _cycle_trade_decision(

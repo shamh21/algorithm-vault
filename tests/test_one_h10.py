@@ -1574,9 +1574,7 @@ def test_one_h10_start_creates_provider_tagged_legs(app, monkeypatch) -> None:
     assert all((leg.details.get("one_h10_forecast") or {}).get("ml_namespace") == "1h10" for leg in legs)
     assert all(db.session.get(StrategyRun, leg.strategy_run_id).parameters["one_h10_forecast"]["ml_horizon"] == "1h10" for leg in legs)
     assert all(float(leg.details.get("allocation_score") or 0.0) > 0 for leg in legs)
-    assert all(
-        db.session.get(StrategyRun, leg.strategy_run_id).parameters["forecast_profitability_score"] is not None for leg in legs
-    )
+    assert all(db.session.get(StrategyRun, leg.strategy_run_id).parameters["forecast_profitability_score"] is not None for leg in legs)
     assert all(
         db.session.get(StrategyRun, leg.strategy_run_id).parameters["forecast_execution_adjusted_net_return_bps"] is not None
         for leg in legs
@@ -3113,6 +3111,9 @@ def test_one_h10_queued_worker_state_is_visible_in_cycle_summary(app) -> None:
     assert summary["trade_decision_legs"][0]["reason"] == "strategy_worker_pending"
     assert summary["worker"]["strategy_run_queue"] == "dedicated_worker"
     assert summary["worker"]["queued_run_count"] == 1
+    assert summary["worker"]["runtime_health"]["health"] == "blocked"
+    assert summary["worker"]["runtime_health"]["recent_heartbeat"] is False
+    assert "no recent dedicated worker heartbeat" in summary["worker"]["runtime_health"]["blockers"][0]
     assert summary["worker"]["live_order_path"] == "VaultCycle -> StrategyRun -> Worker -> RiskEngine -> OrderManager"
 
 
