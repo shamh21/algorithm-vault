@@ -728,12 +728,179 @@
     </section>
   </section>
 {% elif page.key == "security" %}
-  {{ public_ui.public_hero(page, "public-page-title", public_seo_pages) }}
-  {{ public_ui.public_metrics(page) }}
-  {{ public_ui.public_cards(page, "Trust and control surfaces", compact=True) }}
-  {{ public_ui.public_status(page, "Sensitive workflows stay gated", "Security states") }}
-  {{ public_ui.public_sections(page, stacked=True) }}
-  {{ public_ui.public_disclaimer(page) }}
+  <section class="security-landing" aria-labelledby="security-page-title">
+    <section class="security-hero" aria-label="Security overview">
+      <span class="security-grid" aria-hidden="true"></span>
+      <span class="security-glow security-glow--one" aria-hidden="true"></span>
+      <span class="security-glow security-glow--two" aria-hidden="true"></span>
+      <div class="security-hero__copy">
+        <span class="card-kicker">{{ page.eyebrow }}</span>
+        <h1 id="security-page-title">{{ page.heading }}</h1>
+        <p>{{ page.lead }}</p>
+        <ul class="security-trust-row" aria-label="Security trust signals">
+          {% for badge in page.badges %}
+            <li><span aria-hidden="true"><svg class="topnav-icon"><use href="#{% if loop.index == 1 %}icon-shield{% elif loop.index == 2 %}icon-alert{% elif loop.index == 3 %}icon-login{% else %}icon-activity{% endif %}"></use></svg></span>{{ badge.label }}</li>
+          {% endfor %}
+        </ul>
+        <div class="security-hero__actions" aria-label="Security actions">
+          <a class="button-link primary" href="{{ page.primary_href }}">{{ page.primary_label }}</a>
+          <a class="button-link secondary" href="{{ page.secondary_href }}">{{ page.secondary_label }}</a>
+        </div>
+      </div>
+
+      <aside class="security-ops-panel" aria-label="Security operations panel preview">
+        <div class="security-ops-panel__top">
+          <span>Security overview</span>
+          <strong>Policy online</strong>
+        </div>
+        <div class="security-ops-panel__body">
+          <div class="security-connection-state">
+            <span aria-hidden="true"></span>
+            <div>
+              <small>Connection status</small>
+              <strong>Secure</strong>
+              <em>All systems operational</em>
+            </div>
+          </div>
+          <div class="security-shield-visual" aria-hidden="true">
+            <span class="security-map"></span>
+            <span class="security-shield">A</span>
+          </div>
+        </div>
+        <section class="security-checkpoint-strip" aria-label="Validation checkpoints">
+          <h2>Validation checkpoints</h2>
+          <ol>
+            <li><span></span>Identity</li>
+            <li><span></span>Policy</li>
+            <li><span></span>Risk gates</li>
+            <li><span></span>Execution route</li>
+            <li class="is-audit"><span></span>Audit</li>
+          </ol>
+        </section>
+        <div class="security-ops-cards" aria-label="Protected operational controls">
+          <article>
+            <span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-login"></use></svg></span>
+            <h3>Protected routes</h3>
+            <p>All sensitive actions are server-authoritative.</p>
+          </article>
+          <article>
+            <span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-activity"></use></svg></span>
+            <h3>Monitoring</h3>
+            <p>Real-time system and workflow monitoring.</p>
+          </article>
+          <article>
+            <span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-dashboard"></use></svg></span>
+            <h3>Audit trail</h3>
+            <p>Immutable logs for actions and changes.</p>
+          </article>
+        </div>
+      </aside>
+    </section>
+
+    <section class="security-panel security-readiness" aria-labelledby="security-readiness-title">
+      <h2 id="security-readiness-title">Security readiness</h2>
+      {% set readiness_cards = [
+        {"title": "Connections encrypted", "body": "Connection data uses encrypted transport in transit.", "icon": "icon-shield"},
+        {"title": "Server-side controls", "body": "Policy decisions and validation happen on the server.", "icon": "icon-settings"},
+        {"title": "Risk gates visible", "body": "Required checks are shown before protected action.", "icon": "icon-alert"},
+        {"title": "Protected execution paths", "body": "Sensitive workflows use protected routes.", "icon": "icon-login"},
+        {"title": "Runtime state visibility", "body": "System and workflow states stay visible.", "icon": "icon-activity"},
+        {"title": "Auditable actions", "body": "Actions are logged and reviewable.", "icon": "icon-dashboard"}
+      ] %}
+      <div class="security-readiness-grid">
+        {% for card in readiness_cards %}
+          <article>
+            <span aria-hidden="true"><svg class="topnav-icon"><use href="#{{ card.icon }}"></use></svg></span>
+            <h3>{{ card.title }}</h3>
+            <p>{{ card.body }}</p>
+          </article>
+        {% endfor %}
+      </div>
+    </section>
+
+    <section class="security-panel security-trust" aria-labelledby="security-trust-title">
+      <h2 id="security-trust-title">Trust and control surfaces</h2>
+      <div class="security-trust-grid">
+        {% for card in page.cards %}
+          <article>
+            <span class="security-control-icon" aria-hidden="true"><svg class="topnav-icon"><use href="#{{ card.icon }}"></use></svg></span>
+            <div>
+              <small>{{ card.kicker }}</small>
+              <h3>{{ card.title }}</h3>
+              <p>{{ card.body }}</p>
+            </div>
+          </article>
+        {% endfor %}
+      </div>
+    </section>
+
+    <section class="security-panel security-flow" aria-labelledby="security-flow-title">
+      <h2 id="security-flow-title">Sensitive workflows stay gated</h2>
+      {% set flow_cards = [
+        {"kicker": "Unauthorized", "title": "Blocked", "body": "Unauthorized attempts are denied.", "icon": "icon-user-plus"},
+        {"kicker": "Secrets", "title": "Protected", "body": "Sensitive values never leave secure systems.", "icon": "icon-settings"},
+        {"kicker": "Risk gate", "title": "Required", "body": "Risk and policy checks must pass.", "icon": "icon-shield"},
+        {"kicker": "Validation", "title": "Required", "body": "Server validation confirms eligibility.", "icon": "icon-dashboard"},
+        {"kicker": "Protected action", "title": "Server-confirmed", "body": "Actions execute only after confirmation.", "icon": "icon-login"}
+      ] %}
+      <div class="security-flow-track" role="list" aria-label="Sensitive workflow gate sequence">
+        {% for card in flow_cards %}
+          <article role="listitem">
+            <small>{{ card.kicker }}</small>
+            <span aria-hidden="true"><svg class="topnav-icon"><use href="#{{ card.icon }}"></use></svg></span>
+            <h3>{{ card.title }}</h3>
+            <p>{{ card.body }}</p>
+          </article>
+        {% endfor %}
+      </div>
+    </section>
+
+    <section class="security-panel security-visibility" aria-labelledby="security-visibility-title">
+      <h2 id="security-visibility-title">Visibility before automation</h2>
+      {% set visibility_cards = [
+        {"title": "Account states", "body": "Live state of accounts and connections.", "icon": "icon-user-plus"},
+        {"title": "Readiness labels", "body": "Clear labels indicate whether action is safe.", "icon": "icon-shield"},
+        {"title": "Degraded-mode awareness", "body": "System degradation is detected and communicated.", "icon": "icon-alert"},
+        {"title": "Execution route visibility", "body": "Routes are visible before any action.", "icon": "icon-convert"},
+        {"title": "Monitored sync status", "body": "Sync and heartbeat status is visible.", "icon": "icon-activity"},
+        {"title": "Explicit operational context", "body": "Context is provided before sensitive operations.", "icon": "icon-dashboard"}
+      ] %}
+      <div class="security-visibility-grid">
+        {% for card in visibility_cards %}
+          <article>
+            <span aria-hidden="true"><svg class="topnav-icon"><use href="#{{ card.icon }}"></use></svg></span>
+            <h3>{{ card.title }}</h3>
+            <p>{{ card.body }}</p>
+          </article>
+        {% endfor %}
+      </div>
+    </section>
+
+    <section class="security-language" aria-labelledby="security-language-title">
+      <h2 id="security-language-title">Our security language</h2>
+      <ul>
+        <li>Public pages do not expose secrets.</li>
+        <li>Sensitive actions require backend validation.</li>
+        <li>Credentials are not rendered publicly.</li>
+        <li>Runtime checks occur before execution.</li>
+        <li>Protected workflows remain server-authoritative.</li>
+      </ul>
+    </section>
+
+    <section class="security-final-cta public-cta-block" aria-labelledby="security-final-title">
+      <span class="security-final-cta__shield" aria-hidden="true">A</span>
+      <div>
+        <h2 id="security-final-title">{{ page.cta.title }}</h2>
+        <p>{{ page.cta.body }}</p>
+      </div>
+      <div class="public-cta-actions" aria-label="Security next actions">
+        <a class="button-link primary" href="{{ page.cta.primary_href }}">{{ page.cta.primary_label }}</a>
+        <a class="button-link secondary" href="{{ page.cta.secondary_href }}">{{ page.cta.secondary_label }}</a>
+      </div>
+    </section>
+
+    <p class="security-disclaimer">{{ page.disclaimer }}</p>
+  </section>
 {% else %}
   {{ public_ui.public_hero(page, "public-page-title", public_seo_pages) }}
   {{ public_ui.public_metrics(page) }}
@@ -741,7 +908,7 @@
   {{ public_ui.public_status(page) }}
   {{ public_ui.public_sections(page, stacked=True) }}
 {% endif %}
-{% if page.key != "features" and page.key != "pricing" and page.key != "mobile" and page.key != "connectivity" %}
+{% if page.key != "features" and page.key != "pricing" and page.key != "mobile" and page.key != "connectivity" and page.key != "security" %}
   {{ public_ui.public_cta(page) }}
 {% endif %}
 {% endblock %}

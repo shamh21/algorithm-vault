@@ -511,15 +511,12 @@ PUBLIC_PAGES: dict[str, PublicSeoPage] = {
         nav_label="Security",
         title="Security & Risk Controls | AlgVault",
         description=(
-            "AlgVault emphasizes encrypted connections, credential handling, authentication flows, access controls, "
-            "infrastructure reliability, monitoring, auditing, and user visibility without fake compliance claims."
+            "AlgVault presents monitored workflows, server-authoritative validation, protected credentials, "
+            "operational transparency, bounded automation, and explicit system states."
         ),
         eyebrow="Security",
         heading="Trust built through visible controls",
-        lead=(
-            "AlgVault keeps the public story calm and specific: protected access, server-side secrets, "
-            "explicit risk states, and user visibility before sensitive trading or wallet actions."
-        ),
+        lead=("AlgVault keeps operational policy and explicit protected actions visible before sensitive workflows execute."),
         primary_label="Create secure access",
         primary_href="/register",
         secondary_label="Connectivity",
@@ -542,9 +539,10 @@ PUBLIC_PAGES: dict[str, PublicSeoPage] = {
             },
         ),
         badges=(
-            {"label": "2FA-aware access", "tone": "secure"},
-            {"label": "No browser secrets", "tone": "mobile"},
-            {"label": "No fake certifications", "tone": "alert"},
+            {"label": "Server-authoritative", "tone": "secure"},
+            {"label": "No browser overrides", "tone": "mobile"},
+            {"label": "Protected credentials", "tone": "secure"},
+            {"label": "Auditable actions", "tone": "alert"},
         ),
         hero_rows=(
             {"label": "Connections", "value": "Encrypted", "state": "HTTPS first"},
@@ -554,23 +552,23 @@ PUBLIC_PAGES: dict[str, PublicSeoPage] = {
         cards=(
             {
                 "icon": "icon-shield",
-                "kicker": "Encrypted connections",
+                "kicker": "Public surface",
                 "title": "HTTPS public surface",
                 "body": "Production pages and app metadata are served through the secure custom domain.",
                 "meta": "Transport",
             },
             {
                 "icon": "icon-settings",
-                "kicker": "Credential handling",
+                "kicker": "Credentials",
                 "title": "Secrets stay backend-owned",
-                "body": "Broker keys, wallet material, signer tokens, and webhook secrets do not render in public templates.",
+                "body": "Provider credentials stay in backend-owned workflows and are not rendered publicly.",
                 "meta": "Secrets",
             },
             {
                 "icon": "icon-login",
-                "kicker": "Authentication flows",
-                "title": "Protected setup paths",
-                "body": "Private wallet, vault, settings, and admin surfaces require authenticated access.",
+                "kicker": "Auth paths",
+                "title": "Protected auth paths",
+                "body": "Authentication, verification, and active sessions stay on authenticated routes.",
                 "meta": "Auth",
             },
             {
@@ -582,9 +580,9 @@ PUBLIC_PAGES: dict[str, PublicSeoPage] = {
             },
             {
                 "icon": "icon-dashboard",
-                "kicker": "Infrastructure reliability",
-                "title": "Runtime readiness is explicit",
-                "body": "Health and readiness are distinct so a served app does not imply trading readiness.",
+                "kicker": "Runtime readiness",
+                "title": "Runtime readiness conflict detection",
+                "body": "Readiness conflicts are identified to prevent execution if state is not fit for trading workflows.",
                 "meta": "Runtime",
             },
             {
@@ -610,7 +608,7 @@ PUBLIC_PAGES: dict[str, PublicSeoPage] = {
         cta={
             "kicker": "Security Model",
             "title": "Keep automation observable and gated",
-            "body": "AlgVault presents controls plainly, without compliance claims or guaranteed-performance language.",
+            "body": "AlgVault presents controls plainly, without performance claims or guaranteed outcomes.",
             "primary_label": "Create secure access",
             "primary_href": "/register",
             "secondary_label": "Connectivity",

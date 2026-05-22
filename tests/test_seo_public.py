@@ -232,6 +232,69 @@ def test_public_connectivity_page_uses_operations_dashboard_layout(app) -> None:
     assert "token" not in html.lower()
 
 
+def test_public_security_page_uses_operational_security_layout(app) -> None:
+    response = app.test_client().get("/security/")
+    html = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert html.count("<h1") == 1
+    assert "security-landing" in html
+    assert "security-ops-panel" in html
+    assert "Trust built through visible controls" in html
+    assert "AlgVault keeps operational policy and explicit protected actions visible before sensitive workflows execute." in html
+    assert "Server-authoritative" in html
+    assert "No browser overrides" in html
+    assert "Protected credentials" in html
+    assert "Auditable actions" in html
+    assert "Security readiness" in html
+    assert "Connections encrypted" in html
+    assert "Server-side controls" in html
+    assert "Risk gates visible" in html
+    assert "Protected execution paths" in html
+    assert "Runtime state visibility" in html
+    assert "Trust and control surfaces" in html
+    assert "HTTPS public surface" in html
+    assert "Secrets stay backend-owned" in html
+    assert "Protected auth paths" in html
+    assert "Private routes stay private" in html
+    assert "Runtime readiness conflict detection" in html
+    assert "Operational states are visible" in html
+    assert "Controls before action" in html
+    assert "Sensitive workflows stay gated" in html
+    assert "Unauthorized" in html
+    assert "Blocked" in html
+    assert "Server-confirmed" in html
+    assert "Visibility before automation" in html
+    assert "Account states" in html
+    assert "Readiness labels" in html
+    assert "Degraded-mode awareness" in html
+    assert "Execution route visibility" in html
+    assert "Monitored sync status" in html
+    assert "Explicit operational context" in html
+    assert "Our security language" in html
+    assert "Public pages do not expose secrets." in html
+    assert "Sensitive actions require backend validation." in html
+    assert "Credentials are not rendered publicly." in html
+    assert "Runtime checks occur before execution." in html
+    assert "Protected workflows remain server-authoritative." in html
+    assert "Keep automation observable and gated" in html
+    assert "without performance claims or guaranteed outcomes" in html
+    assert 'href="/register"' in html
+    assert 'href="/connectivity/"' in html
+    assert "css/public.css" in html
+    assert "css/app.css" not in html
+    assert "ops-bridge.js" not in html
+    assert "public-hero--security" not in html
+    assert "API key" not in html
+    assert "webhook URL" not in html
+    assert "private key" not in html.lower()
+    assert "bearer token" not in html.lower()
+    assert "insured" not in html.lower()
+    assert "guaranteed safety" not in html.lower()
+    assert "guaranteed profits" not in html.lower()
+    assert "risk-free trading" not in html.lower()
+
+
 def test_public_pages_render_premium_product_system_without_sensitive_material(app) -> None:
     client = app.test_client()
     forbidden = (
@@ -264,6 +327,10 @@ def test_public_pages_render_premium_product_system_without_sensitive_material(a
             assert "connection-overview-card" in html, path
             assert "provider-connection-grid" in html, path
             assert "connectivity-final-cta" in html, path
+        elif path == "/security/":
+            assert "security-landing" in html, path
+            assert "security-ops-panel" in html, path
+            assert "security-final-cta" in html, path
         else:
             assert "public-device-frame" in html, path
             assert "public-trust-badge" in html, path
