@@ -8,7 +8,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
-from flask import Blueprint, abort, current_app, flash, jsonify, redirect, render_template, request, url_for
+from flask import Blueprint, abort, current_app, flash, jsonify, make_response, redirect, render_template, request, url_for
 from sqlalchemy import or_
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import joinedload
@@ -45,6 +45,8 @@ from ...services.market_scanner import ScoredCandidate
 from ...services.one_h10_quality import ONE_H10_HORIZON_SECONDS, one_h10_forecast_live_blockers
 from ...services.provider_assets import normalize_provider, provider_collateral_asset, provider_feature_context
 from ...services.response_envelope import action_envelope, exception_envelope, readiness_envelope
+from ...services.seo import PUBLIC_ENDPOINTS as SEO_PUBLIC_ENDPOINTS
+from ...services.seo import public_page
 from ...services.vault_allocation_assets import (
     BASE_VAULT_ALLOCATION_ASSETS,
     DEFAULT_ASSET_NETWORKS,
@@ -99,6 +101,10 @@ _LIVE_API_DELEGATED_ENDPOINTS = {
 @consumer_bp.before_request
 def _protect_consumer():
     if request.method == "OPTIONS":
+        return None
+    if request.endpoint in SEO_PUBLIC_ENDPOINTS:
+        return None
+    if request.endpoint == "consumer.home" and current_user() is None:
         return None
     if request.endpoint and request.endpoint.startswith("consumer.legacy_"):
         return None
@@ -167,6 +173,8 @@ def _vault_live_api_deferred_for_request() -> bool:
 @consumer_bp.get("/")
 def home():
     user = current_user()
+    if user is None:
+        return redirect(url_for("consumer.public_overview"))
     try:
         _sync_completed_cycles(user)
     except Exception as exc:  # noqa: BLE001
@@ -188,6 +196,52 @@ def home():
         wallet_overview=wallet_overview,
         pnl_history=pnl_history,
     )
+
+
+def _render_public_marketing_page(key: str):
+    page = public_page(key)
+    template = "marketing/home.html" if key == "home" else "marketing/page.html"
+    return make_response(render_template(template, page=page))
+
+
+@consumer_bp.get("/overview/", endpoint="public_overview")
+def public_overview():
+    return _render_public_marketing_page("home")
+
+
+@consumer_bp.get("/features/", endpoint="public_features")
+def public_features():
+    return _render_public_marketing_page("features")
+
+
+@consumer_bp.get("/pricing/", endpoint="public_pricing")
+def public_pricing():
+    return _render_public_marketing_page("pricing")
+
+
+@consumer_bp.get("/mobile/", endpoint="public_mobile")
+def public_mobile():
+    return _render_public_marketing_page("mobile")
+
+
+@consumer_bp.get("/connectivity/", endpoint="public_connectivity")
+def public_connectivity():
+    return _render_public_marketing_page("connectivity")
+
+
+@consumer_bp.get("/security/", endpoint="public_security")
+def public_security():
+    return _render_public_marketing_page("security")
+
+
+@consumer_bp.get("/mobile-pwa/")
+def legacy_public_mobile():
+    return redirect(url_for("consumer.public_mobile"), code=308)
+
+
+@consumer_bp.get("/broker-connectivity/")
+def legacy_public_connectivity():
+    return redirect(url_for("consumer.public_connectivity"), code=308)
 
 
 @consumer_bp.get("/wallet/", strict_slashes=False)

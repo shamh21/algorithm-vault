@@ -116,6 +116,7 @@ class OneH10ForecastService:
             forecast.get("expected_execution_quality"),
             self._safe_float(forecast.get("execution_quality")),
         )
+        self._apply_min_order_notional_floor(forecast, context)
         forecast.update(self._target_progress_payload(forecast))
         forecast.update(one_h10_profitability_payload(forecast, self.config))
         decision_blockers = one_h10_forecast_live_blockers(forecast, self.config)
@@ -819,6 +820,46 @@ class OneH10ForecastService:
         if allocation > 0 and margin > 0:
             return min(allocation, margin)
         return max(allocation, margin, 0.0)
+
+    def _apply_min_order_notional_floor(self, forecast: dict[str, Any], context: dict[str, Any]) -> None:
+        """Normalize actionable Hyperliquid 1H10 forecasts to the exchange minimum order size."""
+
+        if not bool(self.config.get("ONE_H10_MIN_ORDER_NOTIONAL_FLOOR_ENABLED", True)):
+            return
+        action = str(forecast.get("predicted_side") or forecast.get("action") or "hold").strip().lower()
+        if action not in {"buy", "sell"}:
+            return
+        provider = normalize_provider(forecast.get("provider") or context.get("provider") or context.get("execution_venue"))
+        min_notional = self._provider_min_order_notional_usd(provider)
+        if min_notional <= 0:
+            return
+        budget = self._capital_budget(context)
+        forecast["min_order_notional_usd"] = min_notional
+        forecast["min_order_notional_budget_usd"] = budget
+        if budget + 1e-9 < min_notional:
+            return
+        current_notional = self._safe_float(forecast.get("suggested_notional_usd"), 0.0)
+        if current_notional <= 0 or current_notional + 1e-9 >= min_notional:
+            return
+        floor_fraction = min_notional / max(budget, 1e-9)
+        if floor_fraction > self._max_position_fraction() + 1e-9:
+            return
+        hypothetical = dict(forecast)
+        hypothetical["suggested_notional_usd"] = min_notional
+        hypothetical["position_fraction"] = max(self._safe_float(forecast.get("position_fraction"), 0.0), floor_fraction)
+        remaining_blockers = [
+            blocker for blocker in one_h10_forecast_live_blockers(hypothetical, self.config) if blocker != "below_min_order_notional"
+        ]
+        if remaining_blockers:
+            return
+        forecast["suggested_notional_usd"] = min_notional
+        forecast["position_fraction"] = hypothetical["position_fraction"]
+        forecast["min_order_notional_applied"] = True
+
+    def _provider_min_order_notional_usd(self, provider: str) -> float:
+        if normalize_provider(provider) == "hyperliquid":
+            return max(0.0, self._safe_float(self.config.get("HYPERLIQUID_MIN_ORDER_VALUE_USD"), 10.0))
+        return max(0.0, self._safe_float(self.config.get("ONE_H10_MIN_ORDER_NOTIONAL_USD"), 0.0))
 
     def _features_are_stale(self, context: dict[str, Any]) -> bool:
         raw_updated_at = str(context.get("one_h10_feature_updated_at") or context.get("updated_at") or "").strip()

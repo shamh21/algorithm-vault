@@ -1,0 +1,286 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="overview-hero" aria-labelledby="public-home-title">
+  <div class="overview-hero__ambient" aria-hidden="true">
+    <span class="overview-hero__grid"></span>
+    <span class="overview-hero__orbit"></span>
+    <span class="overview-hero__spark overview-hero__spark--one"></span>
+    <span class="overview-hero__spark overview-hero__spark--two"></span>
+  </div>
+
+  <div class="overview-hero__copy">
+    <div class="overview-status-row" aria-label="AlgVault live system status">
+      <span class="overview-live-badge"><span aria-hidden="true"></span>LIVE SYSTEM</span>
+      <span class="overview-provider-badge">Hyperliquid Connected <span aria-hidden="true"></span></span>
+    </div>
+    <span class="card-kicker">{{ page.eyebrow }}</span>
+    <h1 id="public-home-title">{{ page.heading }}</h1>
+    <p>{{ page.lead }}</p>
+    <ul class="overview-trust-row" aria-label="AlgVault public trust signals">
+      <li><span aria-hidden="true"></span>Server-side controls</li>
+      <li><span aria-hidden="true"></span>iPhone PWA</li>
+      <li><span aria-hidden="true"></span>Risk status visible</li>
+    </ul>
+    <div class="overview-hero__actions" aria-label="Overview actions">
+      <a class="button-link primary" href="{{ page.primary_href }}">Create secure access <span aria-hidden="true">-&gt;</span></a>
+      <a class="button-link secondary" href="{{ page.secondary_href }}">Explore features</a>
+    </div>
+  </div>
+
+  <aside class="overview-phone-stage" aria-label="AlgVault mobile trading preview">
+    <div class="overview-phone overview-phone--hero">
+      <span class="overview-phone__speaker" aria-hidden="true"></span>
+      <div class="overview-phone__screen">
+        <header class="overview-phone__topbar">
+          <span class="overview-phone__brand">
+            <img src="/icons/algvault-mascot-64.png" alt="" width="64" height="64" decoding="async" fetchpriority="high">
+            AlgVault
+          </span>
+          <span class="overview-phone__menu" aria-hidden="true"></span>
+        </header>
+        <span class="overview-phone__label">Overview</span>
+        <section class="overview-mini-chart" aria-label="Equity curve preview">
+          <div>
+            <span>Equity curve</span>
+            <strong>+12.43%</strong>
+          </div>
+          <svg viewBox="0 0 220 92" role="img" aria-label="Upward red market line">
+            <defs>
+              <linearGradient id="overview-chart-fill" x1="0" x2="0" y1="0" y2="1">
+                <stop offset="0" stop-color="#ff2d2d" stop-opacity="0.42"></stop>
+                <stop offset="1" stop-color="#ff2d2d" stop-opacity="0"></stop>
+              </linearGradient>
+            </defs>
+            <path class="overview-mini-chart__fill" d="M6 75 L26 58 L43 67 L63 35 L83 52 L103 43 L124 61 L145 31 L165 44 L184 36 L212 18 L212 92 L6 92 Z"></path>
+            <path class="overview-mini-chart__line" d="M6 75 L26 58 L43 67 L63 35 L83 52 L103 43 L124 61 L145 31 L165 44 L184 36 L212 18"></path>
+          </svg>
+          <div class="overview-chart-tabs" aria-hidden="true">
+            <span>1H</span><span class="active">1D</span><span>7D</span><span>1M</span>
+          </div>
+        </section>
+        <div class="overview-phone-grid" aria-label="Mobile system status">
+          <article>
+            <span>Active strategies</span>
+            <strong>12</strong>
+            <small>Online</small>
+          </article>
+          <article>
+            <span>Risk status</span>
+            <strong>Normal</strong>
+            <small>All gates operational</small>
+          </article>
+        </div>
+        <section class="overview-activity-list" aria-label="Recent activity preview">
+          <span>Recent activity</span>
+          <p><strong>BTC momentum</strong><em>Long</em><b>+2.34%</b></p>
+          <p><strong>ETH scalper</strong><em>Active</em><b>+0.98%</b></p>
+          <p><strong>SOL breakout</strong><em>Watching</em><b>12m ago</b></p>
+        </section>
+      </div>
+    </div>
+  </aside>
+</section>
+
+<section class="overview-metric-strip" aria-label="AlgVault live metrics">
+  <article>
+    <span class="overview-metric-icon overview-metric-icon--red" aria-hidden="true"><svg class="topnav-icon"><use href="#icon-activity"></use></svg></span>
+    <div>
+      <span>Active Strategies</span>
+      <strong>12</strong>
+      <p>Online</p>
+    </div>
+  </article>
+  <article>
+    <span class="overview-metric-icon overview-metric-icon--cyan" aria-hidden="true"><svg class="topnav-icon"><use href="#icon-markets"></use></svg></span>
+    <div>
+      <span>Connected Providers</span>
+      <strong>4</strong>
+      <p>Healthy</p>
+    </div>
+  </article>
+  <article>
+    <span class="overview-metric-icon overview-metric-icon--green" aria-hidden="true"><svg class="topnav-icon"><use href="#icon-dashboard"></use></svg></span>
+    <div>
+      <span>System Latency</span>
+      <strong>42ms</strong>
+      <p>Excellent</p>
+    </div>
+  </article>
+  <article>
+    <span class="overview-metric-icon overview-metric-icon--gold" aria-hidden="true"><svg class="topnav-icon"><use href="#icon-shield"></use></svg></span>
+    <div>
+      <span>Risk Engine Status</span>
+      <strong>Online</strong>
+      <p>Monitoring</p>
+    </div>
+  </article>
+</section>
+
+<section class="overview-system-grid" aria-label="Overview readiness and key capabilities">
+  <article class="overview-readiness-panel">
+    <div class="overview-section-kicker"><span aria-hidden="true"></span>Overview readiness</div>
+    <ul>
+      <li>
+        <span class="overview-readiness-icon" aria-hidden="true"><svg class="topnav-icon"><use href="#icon-vault"></use></svg></span>
+        <div><strong>Strategy Monitor</strong><small>Signals visible</small></div>
+        <em>Online</em>
+      </li>
+      <li>
+        <span class="overview-readiness-icon" aria-hidden="true"><svg class="topnav-icon"><use href="#icon-markets"></use></svg></span>
+        <div><strong>Broker/API</strong><small>Readiness first</small></div>
+        <em>Verified</em>
+      </li>
+      <li>
+        <span class="overview-readiness-icon" aria-hidden="true"><svg class="topnav-icon"><use href="#icon-wallet"></use></svg></span>
+        <div><strong>Wallet Controls</strong><small>No browser secrets</small></div>
+        <em>Protected</em>
+      </li>
+      <li>
+        <span class="overview-readiness-icon" aria-hidden="true"><svg class="topnav-icon"><use href="#icon-shield"></use></svg></span>
+        <div><strong>Risk Engine</strong><small>Live monitoring</small></div>
+        <em>Active</em>
+      </li>
+    </ul>
+  </article>
+
+  <div class="overview-capabilities">
+    <div class="overview-section-kicker">Key capabilities</div>
+    <div class="overview-capability-grid">
+      <article>
+        <span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-shield"></use></svg></span>
+        <small>Execution</small>
+        <h2>Guarded</h2>
+        <p>Server-side validation before sensitive actions.</p>
+      </article>
+      <article>
+        <span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-activity"></use></svg></span>
+        <small>Monitoring</small>
+        <h2>Live context</h2>
+        <p>Strategy, market, provider, and risk posture in view.</p>
+      </article>
+      <article>
+        <span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-wallet"></use></svg></span>
+        <small>Portfolio</small>
+        <h2>Visible</h2>
+        <p>Wallet and vault state organized for quick review.</p>
+      </article>
+      <article>
+        <span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-home"></use></svg></span>
+        <small>Mobile</small>
+        <h2>PWA</h2>
+        <p>Installable shell tuned for iPhone Safari.</p>
+      </article>
+    </div>
+    <a class="overview-secure-link" href="/register">
+      <span>
+        <small>Secure access</small>
+        <strong>Move from public overview to protected setup</strong>
+        <em>Create access to review wallet, vault, provider, and strategy controls behind authenticated server-side gates.</em>
+      </span>
+      <svg class="topnav-icon" aria-hidden="true"><use href="#icon-login"></use></svg>
+    </a>
+  </div>
+</section>
+
+<section class="overview-pwa-showcase overview-reveal-section" aria-labelledby="overview-pwa-title">
+  <div class="overview-pwa-copy">
+    <span class="card-kicker">Mobile-first by design</span>
+    <h2 id="overview-pwa-title">Powerful on iPhone. Built as a PWA.</h2>
+    <p>Install AlgVault as a native app on your iPhone. Fast, secure, and always in sync.</p>
+    <ul>
+      <li>Install in seconds</li>
+      <li>Works offline-ready</li>
+      <li>Secure by design</li>
+      <li>Native app experience</li>
+    </ul>
+    <a class="overview-install-card" href="/mobile/">
+      <span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-home"></use></svg></span>
+      <strong>Add to Home Screen</strong>
+      <small>Install AlgVault PWA</small>
+    </a>
+  </div>
+  <div class="overview-pwa-visual" role="img" aria-label="iPhone PWA install preview">
+    <div class="overview-ios-board" aria-hidden="true">
+      <span></span><span></span><span></span><span></span><span></span><span></span>
+    </div>
+    <div class="overview-phone overview-phone--pwa" aria-hidden="true">
+      <span class="overview-phone__speaker"></span>
+      <div class="overview-phone__screen">
+        <header class="overview-phone__topbar">
+          <span class="overview-phone__brand">
+            <img src="/icons/algvault-mascot-64.png" alt="" width="64" height="64" loading="lazy" decoding="async">
+            AlgVault
+          </span>
+          <span class="overview-phone__menu"></span>
+        </header>
+        <span class="overview-phone__label">Overview</span>
+        <div class="overview-mini-chart overview-mini-chart--compact">
+          <strong>+12.43%</strong>
+          <svg viewBox="0 0 220 80">
+            <path class="overview-mini-chart__fill" d="M6 66 L29 47 L52 57 L76 30 L100 45 L124 38 L148 51 L171 27 L195 33 L214 17 L214 80 L6 80 Z"></path>
+            <path class="overview-mini-chart__line" d="M6 66 L29 47 L52 57 L76 30 L100 45 L124 38 L148 51 L171 27 L195 33 L214 17"></path>
+          </svg>
+        </div>
+        <div class="overview-phone-grid">
+          <article><span>Strategies</span><strong>12</strong><small>Online</small></article>
+          <article><span>Risk</span><strong>Normal</strong><small>Ready</small></article>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="overview-deep-grid overview-reveal-section" aria-label="Security architecture and connected ecosystem">
+  <article class="overview-security-card">
+    <div>
+      <span class="card-kicker">Security architecture</span>
+      <h2>Built for protection. Designed for control.</h2>
+      <ul>
+        <li>Server-side validation</li>
+        <li>No browser secrets</li>
+        <li>Encrypted communications</li>
+        <li>Granular access controls</li>
+        <li>Continuous risk monitoring</li>
+      </ul>
+    </div>
+    <div class="overview-shield-visual" aria-hidden="true">
+      <span class="overview-shield-visual__plate"></span>
+      <span class="overview-shield-visual__plate"></span>
+      <span class="overview-shield-visual__shield"><svg class="topnav-icon"><use href="#icon-shield"></use></svg></span>
+    </div>
+  </article>
+
+  <article class="overview-ecosystem-card">
+    <div>
+      <span class="card-kicker">Connected ecosystem</span>
+      <h2>Connect what you trade. Control how you trade.</h2>
+      <ul>
+        <li>Automated trading features</li>
+        <li>Mobile trading PWA</li>
+        <li>Broker/API connectivity</li>
+        <li>Security and risk controls</li>
+      </ul>
+    </div>
+    <div class="overview-network" aria-hidden="true">
+      <span class="overview-network__core"><img src="/icons/algvault-mascot-64.png" alt="" width="64" height="64" loading="lazy" decoding="async"></span>
+      <span class="overview-network__node overview-network__node--one">Binance</span>
+      <span class="overview-network__node overview-network__node--two">Hyperliquid</span>
+      <span class="overview-network__node overview-network__node--three">Wallet</span>
+      <span class="overview-network__node overview-network__node--four">API</span>
+    </div>
+  </article>
+</section>
+
+<section class="overview-final-cta" aria-labelledby="overview-final-title">
+  <span class="overview-final-cta__icon" aria-hidden="true"><svg class="topnav-icon"><use href="#icon-login"></use></svg></span>
+  <div>
+    <h2 id="overview-final-title">Ready to take control?</h2>
+    <p>Create secure access and move from overview to protected setup in seconds.</p>
+  </div>
+  <nav aria-label="Overview final actions">
+    <a class="button-link primary" href="/register">Create secure access <span aria-hidden="true">-&gt;</span></a>
+    <a class="button-link secondary" href="/security/">Review security</a>
+  </nav>
+</section>
+{% endblock %}

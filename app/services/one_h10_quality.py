@@ -22,6 +22,7 @@ ONE_H10_HARD_BLOCKERS = frozenset(
         "poor_risk_reward",
         "low_liquidity_capacity",
         "low_profitability_score",
+        "below_min_order_notional",
         "stale_market_data",
         "features_stale",
         "missing_fibonacci_features",
@@ -44,6 +45,7 @@ ONE_H10_REASON_CODES = {
     "poor_risk_reward": "POOR_RISK_REWARD",
     "low_liquidity_capacity": "LOW_LIQUIDITY",
     "low_profitability_score": "BELOW_EDGE_THRESHOLD",
+    "below_min_order_notional": "MIN_ORDER_NOTIONAL",
     "stale_market_data": "STALE_MARKET_DATA",
     "features_stale": "STALE_MARKET_DATA",
     "missing_fibonacci_features": "STALE_MARKET_DATA",
@@ -239,8 +241,13 @@ def one_h10_forecast_live_blockers(
         if profitability_score < thresholds["min_profitability_score"]:
             blockers.append("low_profitability_score")
 
-    if _safe_float(forecast.get("suggested_notional_usd"), 0.0) <= 0:
+    suggested_notional = _safe_float(forecast.get("suggested_notional_usd"), 0.0)
+    if suggested_notional <= 0:
         blockers.append("forecast_zero_sizing")
+    else:
+        min_order_notional = _min_order_notional_usd(forecast, config)
+        if actionable and min_order_notional > 0 and suggested_notional + 1e-9 < min_order_notional:
+            blockers.append("below_min_order_notional")
 
     if _forecast_is_stale(forecast, thresholds["max_signal_age_seconds"], now=now):
         blockers.append("forecast_stale")
@@ -292,6 +299,14 @@ def _forecast_is_stale(forecast: dict[str, Any], max_age_seconds: float, *, now:
     if reference.tzinfo is None:
         reference = reference.replace(tzinfo=UTC)
     return (reference.astimezone(UTC) - created_at.astimezone(UTC)).total_seconds() > max_age_seconds
+
+
+def _min_order_notional_usd(forecast: dict[str, Any], config: dict[str, Any] | None) -> float:
+    provider = str(forecast.get("provider") or forecast.get("execution_venue") or "").strip().lower()
+    payload = config or {}
+    if provider == "hyperliquid":
+        return max(0.0, _safe_float(payload.get("HYPERLIQUID_MIN_ORDER_VALUE_USD"), 10.0))
+    return max(0.0, _safe_float(payload.get("ONE_H10_MIN_ORDER_NOTIONAL_USD"), 0.0))
 
 
 def _optional_float(value: Any) -> float | None:

@@ -1264,12 +1264,13 @@ class _PassingOneH10Forecast:
         available_margin_usd: float = 0.0,
         market: Any = None,
     ) -> dict[str, Any]:
+        provider_floor = 10.0 if str(provider).lower() == "hyperliquid" else 5.0
         suggested_notional = min(
             value
             for value in [
-                float(allocation_cap_usd or 5.0),
-                float(available_margin_usd or allocation_cap_usd or 5.0),
-                5.0,
+                float(allocation_cap_usd or provider_floor),
+                float(available_margin_usd or allocation_cap_usd or provider_floor),
+                provider_floor,
             ]
             if value > 0
         )
@@ -2181,6 +2182,109 @@ def test_one_h10_forecast_signal_holds_on_cost_quality_blocker_without_fallback(
     assert selected.metadata["no_trade_reason"].startswith("one_h10_forecast_blocked:")
     assert "low_edge_after_costs" in selected.metadata["forecast_decision_blockers"]
     assert selected.metadata["decision_reason_code"] == "BELOW_EDGE_THRESHOLD"
+
+
+def test_one_h10_forecast_floors_hyperliquid_notional_when_budget_supports_minimum(app) -> None:
+    app.config["ONE_H10_MIN_ORDER_NOTIONAL_FLOOR_ENABLED"] = True
+    service = app.extensions["services"]["one_h10_forecast"]
+    forecast = {
+        "provider": "hyperliquid",
+        "predicted_side": "buy",
+        "confidence": 0.8,
+        "position_fraction": 0.20,
+        "gross_expected_return_bps": 40.0,
+        "expected_return_bps": 24.0,
+        "net_expected_return_bps": 24.0,
+        "execution_adjusted_net_return_bps": 20.0,
+        "cost_drag_bps": 6.0,
+        "estimated_fee_bps": 2.0,
+        "estimated_slippage_bps": 2.0,
+        "spread_bps": 1.0,
+        "execution_quality": 0.9,
+        "expected_net_edge_passed": True,
+        "risk_reward": 2.0,
+        "suggested_notional_usd": 7.0,
+        "suggested_stop_loss_pct": 0.01,
+        "suggested_take_profit_pct": 0.03,
+        "blockers": [],
+        "advisory_blockers": [],
+    }
+
+    service._apply_min_order_notional_floor(
+        forecast,
+        {"provider": "hyperliquid", "allocation_cap_usd": 35.0, "available_margin_usd": 35.0},
+    )
+
+    assert forecast["suggested_notional_usd"] == pytest.approx(app.config["HYPERLIQUID_MIN_ORDER_VALUE_USD"])
+    assert forecast["position_fraction"] == pytest.approx(app.config["HYPERLIQUID_MIN_ORDER_VALUE_USD"] / 35.0)
+    assert forecast["min_order_notional_applied"] is True
+    assert "below_min_order_notional" not in one_h10_forecast_live_blockers(forecast, app.config)
+
+
+def test_one_h10_forecast_blocks_hyperliquid_notional_below_exchange_minimum(app) -> None:
+    forecast = {
+        "provider": "hyperliquid",
+        "predicted_side": "buy",
+        "confidence": 0.8,
+        "gross_expected_return_bps": 40.0,
+        "expected_return_bps": 24.0,
+        "net_expected_return_bps": 24.0,
+        "cost_drag_bps": 6.0,
+        "estimated_fee_bps": 2.0,
+        "estimated_slippage_bps": 2.0,
+        "spread_bps": 1.0,
+        "execution_quality": 0.9,
+        "expected_net_edge_passed": True,
+        "risk_reward": 2.0,
+        "suggested_notional_usd": 7.0,
+        "suggested_stop_loss_pct": 0.01,
+        "suggested_take_profit_pct": 0.03,
+        "blockers": [],
+    }
+
+    assert "below_min_order_notional" in one_h10_forecast_live_blockers(forecast, app.config)
+
+
+def test_one_h10_entry_sizing_uses_forecast_notional_once(app) -> None:
+    app.config["ONE_H10_REQUIRE_PROMOTED_ML"] = False
+    manager = app.extensions["services"]["strategy_manager"]
+    run = StrategyRun(strategy_name="scalping", symbol="DOGE", timeframe="1m", mode="live")
+    run.parameters = {
+        "one_h10_vault": True,
+        "ml_horizon": "1h10",
+        "provider": "hyperliquid",
+        "allocation_cap_usd": 35.0,
+        "available_margin_usd": 35.0,
+        "one_h10_forecast": {
+            "provider": "hyperliquid",
+            "ml_ready": True,
+            "predicted_side": "buy",
+            "confidence": 0.8,
+            "position_fraction": 0.60,
+            "gross_expected_return_bps": 40.0,
+            "expected_return_bps": 24.0,
+            "net_expected_return_bps": 24.0,
+            "cost_drag_bps": 6.0,
+            "estimated_fee_bps": 2.0,
+            "estimated_slippage_bps": 2.0,
+            "spread_bps": 1.0,
+            "execution_quality": 0.9,
+            "expected_net_edge_passed": True,
+            "risk_reward": 2.0,
+            "suggested_notional_usd": 21.0,
+            "suggested_stop_loss_pct": 0.01,
+            "suggested_take_profit_pct": 0.03,
+            "blockers": [],
+        },
+    }
+    base = Signal("hold", "base hold", "1m", None, None, 0.0, {})
+
+    selected = manager._one_h10_forecast_signal(run, base, [{"close": 100.0}])
+    sizing_base = manager._entry_sizing_base(run)
+
+    assert selected.action == "buy"
+    assert selected.position_fraction == pytest.approx(0.60)
+    assert sizing_base * selected.position_fraction == pytest.approx(21.0)
 
 
 def test_one_h10_risk_rejects_low_edge_forecast_before_live_order(app) -> None:

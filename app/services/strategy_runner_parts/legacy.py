@@ -2326,6 +2326,14 @@ class StrategyManager:
             suggested = self._safe_float(forecast.get("suggested_notional_usd"), 0.0)
             allocation_cap = self._safe_float(run.parameters.get("allocation_cap_usd"), 0.0)
             available = self._safe_float(run.parameters.get("available_margin_usd"), 0.0)
+            notional_caps = [value for value in (allocation_cap, available) if value > 0]
+            max_notional = min(notional_caps) if notional_caps else 0.0
+            if suggested > 0:
+                target_notional = min(suggested, max_notional) if max_notional > 0 else suggested
+                position_fraction = self._safe_float(forecast.get("position_fraction"), 0.0)
+                if position_fraction > 0:
+                    return target_notional / max(position_fraction, 1e-9)
+                return target_notional
             candidates = [value for value in (suggested, allocation_cap, available) if value > 0]
             return min(candidates) if candidates else 0.0
         allocation_cap = self._safe_float(run.parameters.get("allocation_cap_usd"), 0.0)
