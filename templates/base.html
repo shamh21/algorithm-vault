@@ -2,9 +2,11 @@
 <!doctype html>
 <html lang="en" data-theme="dark" style="-webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;">
   <head>
+    {% set page_seo = seo|default({}) %}
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-    <meta name="description" content="AlgVault is a secure mobile command center for automated portfolio allocation, strategy monitoring, and vault activity.">
+    <meta name="description" content="{{ page_seo.description|default('AlgVault is a secure mobile command center for automated portfolio allocation, strategy monitoring, and vault activity.') }}">
+    <meta name="robots" content="{{ page_seo.robots|default('noindex, nofollow') }}">
     <meta name="theme-color" content="#050607">
     <meta name="theme-color" content="#050607" media="(prefers-color-scheme: light)">
     <meta name="theme-color" content="#050607" media="(prefers-color-scheme: dark)">
@@ -16,7 +18,8 @@
     <meta name="apple-mobile-web-app-title" content="AlgVault">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="msapplication-TileColor" content="#050607">
-    {% set asset_v = current_app.config.get('ASSET_VERSION', '1') ~ '-algvault-vault-shell-polish-10-wallet-merge-1' %}
+    <meta name="msapplication-TileImage" content="/icons/algvault-mascot-144.png">
+    {% set asset_v = current_app.config.get('ASSET_VERSION', '1') ~ '-algvault-admin-dashboard-fix-2-backtests-ui-1-algvault-mascot-brand-1-algvault-treasury-ops-1-ops-bridge-readiness-1-redblack-pwa-1-settings-control-center-2-public-pages-focus-1-login-pwa-1-convert-refresh-1-wallet-redesign-1-backtests-iphone-console-1-overview-exchange-2-features-exchange-1-mobile-pwa-premium-1' %}
     <script>
       try {
         const storedTheme = window.localStorage.getItem("av-color-theme");
@@ -26,15 +29,37 @@
         }
       } catch {}
     </script>
-    <title>{% block title %}AlgVault{% endblock %}</title>
+    <title>{% block title %}{{ page_seo.title|default('AlgVault') }}{% endblock %}</title>
+    <link rel="canonical" href="{{ page_seo.canonical_url|default('https://algvault.app/') }}">
+    <meta property="og:site_name" content="AlgVault">
+    <meta property="og:type" content="{{ page_seo.og_type|default('website') }}">
+    <meta property="og:title" content="{{ page_seo.og_title|default(page_seo.title|default('AlgVault')) }}">
+    <meta property="og:description" content="{{ page_seo.og_description|default(page_seo.description|default('AlgVault automated trading command center.')) }}">
+    <meta property="og:url" content="{{ page_seo.og_url|default(page_seo.canonical_url|default('https://algvault.app/')) }}">
+    <meta property="og:image" content="{{ page_seo.og_image|default('https://algvault.app/icons/algvault-mascot-512.png') }}">
+    <meta property="og:image:alt" content="AlgVault app icon">
+    <meta name="twitter:card" content="{{ page_seo.twitter_card|default('summary_large_image') }}">
+    <meta name="twitter:title" content="{{ page_seo.twitter_title|default(page_seo.title|default('AlgVault')) }}">
+    <meta name="twitter:description" content="{{ page_seo.twitter_description|default(page_seo.description|default('AlgVault automated trading command center.')) }}">
+    <meta name="twitter:image" content="{{ page_seo.twitter_image|default('https://algvault.app/icons/algvault-mascot-512.png') }}">
     <link rel="manifest" href="/manifest.json">
+    <link rel="icon" href="/icons/favicon.ico" sizes="any">
     <link rel="icon" type="image/svg+xml" href="/icons/algvault-icon.svg">
-    <link rel="icon" type="image/png" sizes="192x192" href="/icons/algvault-ios-192.png">
-    <link rel="icon" type="image/png" sizes="512x512" href="/icons/algvault-ios-512.png">
-    <link rel="apple-touch-icon" href="/icons/algvault-ios-180.png">
-    <link rel="apple-touch-icon-precomposed" href="/icons/algvault-ios-180.png">
-    <link rel="preload" as="style" href="{{ url_for('static', filename='css/app.css') }}?v={{ asset_v }}">
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}?v={{ asset_v }}">
+    <link rel="icon" type="image/png" sizes="16x16" href="/icons/algvault-mascot-16.png">
+    <link rel="icon" type="image/png" sizes="32x32" href="/icons/algvault-mascot-32.png">
+    <link rel="icon" type="image/png" sizes="48x48" href="/icons/algvault-mascot-48.png">
+    <link rel="icon" type="image/png" sizes="192x192" href="/icons/algvault-mascot-192.png">
+    <link rel="icon" type="image/png" sizes="512x512" href="/icons/algvault-mascot-512.png">
+    <link rel="mask-icon" href="/icons/algvault-mask-icon.svg" color="#ff1f36">
+    <link rel="apple-touch-icon" sizes="180x180" href="/icons/algvault-mascot-180.png">
+    <link rel="apple-touch-icon-precomposed" sizes="180x180" href="/icons/algvault-mascot-180.png">
+    <link rel="preload" as="image" href="/icons/algvault-mascot-192.png" imagesrcset="/icons/algvault-mascot-64.png 64w, /icons/algvault-mascot-192.png 192w" imagesizes="64px">
+    {% set stylesheet_filename = 'css/public.css' if page_seo.is_public else 'css/app.css' %}
+    <link rel="preload" as="style" href="{{ url_for('static', filename=stylesheet_filename) }}?v={{ asset_v }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename=stylesheet_filename) }}?v={{ asset_v }}">
+    {% for schema in page_seo.json_ld|default([]) %}
+      <script type="application/ld+json">{{ schema|tojson }}</script>
+    {% endfor %}
     {% block page_styles %}{% endblock %}
   </head>
   <body class="app-body app-starting mode-{{ nav_mode|default('live') }}" data-safe-area>
@@ -128,16 +153,23 @@
       </symbol>
     </svg>
 
-    {% include "components/algvault_intro.html" %}
+    {% if not page_seo.is_public %}
+      {% include "components/algvault_intro.html" %}
+    {% endif %}
 
     <header class="site-header app-topbar" data-app-topbar>
-      <a class="brand-lockup" href="{% if admin_authenticated %}{{ url_for('dashboard.index') }}{% else %}{{ url_for('consumer.home') }}{% endif %}" aria-label="Go to home">
-        <span class="brand-mark" aria-hidden="true">AV</span>
+      <a class="brand-lockup" href="{% if admin_authenticated %}{{ url_for('dashboard.index') }}{% elif not current_user %}{{ url_for('consumer.public_overview') }}{% else %}{{ url_for('consumer.home') }}{% endif %}">
+        <span class="brand-mark brand-mark--mascot" aria-hidden="true">
+          <img src="/icons/algvault-mascot-64.png" alt="" width="64" height="64" decoding="async">
+        </span>
         <span class="brand-copy">
           <span class="eyebrow">AlgVault</span>
           {% if admin_authenticated %}
             <strong>Ops Console</strong>
             <small>Automated trading controls</small>
+          {% elif not current_user %}
+            <strong>AlgVault</strong>
+            <small>Automated trading platform</small>
           {% else %}
             <strong>Command Center</strong>
             <small>Automated trading vault</small>
@@ -145,12 +177,24 @@
         </span>
       </a>
 
+      {% if not current_user %}
+        <nav class="public-topnav" aria-label="Public pages">
+          {% for public_page in public_seo_pages %}
+            <a href="{{ public_page.href }}" class="{% if request.path == public_page.href %}active{% endif %}" {% if request.path == public_page.href %}aria-current="page"{% endif %}>{{ public_page.label }}</a>
+          {% endfor %}
+        </nav>
+      {% endif %}
+
       <div class="topbar-actions">
+        {% if not current_user %}
+          <a class="public-topbar-link" href="{{ url_for('auth.login') }}">Sign in</a>
+          <a class="button-link primary public-topbar-cta" href="{{ url_for('auth.register') }}">Create access</a>
+        {% endif %}
         <div class="mode-chip mode-chip-{{ nav_mode|default('live') }}" aria-label="Current app mode">
           <span class="mode-dot" aria-hidden="true"></span>
-          <span>{{ nav_mode|default('live')|replace('_', ' ')|upper }}</span>
+          <span>{% if not current_user %}PWA{% else %}{{ nav_mode|default('live')|replace('_', ' ')|upper }}{% endif %}</span>
         </div>
-        <button class="nav-toggle secondary" type="button" aria-expanded="false" aria-controls="primary-navigation" data-nav-toggle>
+        <button class="nav-toggle secondary" type="button" aria-label="Open navigation menu" aria-expanded="false" aria-controls="primary-navigation" data-nav-toggle>
           <span class="nav-toggle-bars" aria-hidden="true">
             <span></span>
             <span></span>
@@ -161,7 +205,7 @@
       </div>
     </header>
 
-    <nav class="nav app-nav" id="primary-navigation" data-primary-nav aria-label="Primary navigation" aria-hidden="true">
+    <nav class="nav app-nav" id="primary-navigation" data-primary-nav aria-label="Primary navigation" aria-hidden="true" inert>
         {% if current_user %}
           <div class="nav-panel-head">
             <span class="card-kicker">Navigation</span>
@@ -223,6 +267,16 @@
             <strong>AlgVault</strong>
           </div>
           <div class="nav-section">
+            <span class="nav-section-title">Platform</span>
+            {% for public_page in public_seo_pages %}
+              <a href="{{ public_page.href }}" class="nav-link {% if request.path == public_page.href %}active{% endif %}" {% if request.path == public_page.href %}aria-current="page"{% endif %}>
+                <svg class="topnav-icon" aria-hidden="true"><use href="#icon-markets"></use></svg>
+                <span class="nav-link-copy"><strong>{{ public_page.label }}</strong><small>Public page</small></span>
+              </a>
+            {% endfor %}
+          </div>
+          <div class="nav-section">
+            <span class="nav-section-title">Access</span>
             <a href="{{ url_for('auth.login') }}" class="nav-link {% if request.endpoint == 'auth.login' %}active{% endif %}" {% if request.endpoint == 'auth.login' %}aria-current="page"{% endif %}>
               <svg class="topnav-icon" aria-hidden="true"><use href="#icon-login"></use></svg>
               <span class="nav-link-copy"><strong>Login</strong><small>Access your vault</small></span>
@@ -236,7 +290,7 @@
       </nav>
     <div class="nav-backdrop" id="nav-backdrop" data-nav-backdrop aria-hidden="true"></div>
 
-    {% if request.endpoint != 'consumer.home' %}
+    {% if current_user and request.endpoint not in ['consumer.home', 'auth.login', 'auth.register', 'auth.setup_2fa'] %}
       <section class="crypto-rail" aria-label="Crypto wallet balances">
         <div class="crypto-rail-track">
           {% for item in crypto_rail_assets %}
@@ -296,7 +350,39 @@
       </nav>
     {% endif %}
 
+    {% if not current_user %}
+      <footer class="public-footer" aria-label="AlgVault public navigation">
+        <div class="public-footer__brand">
+          <span class="brand-mark brand-mark--mascot" aria-hidden="true">
+            <img src="/icons/algvault-mascot-64.png" alt="" width="64" height="64" loading="lazy" decoding="async">
+          </span>
+          <div>
+            <strong>AlgVault</strong>
+            <p>Automated trading monitoring, server-side execution controls, broker connectivity, and mobile portfolio visibility.</p>
+          </div>
+        </div>
+        <div class="public-footer__grid">
+          <nav class="public-footer__links" aria-label="Product pages">
+            <strong>Product</strong>
+            <a href="{{ url_for('consumer.public_overview') }}">Overview</a>
+            <a href="{{ url_for('consumer.public_features') }}">Features</a>
+            <a href="{{ url_for('consumer.public_pricing') }}">Pricing</a>
+            <a href="{{ url_for('consumer.public_mobile') }}">Mobile PWA</a>
+          </nav>
+          <nav class="public-footer__links" aria-label="Platform pages">
+            <strong>Platform</strong>
+            <a href="{{ url_for('consumer.public_connectivity') }}">Connectivity</a>
+            <a href="{{ url_for('consumer.public_security') }}">Security</a>
+            <a href="{{ url_for('auth.login') }}">Sign in</a>
+            <a href="{{ url_for('auth.register') }}">Create access</a>
+          </nav>
+        </div>
+        <p class="public-footer__note">AlgVault provides automation, analytics, and operational tooling. It does not provide investment advice or guaranteed trading outcomes.</p>
+      </footer>
+    {% endif %}
+
     {% set vault_live_api_origin = current_app.config.get('PUBLIC_LIVE_API_ORIGIN') if request.endpoint == 'consumer.vault' else '' %}
+    {% set include_authenticated_helpers = current_user or admin_authenticated %}
     <script>
       window.AlgVaultConfig = (() => {
         const config = {
@@ -313,20 +399,24 @@
           }
         };
         config.apiUrl = (path) => {
-          const appOrigin = normalizeOrigin(config.appOrigin, window.location.origin);
-          const apiOrigin = normalizeOrigin(config.apiOrigin, window.location.origin);
+          const currentOrigin = window.location.origin;
+          const appOrigin = normalizeOrigin(config.appOrigin, currentOrigin);
+          const apiOrigin = normalizeOrigin(config.apiOrigin, appOrigin);
+          const hasSeparateApiOrigin = Boolean(config.apiOrigin) && apiOrigin !== appOrigin;
+          const targetOrigin = hasSeparateApiOrigin ? apiOrigin : currentOrigin;
           const inputUrl = new URL(path || "/", appOrigin);
-          if (inputUrl.origin === appOrigin || inputUrl.origin === window.location.origin) {
-            return new URL(`${inputUrl.pathname}${inputUrl.search}${inputUrl.hash}`, apiOrigin).toString();
+          if (inputUrl.origin === appOrigin || inputUrl.origin === currentOrigin) {
+            return new URL(`${inputUrl.pathname}${inputUrl.search}${inputUrl.hash}`, targetOrigin).toString();
           }
           return inputUrl.toString();
         };
         config.vaultApiUrl = (path) => {
-          const appOrigin = normalizeOrigin(config.appOrigin, window.location.origin);
+          const currentOrigin = window.location.origin;
+          const appOrigin = normalizeOrigin(config.appOrigin, currentOrigin);
           const liveApiOrigin = normalizeOrigin(config.liveApiOrigin, "");
           if (!liveApiOrigin) return config.apiUrl(path);
           const inputUrl = new URL(path || "/", appOrigin);
-          if (inputUrl.origin === appOrigin || inputUrl.origin === window.location.origin) {
+          if (inputUrl.origin === appOrigin || inputUrl.origin === currentOrigin) {
             return new URL(`${inputUrl.pathname}${inputUrl.search}${inputUrl.hash}`, liveApiOrigin).toString();
           }
           return inputUrl.toString();
@@ -337,8 +427,13 @@
       window.AV_SW_SCOPE = "/";
       window.AV_BUILD_VERSION = "{{ asset_v }}";
     </script>
+    {% if include_authenticated_helpers %}
+      <script defer src="{{ url_for('static', filename='js/ops-bridge.js') }}?v={{ asset_v }}"></script>
+    {% endif %}
     <script defer src="{{ url_for('static', filename='js/app-shell.js') }}?v={{ asset_v }}"></script>
-    <script defer src="{{ url_for('static', filename='js/responsive-tables.js') }}?v={{ asset_v }}"></script>
+    {% if include_authenticated_helpers %}
+      <script defer src="{{ url_for('static', filename='js/responsive-tables.js') }}?v={{ asset_v }}"></script>
+    {% endif %}
     {% block page_scripts %}{% endblock %}
   </body>
 </html>

@@ -1,0 +1,409 @@
+{% extends "base.html" %}
+{% import "marketing/_components.html" as public_ui with context %}
+
+{% block content %}
+{% if page.key == "features" %}
+  <section class="features-landing" aria-labelledby="features-page-title">
+    <div class="features-hero">
+      <div class="features-hero__copy">
+        <nav class="features-breadcrumb" aria-label="Breadcrumb">
+          <a href="{{ url_for('consumer.public_overview') }}">Home</a>
+          <span aria-hidden="true">/</span>
+          <span>Features</span>
+        </nav>
+        <span class="features-kicker">{{ page.eyebrow }}</span>
+        <h1 id="features-page-title">{{ page.heading }}</h1>
+        <p>{{ page.lead }}</p>
+        <div class="features-hero__actions" aria-label="Features page actions">
+          <a class="button-link primary" href="{{ page.cta.primary_href }}">{{ page.cta.primary_label }}</a>
+          <a class="button-link secondary" href="{{ page.primary_href }}">{{ page.primary_label }}</a>
+          <a class="button-link secondary" href="{{ page.secondary_href }}">{{ page.secondary_label }}</a>
+        </div>
+      </div>
+      <aside class="features-hero-visual" aria-label="AlgVault trading dashboard preview">
+        <span class="features-hero-visual__glow" aria-hidden="true"></span>
+        <div class="features-dashboard-card">
+          <div class="features-dashboard-card__top">
+            <span>AV / USDC</span>
+            <strong>Readiness online</strong>
+          </div>
+          <div class="features-chart" aria-hidden="true">
+            <span class="features-candle features-candle--up" style="--h: 46%; --y: 42%;"></span>
+            <span class="features-candle features-candle--down" style="--h: 31%; --y: 52%;"></span>
+            <span class="features-candle features-candle--up" style="--h: 58%; --y: 32%;"></span>
+            <span class="features-candle features-candle--up" style="--h: 72%; --y: 22%;"></span>
+            <span class="features-candle features-candle--down" style="--h: 48%; --y: 36%;"></span>
+            <span class="features-candle features-candle--up" style="--h: 64%; --y: 24%;"></span>
+            <span class="features-candle features-candle--down" style="--h: 42%; --y: 45%;"></span>
+            <span class="features-candle features-candle--up" style="--h: 68%; --y: 18%;"></span>
+            <span class="features-candle features-candle--up" style="--h: 52%; --y: 27%;"></span>
+          </div>
+          <div class="features-dashboard-card__rows">
+            <span><b>Provider</b><em>Synced</em></span>
+            <span><b>Risk gate</b><em>Active</em></span>
+            <span><b>Cycle state</b><em>Ready</em></span>
+          </div>
+        </div>
+        <span class="features-floating-tile features-floating-tile--shield" aria-hidden="true">
+          <svg class="topnav-icon"><use href="#icon-shield"></use></svg>
+        </span>
+        <span class="features-floating-tile features-floating-tile--activity" aria-hidden="true">
+          <svg class="topnav-icon"><use href="#icon-activity"></use></svg>
+        </span>
+        <span class="features-floating-tile features-floating-tile--target" aria-hidden="true">
+          <svg class="topnav-icon"><use href="#icon-dashboard"></use></svg>
+        </span>
+      </aside>
+    </div>
+
+    <div class="features-filter" role="toolbar" aria-label="Feature categories">
+      <button class="is-active" type="button" aria-pressed="true">All features</button>
+      <button type="button" aria-pressed="false">Platform</button>
+      <button type="button" aria-pressed="false">Automation</button>
+      <button type="button" aria-pressed="false">Risk &amp; Control</button>
+      <button type="button" aria-pressed="false">Accessibility</button>
+      <button type="button" aria-pressed="false">Security</button>
+      <button type="button" aria-pressed="false">Insights</button>
+    </div>
+
+    <section class="features-section" id="platform-features" aria-labelledby="platform-features-title">
+      <h2 id="platform-features-title">Platform Features</h2>
+      <div class="features-card-grid features-card-grid--platform">
+        {% for card in page.cards %}
+          {% if card.group == "platform" %}
+            <article class="features-card">
+              <span class="features-icon-tile" aria-hidden="true"><svg class="topnav-icon"><use href="#{{ card.icon }}"></use></svg></span>
+              <h3>{{ card.title }}</h3>
+              <p>{{ card.body }}</p>
+            </article>
+          {% endif %}
+        {% endfor %}
+      </div>
+    </section>
+
+    <section class="features-section" id="automation-features" aria-labelledby="automation-features-title">
+      <h2 id="automation-features-title">Automation &amp; Smart Features</h2>
+      <div class="features-card-grid features-card-grid--automation">
+        {% for card in page.cards %}
+          {% if card.group == "automation" %}
+            <article class="features-card features-card--dense">
+              <span class="features-icon-tile" aria-hidden="true"><svg class="topnav-icon"><use href="#{{ card.icon }}"></use></svg></span>
+              <span class="features-card__meta">{{ card.meta }}</span>
+              <h3>{{ card.title }}</h3>
+              <p>{{ card.body }}</p>
+            </article>
+          {% endif %}
+        {% endfor %}
+      </div>
+    </section>
+
+    <section class="features-insight" aria-labelledby="features-insight-title">
+      <div class="features-icon-tile" aria-hidden="true"><svg class="topnav-icon"><use href="#icon-markets"></use></svg></div>
+      <div>
+        <span class="features-kicker">Insights &amp; Oversight</span>
+        <h2 id="features-insight-title">Review access plans and mobile behavior</h2>
+        <p>Correlate plans, runtime posture, and PWA experience without leaving the desk.</p>
+      </div>
+      <nav aria-label="Insights next steps">
+        <a class="button-link primary" href="{{ page.primary_href }}">{{ page.primary_label }}</a>
+        <a class="button-link secondary" href="{{ page.secondary_href }}">{{ page.secondary_label }}</a>
+      </nav>
+    </section>
+
+    <section class="features-matters" aria-labelledby="features-matters-title">
+      <span class="features-kicker">Why it matters</span>
+      <h2 id="features-matters-title">A faster operating surface for protected trading workflows</h2>
+      <div class="features-matters-grid">
+        <article>
+          <span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-activity"></use></svg></span>
+          <h3>Faster decisions</h3>
+          <p>Everything you need, exactly where you need it.</p>
+        </article>
+        <article>
+          <span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-shield"></use></svg></span>
+          <h3>Smarter risk control</h3>
+          <p>Built-in safeguards before every action.</p>
+        </article>
+        <article>
+          <span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-dashboard"></use></svg></span>
+          <h3>Operational clarity</h3>
+          <p>End-to-end visibility across your stack.</p>
+        </article>
+        <article>
+          <span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-login"></use></svg></span>
+          <h3>Enterprise-grade by design</h3>
+          <p>Security, reliability, and control at every layer.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="features-final-cta" aria-labelledby="features-final-title">
+      <div>
+        <span class="features-kicker">{{ page.cta.kicker }}</span>
+        <h2 id="features-final-title">{{ page.cta.title }}</h2>
+        <p>{{ page.cta.body }}</p>
+      </div>
+      <nav aria-label="Features final actions">
+        <a class="button-link primary" href="{{ page.cta.primary_href }}">{{ page.cta.primary_label }}</a>
+        <a class="button-link secondary" href="{{ page.cta.secondary_href }}">{{ page.cta.secondary_label }}</a>
+      </nav>
+    </section>
+
+    <p class="features-disclaimer">{{ page.disclaimer }}</p>
+  </section>
+{% elif page.key == "pricing" %}
+  {{ public_ui.public_hero(page, "public-page-title", public_seo_pages) }}
+  {{ public_ui.public_metrics(page) }}
+  {{ public_ui.public_cards(page, "Choose the access level", compact=True) }}
+  {{ public_ui.public_status(page, "Simple comparison, clear boundaries", "Plan notes") }}
+  {{ public_ui.public_disclaimer(page) }}
+{% elif page.key == "mobile" %}
+  <section class="mobile-landing" aria-labelledby="public-page-title">
+    <section class="mobile-hero" aria-labelledby="public-page-title">
+      <span class="mobile-hero__grid" aria-hidden="true"></span>
+      <span class="mobile-hero__glow mobile-hero__glow--one" aria-hidden="true"></span>
+      <span class="mobile-hero__glow mobile-hero__glow--two" aria-hidden="true"></span>
+      <div class="mobile-hero__copy">
+        <span class="card-kicker">{{ page.eyebrow }}</span>
+        <h1 id="public-page-title">{{ page.heading }}</h1>
+        <p>{{ page.lead }}</p>
+        {{ public_ui.public_badges(page) }}
+        <div class="mobile-hero__actions public-hero__actions" aria-label="{{ page.nav_label }} actions">
+          <a class="button-link primary" href="{{ page.primary_href }}">{{ page.primary_label }}</a>
+          <a class="button-link secondary" href="{{ page.secondary_href }}">{{ page.secondary_label }}</a>
+        </div>
+      </div>
+      <aside class="mobile-hero__visual public-device-frame" aria-label="AlgVault iPhone trading preview">
+        <div class="mobile-phone mobile-phone--float">
+          <span class="mobile-phone__notch" aria-hidden="true"></span>
+          <div class="mobile-phone__screen">
+            <div class="mobile-phone__status" aria-label="iPhone status bar preview">
+              <span>9:42</span>
+              <span>5G</span>
+            </div>
+            <div class="mobile-phone__brand">
+              <span><img src="/icons/algvault-mascot-64.png" alt="" width="64" height="64" decoding="async"> AlgVault</span>
+              <svg class="topnav-icon" aria-hidden="true"><use href="#icon-settings"></use></svg>
+            </div>
+            <section class="mobile-phone__portfolio" aria-label="Portfolio preview">
+              <span>Portfolio</span>
+              <strong>Total value</strong>
+              <b>$128,420.58</b>
+              <em>+2.41% today</em>
+              <svg viewBox="0 0 240 92" role="img" aria-label="Trading chart trending upward">
+                <defs>
+                  <linearGradient id="mobile-chart-fill" x1="0" x2="0" y1="0" y2="1">
+                    <stop offset="0%" stop-color="#ff3342" stop-opacity="0.32"></stop>
+                    <stop offset="100%" stop-color="#ff3342" stop-opacity="0"></stop>
+                  </linearGradient>
+                </defs>
+                <path class="mobile-chart-area" d="M8 74 L28 62 L48 68 L68 47 L88 54 L108 38 L128 44 L148 28 L168 36 L188 21 L212 26 L232 12 L232 92 L8 92 Z"></path>
+                <path class="mobile-chart-line" d="M8 74 L28 62 L48 68 L68 47 L88 54 L108 38 L128 44 L148 28 L168 36 L188 21 L212 26 L232 12"></path>
+              </svg>
+              <div class="mobile-phone__tabs" aria-label="Chart range preview">
+                <span>1H</span>
+                <span class="is-active">1D</span>
+                <span>1W</span>
+                <span>1M</span>
+              </div>
+            </section>
+            <section class="mobile-phone__cycle" aria-label="Vault cycle status preview">
+              <div>
+                <span>Vault Cycle</span>
+                <strong>Expansion</strong>
+                <small>Phase 3 of 4</small>
+              </div>
+              <b>72%</b>
+            </section>
+            <section class="mobile-phone__signals" aria-label="Signal preview">
+              <span>Signals</span>
+              <p><strong>BTC/USDT</strong><em>Bullish</em></p>
+              <p><strong>ETH/USDT</strong><em>Neutral</em></p>
+            </section>
+          </div>
+        </div>
+      </aside>
+    </section>
+
+    <section class="mobile-showcase public-card-system" aria-labelledby="mobile-showcase-title">
+      <div class="mobile-showcase__copy">
+        <span class="card-kicker">Mobile experience</span>
+        <h2 id="mobile-showcase-title">Built for the way you operate</h2>
+        <p>A mobile shell that stays fast, focused, and reliable wherever you are.</p>
+        <ul>
+          <li>Installed PWA mode</li>
+          <li>Compact trading cards</li>
+          <li>Operational state at a glance</li>
+          <li>Safe-area aware layout</li>
+        </ul>
+      </div>
+      <div class="mobile-showcase__panels" aria-label="Mobile app shell concepts">
+        <article class="mobile-app-card mobile-app-card--watchlist">
+          <div class="mobile-card-head"><strong>Watchlist</strong><svg class="topnav-icon" aria-hidden="true"><use href="#icon-markets"></use></svg></div>
+          <p><span>BTC / USDT</span><b class="is-down">-2.41%</b></p>
+          <p><span>ETH / USDT</span><b>+1.23%</b></p>
+          <p><span>SOL / USDT</span><b class="is-down">-0.71%</b></p>
+        </article>
+        <article class="mobile-app-card">
+          <div class="mobile-card-head"><strong>Vault Cycle</strong><svg class="topnav-icon" aria-hidden="true"><use href="#icon-vault"></use></svg></div>
+          <p><span>Condition</span><b>Favorable</b></p>
+          <p><span>Risk</span><b>Managed</b></p>
+          <p><span>Next check</span><b>12m 44s</b></p>
+        </article>
+        <article class="mobile-app-card">
+          <div class="mobile-card-head"><strong>Signals</strong><svg class="topnav-icon" aria-hidden="true"><use href="#icon-activity"></use></svg></div>
+          <p><span>BTC/USDT</span><b class="is-red">Bullish</b></p>
+          <p><span>ETH/USDT</span><b>Neutral</b></p>
+          <p><span>SOL/USDT</span><b class="is-red">Watch</b></p>
+        </article>
+        <article class="mobile-app-card">
+          <div class="mobile-card-head"><strong>Orders</strong><svg class="topnav-icon" aria-hidden="true"><use href="#icon-dashboard"></use></svg></div>
+          <p><span>Open</span><b>2</b></p>
+          <p><span>History</span><b>18</b></p>
+          <span class="mobile-card-action">New order</span>
+        </article>
+        <nav class="mobile-bottom-nav" aria-label="Sticky bottom navigation concept">
+          <span class="is-active"><svg class="topnav-icon" aria-hidden="true"><use href="#icon-home"></use></svg>Overview</span>
+          <span><svg class="topnav-icon" aria-hidden="true"><use href="#icon-markets"></use></svg>Markets</span>
+          <span><svg class="topnav-icon" aria-hidden="true"><use href="#icon-vault"></use></svg>Vault</span>
+          <span><svg class="topnav-icon" aria-hidden="true"><use href="#icon-wallet"></use></svg>Orders</span>
+        </nav>
+      </div>
+    </section>
+
+    <section class="mobile-feature-rows public-status-system" aria-labelledby="mobile-pwa-title">
+      <div class="public-section-heading">
+        <h2 id="mobile-pwa-title">Built for iPhone PWA usage</h2>
+      </div>
+      <div class="mobile-feature-list">
+        <article>
+          <span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-activity"></use></svg></span>
+          <div>
+            <h3>Fast perceived load</h3>
+            <p>Server-rendered shell content keeps the first view immediate while scripts defer.</p>
+          </div>
+        </article>
+        <article>
+          <span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-dashboard"></use></svg></span>
+          <div>
+            <h3>No horizontal overflow</h3>
+            <p>Narrow layouts and safe-area spacing preserve the viewport on every screen.</p>
+          </div>
+        </article>
+        <article>
+          <span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-theme"></use></svg></span>
+          <div>
+            <h3>Reduced motion support</h3>
+            <p>Motion respects system settings and avoids distracting movement.</p>
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <section class="mobile-ops public-card-system" aria-labelledby="mobile-ops-title">
+      <div class="public-section-heading">
+        <span class="card-kicker">Mobile operations</span>
+        <h2 id="mobile-ops-title">Operational clarity on mobile</h2>
+      </div>
+      <div class="mobile-ops-grid">
+        <article><span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-alert"></use></svg></span><h3>Explicit network states</h3><p>Know exactly when you are online or offline.</p></article>
+        <article><span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-shield"></use></svg></span><h3>Safe offline behavior</h3><p>Cached shell keeps key information available.</p></article>
+        <article><span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-login"></use></svg></span><h3>Server-validated actions</h3><p>Sensitive actions require server confirmation.</p></article>
+        <article><span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-user-plus"></use></svg></span><h3>Touch-friendly controls</h3><p>44px+ targets and room for your thumb.</p></article>
+        <article><span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-dashboard"></use></svg></span><h3>Stable viewport sizing</h3><p>No jumpy layouts or content shifts.</p></article>
+        <article><span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-vault"></use></svg></span><h3>Compact repeated workflows</h3><p>Complete tasks with fewer taps and clearer steps.</p></article>
+      </div>
+    </section>
+
+    <section class="mobile-install" aria-labelledby="mobile-install-title">
+      <div class="mobile-install__copy">
+        <span class="card-kicker">Installable PWA</span>
+        <h2 id="mobile-install-title">Installable PWA in seconds</h2>
+        <p>Add AlgVault to your iPhone for an app-like operating surface.</p>
+        <ol>
+          <li><strong>Installable icon metadata</strong><span>Home Screen icons and maskable assets are defined.</span></li>
+          <li><strong>Standalone display mode</strong><span>The shell is prepared for installed PWA launch.</span></li>
+          <li><strong>Theme-color support</strong><span>Dark system chrome matches the AlgVault shell.</span></li>
+          <li><strong>Splash-screen readiness</strong><span>Apple metadata supports a clean app start.</span></li>
+          <li><strong>Safe-area support</strong><span>Viewport-fit spacing handles notch and Home Indicator devices.</span></li>
+        </ol>
+      </div>
+      <aside class="mobile-install__visual" aria-label="iPhone install prompt preview">
+        <div class="mobile-install-prompt">
+          <div class="mobile-install-prompt__app">
+            <img src="/icons/algvault-mascot-64.png" alt="" width="64" height="64" loading="lazy" decoding="async">
+            <div><strong>AlgVault</strong><span>algvault.app</span></div>
+          </div>
+          <p>Add to Reading List <span aria-hidden="true">+</span></p>
+          <p>Add Bookmark <span aria-hidden="true">+</span></p>
+          <p>Add to Favorites <span aria-hidden="true">+</span></p>
+          <p class="is-selected">Add to Home Screen <span aria-hidden="true">+</span></p>
+          <p>Markup <span aria-hidden="true">+</span></p>
+          <div class="mobile-install-prompt__share" aria-hidden="true"><svg class="topnav-icon"><use href="#icon-login"></use></svg></div>
+        </div>
+      </aside>
+    </section>
+
+    <section class="mobile-touch" aria-labelledby="mobile-touch-title">
+      <div class="public-section-heading">
+        <h2 id="mobile-touch-title">Designed around touch-first operation</h2>
+      </div>
+      <div class="mobile-touch-strip">
+        <article><span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-user-plus"></use></svg></span><h3>44px+ tap targets</h3><p>Built for accurate mobile input.</p></article>
+        <article><span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-vault"></use></svg></span><h3>Thumb-zone controls</h3><p>Important actions stay within easy reach.</p></article>
+        <article><span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-dashboard"></use></svg></span><h3>Responsive spacing</h3><p>Breathing room adapts to any device.</p></article>
+        <article><span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-shield"></use></svg></span><h3>Reduced accidental actions</h3><p>Confirmation for high-impact actions.</p></article>
+        <article><span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-wallet"></use></svg></span><h3>Fixed action bars</h3><p>Primary actions stay accessible.</p></article>
+        <article><span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-markets"></use></svg></span><h3>Compact navigation</h3><p>Bottom nav keeps you oriented.</p></article>
+      </div>
+    </section>
+
+    <section class="mobile-connectivity public-status-system" aria-labelledby="mobile-connectivity-title">
+      <div class="public-section-heading">
+        <h2 id="mobile-connectivity-title">Connectivity you can trust</h2>
+      </div>
+      <div class="mobile-status-strip" aria-label="Operational status">
+        <article class="is-green"><span aria-hidden="true"></span><strong>API connected</strong><p>All systems operational</p></article>
+        <article class="is-green"><span aria-hidden="true"></span><strong>Sync healthy</strong><p>Data updated just now</p></article>
+        <article class="is-gold"><span aria-hidden="true"></span><strong>Cached shell available</strong><p>Available offline</p></article>
+        <article class="is-red"><span aria-hidden="true"></span><strong>Authentication required</strong><p>Auth required for sensitive actions</p></article>
+      </div>
+    </section>
+
+    <section class="mobile-final-cta public-cta-block" aria-labelledby="mobile-final-title">
+      <span class="mobile-final-cta__icon" aria-hidden="true"><svg class="topnav-icon"><use href="#icon-shield"></use></svg></span>
+      <div>
+        <span class="card-kicker">{{ page.cta.kicker }}</span>
+        <h2 id="mobile-final-title">{{ page.cta.title }}</h2>
+        <p>{{ page.cta.body }}</p>
+      </div>
+      <nav class="public-cta-actions" aria-label="{{ page.nav_label }} next actions">
+        <a class="button-link primary" href="{{ page.cta.primary_href }}">{{ page.cta.primary_label }}</a>
+        <a class="button-link secondary" href="{{ page.cta.secondary_href }}">{{ page.cta.secondary_label }}</a>
+      </nav>
+    </section>
+  </section>
+{% elif page.key == "connectivity" %}
+  {{ public_ui.public_hero(page, "public-page-title", public_seo_pages) }}
+  {{ public_ui.public_metrics(page) }}
+  {{ public_ui.public_status(page, "Connection flow in three steps", "Connectivity flow") }}
+  {{ public_ui.public_cards(page, "Integration surfaces", compact=True) }}
+  {{ public_ui.public_sections(page, stacked=True) }}
+{% elif page.key == "security" %}
+  {{ public_ui.public_hero(page, "public-page-title", public_seo_pages) }}
+  {{ public_ui.public_metrics(page) }}
+  {{ public_ui.public_cards(page, "Trust and control surfaces", compact=True) }}
+  {{ public_ui.public_status(page, "Sensitive workflows stay gated", "Security states") }}
+  {{ public_ui.public_sections(page, stacked=True) }}
+  {{ public_ui.public_disclaimer(page) }}
+{% else %}
+  {{ public_ui.public_hero(page, "public-page-title", public_seo_pages) }}
+  {{ public_ui.public_metrics(page) }}
+  {{ public_ui.public_cards(page, compact=True) }}
+  {{ public_ui.public_status(page) }}
+  {{ public_ui.public_sections(page, stacked=True) }}
+{% endif %}
+{% if page.key != "features" and page.key != "mobile" %}
+  {{ public_ui.public_cta(page) }}
+{% endif %}
+{% endblock %}
