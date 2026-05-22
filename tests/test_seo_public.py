@@ -136,6 +136,50 @@ def test_public_features_page_uses_exchange_landing_system(app) -> None:
     assert "risk-free trading" not in html.lower()
 
 
+def test_public_pricing_page_uses_exchange_plan_comparison(app) -> None:
+    response = app.test_client().get("/pricing/")
+    html = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert html.count("<h1") == 1
+    assert "pricing-landing" in html
+    assert "pricing-hero" in html
+    assert "Simple access tiers for monitored automation" in html
+    assert "Choose the AlgVault access level that matches your workflow" in html
+    assert "Transparent tiers" in html
+    assert "No hidden urgency" in html
+    assert "No performance claims" in html
+    assert "Starter" in html
+    assert "Operator" in html
+    assert "Recommended" in html
+    assert "Custom" in html
+    assert "Phone/PWA access" in html
+    assert "Automated execution controls" in html
+    assert "Operational audit visibility" in html
+    assert "Compare access tiers" in html
+    assert "Mobile PWA" in html
+    assert "Execution controls" in html
+    assert "Provider visibility" in html
+    assert "Custom workflows" in html
+    assert "Built on safety and clarity" in html
+    assert "Server-led validation" in html
+    assert "No guaranteed returns" in html
+    assert "Secure account setup" in html
+    assert "Plan boundaries stay clear" in html
+    assert "Start with secure setup" in html
+    assert "Final plan details are confirmed during account setup." in html
+    assert 'href="/register"' in html
+    assert 'href="/features/"' in html
+    assert 'href="/security/"' in html
+    assert "css/public.css" in html
+    assert "css/app.css" not in html
+    assert "ops-bridge.js" not in html
+    assert "public-cta-block" not in html
+    assert html.count("Start with secure setup") == 1
+    assert "guaranteed profits" not in html.lower()
+    assert "risk-free trading" not in html.lower()
+
+
 def test_public_connectivity_page_uses_operations_dashboard_layout(app) -> None:
     response = app.test_client().get("/connectivity/")
     html = response.get_data(as_text=True)
@@ -211,6 +255,10 @@ def test_public_pages_render_premium_product_system_without_sensitive_material(a
             assert "features-landing" in html, path
             assert "features-final-cta" in html, path
             assert "features-filter" in html, path
+        elif path == "/pricing/":
+            assert "pricing-landing" in html, path
+            assert "pricing-plan-grid" in html, path
+            assert "pricing-final-cta" in html, path
         elif path == "/connectivity/":
             assert "connectivity-landing" in html, path
             assert "connection-overview-card" in html, path

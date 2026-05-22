@@ -265,7 +265,7 @@ PUBLIC_PAGES: dict[str, PublicSeoPage] = {
         ),
         eyebrow="Pricing",
         heading="Simple access tiers for monitored automation",
-        lead=("Choose the level of AlgVault access that matches how much operational visibility, connectivity, and control you need."),
+        lead=("Choose the AlgVault access level that matches your workflow, visibility needs, and control requirements."),
         primary_label="Create account",
         primary_href="/register",
         secondary_label="Compare features",
@@ -278,7 +278,7 @@ PUBLIC_PAGES: dict[str, PublicSeoPage] = {
         sections=(),
         badges=(
             {"label": "Transparent tiers", "tone": "secure"},
-            {"label": "No fake urgency", "tone": "mobile"},
+            {"label": "No hidden urgency", "tone": "mobile"},
             {"label": "No performance claims", "tone": "alert"},
         ),
         hero_rows=(
@@ -289,23 +289,23 @@ PUBLIC_PAGES: dict[str, PublicSeoPage] = {
         cards=(
             {
                 "kicker": "Starter",
-                "title": "Monitor",
+                "title": "Starter",
                 "meta": "Access",
                 "body": "For evaluating AlgVault and tracking core operating posture.",
-                "features": ("iPhone PWA access", "Strategy and wallet visibility", "Security-first account setup"),
+                "features": ("Phone/PWA access", "Strategy and wallet visibility", "Security-first account setup"),
             },
             {
                 "kicker": "Operator",
-                "title": "Control",
+                "title": "Operator",
                 "meta": "Core",
                 "body": "For users who need monitored automation with provider and vault controls.",
                 "features": ("Automated execution controls", "Broker/API connectivity", "Risk and readiness states"),
             },
             {
-                "kicker": "Desk",
-                "title": "Scale",
+                "kicker": "Custom",
+                "title": "Custom",
                 "meta": "Custom",
-                "body": "For advanced workflows that require operational review and custom setup.",
+                "body": "For advanced workflows requiring operational review and custom state.",
                 "features": ("Expanded monitoring surfaces", "Operational audit visibility", "Custom onboarding path"),
             },
         ),

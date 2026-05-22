@@ -152,11 +152,164 @@
     <p class="features-disclaimer">{{ page.disclaimer }}</p>
   </section>
 {% elif page.key == "pricing" %}
-  {{ public_ui.public_hero(page, "public-page-title", public_seo_pages) }}
-  {{ public_ui.public_metrics(page) }}
-  {{ public_ui.public_cards(page, "Choose the access level", compact=True) }}
-  {{ public_ui.public_status(page, "Simple comparison, clear boundaries", "Plan notes") }}
-  {{ public_ui.public_disclaimer(page) }}
+  <section class="pricing-landing" aria-labelledby="pricing-page-title">
+    <div class="pricing-hero">
+      <div class="pricing-hero__copy">
+        <nav class="pricing-breadcrumb" aria-label="Breadcrumb">
+          <a href="{{ url_for('consumer.public_overview') }}">Home</a>
+          <span aria-hidden="true">/</span>
+          <span>Pricing</span>
+        </nav>
+        <span class="pricing-kicker">{{ page.eyebrow }}</span>
+        <h1 id="pricing-page-title">{{ page.heading }}</h1>
+        <p>{{ page.lead }}</p>
+        <ul class="pricing-trust-pills" aria-label="Pricing trust signals">
+          {% for badge in page.badges %}
+            <li>
+              <span aria-hidden="true"><svg class="topnav-icon"><use href="#{% if loop.index == 1 %}icon-shield{% elif loop.index == 2 %}icon-alert{% else %}icon-activity{% endif %}"></use></svg></span>
+              {{ badge.label }}
+            </li>
+          {% endfor %}
+        </ul>
+        <div class="pricing-hero__actions" aria-label="Pricing page actions">
+          <a class="button-link primary" href="{{ page.primary_href }}">{{ page.primary_label }}</a>
+          <a class="button-link secondary" href="{{ page.secondary_href }}">{{ page.secondary_label }}</a>
+        </div>
+      </div>
+
+      <aside class="pricing-hero-visual" aria-label="AlgVault plan and control preview">
+        <span class="pricing-hero-visual__line" aria-hidden="true"></span>
+        <div class="pricing-console-card">
+          <div class="pricing-console-card__top">
+            <span>Access matrix</span>
+            <strong>Server-led</strong>
+          </div>
+          <div class="pricing-console-chart" aria-hidden="true">
+            <span style="--h: 32%; --x: 8%;"></span>
+            <span style="--h: 46%; --x: 22%;"></span>
+            <span style="--h: 39%; --x: 36%;"></span>
+            <span style="--h: 62%; --x: 50%;"></span>
+            <span style="--h: 74%; --x: 64%;"></span>
+            <span style="--h: 58%; --x: 78%;"></span>
+          </div>
+          <div class="pricing-console-rows">
+            <span><b>Mobile PWA</b><em>Included</em></span>
+            <span><b>Risk gates</b><em>Visible</em></span>
+            <span><b>Provider state</b><em>Checked</em></span>
+          </div>
+        </div>
+        <span class="pricing-visual-tile pricing-visual-tile--shield" aria-hidden="true">
+          <svg class="topnav-icon"><use href="#icon-shield"></use></svg>
+        </span>
+        <span class="pricing-visual-tile pricing-visual-tile--wallet" aria-hidden="true">
+          <svg class="topnav-icon"><use href="#icon-wallet"></use></svg>
+        </span>
+      </aside>
+    </div>
+
+    <section class="pricing-plans" aria-labelledby="pricing-plans-title">
+      <span class="pricing-kicker">Access tiers</span>
+      <h2 id="pricing-plans-title">Choose the operating level that fits your workflow</h2>
+      <div class="pricing-plan-grid">
+        {% for card in page.cards %}
+          {% set is_recommended = card.title == "Operator" %}
+          <article class="pricing-plan-card {% if is_recommended %}pricing-plan-card--recommended{% endif %}">
+            {% if is_recommended %}
+              <span class="pricing-recommended-badge">Recommended</span>
+            {% endif %}
+            <div class="pricing-plan-card__head">
+              <span class="pricing-plan-icon" aria-hidden="true"><svg class="topnav-icon"><use href="#{% if card.title == 'Starter' %}icon-user-plus{% elif card.title == 'Operator' %}icon-vault{% else %}icon-settings{% endif %}"></use></svg></span>
+              <h3>{{ card.title }}</h3>
+            </div>
+            <p>{{ card.body }}</p>
+            <ul aria-label="{{ card.title }} includes">
+              {% for feature in card.features %}
+                <li>{{ feature }}</li>
+              {% endfor %}
+            </ul>
+            <a class="button-link {% if is_recommended %}primary{% else %}secondary{% endif %}" href="{{ page.primary_href }}">
+              {% if card.title == "Starter" %}Choose Starter{% elif card.title == "Operator" %}Choose Operator{% else %}Choose Custom{% endif %}
+            </a>
+          </article>
+        {% endfor %}
+      </div>
+    </section>
+
+    <section class="pricing-comparison" aria-labelledby="pricing-comparison-title">
+      <h2 id="pricing-comparison-title">Compare access tiers</h2>
+      <table>
+        <caption>AlgVault public plan comparison</caption>
+        <thead>
+          <tr>
+            <th scope="col">Capability</th>
+            <th scope="col">Starter</th>
+            <th scope="col">Operator</th>
+            <th scope="col">Custom</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% set comparison_rows = (
+            ("Mobile PWA", true, true, true, "icon-wallet"),
+            ("Account tools", true, true, true, "icon-user-plus"),
+            ("Execution controls", false, true, true, "icon-convert"),
+            ("Risk language", false, true, true, "icon-shield"),
+            ("Provider visibility", false, true, true, "icon-markets"),
+            ("Operational support", false, true, true, "icon-dashboard"),
+            ("Custom workflows", false, false, true, "icon-settings"),
+          ) %}
+          {% for label, starter, operator, custom, icon in comparison_rows %}
+            <tr>
+              <th scope="row"><svg class="topnav-icon" aria-hidden="true"><use href="#{{ icon }}"></use></svg>{{ label }}</th>
+              <td data-label="Starter">{% if starter %}<span class="pricing-check"><span class="pricing-sr-only">Included</span></span>{% else %}<span class="pricing-dash" aria-label="Not included">-</span>{% endif %}</td>
+              <td data-label="Operator">{% if operator %}<span class="pricing-check"><span class="pricing-sr-only">Included</span></span>{% else %}<span class="pricing-dash" aria-label="Not included">-</span>{% endif %}</td>
+              <td data-label="Custom">{% if custom %}<span class="pricing-check"><span class="pricing-sr-only">Included</span></span>{% else %}<span class="pricing-dash" aria-label="Not included">-</span>{% endif %}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
+
+    <section class="pricing-safety" aria-labelledby="pricing-safety-title">
+      <h2 id="pricing-safety-title">Built on safety and clarity</h2>
+      <div class="pricing-safety-grid">
+        <article>
+          <span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-shield"></use></svg></span>
+          <h3>Server-led validation</h3>
+          <p>Sensitive workflows stay behind validation gates.</p>
+        </article>
+        <article>
+          <span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-alert"></use></svg></span>
+          <h3>No guaranteed returns</h3>
+          <p>No guaranteed returns or investment advice.</p>
+        </article>
+        <article>
+          <span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-login"></use></svg></span>
+          <h3>Secure account setup</h3>
+          <p>Secure account creation before private tools.</p>
+        </article>
+        <article>
+          <span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-dashboard"></use></svg></span>
+          <h3>Plan boundaries stay clear</h3>
+          <p>Plans describe tools and controls, not trading outcomes.</p>
+        </article>
+      </div>
+    </section>
+
+    <p class="pricing-disclaimer">{{ page.disclaimer }}</p>
+
+    <section class="pricing-final-cta" aria-labelledby="pricing-final-title">
+      <span class="pricing-final-cta__icon" aria-hidden="true"><svg class="topnav-icon"><use href="#icon-login"></use></svg></span>
+      <div>
+        <span class="pricing-kicker">{{ page.cta.kicker }}</span>
+        <h2 id="pricing-final-title">{{ page.cta.title }}</h2>
+        <p>{{ page.cta.body }}</p>
+      </div>
+      <nav aria-label="Pricing final actions">
+        <a class="button-link primary" href="{{ page.cta.primary_href }}">{{ page.cta.primary_label }}</a>
+        <a class="button-link secondary" href="{{ page.cta.secondary_href }}">{{ page.cta.secondary_label }}</a>
+      </nav>
+    </section>
+  </section>
 {% elif page.key == "mobile" %}
   <section class="mobile-landing" aria-labelledby="public-page-title">
     <section class="mobile-hero" aria-labelledby="public-page-title">
@@ -588,7 +741,7 @@
   {{ public_ui.public_status(page) }}
   {{ public_ui.public_sections(page, stacked=True) }}
 {% endif %}
-{% if page.key != "features" and page.key != "mobile" and page.key != "connectivity" %}
+{% if page.key != "features" and page.key != "pricing" and page.key != "mobile" and page.key != "connectivity" %}
   {{ public_ui.public_cta(page) }}
 {% endif %}
 {% endblock %}
