@@ -29,7 +29,9 @@ from ...models import (
     VaultAllocationLeg,
     VaultCycle,
     WalletAddress,
+    WalletApplePayPurchaseOrder,
     WalletBalance,
+    WalletOnrampOrder,
     WalletTransaction,
 )
 from ...runtime import get_current_mode, get_service, market_mode_for
@@ -44,6 +46,7 @@ from ...services.market_scanner import ScoredCandidate
 from ...services.one_h10_quality import ONE_H10_HORIZON_SECONDS, one_h10_forecast_live_blockers
 from ...services.provider_assets import normalize_provider, provider_collateral_asset, provider_feature_context
 from ...services.response_envelope import action_envelope, exception_envelope, readiness_envelope
+from ...services.seo import public_page
 from ...services.vault_allocation_assets import (
     BASE_VAULT_ALLOCATION_ASSETS,
     DEFAULT_ASSET_NETWORKS,
@@ -59,6 +62,8 @@ from ...services.vault_allocation_assets import (
 from ...services.vault_coherence import cycle_coherence_payload_from_forecasts, extract_cycle_coherence_payload
 from ...services.vault_readiness import get_vault_cycle_readiness
 from ...services.wallet_addresses import generate_deposit_address, use_real_addresses, validate_withdraw_address
+from ...services.wallet_apple_pay_purchase import WalletApplePayPurchaseError
+from ...services.wallet_onramp import WalletOnrampError
 from ...services.withdrawal_config import wallet_withdrawals_enabled
 from ...services.worker_lease import in_process_workers_enabled
 from ...utils import format_duration_seconds
@@ -93,6 +98,16 @@ _LIVE_API_DELEGATED_ENDPOINTS = {
     "consumer.vault_cycle_status",
     "consumer.cycle_start_status",
 }
+_PUBLIC_CONTENT_ENDPOINTS = {
+    "consumer.public_overview",
+    "consumer.public_features",
+    "consumer.public_pricing",
+    "consumer.public_mobile",
+    "consumer.public_mobile_pwa_alias",
+    "consumer.public_connectivity",
+    "consumer.public_broker_connectivity",
+    "consumer.public_security",
+}
 
 
 @consumer_bp.before_request
@@ -100,6 +115,16 @@ def _protect_consumer():
     if request.method == "OPTIONS":
         return None
     if request.endpoint and request.endpoint.startswith("consumer.legacy_"):
+        return None
+    if request.endpoint in {
+        "consumer.wallet_onramp_custom_webhook",
+        "consumer.wallet_apple_pay_gateway_webhook",
+        "consumer.wallet_card_gateway_webhook",
+    }:
+        return None
+    if request.endpoint in _PUBLIC_CONTENT_ENDPOINTS:
+        return None
+    if request.endpoint == "consumer.home" and current_user() is None:
         return None
     vault_diagnostic_endpoints = {
         "consumer.vault",
@@ -166,6 +191,9 @@ def _vault_live_api_deferred_for_request() -> bool:
 @consumer_bp.get("/")
 def home():
     user = current_user()
+    if user is None:
+        return redirect(url_for("consumer.public_overview"))
+
     try:
         _sync_completed_cycles(user)
     except Exception as exc:  # noqa: BLE001
@@ -189,6 +217,50 @@ def home():
     )
 
 
+@consumer_bp.get("/overview/", strict_slashes=False)
+def public_overview():
+    return render_template("marketing/page.html", page=public_page("home"))
+
+
+@consumer_bp.get("/features/", strict_slashes=False)
+def public_features():
+    return _render_public_page("features")
+
+
+@consumer_bp.get("/pricing/", strict_slashes=False)
+def public_pricing():
+    return _render_public_page("pricing")
+
+
+@consumer_bp.get("/mobile/", strict_slashes=False)
+def public_mobile():
+    return _render_public_page("mobile")
+
+
+@consumer_bp.get("/mobile-pwa/", strict_slashes=False)
+def public_mobile_pwa_alias():
+    return redirect(url_for("consumer.public_mobile"), code=308)
+
+
+@consumer_bp.get("/connectivity/", strict_slashes=False)
+def public_connectivity():
+    return _render_public_page("connectivity")
+
+
+@consumer_bp.get("/broker-connectivity/", strict_slashes=False)
+def public_broker_connectivity():
+    return redirect(url_for("consumer.public_connectivity"), code=308)
+
+
+@consumer_bp.get("/security/", strict_slashes=False)
+def public_security():
+    return _render_public_page("security")
+
+
+def _render_public_page(key: str):
+    return render_template("marketing/page.html", page=public_page(key))
+
+
 @consumer_bp.get("/wallet/", strict_slashes=False)
 def wallet():
     user = current_user()
@@ -209,6 +281,312 @@ def wallet():
         activity_page=activity_page,
         networks=ASSET_NETWORKS,
     )
+
+
+@consumer_bp.post("/wallet/onramp/session", strict_slashes=False)
+def wallet_onramp_session():
+    user = current_user()
+    payload = request.get_json(silent=True) or {}
+    asset = str(payload.get("asset") or "").strip().upper()
+    if not _is_supported_wallet_asset(asset):
+        return jsonify({"ok": False, "code": "onramp_bad_asset", "message": "Choose a supported wallet asset."}), 400
+
+    networks = _asset_networks(asset)
+    requested_network = str(payload.get("network") or (networks[0] if networks else "")).strip()
+    if requested_network not in networks:
+        return jsonify({"ok": False, "code": "onramp_bad_network", "message": "Choose a supported network."}), 400
+
+    balance = _wallet_balance_for(user, asset)
+    deposit_address = _ensure_deposit_address(user.id, asset, requested_network, balance)
+    if deposit_address is None:
+        db.session.rollback()
+        return jsonify(
+            {"ok": False, "code": "onramp_no_deposit_address", "message": "No deposit address is available for this asset/network."}
+        ), 409
+
+    service = get_service("wallet_onramp")
+    try:
+        order = service.create_session(
+            user=user,
+            asset=asset,
+            network=requested_network,
+            fiat_currency=str(payload.get("fiat_currency") or "USD"),
+            fiat_amount=payload.get("fiat_amount"),
+            payment_method=str(payload.get("payment_method") or ""),
+            deposit_address=deposit_address,
+            idempotency_key=request.headers.get("Idempotency-Key") or str(payload.get("idempotency_key") or ""),
+            return_url=url_for("consumer.wallet", onramp_order="__ORDER_ID__", _external=True),
+            cancel_url=url_for("consumer.wallet", onramp_order="__ORDER_ID__", onramp_canceled="1", _external=True),
+            webhook_url=url_for("consumer.wallet_onramp_custom_webhook", _external=True),
+            client_ip=request.headers.get("X-Real-IP") or request.remote_addr,
+        )
+        commit_with_retry()
+    except WalletOnrampError as exc:
+        if getattr(exc, "order", None) is not None:
+            commit_with_retry()
+        else:
+            db.session.rollback()
+        status_code = 503 if exc.code in {"onramp_not_ready", "onramp_provider_failed"} else 400
+        return jsonify({"ok": False, "code": exc.code, "message": str(exc)}), status_code
+
+    return jsonify({"ok": True, "checkout_url": order.checkout_url, "order_id": order.public_id, "status": order.status})
+
+
+@consumer_bp.get("/wallet/onramp/<order_id>/status", strict_slashes=False)
+def wallet_onramp_status(order_id: str):
+    user = current_user()
+    order = WalletOnrampOrder.query.filter_by(public_id=str(order_id or "").strip(), user_id=user.id).one_or_none()
+    if order is None:
+        return jsonify({"ok": False, "code": "onramp_order_not_found", "message": "On-ramp order was not found."}), 404
+    return jsonify({"ok": True, "order": get_service("wallet_onramp").status_payload(order)})
+
+
+@consumer_bp.post("/wallet/apple-pay/quote", strict_slashes=False)
+def wallet_apple_pay_quote():
+    user = current_user()
+    payload = request.get_json(silent=True) or {}
+    asset = str(payload.get("asset") or "").strip().upper()
+    if not _is_supported_wallet_asset(asset):
+        return jsonify({"ok": False, "code": "apple_pay_bad_asset", "message": "Choose a supported wallet asset."}), 400
+
+    networks = _asset_networks(asset)
+    requested_network = str(payload.get("network") or (networks[0] if networks else "")).strip()
+    if requested_network not in networks:
+        return jsonify({"ok": False, "code": "apple_pay_bad_network", "message": "Choose a supported network."}), 400
+
+    balance = _wallet_balance_for(user, asset)
+    deposit_address = _ensure_deposit_address(user.id, asset, requested_network, balance)
+    if deposit_address is None:
+        db.session.rollback()
+        return jsonify(
+            {"ok": False, "code": "apple_pay_no_deposit_address", "message": "No deposit address is available for this asset/network."}
+        ), 409
+
+    service = get_service("wallet_apple_pay_purchase")
+    try:
+        order = service.create_quote_order(
+            user=user,
+            asset=asset,
+            network=requested_network,
+            fiat_currency=str(payload.get("fiat_currency") or "USD"),
+            fiat_amount=payload.get("fiat_amount"),
+            deposit_address=deposit_address,
+            idempotency_key=request.headers.get("Idempotency-Key") or str(payload.get("idempotency_key") or ""),
+        )
+        commit_with_retry()
+    except WalletApplePayPurchaseError as exc:
+        db.session.rollback()
+        status_code = _wallet_buy_error_status(exc.code)
+        return jsonify({"ok": False, "code": exc.code, "message": str(exc)}), status_code
+
+    return jsonify(
+        {
+            "ok": True,
+            "order": service.status_payload(order),
+            "apple_pay_request": order.details.get("quote", {}).get("apple_pay_request", {}),
+        }
+    )
+
+
+@consumer_bp.post("/wallet/apple-pay/merchant-session", strict_slashes=False)
+def wallet_apple_pay_merchant_session():
+    payload = request.get_json(silent=True) or {}
+    service = get_service("wallet_apple_pay_purchase")
+    try:
+        session_payload = service.merchant_session(
+            validation_url=str(payload.get("validation_url") or payload.get("validationURL") or ""),
+            initiative_context=str(payload.get("initiative_context") or request.host or ""),
+        )
+    except WalletApplePayPurchaseError as exc:
+        return jsonify({"ok": False, "code": exc.code, "message": str(exc)}), 400 if exc.code == "apple_pay_bad_validation_url" else 503
+    return jsonify({"ok": True, "merchant_session": session_payload})
+
+
+@consumer_bp.post("/wallet/apple-pay/authorize", strict_slashes=False)
+def wallet_apple_pay_authorize():
+    user = current_user()
+    payload = request.get_json(silent=True) or {}
+    service = get_service("wallet_apple_pay_purchase")
+    try:
+        order = service.authorize_payment(
+            user=user,
+            order_id=str(payload.get("order_id") or ""),
+            payment_token=payload.get("payment_token") if isinstance(payload.get("payment_token"), dict) else {},
+            idempotency_key=request.headers.get("Idempotency-Key") or str(payload.get("idempotency_key") or ""),
+        )
+        commit_with_retry()
+    except WalletApplePayPurchaseError as exc:
+        if getattr(exc, "order", None) is not None:
+            commit_with_retry()
+        else:
+            db.session.rollback()
+        status_code = 404 if exc.code == "apple_pay_order_not_found" else _wallet_buy_error_status(exc.code)
+        return jsonify({"ok": False, "code": exc.code, "message": str(exc)}), status_code
+    return jsonify({"ok": True, "order": service.status_payload(order)})
+
+
+@consumer_bp.get("/wallet/apple-pay/<order_id>/status", strict_slashes=False)
+def wallet_apple_pay_status(order_id: str):
+    user = current_user()
+    order = WalletApplePayPurchaseOrder.query.filter_by(public_id=str(order_id or "").strip(), user_id=user.id).one_or_none()
+    if order is None:
+        return jsonify({"ok": False, "code": "apple_pay_order_not_found", "message": "Apple Pay order was not found."}), 404
+    return jsonify({"ok": True, "order": get_service("wallet_apple_pay_purchase").status_payload(order)})
+
+
+@consumer_bp.post("/wallet/card/quote", strict_slashes=False)
+def wallet_card_quote():
+    user = current_user()
+    payload = request.get_json(silent=True) or {}
+    asset = str(payload.get("asset") or "").strip().upper()
+    if not _is_supported_wallet_asset(asset):
+        return jsonify({"ok": False, "code": "card_bad_asset", "message": "Choose a supported wallet asset."}), 400
+
+    networks = _asset_networks(asset)
+    requested_network = str(payload.get("network") or (networks[0] if networks else "")).strip()
+    if requested_network not in networks:
+        return jsonify({"ok": False, "code": "card_bad_network", "message": "Choose a supported network."}), 400
+
+    balance = _wallet_balance_for(user, asset)
+    deposit_address = _ensure_deposit_address(user.id, asset, requested_network, balance)
+    if deposit_address is None:
+        db.session.rollback()
+        return jsonify(
+            {"ok": False, "code": "card_no_deposit_address", "message": "No deposit address is available for this asset/network."}
+        ), 409
+
+    service = get_service("wallet_apple_pay_purchase")
+    try:
+        order = service.create_card_quote_order(
+            user=user,
+            asset=asset,
+            network=requested_network,
+            fiat_currency=str(payload.get("fiat_currency") or "USD"),
+            fiat_amount=payload.get("fiat_amount"),
+            deposit_address=deposit_address,
+            idempotency_key=request.headers.get("Idempotency-Key") or str(payload.get("idempotency_key") or ""),
+        )
+        commit_with_retry()
+    except WalletApplePayPurchaseError as exc:
+        db.session.rollback()
+        return jsonify({"ok": False, "code": exc.code, "message": str(exc)}), _wallet_buy_error_status(exc.code)
+
+    return jsonify({"ok": True, "order": service.status_payload(order), "gateway": service.card_gateway_client_config()})
+
+
+@consumer_bp.post("/wallet/card/authorize", strict_slashes=False)
+def wallet_card_authorize():
+    user = current_user()
+    payload = request.get_json(silent=True) or {}
+    token_payload = payload.get("gateway_payment_token")
+    if isinstance(token_payload, str):
+        token_payload = {"token": token_payload}
+    elif not isinstance(token_payload, dict):
+        token_payload = {}
+    service = get_service("wallet_apple_pay_purchase")
+    try:
+        order = service.authorize_card_payment(
+            user=user,
+            order_id=str(payload.get("order_id") or ""),
+            gateway_payment_token=token_payload,
+            idempotency_key=request.headers.get("Idempotency-Key") or str(payload.get("idempotency_key") or ""),
+        )
+        commit_with_retry()
+    except WalletApplePayPurchaseError as exc:
+        if getattr(exc, "order", None) is not None:
+            commit_with_retry()
+        else:
+            db.session.rollback()
+        status_code = 404 if exc.code == "apple_pay_order_not_found" else _wallet_buy_error_status(exc.code)
+        return jsonify({"ok": False, "code": exc.code, "message": str(exc)}), status_code
+    return jsonify({"ok": True, "order": service.status_payload(order)})
+
+
+@consumer_bp.get("/wallet/card/<order_id>/status", strict_slashes=False)
+def wallet_card_status(order_id: str):
+    user = current_user()
+    order = WalletApplePayPurchaseOrder.query.filter_by(
+        public_id=str(order_id or "").strip(),
+        user_id=user.id,
+        payment_method="card",
+    ).one_or_none()
+    if order is None:
+        return jsonify({"ok": False, "code": "card_order_not_found", "message": "Card order was not found."}), 404
+    return jsonify({"ok": True, "order": get_service("wallet_apple_pay_purchase").status_payload(order)})
+
+
+@consumer_bp.post("/api/wallet/onramp/custom/webhook", strict_slashes=False)
+def wallet_onramp_custom_webhook():
+    service = get_service("wallet_onramp")
+    body = request.get_data(cache=True) or b""
+    if not service.verify_webhook_signature(body, request.headers):
+        return jsonify({"ok": False, "code": "onramp_bad_signature", "message": "Invalid webhook signature."}), 401
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "code": "onramp_bad_payload", "message": "Webhook payload must be JSON."}), 400
+    try:
+        order = service.handle_webhook(payload)
+        commit_with_retry()
+    except WalletOnrampError as exc:
+        db.session.rollback()
+        status_code = 404 if exc.code == "onramp_order_not_found" else 400
+        return jsonify({"ok": False, "code": exc.code, "message": str(exc)}), status_code
+    return jsonify({"ok": True, "order_id": order.public_id, "status": order.status})
+
+
+@consumer_bp.post("/api/wallet/apple-pay/gateway/webhook", strict_slashes=False)
+def wallet_apple_pay_gateway_webhook():
+    service = get_service("wallet_apple_pay_purchase")
+    body = request.get_data(cache=True) or b""
+    if not service.verify_gateway_webhook_signature(body, request.headers):
+        return jsonify({"ok": False, "code": "apple_pay_bad_signature", "message": "Invalid webhook signature."}), 401
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "code": "apple_pay_bad_payload", "message": "Webhook payload must be JSON."}), 400
+    try:
+        order = service.handle_gateway_webhook(payload)
+        commit_with_retry()
+    except WalletApplePayPurchaseError as exc:
+        db.session.rollback()
+        status_code = 404 if exc.code == "apple_pay_order_not_found" else 400
+        return jsonify({"ok": False, "code": exc.code, "message": str(exc)}), status_code
+    return jsonify({"ok": True, "order_id": order.public_id, "status": order.status})
+
+
+@consumer_bp.post("/api/wallet/card/gateway/webhook", strict_slashes=False)
+def wallet_card_gateway_webhook():
+    service = get_service("wallet_apple_pay_purchase")
+    body = request.get_data(cache=True) or b""
+    if not service.verify_card_gateway_webhook_signature(body, request.headers):
+        return jsonify({"ok": False, "code": "card_bad_signature", "message": "Invalid webhook signature."}), 401
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"ok": False, "code": "card_bad_payload", "message": "Webhook payload must be JSON."}), 400
+    try:
+        order = service.handle_gateway_webhook(payload)
+        commit_with_retry()
+    except WalletApplePayPurchaseError as exc:
+        db.session.rollback()
+        status_code = 404 if exc.code == "apple_pay_order_not_found" else 400
+        return jsonify({"ok": False, "code": exc.code, "message": str(exc)}), status_code
+    return jsonify({"ok": True, "order_id": order.public_id, "status": order.status})
+
+
+def _wallet_buy_error_status(code: str) -> int:
+    if code in {"apple_pay_order_not_found", "card_order_not_found"}:
+        return 404
+    if code in {
+        "apple_pay_not_ready",
+        "apple_pay_oneinch_quote_failed",
+        "apple_pay_oneinch_fee_unavailable",
+        "apple_pay_eth_price_unavailable",
+        "apple_pay_price_unavailable",
+        "apple_pay_transfer_fee_unavailable",
+        "apple_pay_inventory_unavailable",
+        "apple_pay_gateway_failed",
+    }:
+        return 503
+    return 400
 
 
 @consumer_bp.route("/convert/", methods=["GET", "POST"], strict_slashes=False)
@@ -1815,7 +2193,195 @@ def _wallet_view_model(wallet_summary, transactions: list[WalletTransaction]) ->
         "primary_convert_href": url_for("consumer.convert", from_asset=primary_asset),
         "asset_rows": [_wallet_asset_row(balance) for balance in balances],
         "transaction_rows": [_wallet_transaction_row(item) for item in transactions],
+        "onramp": _wallet_onramp_view([_wallet_asset_row(balance) for balance in balances], primary_asset),
+        "card_buy": _wallet_card_buy_view([_wallet_asset_row(balance) for balance in balances], primary_asset),
+        "apple_pay": _wallet_apple_pay_view([_wallet_asset_row(balance) for balance in balances], primary_asset),
     }
+
+
+def _wallet_onramp_view(asset_rows: list[dict[str, object]], primary_asset: str) -> dict[str, object]:
+    service = get_service("wallet_onramp")
+    readiness = service.readiness()
+    min_fiat_usd = _clean_onramp_amount(readiness.get("min_fiat_usd", 10))
+    max_fiat_usd = _clean_onramp_amount(readiness.get("max_fiat_usd", 5000))
+    amount_presets = [
+        _clean_onramp_amount(amount) for amount in (50, 100, 250, 500) if float(min_fiat_usd) <= float(amount) <= float(max_fiat_usd)
+    ]
+    if not amount_presets and float(min_fiat_usd) <= float(max_fiat_usd):
+        amount_presets = [min_fiat_usd]
+    default_amount = amount_presets[1] if len(amount_presets) > 1 else (amount_presets[0] if amount_presets else min_fiat_usd)
+    allowed_assets = readiness.get("allowed_assets", {}) if isinstance(readiness, dict) else {}
+    asset_options = _wallet_buy_asset_options(asset_rows, allowed_assets, primary_asset)
+    default_asset = primary_asset if any(option["asset"] == primary_asset for option in asset_options) else ""
+    if not default_asset and asset_options:
+        default_asset = str(asset_options[0]["asset"])
+    default_network = next((str(option["default_network"]) for option in asset_options if option["asset"] == default_asset), "")
+    ready = bool(readiness.get("ready")) and bool(asset_options)
+    blockers = list(readiness.get("blockers", []) or [])
+    if bool(readiness.get("ready")) and not asset_options:
+        blockers.append("No wallet asset has both provider support and an active deposit address.")
+    return {
+        "ready": ready,
+        "enabled": bool(readiness.get("enabled")),
+        "provider": readiness.get("provider", "custom_hosted"),
+        "blockers": blockers,
+        "unavailable_copy": "Buy with card is unavailable until custom hosted provider readiness and deposit routing are complete.",
+        "session_url": url_for("consumer.wallet_onramp_session"),
+        "status_url_template": url_for("consumer.wallet_onramp_status", order_id="__ORDER_ID__"),
+        "payment_methods": readiness.get("payment_methods", []),
+        "fiat_currency": readiness.get("fiat_currency", "USD"),
+        "min_fiat_usd": min_fiat_usd,
+        "max_fiat_usd": max_fiat_usd,
+        "amount_presets": amount_presets,
+        "default_amount": default_amount,
+        "assets": asset_options,
+        "default_asset": default_asset,
+        "default_network": default_network,
+    }
+
+
+def _wallet_card_buy_view(asset_rows: list[dict[str, object]], primary_asset: str) -> dict[str, object]:
+    service = get_service("wallet_apple_pay_purchase")
+    readiness = service.card_readiness()
+    min_fiat_usd = _clean_onramp_amount(readiness.get("min_fiat_usd", 10))
+    max_fiat_usd = _clean_onramp_amount(readiness.get("max_fiat_usd", 5000))
+    amount_presets = [
+        _clean_onramp_amount(amount) for amount in (50, 100, 250, 500) if float(min_fiat_usd) <= float(amount) <= float(max_fiat_usd)
+    ]
+    if not amount_presets and float(min_fiat_usd) <= float(max_fiat_usd):
+        amount_presets = [min_fiat_usd]
+    default_amount = amount_presets[1] if len(amount_presets) > 1 else (amount_presets[0] if amount_presets else min_fiat_usd)
+    allowed_assets = readiness.get("allowed_assets", {}) if isinstance(readiness, dict) else {}
+    asset_options = _wallet_buy_asset_options(asset_rows, allowed_assets, primary_asset)
+    default_asset = primary_asset if any(option["asset"] == primary_asset for option in asset_options) else ""
+    if not default_asset and asset_options:
+        default_asset = str(asset_options[0]["asset"])
+    default_network = next((str(option["default_network"]) for option in asset_options if option["asset"] == default_asset), "")
+    ready = bool(readiness.get("ready")) and bool(asset_options)
+    blockers: list[str] = []
+    if list(readiness.get("blockers", []) or []):
+        blockers.append("Card gateway setup is incomplete.")
+    if bool(readiness.get("ready")) and not asset_options:
+        blockers.append("No wallet asset has both card support and an active deposit address.")
+    return {
+        "ready": ready,
+        "enabled": bool(readiness.get("enabled")),
+        "provider": readiness.get("provider", "custom_card_gateway"),
+        "blockers": blockers,
+        "unavailable_copy": "Buy with Card is unavailable until card gateway, treasury, signer, and fulfillment readiness are complete.",
+        "quote_url": url_for("consumer.wallet_card_quote"),
+        "authorize_url": url_for("consumer.wallet_card_authorize"),
+        "status_url_template": url_for("consumer.wallet_card_status", order_id="__ORDER_ID__"),
+        "payment_methods": readiness.get("payment_methods", []),
+        "fiat_currency": readiness.get("fiat_currency", "USD"),
+        "treasury_fee_bps": readiness.get("treasury_fee_bps", 250.0),
+        "min_fiat_usd": min_fiat_usd,
+        "max_fiat_usd": max_fiat_usd,
+        "amount_presets": amount_presets,
+        "default_amount": default_amount,
+        "assets": asset_options,
+        "default_asset": default_asset,
+        "default_network": default_network,
+        "gateway": readiness.get("gateway", {}),
+    }
+
+
+def _wallet_apple_pay_view(asset_rows: list[dict[str, object]], primary_asset: str) -> dict[str, object]:
+    service = get_service("wallet_apple_pay_purchase")
+    readiness = service.readiness()
+    min_fiat_usd = _clean_onramp_amount(readiness.get("min_fiat_usd", 10))
+    max_fiat_usd = _clean_onramp_amount(readiness.get("max_fiat_usd", 5000))
+    amount_presets = [
+        _clean_onramp_amount(amount) for amount in (50, 100, 250, 500) if float(min_fiat_usd) <= float(amount) <= float(max_fiat_usd)
+    ]
+    if not amount_presets and float(min_fiat_usd) <= float(max_fiat_usd):
+        amount_presets = [min_fiat_usd]
+    default_amount = amount_presets[1] if len(amount_presets) > 1 else (amount_presets[0] if amount_presets else min_fiat_usd)
+    allowed_assets = readiness.get("allowed_assets", {}) if isinstance(readiness, dict) else {}
+    asset_options = _wallet_buy_asset_options(asset_rows, allowed_assets, primary_asset)
+    default_asset = primary_asset if any(option["asset"] == primary_asset for option in asset_options) else ""
+    if not default_asset and asset_options:
+        default_asset = str(asset_options[0]["asset"])
+    default_network = next((str(option["default_network"]) for option in asset_options if option["asset"] == default_asset), "")
+    ready = bool(readiness.get("ready")) and bool(asset_options)
+    blockers: list[str] = []
+    if list(readiness.get("blockers", []) or []):
+        blockers.append("Direct Apple Pay setup is incomplete.")
+    if bool(readiness.get("ready")) and not asset_options:
+        blockers.append("No wallet asset has both Apple Pay support and an active deposit address.")
+    return {
+        "ready": ready,
+        "enabled": bool(readiness.get("enabled")),
+        "provider": readiness.get("provider", "direct_apple_pay"),
+        "blockers": blockers,
+        "unavailable_copy": "Apple Pay is unavailable until merchant, gateway, treasury, signer, and fulfillment readiness are complete.",
+        "quote_url": url_for("consumer.wallet_apple_pay_quote"),
+        "merchant_session_url": url_for("consumer.wallet_apple_pay_merchant_session"),
+        "authorize_url": url_for("consumer.wallet_apple_pay_authorize"),
+        "status_url_template": url_for("consumer.wallet_apple_pay_status", order_id="__ORDER_ID__"),
+        "payment_methods": readiness.get("payment_methods", []),
+        "fiat_currency": readiness.get("fiat_currency", "USD"),
+        "country_code": readiness.get("country_code", "CA"),
+        "merchant_capabilities": readiness.get("merchant_capabilities", ["supports3DS"]),
+        "supported_networks": readiness.get("supported_networks", []),
+        "treasury_fee_bps": readiness.get("treasury_fee_bps", 250.0),
+        "min_fiat_usd": min_fiat_usd,
+        "max_fiat_usd": max_fiat_usd,
+        "amount_presets": amount_presets,
+        "default_amount": default_amount,
+        "assets": asset_options,
+        "default_asset": default_asset,
+        "default_network": default_network,
+    }
+
+
+def _wallet_buy_asset_options(
+    asset_rows: list[dict[str, object]],
+    allowed_assets: object,
+    _primary_asset: str,
+) -> list[dict[str, object]]:
+    asset_options: list[dict[str, object]] = []
+    user = current_user()
+    user_id = getattr(user, "id", None)
+    for row in asset_rows:
+        asset = str(row.get("asset") or "").upper()
+        configured_networks = allowed_assets.get(asset, []) if isinstance(allowed_assets, dict) else []
+        supported_networks = [network for network in _asset_networks(asset) if network in configured_networks]
+        if not supported_networks:
+            continue
+        default_network = supported_networks[0]
+        addresses: dict[str, str] = {}
+        for network in supported_networks:
+            active_address = _active_deposit_address(user_id, asset, network) if user_id is not None else None
+            if active_address is not None:
+                addresses[network] = str(active_address.address or "")
+        address = addresses.get(default_network, "")
+        if not address:
+            address = str(row.get("address") or "")
+            if address:
+                addresses[default_network] = address
+        asset_options.append(
+            {
+                "asset": asset,
+                "label": asset,
+                "networks": supported_networks,
+                "default_network": default_network,
+                "address": address,
+                "addresses": addresses,
+                "address_short": _short_wallet_address(address),
+            }
+        )
+    return asset_options
+
+
+def _clean_onramp_amount(value: object) -> float | int:
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        amount = 0.0
+    if amount.is_integer():
+        return int(amount)
+    return round(amount, 2)
 
 
 def _primary_wallet_balance(balances: list[object]) -> object | None:

@@ -720,9 +720,7 @@ class LeveragedMarket(db.Model):
 
     trading_connection = db.relationship("TradingConnection", backref="leveraged_markets")
 
-    __table_args__ = (
-        db.UniqueConstraint("provider", "venue_symbol", name="uq_leveraged_market_provider_symbol"),
-    )
+    __table_args__ = (db.UniqueConstraint("provider", "venue_symbol", name="uq_leveraged_market_provider_symbol"),)
 
     @property
     def raw(self) -> dict[str, Any]:
@@ -915,6 +913,105 @@ class WalletLedgerEvent(db.Model):
         self.metadata_json = json.dumps(value or {})
 
 
+class WalletOnrampOrder(db.Model):
+    """Server-tracked hosted on-ramp order; funds still settle through deposit reconciliation."""
+
+    id = db.Column(db.Integer, primary_key=True)
+    public_id = db.Column(db.String(40), unique=True, nullable=False, default=lambda: public_token("wo"), index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False, index=True)
+    deposit_address_id = db.Column(db.Integer, db.ForeignKey("deposit_address.id"), nullable=True, index=True)
+    asset = db.Column(db.String(32), nullable=False, index=True)
+    network = db.Column(db.String(64), nullable=False, index=True)
+    destination_address = db.Column(db.Text, nullable=False)
+    fiat_currency = db.Column(db.String(8), nullable=False, default="USD", index=True)
+    fiat_amount = db.Column(db.Float, nullable=False, default=0.0)
+    payment_method = db.Column(db.String(32), nullable=False, index=True)
+    provider = db.Column(db.String(64), nullable=False, default="custom_hosted", index=True)
+    provider_order_id = db.Column(db.String(180), nullable=True, index=True)
+    checkout_url = db.Column(db.Text, nullable=False, default="")
+    status = db.Column(db.String(32), nullable=False, default="created", index=True)
+    idempotency_key = db.Column(db.String(220), nullable=False, unique=True, index=True)
+    failure_reason = db.Column(db.Text, nullable=False, default="")
+    metadata_json = db.Column(db.Text, nullable=False, default="{}")
+    created_at = db.Column(db.DateTime, nullable=False, default=utcnow, index=True)
+    updated_at = db.Column(db.DateTime, nullable=False, default=utcnow, onupdate=utcnow)
+    expires_at = db.Column(db.DateTime, nullable=True, index=True)
+    completed_at = db.Column(db.DateTime, nullable=True, index=True)
+
+    user = db.relationship("User", backref="wallet_onramp_orders")
+    deposit_address = db.relationship("DepositAddress", backref="onramp_orders")
+
+    __table_args__ = (
+        db.Index("ix_wallet_onramp_order_user_status_created", "user_id", "status", "created_at"),
+        db.Index("ix_wallet_onramp_order_provider_status", "provider", "status"),
+    )
+
+    @property
+    def details(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.metadata_json or "{}")
+        except json.JSONDecodeError:
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    @details.setter
+    def details(self, value: dict[str, Any]) -> None:
+        self.metadata_json = json.dumps(value or {}, default=str)
+
+
+class WalletApplePayPurchaseOrder(db.Model):
+    """Direct Apple Pay/card crypto purchase order with payment and fulfillment state."""
+
+    id = db.Column(db.Integer, primary_key=True)
+    public_id = db.Column(db.String(40), unique=True, nullable=False, default=lambda: public_token("wap"), index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False, index=True)
+    deposit_address_id = db.Column(db.Integer, db.ForeignKey("deposit_address.id"), nullable=True, index=True)
+    asset = db.Column(db.String(32), nullable=False, index=True)
+    network = db.Column(db.String(64), nullable=False, index=True)
+    destination_address = db.Column(db.Text, nullable=False)
+    fiat_currency = db.Column(db.String(8), nullable=False, default="USD", index=True)
+    fiat_gross_amount = db.Column(db.Float, nullable=False, default=0.0)
+    treasury_fee_usd = db.Column(db.Float, nullable=False, default=0.0)
+    execution_fee_usd = db.Column(db.Float, nullable=False, default=0.0)
+    net_asset_amount = db.Column(db.Float, nullable=False, default=0.0)
+    payment_method = db.Column(db.String(32), nullable=False, default="apple_pay", index=True)
+    gateway_payment_id = db.Column(db.String(180), nullable=True, index=True)
+    gateway_capture_id = db.Column(db.String(180), nullable=True, index=True)
+    gateway_refund_id = db.Column(db.String(180), nullable=True, index=True)
+    oneinch_quote_id = db.Column(db.String(180), nullable=True, index=True)
+    oneinch_swap_id = db.Column(db.String(180), nullable=True, index=True)
+    fulfillment_tx_hash = db.Column(db.String(180), nullable=True, index=True)
+    treasury_tx_hash = db.Column(db.String(180), nullable=True, index=True)
+    status = db.Column(db.String(32), nullable=False, default="quoted", index=True)
+    idempotency_key = db.Column(db.String(220), nullable=False, unique=True, index=True)
+    failure_reason = db.Column(db.Text, nullable=False, default="")
+    metadata_json = db.Column(db.Text, nullable=False, default="{}")
+    created_at = db.Column(db.DateTime, nullable=False, default=utcnow, index=True)
+    updated_at = db.Column(db.DateTime, nullable=False, default=utcnow, onupdate=utcnow)
+    expires_at = db.Column(db.DateTime, nullable=True, index=True)
+    completed_at = db.Column(db.DateTime, nullable=True, index=True)
+
+    user = db.relationship("User", backref="wallet_apple_pay_purchase_orders")
+    deposit_address = db.relationship("DepositAddress", backref="apple_pay_purchase_orders")
+
+    __table_args__ = (
+        db.Index("ix_wallet_apple_pay_purchase_order_user_status_created", "user_id", "status", "created_at"),
+        db.Index("ix_wallet_apple_pay_purchase_order_asset_network", "asset", "network"),
+    )
+
+    @property
+    def details(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.metadata_json or "{}")
+        except json.JSONDecodeError:
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    @details.setter
+    def details(self, value: dict[str, Any]) -> None:
+        self.metadata_json = json.dumps(value or {}, default=str)
+
+
 class ProfitSharePayout(db.Model):
     """Append-only invite-code profit-share payout ledger."""
 
@@ -979,9 +1076,7 @@ class TradingConnection(db.Model):
     created_at = db.Column(db.DateTime, nullable=False, default=utcnow, index=True)
     updated_at = db.Column(db.DateTime, nullable=False, default=utcnow, onupdate=utcnow)
 
-    __table_args__ = (
-        db.UniqueConstraint("user_id", "provider", "connection_type", name="uq_trading_connection_scope"),
-    )
+    __table_args__ = (db.UniqueConstraint("user_id", "provider", "connection_type", name="uq_trading_connection_scope"),)
 
     user = db.relationship("User", backref="trading_connections")
 
@@ -1029,9 +1124,7 @@ class WalletAccount(db.Model):
     created_at = db.Column(db.DateTime, nullable=False, default=utcnow, index=True)
     updated_at = db.Column(db.DateTime, nullable=False, default=utcnow, onupdate=utcnow)
 
-    __table_args__ = (
-        db.UniqueConstraint("user_id", "provider", "asset", "network", name="uq_wallet_account_scope"),
-    )
+    __table_args__ = (db.UniqueConstraint("user_id", "provider", "asset", "network", name="uq_wallet_account_scope"),)
 
     user = db.relationship("User", backref="wallet_accounts")
 
@@ -1674,9 +1767,7 @@ class OptimizerRun(db.Model):
     completed_at = db.Column(db.DateTime, nullable=True)
 
     rankings = db.relationship("StrategyRanking", backref="optimizer_run", lazy=True, cascade="all, delete-orphan")
-    __table_args__ = (
-        db.Index("ix_optimizer_run_profile_status_created", "profile", "status", "created_at"),
-    )
+    __table_args__ = (db.Index("ix_optimizer_run_profile_status_created", "profile", "status", "created_at"),)
 
     @property
     def symbols(self) -> list[str]:

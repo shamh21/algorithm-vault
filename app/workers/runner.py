@@ -51,12 +51,14 @@ def _run_due_jobs(lease_service: WorkerLeaseService, *, job_filter: set[str] | N
         "strategy_starter": _strategy_starter_job,
         "vault_cycle_enforcement": _vault_cycle_enforcement_job,
         "treasury_solvency": _treasury_solvency_job,
+        "apple_pay_fulfillment": _apple_pay_fulfillment_job,
     }
     config = lease_service.config
     enabled = {
         "strategy_starter": bool(config.get("WORKER_STRATEGY_STARTER_ENABLED", True)),
         "vault_cycle_enforcement": bool(config.get("WORKER_VAULT_ENFORCEMENT_ENABLED", True)),
         "treasury_solvency": bool(config.get("WORKER_TREASURY_SOLVENCY_ENABLED", True)),
+        "apple_pay_fulfillment": bool(config.get("WORKER_APPLE_PAY_FULFILLMENT_ENABLED", True)),
     }
     results: list[dict[str, Any]] = []
     bucket = int(time.time() // max(1, int(config.get("WORKER_POLL_SECONDS", 15) or 15)))
@@ -110,12 +112,22 @@ def _treasury_solvency_job() -> dict[str, Any]:
     return dict(result or {})
 
 
+def _apple_pay_fulfillment_job() -> dict[str, Any]:
+    result = get_service("wallet_apple_pay_purchase").process_pending_orders()
+    return dict(result or {})
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run AlgVault dedicated worker jobs.")
     parser.add_argument("--once", action="store_true", help="Run due jobs once and exit.")
     parser.add_argument("--interval", type=int, default=None, help="Worker polling interval in seconds.")
     parser.add_argument("--owner-id", default="", help="Stable owner id for lease diagnostics.")
-    parser.add_argument("--job", action="append", default=[], choices=["strategy_starter", "vault_cycle_enforcement", "treasury_solvency"])
+    parser.add_argument(
+        "--job",
+        action="append",
+        default=[],
+        choices=["strategy_starter", "vault_cycle_enforcement", "treasury_solvency", "apple_pay_fulfillment"],
+    )
     args = parser.parse_args()
     results = run_worker(
         once=bool(args.once),

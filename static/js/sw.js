@@ -1,4 +1,4 @@
-const CACHE_VERSION = "algvault-v21-vault-shell-polish-9";
+const CACHE_VERSION = "algvault-v43-wallet-card-buy-1";
 const SHELL_CACHE = `${CACHE_VERSION}-shell`;
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 

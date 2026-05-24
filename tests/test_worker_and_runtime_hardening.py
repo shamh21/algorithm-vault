@@ -350,9 +350,57 @@ def test_ops_status_redacts_and_reports_core_state(app) -> None:
     assert "workers" in payload
     assert "wallets" in payload
     assert "models" in payload
+    assert "apple_pay_purchase" in payload
     assert payload["live_operations"]["ready"] is False
     assert any("live operations" in blocker for blocker in payload["live_operations"]["blockers"])
     assert "super-secret" not in body
+
+
+def test_ops_status_reports_card_buy_readiness_without_secret_values(app) -> None:
+    with app.app_context():
+        app.config.update(
+            {
+                "CARD_BUY_ENABLED": True,
+                "CARD_GATEWAY_TOKENIZATION_URL": "https://card-gateway.example/tokenize",
+                "CARD_GATEWAY_AUTHORIZE_URL": "https://card-gateway.example/authorize",
+                "CARD_GATEWAY_API_KEY": "card-secret",
+                "CARD_GATEWAY_WEBHOOK_SECRET": "card-webhook-secret",
+                "CARD_GATEWAY_PUBLIC_CONFIG": {"publishable_key": "pk_test_card"},
+                "APPLE_PAY_CRYPTO_SALE_APPROVED": True,
+                "APPLE_PAY_BUY_ALLOWED_ASSETS": {
+                    "USDT": {
+                        "Ethereum": {
+                            "chain_id": 1,
+                            "token_address": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+                            "decimals": 6,
+                            "source_asset": "USDT",
+                            "source_token_address": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+                        }
+                    }
+                },
+                "APPLE_PAY_TREASURY_SOURCE_ADDRESS": "0x2222222222222222222222222222222222222222",
+                "APPLE_PAY_TREASURY_SIGNER_URL": "https://signer.example/submit",
+                "APPLE_PAY_TREASURY_SIGNER_TOKEN": "signer-secret",
+                "ONEINCH_API_KEY": "oneinch-secret",
+                "ONEINCH_API_BASE_URL": "https://api.1inch.com/swap/v6.1",
+            }
+        )
+
+        response = app.test_client().get("/ops/status")
+        payload = response.get_json()
+        body = response.get_data(as_text=True)
+
+    card_buy = payload["apple_pay_purchase"]["card_buy"]
+    assert card_buy["enabled"] is True
+    assert card_buy["provider"] == "custom_card_gateway"
+    assert card_buy["gateway_tokenization_configured"] is True
+    assert card_buy["gateway_authorize_configured"] is True
+    assert card_buy["oneinch_configured"] is True
+    assert card_buy["oneinch_base_url"] == "https://api.1inch.com/swap/v6.1"
+    assert "card-secret" not in body
+    assert "card-webhook-secret" not in body
+    assert "signer-secret" not in body
+    assert "oneinch-secret" not in body
 
 
 def test_ops_status_live_operations_call_out_recovery_mode(app, monkeypatch) -> None:

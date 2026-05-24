@@ -126,7 +126,9 @@ from .services.vault_readiness import VaultReadinessService
 from .services.vault_selector import VaultStrategySelector
 from .services.wallet_addresses import WalletAddressService
 from .services.wallet_activity import WalletActivityService
+from .services.wallet_apple_pay_purchase import WalletApplePayPurchaseService
 from .services.audit_events import register_audit_retention_listener
+from .services.wallet_onramp import WalletOnrampService
 from .services.wallet_custody import RealWalletCustodyService
 from .services.wallet_summary import WalletSummaryService
 from .services.worker_lease import WorkerLeaseService
@@ -261,6 +263,8 @@ def create_app(test_config: dict | None = None) -> Flask:
     wallet_address_service = WalletAddressService(app.config)
     wallet_activity = WalletActivityService()
     wallet_custody = RealWalletCustodyService(app.config)
+    wallet_onramp = WalletOnrampService(app.config)
+    wallet_apple_pay_purchase = WalletApplePayPurchaseService(app.config)
     platform_treasury = PlatformTreasuryService(app.config)
     invite_profit_share = InviteProfitShareService(app.config)
     treasury_solvency = TreasurySolvencyEngine(app.config)
@@ -349,6 +353,8 @@ def create_app(test_config: dict | None = None) -> Flask:
         "wallet_address_service": wallet_address_service,
         "wallet_activity": wallet_activity,
         "wallet_custody": wallet_custody,
+        "wallet_onramp": wallet_onramp,
+        "wallet_apple_pay_purchase": wallet_apple_pay_purchase,
         "platform_treasury": platform_treasury,
         "invite_profit_share": invite_profit_share,
         "treasury_solvency": treasury_solvency,
@@ -519,6 +525,13 @@ def _register_operational_routes(app: Flask) -> None:
     def pwa_icon(filename: str):
         return send_from_directory(Path(app.static_folder) / "icons", filename)
 
+    @app.get("/.well-known/apple-developer-merchantid-domain-association")
+    def apple_pay_domain_association():
+        body = str(app.config.get("APPLE_PAY_DOMAIN_ASSOCIATION", "") or "").strip()
+        if not body:
+            return jsonify({"ok": False, "error": "apple pay domain association is not configured"}), 404
+        return Response(body, mimetype="text/plain")
+
     @app.get("/healthz")
     def healthz():
         return jsonify({"ok": True, "service": app.config.get("APP_NAME", "Algorithm Vault")})
@@ -632,11 +645,12 @@ def _operational_status(app: Flask) -> dict[str, Any]:
         },
     }
     payload["database_recovery"] = _database_recovery_status(app)
-    payload["workers"] = _worker_status(now)
+    payload["workers"] = _worker_status(now, app)
     payload["trading"] = _trading_status(now, app)
     payload["wallets"] = _wallet_status()
     payload["models"] = _model_status()
     payload["treasury"] = _treasury_status(app)
+    payload["apple_pay_purchase"] = _apple_pay_purchase_status(app)
     payload["live_operations"] = _live_operations_status(app, payload["runtime_config"], payload["treasury"])
     payload["observability"] = {
         "provider_failure_count_24h": _audit_count("provider", "failed"),
@@ -644,6 +658,66 @@ def _operational_status(app: Flask) -> dict[str, Any]:
         "chart_refresh_lag_seconds": _chart_refresh_lag(app, now),
     }
     return payload
+
+
+def _apple_pay_purchase_status(app: Flask) -> dict[str, Any]:
+    service = app.extensions.get("services", {}).get("wallet_apple_pay_purchase")
+    if service is None:
+        return {
+            "available": False,
+            "ready": False,
+            "enabled": False,
+            "blockers": ["wallet_apple_pay_purchase service is not configured"],
+        }
+    try:
+        readiness = service.readiness()
+        card_readiness = readiness.get("card_buy") if isinstance(readiness.get("card_buy"), dict) else service.card_readiness()
+        return {
+            "available": True,
+            "ready": bool(readiness.get("ready")),
+            "enabled": bool(readiness.get("enabled")),
+            "provider": readiness.get("provider", "direct_apple_pay"),
+            "blockers": [str(item) for item in readiness.get("blockers", [])],
+            "country_code": readiness.get("country_code"),
+            "supported_networks": readiness.get("supported_networks", []),
+            "min_fiat_usd": readiness.get("min_fiat_usd"),
+            "max_fiat_usd": readiness.get("max_fiat_usd"),
+            "treasury_fee_bps": readiness.get("treasury_fee_bps"),
+            "allowed_assets": readiness.get("allowed_assets", {}),
+            "domain_association_configured": bool(str(app.config.get("APPLE_PAY_DOMAIN_ASSOCIATION", "") or "").strip()),
+            "fulfillment_worker_enabled": bool(app.config.get("WORKER_APPLE_PAY_FULFILLMENT_ENABLED", True)),
+            "card_buy": {
+                "available": True,
+                "ready": bool(card_readiness.get("ready")),
+                "enabled": bool(card_readiness.get("enabled")),
+                "provider": card_readiness.get("provider", "custom_card_gateway"),
+                "blockers": [str(item) for item in card_readiness.get("blockers", [])],
+                "min_fiat_usd": card_readiness.get("min_fiat_usd"),
+                "max_fiat_usd": card_readiness.get("max_fiat_usd"),
+                "treasury_fee_bps": card_readiness.get("treasury_fee_bps"),
+                "allowed_assets": card_readiness.get("allowed_assets", {}),
+                "gateway_tokenization_configured": bool(str(app.config.get("CARD_GATEWAY_TOKENIZATION_URL", "") or "").strip()),
+                "gateway_authorize_configured": bool(str(app.config.get("CARD_GATEWAY_AUTHORIZE_URL", "") or "").strip()),
+                "gateway_public_configured": bool(app.config.get("CARD_GATEWAY_PUBLIC_CONFIG") or {}),
+                "oneinch_configured": bool(str(app.config.get("ONEINCH_API_KEY", "") or "").strip()),
+                "oneinch_base_url": app.config.get("ONEINCH_API_BASE_URL"),
+                "fulfillment_worker_enabled": bool(app.config.get("WORKER_APPLE_PAY_FULFILLMENT_ENABLED", True)),
+            },
+        }
+    except Exception:  # noqa: BLE001
+        db.session.rollback()
+        return {
+            "available": False,
+            "ready": False,
+            "enabled": bool(app.config.get("APPLE_PAY_DIRECT_ENABLED", False)),
+            "blockers": ["direct Apple Pay readiness check failed"],
+            "card_buy": {
+                "available": False,
+                "ready": False,
+                "enabled": bool(app.config.get("CARD_BUY_ENABLED", False)),
+                "blockers": ["card buy readiness check failed"],
+            },
+        }
 
 
 def _database_recovery_status(app: Flask) -> dict[str, Any]:
@@ -853,27 +927,85 @@ def _safe_setting_json(key: str, default: Any) -> Any:
         return default
 
 
-def _worker_status(now: datetime) -> dict[str, Any]:
+def _worker_status(now: datetime, app: Flask | None = None) -> dict[str, Any]:
+    poll_seconds = 15
+    lease_ttl_seconds = 120
+    dedicated_expected = False
+    enabled_jobs = {
+        "strategy_starter": True,
+        "vault_cycle_enforcement": True,
+        "treasury_solvency": True,
+    }
+    if app is not None:
+        poll_seconds = max(1, int(app.config.get("WORKER_POLL_SECONDS", 15) or 15))
+        lease_ttl_seconds = max(1, int(app.config.get("WORKER_LEASE_TTL_SECONDS", 120) or 120))
+        dedicated_expected = (
+            bool(app.config.get("ENABLE_LIVE_TRADING", False))
+            and bool(app.config.get("WORKER_PROCESS_CONFIGURED", False))
+            and not bool(app.config.get("ENABLE_IN_PROCESS_WORKERS", False))
+        )
+        enabled_jobs = {
+            "strategy_starter": bool(app.config.get("WORKER_STRATEGY_STARTER_ENABLED", True)),
+            "vault_cycle_enforcement": bool(app.config.get("WORKER_VAULT_ENFORCEMENT_ENABLED", True)),
+            "treasury_solvency": bool(app.config.get("WORKER_TREASURY_SOLVENCY_ENABLED", True)),
+            "apple_pay_fulfillment": bool(app.config.get("WORKER_APPLE_PAY_FULFILLMENT_ENABLED", True)),
+        }
+    stale_after = max(60, poll_seconds * 6, lease_ttl_seconds)
+    expected_leases = [f"{name}:singleton" for name, enabled in enabled_jobs.items() if enabled]
     try:
         leases = WorkerLease.query.order_by(WorkerLease.lease_name.asc()).all()
         rows: list[dict[str, Any]] = []
         max_lag = 0.0
+        recent_expected = 0
+        active_expected = 0
+        seen_expected: set[str] = set()
         for lease in leases:
             lag = _elapsed_seconds(now, lease.heartbeat_at) if lease.heartbeat_at else None
             if lag is not None:
                 max_lag = max(max_lag, lag)
+            is_expected = lease.lease_name in expected_leases
+            if is_expected:
+                seen_expected.add(lease.lease_name)
+                if lag is not None and lag <= stale_after:
+                    recent_expected += 1
+                if str(lease.status or "").lower() in {"running", "active", "complete"} and lag is not None and lag <= stale_after:
+                    active_expected += 1
             rows.append(
                 {
                     "lease_name": lease.lease_name,
                     "status": lease.status,
                     "heartbeat_lag_seconds": lag,
                     "expires_at": lease.expires_at.isoformat() if lease.expires_at else None,
+                    "expected": is_expected,
                 }
             )
-        return {"available": True, "leases": rows, "max_lease_lag_seconds": max_lag}
+        missing_expected = [lease_name for lease_name in expected_leases if lease_name not in seen_expected]
+        return {
+            "available": True,
+            "leases": rows,
+            "max_lease_lag_seconds": max_lag,
+            "stale_after_seconds": stale_after,
+            "dedicated_expected": dedicated_expected,
+            "enabled_jobs": enabled_jobs,
+            "expected_lease_names": expected_leases,
+            "missing_expected_lease_names": missing_expected,
+            "recent_expected_lease_count": recent_expected,
+            "active_expected_lease_count": active_expected,
+        }
     except Exception:  # noqa: BLE001
         db.session.rollback()
-        return {"available": False, "leases": [], "max_lease_lag_seconds": None}
+        return {
+            "available": False,
+            "leases": [],
+            "max_lease_lag_seconds": None,
+            "stale_after_seconds": stale_after,
+            "dedicated_expected": dedicated_expected,
+            "enabled_jobs": enabled_jobs,
+            "expected_lease_names": expected_leases,
+            "missing_expected_lease_names": expected_leases,
+            "recent_expected_lease_count": 0,
+            "active_expected_lease_count": 0,
+        }
 
 
 def _elapsed_seconds(now: datetime, then: datetime) -> float:

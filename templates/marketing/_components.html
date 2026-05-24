@@ -1,0 +1,186 @@
+{% macro public_badges(page) -%}
+  {% if page.badges %}
+    <ul class="public-badge-row" aria-label="{{ page.nav_label }} trust signals">
+      {% for badge in page.badges %}
+        <li class="public-trust-badge public-trust-badge--{{ badge.tone|default('secure') }}">
+          <span aria-hidden="true"></span>
+          {{ badge.label }}
+        </li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+{%- endmacro %}
+
+{% macro public_page_index(public_seo_pages) -%}
+  <aside class="public-page-index" aria-label="Related AlgVault pages">
+    <span>AlgVault public pages</span>
+    <nav>
+      {% for public_page in public_seo_pages %}
+        <a href="{{ public_page.href }}" {% if request.path == public_page.href %}aria-current="page"{% endif %}>{{ public_page.label }}</a>
+      {% endfor %}
+    </nav>
+  </aside>
+{%- endmacro %}
+
+{% macro public_hero(page, title_id, public_seo_pages, home=False) -%}
+  <section class="public-hero {{ 'public-hero--home' if home else 'public-hero--compact' }} public-hero--{{ page.key }}" aria-labelledby="{{ title_id }}">
+    <div class="public-hero__copy">
+      <span class="card-kicker">{{ page.eyebrow }}</span>
+      <h1 id="{{ title_id }}">{{ page.heading }}</h1>
+      <p>{{ page.lead }}</p>
+      {{ public_badges(page) }}
+      <div class="public-hero__actions" aria-label="{{ page.nav_label }} actions">
+        <a class="button-link primary" href="{{ page.primary_href }}">{{ page.primary_label }}</a>
+        <a class="button-link secondary" href="{{ page.secondary_href }}">{{ page.secondary_label }}</a>
+      </div>
+    </div>
+    <aside class="public-hero__visual" aria-label="{{ page.nav_label }} operating preview">
+      <div class="public-device-frame">
+        <div class="public-device-head">
+          <span class="public-device-dot" aria-hidden="true"></span>
+          <span>AlgVault</span>
+          <strong>{{ page.nav_label }}</strong>
+        </div>
+        <div class="public-terminal" aria-label="{{ page.nav_label }} status preview">
+          <div class="public-terminal__brand">
+            <img src="/icons/algvault-mascot-64.png" alt="" width="64" height="64" decoding="async" {% if home %}fetchpriority="high"{% else %}loading="lazy"{% endif %}>
+            <div>
+              <span>{{ page.eyebrow }}</span>
+              <strong>{{ page.nav_label }} readiness</strong>
+            </div>
+          </div>
+          <dl>
+            {% for row in page.hero_rows %}
+              <div>
+                <dt>{{ row.label }}</dt>
+                <dd>
+                  <strong>{{ row.value }}</strong>
+                  <span>{{ row.state }}</span>
+                </dd>
+              </div>
+            {% endfor %}
+          </dl>
+        </div>
+      </div>
+      {% if not home %}
+        {{ public_page_index(public_seo_pages) }}
+      {% endif %}
+    </aside>
+  </section>
+{%- endmacro %}
+
+{% macro public_metrics(page) -%}
+  <section class="public-metric-strip" aria-label="{{ page.nav_label }} highlights">
+    {% for item in page.highlights %}
+      <article>
+        <span>{{ item.label }}</span>
+        <strong>{{ item.value }}</strong>
+        <p>{{ item.detail }}</p>
+      </article>
+    {% endfor %}
+  </section>
+{%- endmacro %}
+
+{% macro public_sections(page, stacked=False) -%}
+  <section class="public-section-grid {% if stacked %}public-section-grid--stacked{% endif %}" aria-label="{{ page.nav_label }} details">
+    {% for section in page.sections %}
+      <article class="public-info-panel">
+        <span class="card-kicker">{{ section.kicker }}</span>
+        <h2>{{ section.title }}</h2>
+        <p>{{ section.body }}</p>
+      </article>
+    {% endfor %}
+  </section>
+{%- endmacro %}
+
+{% macro public_cards(page, title=None, compact=False) -%}
+  {% if page.cards %}
+    <section class="public-card-system public-card-system--{{ page.key }} {% if compact %}public-card-system--compact{% endif %}" aria-labelledby="public-cards-title">
+      <div class="public-section-heading">
+        <span class="card-kicker">{{ page.nav_label }} system</span>
+        <h2 id="public-cards-title">{{ title|default(page.nav_label ~ " built like an operating surface", true) }}</h2>
+      </div>
+      <div class="public-card-grid">
+        {% for card in page.cards %}
+          <article class="public-system-card">
+            <div class="public-card-topline">
+              {% if card.icon %}
+                <span class="public-card-icon" aria-hidden="true">
+                  <svg class="topnav-icon"><use href="#{{ card.icon }}"></use></svg>
+                </span>
+              {% endif %}
+              <span class="public-card-meta">{{ card.meta }}</span>
+            </div>
+            <span class="card-kicker">{{ card.kicker }}</span>
+            <h3>{{ card.title }}</h3>
+            <p>{{ card.body }}</p>
+            {% if card.features %}
+              <ul class="public-card-list" aria-label="{{ card.title }} includes">
+                {% for feature in card.features %}
+                  <li>{{ feature }}</li>
+                {% endfor %}
+              </ul>
+            {% endif %}
+          </article>
+        {% endfor %}
+      </div>
+    </section>
+  {% endif %}
+{%- endmacro %}
+
+{% macro public_status(page, title="Clear states before sensitive action", kicker="Operational states") -%}
+  {% if page.status_rows %}
+    <section class="public-status-system" aria-labelledby="public-status-title">
+      <div class="public-section-heading">
+        <span class="card-kicker">{{ kicker }}</span>
+        <h2 id="public-status-title">{{ title }}</h2>
+      </div>
+      <div class="public-status-grid">
+        {% for row in page.status_rows %}
+          <article class="public-status-card">
+            <span class="public-status-pill">{{ row.state }}</span>
+            <h3>{{ row.label }}</h3>
+            <p>{{ row.detail }}</p>
+          </article>
+        {% endfor %}
+      </div>
+    </section>
+  {% endif %}
+{%- endmacro %}
+
+{% macro public_disclaimer(page) -%}
+  {% if page.disclaimer %}
+    <p class="public-disclaimer">{{ page.disclaimer }}</p>
+  {% endif %}
+{%- endmacro %}
+
+{% macro public_cta(page) -%}
+  {% if page.cta %}
+    <section class="public-cta-block" aria-labelledby="public-cta-title">
+      <div>
+        <span class="card-kicker">{{ page.cta.kicker }}</span>
+        <h2 id="public-cta-title">{{ page.cta.title }}</h2>
+        <p>{{ page.cta.body }}</p>
+      </div>
+      <div class="public-cta-actions" aria-label="{{ page.nav_label }} next actions">
+        <a class="button-link primary" href="{{ page.cta.primary_href }}">{{ page.cta.primary_label }}</a>
+        <a class="button-link secondary" href="{{ page.cta.secondary_href }}">{{ page.cta.secondary_label }}</a>
+      </div>
+    </section>
+  {% endif %}
+{%- endmacro %}
+
+{% macro public_link_band() -%}
+  <section class="public-link-band" aria-labelledby="public-paths-title">
+    <div>
+      <span class="card-kicker">Explore AlgVault</span>
+      <h2 id="public-paths-title">Find the right operating surface</h2>
+    </div>
+    <nav aria-label="SEO public page links">
+      <a href="/features/">Automated trading features</a>
+      <a href="/mobile/">Mobile trading PWA</a>
+      <a href="/connectivity/">Broker/API connectivity</a>
+      <a href="/security/">Security and risk controls</a>
+    </nav>
+  </section>
+{%- endmacro %}

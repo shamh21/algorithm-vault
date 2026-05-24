@@ -44,6 +44,15 @@
 
     <div class="wallet-primary-actions" aria-label="Primary wallet actions">
       <a href="{{ wallet_view.primary_deposit_href }}" class="button-link primary">Deposit {{ wallet_view.primary_asset }}</a>
+      <button
+        type="button"
+        class="button-link primary wallet-buy-card-trigger"
+        data-wallet-buy-open
+        data-onramp-method="card"
+        {% if not wallet_view.card_buy.enabled %}aria-disabled="true"{% endif %}
+      >
+        Buy with Card
+      </button>
       {% if wallet_view.withdrawals_ready %}
         <a href="{{ wallet_view.primary_withdraw_href }}" class="button-link secondary">Withdraw {{ wallet_view.primary_asset }}</a>
       {% else %}
@@ -59,6 +68,158 @@
       Offline. Wallet balances may be stale until the connection returns.
     </p>
   </header>
+
+  <section
+    class="wallet-card-buy-panel"
+    aria-labelledby="wallet-card-buy-title"
+    data-wallet-card-buy-panel
+    data-csrf-token="{{ csrf_token() }}"
+  >
+    <div>
+      <span class="card-kicker">Buy Crypto</span>
+      <h2 id="wallet-card-buy-title">Buy with Card</h2>
+      <p>AlgVault shows the quote, fees, and estimated delivery before the gateway authorizes your card.</p>
+    </div>
+    <div class="wallet-card-buy-actions">
+      <button type="button" class="button-link primary" data-wallet-buy-open data-onramp-method="card">
+        Buy with Card
+      </button>
+      <button
+        type="button"
+        class="button-link secondary"
+        data-wallet-buy-open
+        data-onramp-method="apple_pay"
+        {% if not wallet_view.apple_pay.enabled %}disabled aria-disabled="true"{% endif %}
+      >
+        Buy with Apple Pay
+      </button>
+    </div>
+    {% if not wallet_view.card_buy.ready %}
+      <p class="wallet-card-buy-readiness">{{ wallet_view.card_buy.unavailable_copy }}</p>
+    {% endif %}
+  </section>
+
+  <div class="wallet-onramp-sheet" data-wallet-onramp-sheet hidden>
+    <div class="wallet-onramp-backdrop" data-wallet-onramp-close></div>
+    <section
+      class="wallet-onramp-dialog"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="wallet-onramp-title"
+      aria-describedby="wallet-onramp-status"
+      tabindex="-1"
+    >
+      <header class="wallet-onramp-header">
+        <div>
+          <span class="card-kicker">Secure Purchase</span>
+          <h2 id="wallet-onramp-title">Buy with Card</h2>
+          <p>Review the server quote, then authorize with hosted tokenized card fields.</p>
+        </div>
+        <button type="button" class="wallet-onramp-close" data-wallet-onramp-close aria-label="Close buy with card">Close</button>
+      </header>
+
+      <form class="wallet-onramp-form" data-wallet-onramp-form novalidate>
+        <div class="wallet-onramp-methods" role="tablist" aria-label="Payment method">
+          <button type="button" data-onramp-method="card" aria-selected="true">Card</button>
+          <button type="button" data-onramp-method="apple_pay" {% if not wallet_view.apple_pay.enabled %}disabled{% endif %}>Apple Pay</button>
+        </div>
+
+        <div class="wallet-onramp-grid">
+          <label class="wallet-onramp-field">
+            <span>Asset</span>
+            <select data-onramp-asset name="asset" required></select>
+          </label>
+          <label class="wallet-onramp-field">
+            <span>Network</span>
+            <select data-onramp-network name="network" required></select>
+          </label>
+        </div>
+
+        <div class="wallet-onramp-amounts" aria-label="USD amount presets">
+          {% set default_amount_presets = wallet_view.card_buy.amount_presets if wallet_view.card_buy.amount_presets else wallet_view.apple_pay.amount_presets %}
+          {% for amount in default_amount_presets %}
+            <button type="button" data-onramp-amount-preset="{{ amount }}">${{ amount }}</button>
+          {% endfor %}
+        </div>
+
+        <label class="wallet-onramp-field wallet-onramp-amount-field">
+          <span>Amount in USD</span>
+          <input
+            data-onramp-amount
+            name="fiat_amount"
+            type="number"
+            inputmode="decimal"
+            min="{{ wallet_view.card_buy.min_fiat_usd }}"
+            max="{{ wallet_view.card_buy.max_fiat_usd }}"
+            step="1"
+            value="{{ wallet_view.card_buy.default_amount }}"
+            required
+          >
+        </label>
+
+        <div class="wallet-onramp-destination" aria-live="polite">
+          <span>Destination</span>
+          <strong data-onramp-destination-asset>{{ wallet_view.card_buy.default_asset or wallet_view.primary_asset }}</strong>
+          <code data-onramp-destination-address>Deposit address pending</code>
+        </div>
+
+        <div class="wallet-onramp-quote" data-wallet-onramp-quote hidden>
+          <div class="wallet-quote-skeleton" data-wallet-quote-skeleton hidden aria-hidden="true">
+            <span></span><span></span><span></span><span></span>
+          </div>
+          <dl class="wallet-apple-pay-fees" data-apple-pay-fees>
+            <div>
+              <dt>Purchase amount</dt>
+              <dd data-buy-purchase-amount>--</dd>
+            </div>
+            <div>
+              <dt>AlgVault fee</dt>
+              <dd data-apple-pay-treasury-fee>--</dd>
+            </div>
+            <div>
+              <dt>Provider/network estimate</dt>
+              <dd data-apple-pay-execution-fee>--</dd>
+            </div>
+            <div>
+              <dt>Total charged</dt>
+              <dd data-buy-total-charged>--</dd>
+            </div>
+            <div>
+              <dt>Estimated received</dt>
+              <dd data-apple-pay-net>--</dd>
+            </div>
+          </dl>
+        </div>
+
+        <div class="wallet-card-gateway" data-card-gateway-panel hidden>
+          <div class="wallet-card-gateway-head">
+            <span>Secure card entry</span>
+            <strong data-card-gateway-state>Waiting for quote</strong>
+          </div>
+          <iframe
+            title="Secure card tokenization"
+            data-card-gateway-frame
+            sandbox="allow-forms allow-scripts allow-same-origin allow-payment"
+            hidden
+          ></iframe>
+          <label class="wallet-onramp-field wallet-token-fallback" data-card-token-fallback hidden>
+            <span>Gateway token reference</span>
+            <input data-card-token-input name="gateway_payment_token" autocomplete="off" inputmode="text">
+          </label>
+        </div>
+
+        <p class="wallet-onramp-disclaimer">
+          AlgVault never handles raw PAN or CVV. Card data is tokenized by the configured gateway and wallet credit waits for captured payment plus fulfillment.
+        </p>
+        <p class="wallet-onramp-state" data-wallet-onramp-state id="wallet-onramp-status" role="status" aria-live="polite" hidden></p>
+
+        <footer class="wallet-onramp-footer">
+          <button type="button" class="wallet-onramp-secondary" data-wallet-onramp-close>Cancel</button>
+          <button type="submit" class="wallet-onramp-submit" data-wallet-onramp-submit>Review Quote</button>
+        </footer>
+      </form>
+    </section>
+  </div>
 
   <section class="wallet-insight-grid" aria-label="Wallet insights">
     <article class="mini-chart-card wallet-chart-card" data-chart-card aria-labelledby="wallet-trend-title">
@@ -240,9 +401,12 @@
   </section>
 </section>
 <script type="application/json" id="wallet-trend-data">{{ portfolio_trend|tojson }}</script>
+<script type="application/json" id="wallet-onramp-data">{{ wallet_view.onramp|tojson }}</script>
+<script type="application/json" id="wallet-card-buy-data">{{ wallet_view.card_buy|tojson }}</script>
+<script type="application/json" id="wallet-apple-pay-data">{{ wallet_view.apple_pay|tojson }}</script>
 {% endblock %}
 
 {% block page_scripts %}
-<script defer src="{{ url_for('static', filename='js/wallet.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}-merged-wallet-ux-1"></script>
+<script defer src="{{ url_for('static', filename='js/wallet.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}-wallet-card-buy-1"></script>
 <script defer src="{{ url_for('static', filename='js/mini-charts.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}-mini-charts-1"></script>
 {% endblock %}

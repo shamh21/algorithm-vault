@@ -461,6 +461,12 @@ def test_consumer_pages_render_wallet_and_vault_experience(app) -> None:
     assert b"Deposit" in wallet.data
     assert b"Withdraw" in wallet.data
     assert b"Convert" in wallet.data
+    assert b"Buy with Card" in wallet.data
+    assert b"wallet-card-buy-data" in wallet.data
+    assert b"wallet-apple-pay-data" in wallet.data
+    assert b"wallet-card-buy-1" in wallet.data
+    assert b"CARD_GATEWAY_API_KEY" not in wallet.data
+    assert b"APPLE_PAY_GATEWAY_API_KEY" not in wallet.data
     assert b"Settlement Currency" not in wallet.data
     assert b"Exchange Margin" not in wallet.data
     assert b"Risk Notice" not in wallet.data
