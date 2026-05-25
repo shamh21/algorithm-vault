@@ -191,6 +191,7 @@ def home():
         wallet_summary = get_service("wallet_summary").summary_for_user(user, balances=balances)
     except Exception as exc:  # noqa: BLE001
         current_app.logger.exception("Home wallet balance unavailable: %s", exc)
+        db.session.rollback()
         wallet_error = "Total wallet balance is temporarily unavailable."
 
     wallet_overview = _home_wallet_balance_payload(wallet_summary, wallet_error)

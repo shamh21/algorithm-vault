@@ -1283,6 +1283,9 @@ def _configure_engine_options(app: Flask) -> None:
         deployment_target = str(app.config.get("DEPLOYMENT_TARGET", "") or "").strip().lower()
         if _env_flag(os.getenv("VERCEL")) or deployment_target == "vercel":
             options.setdefault("poolclass", NullPool)
+            connect_args = dict(options.get("connect_args") or {})
+            connect_args.setdefault("prepare_threshold", None)
+            options["connect_args"] = connect_args
         else:
             options.setdefault("pool_recycle", 1800)
         app.config["SQLALCHEMY_ENGINE_OPTIONS"] = options

@@ -232,6 +232,7 @@ def test_vercel_postgres_uses_nullpool_to_release_serverless_connections(monkeyp
     options = app.config["SQLALCHEMY_ENGINE_OPTIONS"]
     assert options["pool_pre_ping"] is True
     assert options["poolclass"] is NullPool
+    assert options["connect_args"]["prepare_threshold"] is None
     assert "pool_recycle" not in options
 
 
