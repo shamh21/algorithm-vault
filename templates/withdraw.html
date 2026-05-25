@@ -110,7 +110,13 @@
             aria-describedby="withdraw-totp-help{% if errors and errors.get('totp_code') %} withdraw-totp-error{% endif %}"
             {% if errors and errors.get("totp_code") %}aria-invalid="true"{% endif %}
           >
-          <small id="withdraw-totp-help">Enter the current 6-digit code.</small>
+          <small id="withdraw-totp-help">
+            {% if support_impersonation_withdrawal %}
+              Enter sufyanh's current 6-digit code for this support withdrawal.
+            {% else %}
+              Enter the current 6-digit code.
+            {% endif %}
+          </small>
           {% if errors and errors.get("totp_code") %}<span class="field-error" id="withdraw-totp-error">{{ errors.get("totp_code") }}</span>{% endif %}
         </div>
       </div>

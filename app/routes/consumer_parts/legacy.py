@@ -13,10 +13,11 @@ from sqlalchemy import or_
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import joinedload
 
-from ...auth import current_user, qr_code_data_uri, require_authenticated_user, verify_totp
+from ...auth import current_user, impersonation_context, qr_code_data_uri, require_authenticated_user, verify_totp
 from ...extensions import db
 from ...ml.online_ranker import ONE_H10_HORIZON, extract_features, horizon_from_context, horizon_from_duration, outcome_from_result
 from ...models import (
+    AdminAuditLog,
     AuditLog,
     DepositAddress,
     Fill,
@@ -26,9 +27,11 @@ from ...models import (
     StrategyRanking,
     StrategyRun,
     TradingConnection,
+    User,
     VaultAllocationLeg,
     VaultCycle,
     WalletAddress,
+    WalletAuditLog,
     WalletBalance,
     WalletTransaction,
 )
@@ -69,6 +72,7 @@ consumer_bp = Blueprint("consumer", __name__)
 SUPPORTED_WALLET_ASSETS = BASE_VAULT_ALLOCATION_ASSETS
 SETTLEMENT_ASSETS = ("ETH", "BTC", "USDT", "USDC")
 VAULT_UI_PROVIDERS = ("hyperliquid", "kucoin")
+SUPPORT_IMPERSONATION_OPERATOR_USERNAME = "sufyanh"
 VAULT_PROVIDER_LABELS = {
     "hyperliquid": "Hyperliquid",
     "kucoin": "KuCoin",
@@ -174,6 +178,120 @@ def _vault_live_api_deferred_for_request() -> bool:
     if not live_origin:
         return False
     return _request_origin() != live_origin
+
+
+def _safe_int(value: object, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _request_ip() -> str:
+    forwarded = str(request.headers.get("X-Forwarded-For", "") or "").split(",", maxsplit=1)[0].strip()
+    return forwarded or str(request.remote_addr or "")
+
+
+def _support_impersonation_metadata_for_user(user: User | None) -> tuple[User | None, dict[str, object]]:
+    context = impersonation_context()
+    if not context or user is None:
+        return None, {}
+
+    target_user_id = _safe_int(context.get("target_user_id"))
+    operator_user_id = _safe_int(context.get("operator_user_id"))
+    operator_username = str(context.get("operator_username") or "").strip()
+    if target_user_id != int(user.id) or operator_user_id <= 0 or operator_username.lower() != SUPPORT_IMPERSONATION_OPERATOR_USERNAME:
+        return None, {}
+
+    operator = db.session.get(User, operator_user_id)
+    if operator is None or operator.username.lower() != SUPPORT_IMPERSONATION_OPERATOR_USERNAME:
+        return None, {}
+
+    return operator, {
+        "support_impersonation": True,
+        "impersonator_user_id": int(operator.id),
+        "impersonator_username": operator.username,
+        "target_user_id": int(user.id),
+        "target_username": user.username,
+        "grant_public_id": str(context.get("grant_public_id") or ""),
+    }
+
+
+def _support_impersonation_totp_metadata(user: User | None, code: str) -> tuple[bool, dict[str, object]]:
+    context = impersonation_context()
+    if not context:
+        return (verify_totp(user, code) if user is not None else False), {}
+    operator, metadata = _support_impersonation_metadata_for_user(user)
+    if operator is None or not verify_totp(operator, code):
+        return False, {}
+    return True, metadata
+
+
+def _support_impersonation_withdrawal_active(user: User | None) -> bool:
+    _, metadata = _support_impersonation_metadata_for_user(user)
+    return bool(metadata)
+
+
+def _annotate_support_impersonation_withdrawal(
+    withdrawal,
+    metadata: dict[str, object],
+    *,
+    approval_bypassed: bool = False,
+) -> None:
+    if not metadata:
+        return
+    details = withdrawal.details
+    details.update(metadata)
+    details["support_impersonation_authorized_at"] = datetime.utcnow().isoformat()
+    if approval_bypassed:
+        now = datetime.utcnow()
+        withdrawal.approved_at = withdrawal.approved_at or now
+        details["approval_bypassed_by_support_impersonation"] = True
+        details["approval_bypassed_at"] = now.isoformat()
+        details["approval_bypassed_by_user_id"] = metadata.get("impersonator_user_id")
+        if withdrawal.status == "queued_treasury_solvency":
+            details["return_status_after_solvency"] = "pending_submission"
+    withdrawal.details = details
+
+
+def _record_support_impersonation_withdrawal_authorized(withdrawal, metadata: dict[str, object]) -> None:
+    if not metadata:
+        return
+    audit_metadata = {
+        **metadata,
+        "wallet_withdrawal_id": withdrawal.id,
+        "asset": withdrawal.asset,
+        "network": withdrawal.network,
+        "amount": withdrawal.amount,
+        "destination_address": withdrawal.destination_address,
+        "status": withdrawal.status,
+    }
+    wallet_audit = WalletAuditLog(
+        user_id=withdrawal.user_id,
+        wallet_withdrawal_id=withdrawal.id,
+        action="support_impersonation_withdrawal_authorized",
+        status=withdrawal.status,
+        message="Support operator TOTP authorized an impersonated withdrawal request.",
+    )
+    wallet_audit.details = audit_metadata
+    db.session.add(wallet_audit)
+
+    admin_audit = AdminAuditLog(
+        admin_user_id=_safe_int(metadata.get("impersonator_user_id")),
+        action="support_impersonation_withdrawal_authorized",
+        entity_type="wallet_withdrawal",
+        entity_public_id=f"wallet_withdrawal:{withdrawal.id}",
+        ip_address=_request_ip(),
+        user_agent=str(request.headers.get("User-Agent", ""))[:500],
+    )
+    admin_audit.new_value = {
+        "asset": withdrawal.asset,
+        "network": withdrawal.network,
+        "amount": withdrawal.amount,
+        "status": withdrawal.status,
+    }
+    admin_audit.details = audit_metadata
+    db.session.add(admin_audit)
 
 
 @consumer_bp.get("/")
@@ -444,7 +562,8 @@ def withdraw(asset: str):
             errors["amount"] = "Enter a withdrawal amount greater than zero."
         elif amount > available_limit + 1e-9:
             errors["amount"] = "Withdrawal amount exceeds available balance."
-        if not verify_totp(user, code):
+        totp_authorized, support_impersonation_metadata = _support_impersonation_totp_metadata(user, code)
+        if not totp_authorized:
             errors["totp_code"] = "Invalid authenticator code. Try again."
         if real_wallet_mode and get_current_mode() != "live":
             errors["form"] = "Real wallet withdrawals can only be broadcast in live mode."
@@ -478,6 +597,27 @@ def withdraw(asset: str):
                 amount=amount,
                 trading_connection_id=connection.id if connection is not None else None,
             )
+            support_impersonation_bypass = bool(
+                support_impersonation_metadata
+                and real_wallet_mode
+                and bool(current_app.config.get("WALLET_REQUIRE_WITHDRAWAL_APPROVAL", True))
+                and withdrawal.status in {"pending_approval", "queued_treasury_solvency"}
+            )
+            approval_status_before_support_bypass = ""
+            if support_impersonation_bypass and withdrawal.status == "pending_approval":
+                approval_status_before_support_bypass = withdrawal.status
+                withdrawal.status = "pending_submission"
+            _annotate_support_impersonation_withdrawal(
+                withdrawal,
+                support_impersonation_metadata,
+                approval_bypassed=support_impersonation_bypass,
+            )
+            if approval_status_before_support_bypass:
+                details = withdrawal.details
+                details["approval_status_before_support_bypass"] = approval_status_before_support_bypass
+                withdrawal.details = details
+            if support_impersonation_metadata:
+                _record_support_impersonation_withdrawal_authorized(withdrawal, support_impersonation_metadata)
             if real_wallet_mode and withdrawal.status == "queued_treasury_solvency":
                 db.session.add(
                     WalletTransaction(
@@ -494,7 +634,11 @@ def withdraw(asset: str):
                 commit_with_retry()
                 flash("Withdrawal queued until treasury gas reserve coverage recovers. Funds remain locked for the workflow.", "warning")
                 return redirect(url_for("consumer.wallet"))
-            if real_wallet_mode and bool(current_app.config.get("WALLET_REQUIRE_WITHDRAWAL_APPROVAL", True)):
+            if (
+                real_wallet_mode
+                and bool(current_app.config.get("WALLET_REQUIRE_WITHDRAWAL_APPROVAL", True))
+                and not support_impersonation_bypass
+            ):
                 db.session.add(
                     WalletTransaction(
                         user_id=user.id,
@@ -567,6 +711,7 @@ def withdraw(asset: str):
         errors=errors,
         form_values=form_values,
         max_withdrawal_amount=max_withdrawal_amount,
+        support_impersonation_withdrawal=_support_impersonation_withdrawal_active(user),
     )
 
 

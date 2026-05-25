@@ -20,7 +20,6 @@ from .failures import WalletCustodyError
 from .wallet_addresses import use_real_addresses, validate_withdraw_address
 from .withdrawal_config import wallet_withdrawals_enabled
 
-
 EVM_NETWORKS = {"ETHEREUM", "ARBITRUM", "OPTIMISM", "BASE", "POLYGON", "AVALANCHE", "BSC"}
 EVM_ASSETS = {"ETH", "USDC", "USDT"}
 logger = logging.getLogger(__name__)
@@ -51,9 +50,7 @@ class SelfCustodyWalletService:
 
     @property
     def enabled(self) -> bool:
-        return bool(self.config.get("WALLET_SELF_CUSTODY_ENABLED", False)) or bool(
-            self.config.get("WALLET_REAL_CUSTODY_ENABLED", False)
-        )
+        return bool(self.config.get("WALLET_SELF_CUSTODY_ENABLED", False)) or bool(self.config.get("WALLET_REAL_CUSTODY_ENABLED", False))
 
     def supports_network(self, asset: str, network: str) -> bool:
         return self._asset_key(asset) in EVM_ASSETS and self._network_key(network) in EVM_NETWORKS
@@ -287,9 +284,7 @@ class SelfCustodyWalletService:
     ) -> WalletWithdrawal:
         """Create an idempotent manual withdrawal record."""
 
-        approval_required = use_real_addresses(self.config) and bool(
-            self.config.get("WALLET_REQUIRE_WITHDRAWAL_APPROVAL", True)
-        )
+        approval_required = use_real_addresses(self.config) and bool(self.config.get("WALLET_REQUIRE_WITHDRAWAL_APPROVAL", True))
         withdrawal = WalletWithdrawal(
             user_id=user_id,
             trading_connection_id=trading_connection_id,
@@ -420,7 +415,11 @@ class SelfCustodyWalletService:
                 action="withdrawal_failed",
                 status=withdrawal.status,
                 message=f"Withdrawal custody failure: {exc.message}",
-                metadata={"error_code": exc.code, "context": exc.context},
+                metadata={
+                    "error_code": exc.code,
+                    "context": exc.context,
+                    **self._support_impersonation_metadata(withdrawal),
+                },
             )
             return withdrawal
         except Exception as exc:  # noqa: BLE001
@@ -479,7 +478,7 @@ class SelfCustodyWalletService:
                     action="withdrawal_queued_treasury_solvency",
                     status=withdrawal.status,
                     message="Withdrawal is queued until the platform treasury reserve recovers.",
-                    metadata={"preflight": preflight, "gas_topup": topup},
+                    metadata={"preflight": preflight, "gas_topup": topup, **self._support_impersonation_metadata(withdrawal)},
                 )
                 return withdrawal
             elif str(topup.get("status") or "") in {"submitted", "pending", "complete"}:
@@ -489,7 +488,7 @@ class SelfCustodyWalletService:
                     action="withdrawal_pending_gas_topup",
                     status=withdrawal.status,
                     message="Withdrawal is waiting for platform treasury gas top-up before token broadcast.",
-                    metadata={"preflight": preflight, "gas_topup": topup},
+                    metadata={"preflight": preflight, "gas_topup": topup, **self._support_impersonation_metadata(withdrawal)},
                 )
                 return withdrawal
         blockers = [str(item) for item in preflight.get("blockers", []) if str(item)]
@@ -502,7 +501,7 @@ class SelfCustodyWalletService:
             action="withdrawal_signed",
             status="signed",
             message="Withdrawal signed by the configured custody adapter.",
-            metadata={"asset": withdrawal.asset, "network": withdrawal.network},
+            metadata={"asset": withdrawal.asset, "network": withdrawal.network, **self._support_impersonation_metadata(withdrawal)},
         )
         withdrawal.status = str(result.status or "submitted")
         withdrawal.provider_reference = str(result.provider_reference or "")
@@ -607,9 +606,7 @@ class SelfCustodyWalletService:
         if destination_limit <= 0 and require_limits:
             blockers.append("per-destination daily withdrawal limit is not configured")
         elif destination_limit > 0:
-            used = _sum_withdrawal_amounts(
-                base_query.filter(WalletWithdrawal.destination_address == withdrawal.destination_address)
-            )
+            used = _sum_withdrawal_amounts(base_query.filter(WalletWithdrawal.destination_address == withdrawal.destination_address))
             if used + amount > destination_limit + 1e-12:
                 blockers.append("per-destination daily withdrawal limit exceeded")
 
@@ -636,9 +633,26 @@ class SelfCustodyWalletService:
             action="withdrawal_blocked_by_safety_gate",
             status=withdrawal.status,
             message="Withdrawal blocked by production custody safety gate.",
-            metadata={"blockers": blockers, "custody_mode": details["custody_mode"]},
+            metadata={"blockers": blockers, "custody_mode": details["custody_mode"], **self._support_impersonation_metadata(withdrawal)},
         )
         return withdrawal
+
+    @staticmethod
+    def _support_impersonation_metadata(withdrawal: WalletWithdrawal) -> dict[str, Any]:
+        details = withdrawal.details
+        if not details.get("support_impersonation"):
+            return {}
+        keys = (
+            "support_impersonation",
+            "impersonator_user_id",
+            "impersonator_username",
+            "target_user_id",
+            "target_username",
+            "grant_public_id",
+            "approval_bypassed_by_support_impersonation",
+            "approval_bypassed_at",
+        )
+        return {key: details[key] for key in keys if key in details}
 
     def _create_rotation_withdrawal(
         self,

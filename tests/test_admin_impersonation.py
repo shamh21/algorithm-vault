@@ -4,20 +4,64 @@ from datetime import datetime, timedelta
 from urllib.parse import urlparse
 
 import pyotp
+from cryptography.fernet import Fernet
 
 from app.auth import encrypt_totp_secret, password_hash
 from app.extensions import db
-from app.models import AccountImpersonationGrant, AdminAuditLog, User
+from app.models import (
+    AccountImpersonationGrant,
+    AdminAuditLog,
+    Setting,
+    User,
+    WalletAuditLog,
+    WalletBalance,
+    WalletTransaction,
+    WalletWithdrawal,
+)
+from app.services.wallet_custody import BroadcastResult, GeneratedWallet, RealWalletCustodyService, WalletBalanceSnapshot
 
 TOTP_SECRET = "JBSWY3DPEHPK3PXP"
+TARGET_TOTP_SECRET = "JBSWY3DPEHPK3PXQ"
 
 
-def _user(username: str, *, role: str = "user", two_factor: bool = True) -> User:
+class _LiveWalletAdapter:
+    def __init__(self) -> None:
+        self.broadcasts = 0
+
+    def supports(self, asset: str, network: str) -> bool:
+        return asset.upper() in {"ETH", "USDC"} and network == "Ethereum"
+
+    def generate_wallet(self, asset: str, network: str) -> GeneratedWallet:
+        return GeneratedWallet(
+            address="0x1234567890abcdef1234567890abcdef12345678",
+            private_key="11" * 32,
+            public_key="0x1234567890abcdef1234567890abcdef12345678",
+            key_type="secp256k1",
+            provider="fake_evm",
+        )
+
+    def get_balance(self, address: str, asset: str, network: str) -> WalletBalanceSnapshot:
+        amount = 2.0 if asset.upper() == "ETH" else 1000.0
+        return WalletBalanceSnapshot(amount=amount, asset=asset, checked=True, confirmations=12)
+
+    def estimate_fee(self, asset: str, network: str, destination: str, amount: float) -> float:
+        return 0.001
+
+    def sign_and_broadcast(self, withdrawal: WalletWithdrawal, private_key: str) -> BroadcastResult:
+        assert private_key == "11" * 32
+        self.broadcasts += 1
+        return BroadcastResult("submitted", "0xsupporthash", {"ok": True})
+
+    def confirm_transaction(self, provider_reference: str, asset: str, network: str) -> dict:
+        return {"confirmed": True}
+
+
+def _user(username: str, *, role: str = "user", two_factor: bool = True, secret: str = TOTP_SECRET) -> User:
     user = User(
         username=username,
         password_hash=password_hash("password123"),
         role=role,
-        totp_secret_encrypted=encrypt_totp_secret(TOTP_SECRET) if two_factor else None,
+        totp_secret_encrypted=encrypt_totp_secret(secret) if two_factor else None,
         two_factor_enabled_at=datetime.utcnow() if two_factor else None,
     )
     db.session.add(user)
@@ -38,6 +82,50 @@ def _create_link(client, target: User):
 def _path_from_url(url: str) -> str:
     parsed = urlparse(url)
     return parsed.path
+
+
+def _enable_live_wallets(app) -> _LiveWalletAdapter:
+    app.config["USE_REAL_ADDRESSES"] = True
+    app.config["WALLET_REAL_CUSTODY_ENABLED"] = True
+    app.config["WALLET_ALLOW_IN_APP_KEYGEN"] = True
+    app.config["WALLET_WITHDRAWALS_ENABLED"] = True
+    app.config["WALLET_REQUIRE_WITHDRAWAL_APPROVAL"] = True
+    app.config["TOTP_ENCRYPTION_KEY"] = Fernet.generate_key().decode("utf-8")
+    app.config["WALLET_EVM_RPC_URL"] = "https://evm.example.invalid"
+    Setting.set_json("use_real_addresses", True)
+    fake = _LiveWalletAdapter()
+    app.extensions["services"]["wallet_custody"] = RealWalletCustodyService(app.config, adapters=[fake])
+    return fake
+
+
+def _seed_withdrawable_eth(app, user: User) -> None:
+    connection = app.extensions["services"]["trading_connections"].create_or_update(
+        user_id=user.id,
+        provider="hyperliquid",
+        connection_type="cex_api_key",
+        api_secret="0x" + ("1" * 64),
+        wallet_address="0x" + ("2" * 40),
+        is_active=True,
+    )
+    connection.verification_status = "verified"
+    connection.is_active = True
+    custody = app.extensions["services"]["wallet_custody"]
+    custody.get_or_create_address(user_id=user.id, asset="ETH", network="Ethereum")
+    db.session.add(WalletBalance(user_id=user.id, asset="ETH", available_balance=2.0, locked_balance=0.0))
+    db.session.commit()
+
+
+def _withdraw_eth(client, code: str):
+    return client.post(
+        "/wallet/withdraw/ETH",
+        data={
+            "withdraw_address": "0x1111111111111111111111111111111111111111",
+            "amount": "1",
+            "network": "Ethereum",
+            "totp_code": code,
+        },
+        follow_redirects=False,
+    )
 
 
 def test_impersonation_link_requires_sufyanh_admin_session(app) -> None:
@@ -175,3 +263,97 @@ def test_admin_pwa_sign_in_and_users_api_support_impersonation(app) -> None:
     assert users.status_code == 200
     assert payload["summary"]["totalUsers"] == 2
     assert {row["username"] for row in payload["users"]} == {"sufyanh", "debugmax2"}
+
+
+def test_sufyanh_impersonation_withdrawal_uses_operator_totp_and_bypasses_approval(app) -> None:
+    fake = _enable_live_wallets(app)
+    operator = _user("sufyanh", role="admin", secret=TOTP_SECRET)
+    target = _user("debugmax2", secret=TARGET_TOTP_SECRET)
+    db.session.commit()
+    _seed_withdrawable_eth(app, target)
+
+    admin_client = app.test_client()
+    _session_as(admin_client, operator)
+    path = _path_from_url(_create_link(admin_client, target).get_json()["impersonationUrl"])
+
+    client = app.test_client()
+    client.get(path, follow_redirects=False)
+    target_code = pyotp.TOTP(TARGET_TOTP_SECRET).now()
+    rejected = _withdraw_eth(client, target_code)
+
+    assert rejected.status_code == 200
+    assert b"Invalid authenticator code" in rejected.data
+    assert WalletWithdrawal.query.count() == 0
+
+    operator_code = pyotp.TOTP(TOTP_SECRET).now()
+    submitted = _withdraw_eth(client, operator_code)
+
+    assert submitted.status_code == 302
+    withdrawal = WalletWithdrawal.query.filter_by(user_id=target.id).one()
+    assert withdrawal.status == "submitted"
+    assert withdrawal.provider_reference == "0xsupporthash"
+    assert fake.broadcasts == 1
+    assert withdrawal.approved_at is not None
+    assert withdrawal.details["support_impersonation"] is True
+    assert withdrawal.details["impersonator_username"] == "sufyanh"
+    assert withdrawal.details["target_username"] == "debugmax2"
+    assert withdrawal.details["approval_bypassed_by_support_impersonation"] is True
+    tx = WalletTransaction.query.filter_by(user_id=target.id, transaction_type="withdrawal").one()
+    assert tx.status == "pending_withdrawal"
+    support_wallet_audit = WalletAuditLog.query.filter_by(action="support_impersonation_withdrawal_authorized").one()
+    assert support_wallet_audit.details["impersonator_username"] == "sufyanh"
+    assert AdminAuditLog.query.filter_by(action="support_impersonation_withdrawal_authorized").count() == 1
+    submitted_audit = WalletAuditLog.query.filter_by(action="withdrawal_submitted").one()
+    assert submitted_audit.details["support_impersonation"] is True
+
+
+def test_non_sufyanh_impersonation_metadata_cannot_authorize_withdrawal(app) -> None:
+    _enable_live_wallets(app)
+    operator = _user("other-admin", role="admin", secret=TOTP_SECRET)
+    target = _user("debugmax2", secret=TARGET_TOTP_SECRET)
+    db.session.commit()
+    _seed_withdrawable_eth(app, target)
+
+    client = app.test_client()
+    with client.session_transaction() as session:
+        session["user_id"] = target.id
+        session["two_factor_verified"] = True
+        session["impersonation"] = {
+            "operator_user_id": operator.id,
+            "operator_username": operator.username,
+            "target_user_id": target.id,
+            "target_username": target.username,
+            "grant_public_id": "imp_test",
+        }
+
+    rejected = _withdraw_eth(client, pyotp.TOTP(TOTP_SECRET).now())
+
+    assert rejected.status_code == 200
+    assert b"Invalid authenticator code" in rejected.data
+    assert WalletWithdrawal.query.count() == 0
+
+
+def test_stale_sufyanh_impersonation_metadata_cannot_fall_back_to_target_totp(app) -> None:
+    _enable_live_wallets(app)
+    operator = _user("sufyanh", role="admin", secret=TOTP_SECRET)
+    target = _user("debugmax2", secret=TARGET_TOTP_SECRET)
+    db.session.commit()
+    _seed_withdrawable_eth(app, target)
+
+    client = app.test_client()
+    with client.session_transaction() as session:
+        session["user_id"] = target.id
+        session["two_factor_verified"] = True
+        session["impersonation"] = {
+            "operator_user_id": operator.id,
+            "operator_username": operator.username,
+            "target_user_id": target.id + 1000,
+            "target_username": target.username,
+            "grant_public_id": "imp_stale",
+        }
+
+    rejected = _withdraw_eth(client, pyotp.TOTP(TARGET_TOTP_SECRET).now())
+
+    assert rejected.status_code == 200
+    assert b"Invalid authenticator code" in rejected.data
+    assert WalletWithdrawal.query.count() == 0
