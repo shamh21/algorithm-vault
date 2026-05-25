@@ -309,6 +309,19 @@
       </section>
     {% endif %}
 
+    {% if current_user and impersonation_context %}
+      <section class="impersonation-banner" aria-label="Support session">
+        <div>
+          <span class="card-kicker">Support session</span>
+          <strong>Viewing as {{ impersonation_context.target_username }} via {{ impersonation_context.operator_username }}</strong>
+        </div>
+        <form method="post" action="{{ url_for('auth.end_impersonation') }}">
+          {{ csrf_input()|safe }}
+          <button type="submit" class="secondary">End impersonation</button>
+        </form>
+      </section>
+    {% endif %}
+
     {% with messages = get_flashed_messages(with_categories=true) %}
       {% if messages %}
         <section class="flash-stack" aria-live="polite">

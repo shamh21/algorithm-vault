@@ -2,21 +2,45 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 import secrets
-from datetime import datetime, timezone
+from collections.abc import Callable
+from datetime import datetime, timedelta, timezone
 from functools import wraps
-from typing import Any, Callable
+from typing import Any
 from urllib.parse import urlparse
 
-from flask import Blueprint, Response, current_app, flash, jsonify, redirect, render_template, request, stream_with_context, url_for
+from flask import (
+    Blueprint,
+    Response,
+    current_app,
+    flash,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    session,
+    stream_with_context,
+    url_for,
+)
 from sqlalchemy import func, or_
 
 from ..admin_auth import admin_required
-from ..auth import current_user, login_user, logout_user, password_matches, two_factor_session_valid, verify_totp
+from ..auth import (
+    IMPERSONATION_SESSION_KEY,
+    current_user,
+    impersonation_context,
+    login_user,
+    logout_user,
+    password_matches,
+    two_factor_session_valid,
+    verify_totp,
+)
 from ..csrf import csrf_token
 from ..extensions import db
 from ..models import (
+    AccountImpersonationGrant,
     AdminAuditLog,
     AuditLog,
     DepositAddress,
@@ -50,6 +74,8 @@ admin_bp = Blueprint("admin", __name__, url_prefix="/admin")
 profit_share_api_bp = Blueprint("profit_share_api", __name__)
 
 ADMIN_SIGN_IN_FAILED = "Sign-in failed. Check your credentials and try again."
+IMPERSONATION_OPERATOR_USERNAME = "sufyanh"
+IMPERSONATION_GRANT_TTL_SECONDS = 300
 
 
 def admin_api_required(fn: Callable[..., Any]) -> Callable[..., Any]:
@@ -303,7 +329,9 @@ def _exchange_latency_payload(user: User | None) -> dict[str, object]:
             health = latest_connection_health(connection.id)
             provider = normalize_provider(connection.provider)
             order_latencies = _recent_order_latencies(provider)
-            latency_ms = _safe_float(health.get("latency_ms"), 0.0) or (sum(order_latencies) / len(order_latencies) if order_latencies else 0.0)
+            latency_ms = _safe_float(health.get("latency_ms"), 0.0) or (
+                sum(order_latencies) / len(order_latencies) if order_latencies else 0.0
+            )
             rows.append(
                 {
                     "provider": provider,
@@ -319,7 +347,12 @@ def _exchange_latency_payload(user: User | None) -> dict[str, object]:
 
 
 def _adaptive_slippage_payload(risk_engine, exchange_limits: dict[str, object], latency: dict[str, object]) -> dict[str, object]:
-    markets = LeveragedMarket.query.filter_by(status="active").order_by(LeveragedMarket.liquidity_usd.desc(), LeveragedMarket.spread_bps.asc()).limit(25).all()
+    markets = (
+        LeveragedMarket.query.filter_by(status="active")
+        .order_by(LeveragedMarket.liquidity_usd.desc(), LeveragedMarket.spread_bps.asc())
+        .limit(25)
+        .all()
+    )
     spread = 8.0
     liquidity = 0.0
     if markets:
@@ -435,17 +468,11 @@ def live_readiness():
             trading_connection_id=connection.id if connection else None,
         ),
         active_cycles=(
-            VaultCycle.query.filter(VaultCycle.status.in_(["active", "settling"]))
-            .order_by(VaultCycle.started_at.desc())
-            .limit(25)
-            .all()
+            VaultCycle.query.filter(VaultCycle.status.in_(["active", "settling"])).order_by(VaultCycle.started_at.desc()).limit(25).all()
         ),
         recent_orders=Order.query.order_by(Order.created_at.desc()).limit(25).all(),
         recent_audits=(
-            AuditLog.query.filter(AuditLog.category.in_(["vault", "orders", "panic"]))
-            .order_by(AuditLog.created_at.desc())
-            .limit(25)
-            .all()
+            AuditLog.query.filter(AuditLog.category.in_(["vault", "orders", "panic"])).order_by(AuditLog.created_at.desc()).limit(25).all()
         ),
         wallet_readiness=wallet_readiness,
         recent_wallet_withdrawals=WalletWithdrawal.query.order_by(WalletWithdrawal.created_at.desc()).limit(10).all(),
@@ -540,7 +567,10 @@ def _strategy_ranking_diagnostic(ranking: StrategyRanking) -> dict[str, object]:
         {"label": "Net ROI", "value": round(_safe_float(net_roi.get("net_roi_score"), _safe_float(ranking.net_return_after_costs)), 4)},
         {"label": "Drawdown", "value": round(_safe_float(ranking.max_drawdown), 4)},
         {"label": "Win Rate", "value": round(_safe_float(ranking.win_rate), 4)},
-        {"label": "Execution", "value": round(_safe_float(quality.get("expected_execution_quality"), _safe_float(edge.get("expected_execution_quality"))), 4)},
+        {
+            "label": "Execution",
+            "value": round(_safe_float(quality.get("expected_execution_quality"), _safe_float(edge.get("expected_execution_quality"))), 4),
+        },
     ]
     blockers: list[str] = []
     if ranking.rejection_reason:
@@ -702,6 +732,129 @@ def invite_admin_sign_out():
     )
 
 
+@admin_bp.get("/api/users")
+@admin_api_required
+def admin_users_api():
+    search = str(request.args.get("search", "") or "").strip()
+    funded_filter = str(request.args.get("funded", "all") or "all").strip().lower()
+    if funded_filter not in {"all", "funded", "empty"}:
+        funded_filter = "all"
+    sort = str(request.args.get("sort", "portfolio_desc") or "portfolio_desc").strip().lower()
+    limit = max(1, min(_safe_int(request.args.get("limit"), 500), 1000))
+
+    query = User.query
+    if search:
+        query = query.filter(User.username.ilike(f"%{search}%"))
+    users = query.order_by(User.created_at.desc(), User.id.desc()).all()
+    rows = [_admin_user_payload(user) for user in users]
+    if funded_filter == "funded":
+        rows = [row for row in rows if int(row["wallet"]["activeAssetCount"] or 0) > 0]
+    elif funded_filter == "empty":
+        rows = [row for row in rows if int(row["wallet"]["activeAssetCount"] or 0) == 0]
+    rows = _sort_admin_user_payloads(rows, sort)
+    truncated = len(rows) > limit
+    visible_rows = rows[:limit]
+    return jsonify(
+        {
+            "ok": True,
+            "users": visible_rows,
+            "summary": _admin_users_summary(rows),
+            "generatedAt": _iso(datetime.utcnow()),
+            "truncated": truncated,
+        }
+    )
+
+
+@admin_bp.post("/api/users/<int:user_id>/impersonation-link")
+@admin_api_required
+def create_impersonation_link(user_id: int):
+    _ensure_impersonation_grant_table()
+    operator = current_user()
+    if operator is None or operator.username.lower() != IMPERSONATION_OPERATOR_USERNAME:
+        return _admin_api_error("Only sufyanh can open support sessions.", 403, "impersonation_operator_required")
+
+    target = db.session.get(User, user_id)
+    if target is None:
+        return _admin_api_error("User not found.", 404, "user_not_found")
+    if target.id == operator.id:
+        return _admin_api_error("Choose a different account to open.", 400, "cannot_impersonate_self")
+
+    token = secrets.token_urlsafe(32)
+    token_hash = _impersonation_token_hash(token)
+    grant = AccountImpersonationGrant(
+        token_hash=token_hash,
+        operator_user_id=operator.id,
+        target_user_id=target.id,
+        created_ip_address=_request_ip(),
+        created_user_agent=str(request.headers.get("User-Agent", ""))[:500],
+        expires_at=datetime.utcnow() + timedelta(seconds=IMPERSONATION_GRANT_TTL_SECONDS),
+    )
+    grant.details = {"target_username": target.username, "operator_username": operator.username}
+    db.session.add(grant)
+    db.session.flush()
+    _record_admin_audit(
+        "impersonation_link_created",
+        "user",
+        f"user:{target.id}",
+        {},
+        {"target_user_id": target.id, "target_username": target.username, "expires_at": _iso(grant.expires_at)},
+        {"grant_public_id": grant.public_id},
+    )
+    commit_with_retry()
+
+    path = url_for("admin.consume_impersonation", token=token)
+    return jsonify(
+        {
+            "ok": True,
+            "impersonationUrl": _public_app_url(path),
+            "expiresAt": _iso(grant.expires_at),
+            "target": _admin_user_identity_payload(target),
+        }
+    )
+
+
+@admin_bp.get("/impersonate/<token>")
+def consume_impersonation(token: str):
+    _ensure_impersonation_grant_table()
+    grant = AccountImpersonationGrant.query.filter_by(token_hash=_impersonation_token_hash(token)).one_or_none()
+    now = datetime.utcnow()
+    if grant is None or grant.consumed_at is not None or grant.expires_at <= now:
+        flash("Support session link is invalid or expired.", "danger")
+        return redirect(url_for("auth.login"))
+
+    operator = grant.operator_user
+    target = grant.target_user
+    if operator is None or target is None or operator.username.lower() != IMPERSONATION_OPERATOR_USERNAME:
+        flash("Support session link is no longer valid.", "danger")
+        return redirect(url_for("auth.login"))
+
+    grant.consumed_at = now
+    grant.consumed_ip_address = _request_ip()
+    grant.consumed_user_agent = str(request.headers.get("User-Agent", ""))[:500]
+    _record_admin_audit_for_user(
+        operator,
+        "impersonation_started",
+        "user",
+        f"user:{target.id}",
+        {},
+        {"target_user_id": target.id, "target_username": target.username},
+        {"grant_public_id": grant.public_id, "impersonator_user_id": operator.id, "impersonator_username": operator.username},
+    )
+    commit_with_retry()
+
+    login_user(target, two_factor_verified=True)
+    session[IMPERSONATION_SESSION_KEY] = {
+        "grant_public_id": grant.public_id,
+        "operator_user_id": operator.id,
+        "operator_username": operator.username,
+        "target_user_id": target.id,
+        "target_username": target.username,
+        "started_at": _iso(now),
+    }
+    flash(f"Viewing as {target.username} via {operator.username}.", "warning")
+    return redirect(url_for("consumer.home"))
+
+
 @admin_bp.route("/api/invite-codes", methods=["GET", "POST"])
 @admin_api_required
 def invite_codes_api():
@@ -716,7 +869,11 @@ def invite_codes_api():
 
         created: list[ReferralInviteCode] = []
         for index in range(batch_count):
-            code = normalized["code"] if batch_count == 1 and normalized.get("code") else _generate_invite_code(payload.get("codePrefix") or payload.get("code"))
+            code = (
+                normalized["code"]
+                if batch_count == 1 and normalized.get("code")
+                else _generate_invite_code(payload.get("codePrefix") or payload.get("code"))
+            )
             if ReferralInviteCode.query.filter_by(code=code).one_or_none() is not None:
                 if batch_count == 1:
                     return _json_error("Invite code must be unique.", 409, "duplicate_invite_code")
@@ -725,7 +882,9 @@ def invite_codes_api():
             db.session.add(invite)
             _apply_invite_payload(invite, {**normalized, "code": code}, creating=True)
             db.session.flush()
-            _record_admin_audit("invite_code_created", "invite_code", invite.public_id, {}, _invite_snapshot(invite), {"batch_index": index})
+            _record_admin_audit(
+                "invite_code_created", "invite_code", invite.public_id, {}, _invite_snapshot(invite), {"batch_index": index}
+            )
             created.append(invite)
         commit_with_retry()
         return jsonify({"ok": True, "inviteCodes": [_invite_payload(invite) for invite in created]}), 201
@@ -1030,7 +1189,10 @@ def rebalance_platform_treasury():
     try:
         result = get_service("treasury_solvency").rebalance_if_needed(network=network, force=force)
         commit_with_retry()
-        flash("Treasury reserve rebalance queued." if result.get("created") else f"Treasury rebalance: {result.get('status', 'not needed')}.", "success")
+        flash(
+            "Treasury reserve rebalance queued." if result.get("created") else f"Treasury rebalance: {result.get('status', 'not needed')}.",
+            "success",
+        )
     except RuntimeError as exc:
         db.session.rollback()
         flash(str(exc), "danger")
@@ -1225,7 +1387,9 @@ def _normalized_invite_payload(
             raise ValueError("Profit-share percentage must be between 0 and 100.")
         normalized["profit_share_percent"] = percent
     if "profitShareWallet" in payload or "profit_share_wallet" in payload:
-        wallet = str(payload.get("profitShareWallet", payload.get("profit_share_wallet", DEFAULT_PROFIT_SHARE_WALLET)) or "").strip().lower()
+        wallet = (
+            str(payload.get("profitShareWallet", payload.get("profit_share_wallet", DEFAULT_PROFIT_SHARE_WALLET)) or "").strip().lower()
+        )
         normalized["profit_share_wallet"] = wallet or DEFAULT_PROFIT_SHARE_WALLET
     if "profitShareStartsAt" in payload or "profit_share_starts_at" in payload:
         normalized["profit_share_starts_at"] = _parse_datetime(payload.get("profitShareStartsAt") or payload.get("profit_share_starts_at"))
@@ -1359,8 +1523,17 @@ def _invite_payload(invite: ReferralInviteCode, *, include_recent: bool = False)
         "payoutCounts": payout_counts,
     }
     if include_recent:
-        payload["recentUsages"] = [_usage_payload(row) for row in InviteCodeUsage.query.filter_by(invite_code_id=invite.id).order_by(InviteCodeUsage.used_at.desc()).limit(10).all()]
-        payload["recentPayouts"] = [_payout_payload(row) for row in ProfitSharePayout.query.filter_by(invite_code_id=invite.id).order_by(ProfitSharePayout.created_at.desc()).limit(10).all()]
+        payload["recentUsages"] = [
+            _usage_payload(row)
+            for row in InviteCodeUsage.query.filter_by(invite_code_id=invite.id).order_by(InviteCodeUsage.used_at.desc()).limit(10).all()
+        ]
+        payload["recentPayouts"] = [
+            _payout_payload(row)
+            for row in ProfitSharePayout.query.filter_by(invite_code_id=invite.id)
+            .order_by(ProfitSharePayout.created_at.desc())
+            .limit(10)
+            .all()
+        ]
     return payload
 
 
@@ -1394,6 +1567,102 @@ def _payout_payload(payout: ProfitSharePayout) -> dict[str, Any]:
     }
 
 
+def _impersonation_token_hash(token: str) -> str:
+    return hashlib.sha256(str(token or "").encode("utf-8")).hexdigest()
+
+
+def _ensure_impersonation_grant_table() -> None:
+    try:
+        AccountImpersonationGrant.__table__.create(bind=db.engine, checkfirst=True)
+    except Exception:  # noqa: BLE001
+        db.session.rollback()
+        raise
+
+
+def _public_app_url(path: str) -> str:
+    origin = str(current_app.config.get("PUBLIC_APP_ORIGIN") or "").strip().rstrip("/")
+    if not origin or origin.startswith(("http://localhost", "http://127.0.0.1")):
+        origin = "https://algvault.app"
+    normalized_path = path if path.startswith("/") else f"/{path}"
+    return f"{origin}{normalized_path}"
+
+
+def _admin_user_identity_payload(user: User) -> dict[str, Any]:
+    return {
+        "id": int(user.id),
+        "username": user.username,
+        "role": user.role,
+    }
+
+
+def _admin_user_payload(user: User) -> dict[str, Any]:
+    summary = get_service("wallet_summary").summary_for_user(user)
+    balances = [_admin_wallet_balance_payload(balance) for balance in summary.balances if _admin_wallet_balance_active(balance)]
+    portfolio_total = sum(float(balance.get("estimatedUsdValue") or 0.0) for balance in balances)
+    return {
+        **_admin_user_identity_payload(user),
+        "twoFactorEnabled": bool(user.two_factor_enabled),
+        "createdAt": _iso(user.created_at),
+        "updatedAt": _iso(user.updated_at),
+        "wallet": {
+            "portfolioTotalUsd": portfolio_total,
+            "activeAssetCount": len(balances),
+            "balances": balances,
+        },
+        "activity": {
+            "activeCyclesCount": int(summary.active_cycles_count or 0),
+            "activeOrderCount": int(summary.active_order_count or 0),
+        },
+    }
+
+
+def _admin_wallet_balance_payload(balance: Any) -> dict[str, Any]:
+    return {
+        "asset": str(getattr(balance, "asset", "") or "").upper(),
+        "availableBalance": float(getattr(balance, "available_balance", 0.0) or 0.0),
+        "lockedBalance": float(getattr(balance, "locked_balance", 0.0) or 0.0),
+        "totalBalance": float(getattr(balance, "total_balance", 0.0) or 0.0),
+        "estimatedUsdValue": float(getattr(balance, "estimated_usd_value", 0.0) or 0.0),
+        "syncStatus": str(getattr(balance, "sync_status", "") or "not_configured"),
+        "onchainStatus": str(getattr(balance, "onchain_status", "") or "unavailable"),
+        "onchainCheckedAt": _iso(getattr(balance, "onchain_checked_at", None)),
+    }
+
+
+def _admin_wallet_balance_active(balance: Any) -> bool:
+    available = _safe_float(getattr(balance, "available_balance", 0.0))
+    locked = _safe_float(getattr(balance, "locked_balance", 0.0))
+    total = _safe_float(getattr(balance, "total_balance", 0.0))
+    verified = _safe_float(getattr(balance, "verified_on_chain_balance", 0.0))
+    onchain = _safe_float(getattr(balance, "onchain_balance", 0.0))
+    onchain_status = str(getattr(balance, "onchain_status", "") or "").lower()
+    return any(value > 0 for value in (available, locked, total, verified)) or (onchain_status == "checked" and onchain > 0)
+
+
+def _sort_admin_user_payloads(rows: list[dict[str, Any]], sort: str) -> list[dict[str, Any]]:
+    if sort == "username_asc":
+        return sorted(rows, key=lambda row: str(row.get("username") or "").lower())
+    if sort == "created_desc":
+        return sorted(rows, key=lambda row: str(row.get("createdAt") or ""), reverse=True)
+    return sorted(
+        rows,
+        key=lambda row: (
+            _safe_float((row.get("wallet") or {}).get("portfolioTotalUsd")),
+            str(row.get("username") or "").lower(),
+        ),
+        reverse=True,
+    )
+
+
+def _admin_users_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "totalUsers": len(rows),
+        "fundedUsers": sum(1 for row in rows if int((row.get("wallet") or {}).get("activeAssetCount") or 0) > 0),
+        "activeAssetRows": sum(int((row.get("wallet") or {}).get("activeAssetCount") or 0) for row in rows),
+        "portfolioTotalUsd": sum(_safe_float((row.get("wallet") or {}).get("portfolioTotalUsd")) for row in rows),
+    }
+
+
 def _admin_audit_payload(log: AdminAuditLog) -> dict[str, Any]:
     return {
         "publicId": log.public_id,
@@ -1409,6 +1678,19 @@ def _admin_audit_payload(log: AdminAuditLog) -> dict[str, Any]:
     }
 
 
+def _admin_audit_metadata(metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+    details = dict(metadata or {})
+    context = impersonation_context()
+    if not context:
+        return details
+    details.setdefault("impersonator_user_id", _safe_int(context.get("operator_user_id")))
+    details.setdefault("impersonator_username", str(context.get("operator_username") or ""))
+    details.setdefault("target_user_id", _safe_int(context.get("target_user_id")))
+    details.setdefault("target_username", str(context.get("target_username") or ""))
+    details.setdefault("grant_public_id", str(context.get("grant_public_id") or ""))
+    return details
+
+
 def _record_admin_audit(
     action: str,
     entity_type: str,
@@ -1417,7 +1699,18 @@ def _record_admin_audit(
     new_value: dict[str, Any],
     metadata: dict[str, Any] | None = None,
 ) -> None:
-    user = current_user()
+    _record_admin_audit_for_user(current_user(), action, entity_type, entity_public_id, old_value, new_value, metadata)
+
+
+def _record_admin_audit_for_user(
+    user: User | None,
+    action: str,
+    entity_type: str,
+    entity_public_id: str,
+    old_value: dict[str, Any],
+    new_value: dict[str, Any],
+    metadata: dict[str, Any] | None = None,
+) -> None:
     log = AdminAuditLog(
         admin_user_id=user.id if user else None,
         action=action,
@@ -1428,7 +1721,7 @@ def _record_admin_audit(
     )
     log.old_value = old_value
     log.new_value = new_value
-    log.details = metadata or {}
+    log.details = _admin_audit_metadata(metadata)
     db.session.add(log)
 
 

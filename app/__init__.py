@@ -55,7 +55,7 @@ if _should_load_repo_dotenv():
 from .backtesting.engine import BacktestEngine
 from .backtesting.optimizer import StrategyOptimizer
 from .backtesting.vault_simulator import VaultBacktestSimulator
-from .auth import current_user, password_hash
+from .auth import current_user, impersonation_context, password_hash
 from .cli import register_cli
 from .config import public_origin_violations, selected_config_class
 from .csrf import csrf_input, csrf_token, validate_csrf_request
@@ -406,6 +406,7 @@ def create_app(test_config: dict | None = None) -> Flask:
             "current_user": user,
             "admin_authenticated": admin_authenticated(),
             "admin_configured": _safe_admin_configured(app),
+            "impersonation_context": impersonation_context(),
             "crypto_rail_assets": _crypto_rail_assets() if user is not None else [],
             "csrf_token": csrf_token,
             "csrf_input": csrf_input,

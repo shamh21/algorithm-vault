@@ -39,6 +39,61 @@ export type InviteSummary = {
   failedPayouts: number;
 };
 
+export type AdminUserWalletBalance = {
+  asset: string;
+  availableBalance: number;
+  lockedBalance: number;
+  totalBalance: number;
+  estimatedUsdValue: number;
+  syncStatus: string;
+  onchainStatus: string;
+  onchainCheckedAt: string | null;
+};
+
+export type AdminUser = {
+  id: number;
+  username: string;
+  role: string;
+  twoFactorEnabled: boolean;
+  createdAt: string | null;
+  updatedAt: string | null;
+  wallet: {
+    portfolioTotalUsd: number;
+    activeAssetCount: number;
+    balances: AdminUserWalletBalance[];
+  };
+  activity: {
+    activeCyclesCount: number;
+    activeOrderCount: number;
+  };
+};
+
+export type AdminUsersSummary = {
+  totalUsers: number;
+  fundedUsers: number;
+  activeAssetRows: number;
+  portfolioTotalUsd: number;
+};
+
+export type AdminUsersResponse = {
+  ok: true;
+  users: AdminUser[];
+  summary: AdminUsersSummary;
+  generatedAt: string | null;
+  truncated: boolean;
+};
+
+export type AdminImpersonationLinkResponse = {
+  ok: true;
+  impersonationUrl: string;
+  expiresAt: string | null;
+  target: {
+    id: number;
+    username: string;
+    role: string;
+  };
+};
+
 export type Payout = {
   publicId: string;
   inviteCodePublicId: string;

@@ -19,6 +19,8 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from .extensions import db
 from .models import User
 
+IMPERSONATION_SESSION_KEY = "impersonation"
+
 
 def password_hash(password: str) -> str:
     return generate_password_hash(password)
@@ -50,7 +52,29 @@ def logout_user() -> None:
 
 
 def two_factor_session_valid(user: User) -> bool:
-    return user.two_factor_enabled and bool(session.get("two_factor_verified"))
+    if user.two_factor_enabled and bool(session.get("two_factor_verified")):
+        return True
+    return impersonation_session_valid(user)
+
+
+def impersonation_context() -> dict[str, Any] | None:
+    data = session.get(IMPERSONATION_SESSION_KEY)
+    return data if isinstance(data, dict) else None
+
+
+def impersonation_session_valid(user: User) -> bool:
+    data = impersonation_context()
+    if not data:
+        return False
+    try:
+        return int(data.get("target_user_id") or 0) == int(user.id)
+    except (TypeError, ValueError):
+        return False
+
+
+def is_impersonating() -> bool:
+    user = current_user()
+    return bool(user and impersonation_session_valid(user))
 
 
 def encrypt_totp_secret(secret: str) -> str:

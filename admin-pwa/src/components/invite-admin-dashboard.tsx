@@ -450,6 +450,12 @@ export function InviteAdminDashboard() {
             <h1 className="text-2xl font-semibold text-white md:text-4xl">Invite Codes</h1>
           </div>
           <div className="flex items-center gap-2">
+            <a
+              className="tap-target hidden items-center justify-center rounded-full border border-white/10 bg-white/5 px-3 text-sm font-semibold text-white sm:inline-flex"
+              href="/users"
+            >
+              Users
+            </a>
             {adminSession?.admin?.username && <span className="hidden text-sm text-white/55 sm:inline">{adminSession.admin.username}</span>}
             <button
               className="tap-target inline-flex items-center justify-center rounded-full border border-white/10 bg-white/5 px-3 text-sm font-semibold text-white"

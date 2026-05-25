@@ -5,13 +5,15 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from urllib.parse import urlparse
 
-from flask import Blueprint, current_app, flash, redirect, render_template, request, url_for
+from flask import Blueprint, current_app, flash, redirect, render_template, request, session, url_for
 
 from ..auth import (
     current_user,
     decrypt_totp_secret,
     encrypt_totp_secret,
     generate_totp_secret,
+    impersonation_context,
+    is_impersonating,
     login_user,
     logout_user,
     password_hash,
@@ -21,7 +23,7 @@ from ..auth import (
     verify_totp,
 )
 from ..extensions import db
-from ..models import InviteCodeUsage, ReferralInviteCode, TradingConnection, TreasuryReserveState, User
+from ..models import AdminAuditLog, InviteCodeUsage, ReferralInviteCode, TradingConnection, TreasuryReserveState, User
 from ..services.withdrawal_config import wallet_withdrawals_enabled
 
 auth_bp = Blueprint("auth", __name__)
@@ -165,6 +167,46 @@ def logout():
     return redirect(url_for("auth.login"))
 
 
+@auth_bp.post("/impersonation/end")
+def end_impersonation():
+    data = impersonation_context()
+    user = current_user()
+    if not data:
+        flash("No support session is active.", "warning")
+        return redirect(url_for("consumer.home") if user else url_for("auth.login"))
+
+    operator = db.session.get(User, _safe_int(data.get("operator_user_id")))
+    target_id = int(user.id) if user is not None else _safe_int(data.get("target_user_id"))
+    target_username = str(getattr(user, "username", "") or data.get("target_username") or "")
+    log = AdminAuditLog(
+        admin_user_id=operator.id if operator else None,
+        action="impersonation_ended",
+        entity_type="user",
+        entity_public_id=f"user:{target_id}" if target_id else target_username,
+        ip_address=_request_ip(),
+        user_agent=str(request.headers.get("User-Agent", ""))[:500],
+    )
+    log.details = {
+        "grant_public_id": data.get("grant_public_id", ""),
+        "impersonator_user_id": int(operator.id) if operator else _safe_int(data.get("operator_user_id")),
+        "impersonator_username": str(getattr(operator, "username", "") or data.get("operator_username") or ""),
+        "target_user_id": target_id,
+        "target_username": target_username,
+    }
+    db.session.add(log)
+    db.session.commit()
+
+    session.clear()
+    if operator is not None:
+        session["user_id"] = operator.id
+        session["two_factor_verified"] = True
+        flash(f"Returned to {operator.username}.", "success")
+        return redirect(url_for("consumer.home"))
+
+    flash("Support session ended. Sign in again to continue.", "success")
+    return redirect(url_for("auth.login"))
+
+
 @auth_bp.route("/setup-2fa", methods=["GET", "POST"])
 def setup_2fa():
     user = current_user()
@@ -172,6 +214,10 @@ def setup_2fa():
     if user is None:
         flash("Sign in before setting up 2FA.", "warning")
         return redirect(url_for("auth.login", next=url_for("auth.setup_2fa")))
+
+    if is_impersonating():
+        flash("Authenticator setup is blocked while viewing another account.", "warning")
+        return redirect(url_for("consumer.home"))
 
     if user.two_factor_enabled:
         flash("2FA is already enabled for this account.", "success")
@@ -208,6 +254,18 @@ def setup_2fa():
 
 def _clean_username(value: str | None) -> str:
     return str(value or "").strip().lower()
+
+
+def _safe_int(value: object) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _request_ip() -> str:
+    forwarded = str(request.headers.get("X-Forwarded-For", "") or "").split(",", maxsplit=1)[0].strip()
+    return forwarded or str(request.remote_addr or "")
 
 
 def _managed_invites_available() -> bool:

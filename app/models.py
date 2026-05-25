@@ -720,9 +720,7 @@ class LeveragedMarket(db.Model):
 
     trading_connection = db.relationship("TradingConnection", backref="leveraged_markets")
 
-    __table_args__ = (
-        db.UniqueConstraint("provider", "venue_symbol", name="uq_leveraged_market_provider_symbol"),
-    )
+    __table_args__ = (db.UniqueConstraint("provider", "venue_symbol", name="uq_leveraged_market_provider_symbol"),)
 
     @property
     def raw(self) -> dict[str, Any]:
@@ -979,9 +977,7 @@ class TradingConnection(db.Model):
     created_at = db.Column(db.DateTime, nullable=False, default=utcnow, index=True)
     updated_at = db.Column(db.DateTime, nullable=False, default=utcnow, onupdate=utcnow)
 
-    __table_args__ = (
-        db.UniqueConstraint("user_id", "provider", "connection_type", name="uq_trading_connection_scope"),
-    )
+    __table_args__ = (db.UniqueConstraint("user_id", "provider", "connection_type", name="uq_trading_connection_scope"),)
 
     user = db.relationship("User", backref="trading_connections")
 
@@ -1029,9 +1025,7 @@ class WalletAccount(db.Model):
     created_at = db.Column(db.DateTime, nullable=False, default=utcnow, index=True)
     updated_at = db.Column(db.DateTime, nullable=False, default=utcnow, onupdate=utcnow)
 
-    __table_args__ = (
-        db.UniqueConstraint("user_id", "provider", "asset", "network", name="uq_wallet_account_scope"),
-    )
+    __table_args__ = (db.UniqueConstraint("user_id", "provider", "asset", "network", name="uq_wallet_account_scope"),)
 
     user = db.relationship("User", backref="wallet_accounts")
 
@@ -1674,9 +1668,7 @@ class OptimizerRun(db.Model):
     completed_at = db.Column(db.DateTime, nullable=True)
 
     rankings = db.relationship("StrategyRanking", backref="optimizer_run", lazy=True, cascade="all, delete-orphan")
-    __table_args__ = (
-        db.Index("ix_optimizer_run_profile_status_created", "profile", "status", "created_at"),
-    )
+    __table_args__ = (db.Index("ix_optimizer_run_profile_status_created", "profile", "status", "created_at"),)
 
     @property
     def symbols(self) -> list[str]:
@@ -2338,6 +2330,45 @@ class AdminAuditLog(db.Model):
     @new_value.setter
     def new_value(self, value: dict[str, Any]) -> None:
         self.new_value_json = json.dumps(value or {}, default=str)
+
+    @property
+    def details(self) -> dict[str, Any]:
+        try:
+            value = json.loads(self.metadata_json or "{}")
+        except json.JSONDecodeError:
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    @details.setter
+    def details(self, value: dict[str, Any]) -> None:
+        self.metadata_json = json.dumps(value or {}, default=str)
+
+
+class AccountImpersonationGrant(db.Model):
+    """One-time admin support grant for opening a user session without rewriting credentials."""
+
+    id = db.Column(db.Integer, primary_key=True)
+    public_id = db.Column(db.String(40), unique=True, nullable=False, default=lambda: public_token("imp"), index=True)
+    token_hash = db.Column(db.String(128), unique=True, nullable=False, index=True)
+    operator_user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False, index=True)
+    target_user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False, index=True)
+    created_ip_address = db.Column(db.String(120), nullable=False, default="")
+    created_user_agent = db.Column(db.Text, nullable=False, default="")
+    consumed_ip_address = db.Column(db.String(120), nullable=False, default="")
+    consumed_user_agent = db.Column(db.Text, nullable=False, default="")
+    metadata_json = db.Column(db.Text, nullable=False, default="{}")
+    created_at = db.Column(db.DateTime, nullable=False, default=utcnow, index=True)
+    updated_at = db.Column(db.DateTime, nullable=False, default=utcnow, onupdate=utcnow)
+    expires_at = db.Column(db.DateTime, nullable=False, index=True)
+    consumed_at = db.Column(db.DateTime, nullable=True, index=True)
+
+    operator_user = db.relationship("User", foreign_keys=[operator_user_id], backref="created_impersonation_grants")
+    target_user = db.relationship("User", foreign_keys=[target_user_id], backref="targeted_impersonation_grants")
+
+    __table_args__ = (
+        db.Index("ix_account_impersonation_grant_operator_created", "operator_user_id", "created_at"),
+        db.Index("ix_account_impersonation_grant_target_created", "target_user_id", "created_at"),
+    )
 
     @property
     def details(self) -> dict[str, Any]:
