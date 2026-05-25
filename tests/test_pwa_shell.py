@@ -1,7 +1,15 @@
 from __future__ import annotations
 
 import json
+import struct
 from pathlib import Path
+
+
+def _png_size(path: Path) -> tuple[int, int]:
+    with path.open("rb") as handle:
+        header = handle.read(24)
+    assert header[:8] == b"\x89PNG\r\n\x1a\n"
+    return struct.unpack(">II", header[16:24])
 
 
 def test_manifest_contains_dark_standalone_pwa_contract(app) -> None:
@@ -14,20 +22,23 @@ def test_manifest_contains_dark_standalone_pwa_contract(app) -> None:
     assert manifest["name"] == "AlgVault"
     assert manifest["short_name"] == "AlgVault"
     assert "vault" in manifest["description"].lower()
-    assert manifest["start_url"] == "/"
+    assert manifest["start_url"] == "/login"
     assert manifest["scope"] == "/"
     assert manifest["display"] == "standalone"
     assert manifest["background_color"] == "#050607"
     assert manifest["theme_color"] == "#050607"
     assert "finance" in manifest["categories"]
 
-    icons = {icon["sizes"]: icon for icon in manifest["icons"]}
-    assert icons["192x192"]["src"] == "/icons/algvault-ios-192.png"
-    assert icons["192x192"]["purpose"] == "any maskable"
-    assert icons["512x512"]["src"] == "/icons/algvault-ios-512.png"
-    assert icons["512x512"]["purpose"] == "any maskable"
-    assert icons["180x180"]["src"] == "/icons/algvault-ios-180.png"
+    icons = {icon["src"]: icon for icon in manifest["icons"]}
+    assert icons["/icons/algvault-mascot-192.png"]["sizes"] == "192x192"
+    assert icons["/icons/algvault-mascot-192.png"]["purpose"] == "any"
+    assert icons["/icons/algvault-maskable-192.png"]["sizes"] == "192x192"
+    assert icons["/icons/algvault-maskable-192.png"]["purpose"] == "maskable"
+    assert icons["/icons/algvault-mascot-512.png"]["sizes"] == "512x512"
+    assert icons["/icons/algvault-maskable-512.png"]["sizes"] == "512x512"
+    assert icons["/icons/algvault-mascot-180.png"]["sizes"] == "180x180"
     assert "/admin/panic/" not in {shortcut["url"] for shortcut in manifest["shortcuts"]}
+    assert "/login" in {shortcut["url"] for shortcut in manifest["shortcuts"]}
     assert "/convert/" in {shortcut["url"] for shortcut in manifest["shortcuts"]}
 
 
@@ -37,6 +48,16 @@ def test_manifest_files_stay_in_sync() -> None:
     webmanifest = json.loads((root / "manifest.webmanifest").read_text(encoding="utf-8"))
 
     assert manifest == webmanifest
+
+
+def test_webmanifest_route_matches_manifest_json(app) -> None:
+    client = app.test_client()
+    manifest = client.get("/manifest.json")
+    webmanifest = client.get("/manifest.webmanifest")
+
+    assert webmanifest.status_code == 200
+    assert "must-revalidate" in webmanifest.headers["Cache-Control"]
+    assert webmanifest.get_json() == manifest.get_json()
 
 
 def test_base_template_has_dark_ios_pwa_metadata(app) -> None:
@@ -49,7 +70,9 @@ def test_base_template_has_dark_ios_pwa_metadata(app) -> None:
     assert '<meta name="color-scheme" content="dark">' in html
     assert '<meta name="apple-mobile-web-app-capable" content="yes">' in html
     assert '<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">' in html
-    assert '<link rel="apple-touch-icon" href="/icons/algvault-ios-180.png">' in html
+    assert '<link rel="icon" href="/icons/favicon.ico" sizes="any">' in html
+    assert '<link rel="mask-icon" href="/icons/algvault-mask-icon.svg" color="#ff1f36">' in html
+    assert '<link rel="apple-touch-icon" sizes="180x180" href="/icons/algvault-mascot-180.png">' in html
     assert "data-theme-toggle" not in html
     assert "av-color-theme" in html
     assert 'data-component="AlgVaultLaunchAnimation"' in html
@@ -89,24 +112,45 @@ def test_dark_pwa_icon_and_crypto_symbol_sources_exist() -> None:
     icon_source = Path("static/icons/algvault-icon.svg").read_text(encoding="utf-8")
     crypto_icon = Path("templates/components/crypto_icon.html").read_text(encoding="utf-8")
 
-    assert "vault shield" in icon_source.lower()
-    assert "crypto nodes" in icon_source.lower()
+    assert "happy red algvault mascot" in icon_source.lower()
+    assert "holding a dark vault" in icon_source.lower()
     for symbol in ("BTC", "ETH", "ALGO", "USDT", "USDC", "SOL", "XRP"):
         assert symbol in crypto_icon
+
+
+def test_mascot_pwa_icon_exports_have_expected_dimensions() -> None:
+    icon_dir = Path("static/icons")
+    for size in (16, 32, 48, 64, 72, 96, 128, 144, 152, 167, 180, 192, 256, 384, 512):
+        assert _png_size(icon_dir / f"algvault-mascot-{size}.png") == (size, size)
+    assert _png_size(icon_dir / "algvault-maskable-192.png") == (192, 192)
+    assert _png_size(icon_dir / "algvault-maskable-512.png") == (512, 512)
+    assert _png_size(icon_dir / "apple-touch-icon.png") == (180, 180)
+    assert _png_size(icon_dir / "algvault-social.png") == (1200, 630)
+    assert (icon_dir / "favicon.ico").read_bytes()[:4] == b"\x00\x00\x01\x00"
+
+
+def test_favicon_route_serves_mascot_icon(app) -> None:
+    response = app.test_client().get("/favicon.ico")
+
+    assert response.status_code == 308
+    assert response.location == "/icons/favicon.ico"
 
 
 def test_service_worker_precaches_only_safe_shell_assets() -> None:
     source = Path("static/js/sw.js").read_text(encoding="utf-8")
     app_shell = source.split("];", 1)[0]
 
-    assert '"/static/css/app.css"' in app_shell
     assert '"/static/js/app-shell.js"' in app_shell
-    assert '"/static/js/responsive-tables.js"' in app_shell
     assert '"/manifest.json"' in app_shell
-    assert '"/icons/algvault-ios-180.png"' in app_shell
-    assert '"/icons/algvault-ios-192.png"' in app_shell
-    assert '"/icons/algvault-ios-512.png"' in app_shell
-    assert '"/icons/icon-192.png"' in app_shell
+    assert '"/icons/favicon.ico"' in app_shell
+    assert '"/icons/algvault-icon.svg"' in app_shell
+    assert '"/icons/algvault-mask-icon.svg"' in app_shell
+    assert '"/icons/algvault-mascot-180.png"' in app_shell
+    assert '"/icons/algvault-mascot-192.png"' in app_shell
+    assert '"/static/css/app.css"' not in app_shell
+    assert '"/static/css/public.css"' not in app_shell
+    assert '"/static/js/responsive-tables.js"' not in app_shell
+    assert '"/icons/algvault-mascot-512.png"' not in app_shell
     assert '"/admin/dashboard"' not in app_shell
     assert '"/wallet"' not in app_shell
     assert '"/vault"' not in app_shell
@@ -140,7 +184,7 @@ def test_pwa_static_headers_keep_sw_fresh_and_assets_cacheable(app) -> None:
     sw = client.get("/static/js/sw.js")
     root_sw = client.get("/sw.js")
     css = client.get("/static/css/app.css")
-    icon = client.get("/icons/algvault-ios-192.png")
+    icon = client.get("/icons/algvault-mascot-192.png")
 
     assert "must-revalidate" in sw.headers["Cache-Control"]
     assert sw.headers["Service-Worker-Allowed"] == "/"

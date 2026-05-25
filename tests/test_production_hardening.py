@@ -399,17 +399,19 @@ def test_pwa_manifest_has_ios_install_shape(app) -> None:
     assert payload["short_name"] == "AlgVault"
     assert payload["display"] == "standalone"
     assert payload["id"] == "/"
-    assert payload["start_url"] == "/"
+    assert payload["start_url"] == "/login"
     assert payload["scope"] == "/"
     assert payload["background_color"] == "#050607"
     assert payload["theme_color"] == "#050607"
     assert {icon["src"] for icon in payload["icons"]} >= {
-        "/icons/algvault-ios-192.png",
-        "/icons/algvault-ios-512.png",
-        "/icons/algvault-ios-180.png",
+        "/icons/algvault-mascot-192.png",
+        "/icons/algvault-mascot-512.png",
+        "/icons/algvault-mascot-180.png",
+        "/icons/algvault-maskable-192.png",
+        "/icons/algvault-maskable-512.png",
     }
-    assert any("maskable" in icon["purpose"] and icon["sizes"] == "192x192" for icon in payload["icons"])
-    assert any("maskable" in icon["purpose"] and icon["sizes"] == "512x512" for icon in payload["icons"])
+    assert any(icon["purpose"] == "maskable" and icon["sizes"] == "192x192" for icon in payload["icons"])
+    assert any(icon["purpose"] == "maskable" and icon["sizes"] == "512x512" for icon in payload["icons"])
     assert {shortcut["short_name"] for shortcut in payload["shortcuts"]} >= {"Wallet", "Convert", "Vault"}
     assert "/admin/panic/" not in {shortcut["url"] for shortcut in payload["shortcuts"]}
 
@@ -423,7 +425,8 @@ def test_ios_pwa_head_tags_target_algvault(app) -> None:
     assert '<meta name="theme-color" content="#050607">' in shell
     assert '<meta name="color-scheme" content="dark">' in shell
     assert '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">' in shell
-    assert '<link rel="apple-touch-icon" href="/icons/algvault-ios-180.png">' in shell
+    assert '<link rel="apple-touch-icon" sizes="180x180" href="/icons/algvault-mascot-180.png">' in shell
+    assert '<link rel="mask-icon" href="/icons/algvault-mask-icon.svg" color="#ff1f36">' in shell
     assert "data-theme-toggle" not in shell
     assert "data-theme-toggle" in Path("templates/settings.html").read_text(encoding="utf-8")
     assert '<link rel="manifest" href="/manifest.json">' in shell
@@ -432,11 +435,11 @@ def test_ios_pwa_head_tags_target_algvault(app) -> None:
 def test_service_worker_clears_old_algvault_and_tradingbot_caches(app) -> None:
     worker = app.test_client().get("/static/js/sw.js").get_data(as_text=True)
 
-    assert 'const CACHE_VERSION = "algvault-v21-vault-shell-polish-9"' in worker
+    assert 'const CACHE_VERSION = "algvault-v44-public-brand-ios-pages-1"' in worker
     assert 'name.startsWith("algvault-") || name.startsWith("tradingbot-")' in worker
     assert "self.clients.claim()" in worker
     assert "/manifest.json" in worker
-    assert "/icons/algvault-ios-192.png" in worker
+    assert "/icons/algvault-mascot-192.png" in worker
 
 
 def test_service_worker_offline_fallback_does_not_cache_trading_state(app) -> None:
@@ -458,4 +461,4 @@ def test_readme_has_iphone_pwa_https_setup_instructions() -> None:
     assert 'Confirm Safari does not show "This connection is not private."' in readme
     assert "Confirm no network requests go to `172.20.10.6`." in readme
     assert "Confirm service worker scope is `/`." in readme
-    assert "Confirm manifest `start_url` is `/`." in readme
+    assert "Confirm manifest `start_url` is `/login`." in readme

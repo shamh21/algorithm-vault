@@ -3,7 +3,7 @@
   "short_name": "AlgVault",
   "description": "Secure iOS-first AlgVault command center for automated portfolio allocation, strategy monitoring, provider status, and vault activity.",
   "id": "/",
-  "start_url": "/",
+  "start_url": "/login",
   "scope": "/",
   "lang": "en-US",
   "dir": "ltr",
@@ -22,32 +22,116 @@
   "prefer_related_applications": false,
   "icons": [
     {
-      "src": "/icons/algvault-ios-192.png",
-      "sizes": "192x192",
+      "src": "/icons/algvault-mascot-16.png",
+      "sizes": "16x16",
       "type": "image/png",
-      "purpose": "any maskable"
+      "purpose": "any"
     },
     {
-      "src": "/icons/algvault-ios-512.png",
-      "sizes": "512x512",
+      "src": "/icons/algvault-mascot-32.png",
+      "sizes": "32x32",
       "type": "image/png",
-      "purpose": "any maskable"
+      "purpose": "any"
     },
     {
-      "src": "/icons/algvault-ios-180.png",
+      "src": "/icons/algvault-mascot-48.png",
+      "sizes": "48x48",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/algvault-mascot-64.png",
+      "sizes": "64x64",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/algvault-mascot-72.png",
+      "sizes": "72x72",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/algvault-mascot-96.png",
+      "sizes": "96x96",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/algvault-mascot-128.png",
+      "sizes": "128x128",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/algvault-mascot-144.png",
+      "sizes": "144x144",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/algvault-mascot-152.png",
+      "sizes": "152x152",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/algvault-mascot-167.png",
+      "sizes": "167x167",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/algvault-mascot-180.png",
       "sizes": "180x180",
       "type": "image/png",
       "purpose": "any"
+    },
+    {
+      "src": "/icons/algvault-mascot-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/algvault-maskable-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/icons/algvault-mascot-256.png",
+      "sizes": "256x256",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/algvault-mascot-384.png",
+      "sizes": "384x384",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/algvault-mascot-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/algvault-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
     }
   ],
   "shortcuts": [
     {
-      "name": "Portfolio overview",
-      "short_name": "Portfolio",
-      "url": "/",
+      "name": "Sign in",
+      "short_name": "Sign in",
+      "url": "/login",
       "icons": [
         {
-          "src": "/icons/icon-192.png",
+          "src": "/icons/algvault-mascot-192.png",
           "sizes": "192x192",
           "type": "image/png"
         }
@@ -59,7 +143,7 @@
       "url": "/wallet/",
       "icons": [
         {
-          "src": "/icons/icon-192.png",
+          "src": "/icons/algvault-mascot-192.png",
           "sizes": "192x192",
           "type": "image/png"
         }
@@ -71,7 +155,7 @@
       "url": "/convert/",
       "icons": [
         {
-          "src": "/icons/icon-192.png",
+          "src": "/icons/algvault-mascot-192.png",
           "sizes": "192x192",
           "type": "image/png"
         }
@@ -83,7 +167,7 @@
       "url": "/vault/",
       "icons": [
         {
-          "src": "/icons/icon-192.png",
+          "src": "/icons/algvault-mascot-192.png",
           "sizes": "192x192",
           "type": "image/png"
         }

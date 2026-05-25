@@ -1,35 +1,68 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
-  <title id="title">AlgVault iOS app icon</title>
-  <desc id="desc">AlgVault app icon with a graphite vault shield, cyan and green signal rings, and crypto nodes.</desc>
+  <title id="title">AlgVault happy mascot app icon</title>
+  <desc id="desc">A happy red AlgVault mascot in front of a red shield, holding a dark vault with an AV mark.</desc>
   <defs>
-    <linearGradient id="bg" x1="112" y1="64" x2="914" y2="964" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#132033"/>
-      <stop offset="0.48" stop-color="#070b12"/>
-      <stop offset="1" stop-color="#030712"/>
-    </linearGradient>
-    <linearGradient id="shield" x1="306" y1="178" x2="748" y2="834" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#e0f2fe"/>
-      <stop offset="0.48" stop-color="#7dd3fc"/>
-      <stop offset="1" stop-color="#34d399"/>
-    </linearGradient>
-    <radialGradient id="shine" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(314 180) rotate(46) scale(724)">
-      <stop stop-color="#ffffff" stop-opacity="0.24"/>
-      <stop offset="0.36" stop-color="#7dd3fc" stop-opacity="0.1"/>
-      <stop offset="1" stop-color="#020617" stop-opacity="0"/>
+    <radialGradient id="bg" cx="54%" cy="30%" r="78%">
+      <stop stop-color="#282828"/>
+      <stop offset="0.45" stop-color="#0b0b0b"/>
+      <stop offset="1" stop-color="#000000"/>
     </radialGradient>
+    <linearGradient id="red" x1="258" y1="134" x2="760" y2="844" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ff7777"/>
+      <stop offset="0.28" stop-color="#ff2020"/>
+      <stop offset="0.68" stop-color="#bf0505"/>
+      <stop offset="1" stop-color="#740000"/>
+    </linearGradient>
+    <linearGradient id="dark" x1="288" y1="258" x2="790" y2="804" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#2c2c2c"/>
+      <stop offset="0.55" stop-color="#0b0b0b"/>
+      <stop offset="1" stop-color="#000000"/>
+    </linearGradient>
+    <linearGradient id="vault" x1="330" y1="558" x2="730" y2="818" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#4d4d4d"/>
+      <stop offset="0.3" stop-color="#202020"/>
+      <stop offset="1" stop-color="#080808"/>
+    </linearGradient>
+    <filter id="softShadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="28" stdDeviation="32" flood-color="#000000" flood-opacity="0.74"/>
+      <feDropShadow dx="0" dy="0" stdDeviation="20" flood-color="#ff2020" flood-opacity="0.24"/>
+    </filter>
   </defs>
-  <rect width="1024" height="1024" rx="228" fill="url(#bg)"/>
-  <rect x="56" y="56" width="912" height="912" rx="190" fill="url(#shine)"/>
-  <circle cx="512" cy="512" r="404" fill="none" stroke="#7dd3fc" stroke-opacity="0.16" stroke-width="10"/>
-  <circle cx="512" cy="512" r="318" fill="none" stroke="#34d399" stroke-opacity="0.2" stroke-width="8" stroke-dasharray="32 46"/>
-  <path d="M512 166 748 258v178c0 184-84 318-236 414-152-96-236-230-236-414V258l236-92Z" fill="#0b111c" stroke="url(#shield)" stroke-width="26" stroke-linejoin="round"/>
-  <path d="M344 680c42 46 98 88 168 132 70-44 126-86 168-132" fill="none" stroke="#34d399" stroke-width="18" stroke-linecap="round" stroke-opacity="0.74"/>
-  <path d="M362 306 512 248l150 58" fill="none" stroke="#e0f2fe" stroke-width="14" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.68"/>
-  <text x="512" y="568" text-anchor="middle" fill="#f8fafc" font-family="Inter, Arial, sans-serif" font-size="248" font-weight="900">AV</text>
-  <path d="M340 738h124m96 0h124M464 738l48 44 48-44" fill="none" stroke="#7dd3fc" stroke-width="10" stroke-linecap="round" stroke-linejoin="round" opacity="0.78"/>
-  <circle cx="340" cy="738" r="22" fill="#7dd3fc"/>
-  <circle cx="512" cy="782" r="25" fill="#34d399"/>
-  <circle cx="684" cy="738" r="22" fill="#fb7185"/>
-  <circle cx="796" cy="318" r="14" fill="#34d399" opacity="0.9"/>
-  <circle cx="220" cy="706" r="12" fill="#7dd3fc" opacity="0.8"/>
+  <rect width="1024" height="1024" rx="196" fill="url(#bg)"/>
+  <rect x="46" y="46" width="932" height="932" rx="170" fill="none" stroke="#ff2020" stroke-width="26"/>
+  <path d="M512 112 764 210v196c0 198-90 338-252 440-162-102-252-242-252-440V210l252-98Z" fill="#130101" stroke="#ff2020" stroke-width="26" stroke-linejoin="round" opacity="0.9"/>
+  <path d="M94 505h172m492 0h172M96 558h142m548 0h142M112 452h66l54-54m682 54h-66l-54-54M142 612h88l44 44m608-44h-88l-44 44" fill="none" stroke="#980000" stroke-width="12" stroke-linecap="round" stroke-linejoin="round" opacity="0.62"/>
+  <g filter="url(#softShadow)">
+    <path d="M354 162c70 56 102 128 82 216-45-68-84-140-82-216Z" fill="url(#red)"/>
+    <path d="M462 104c86 72 124 166 98 288-60-88-104-174-98-288Z" fill="url(#red)"/>
+    <path d="M590 132c68 66 88 144 48 244-36-80-52-160-48-244Z" fill="url(#red)"/>
+    <path d="M260 346c-52 20-93 65-116 132 78-12 132-42 164-90l-48-42Z" fill="url(#red)"/>
+    <path d="M764 346c52 20 93 65 116 132-78-12-132-42-164-90l48-42Z" fill="url(#red)"/>
+    <path d="M270 328c26-108 128-190 242-190s216 82 242 190c-65-42-146-66-242-66s-177 24-242 66Z" fill="url(#dark)"/>
+    <ellipse cx="512" cy="410" rx="258" ry="232" fill="#ff2020"/>
+    <ellipse cx="512" cy="430" rx="214" ry="192" fill="url(#red)" opacity="0.96"/>
+    <path d="M275 349c36-102 128-172 237-172s201 70 237 172c-72-43-151-64-237-64s-165 21-237 64Z" fill="#090909"/>
+    <path d="M356 310c44-33 95-50 156-50s112 17 156 50c-14-56-78-98-156-98s-142 42-156 98Z" fill="#1f1f1f"/>
+    <path d="M456 190h112l24 78H432l24-78Z" fill="#121212"/>
+    <path d="M512 164 565 190v42c0 42-19 72-53 94-34-22-53-52-53-94v-42l53-26Z" fill="#2c2c2c" stroke="#ff2020" stroke-width="10"/>
+    <path d="M493 230v-18a19 19 0 0 1 38 0v18" fill="none" stroke="#ff2020" stroke-width="10" stroke-linecap="round"/>
+    <rect x="486" y="228" width="52" height="44" rx="10" fill="#ff2020"/>
+    <circle cx="420" cy="397" r="67" fill="#ffffff"/>
+    <circle cx="604" cy="397" r="67" fill="#ffffff"/>
+    <circle cx="431" cy="404" r="38" fill="#5b220e"/>
+    <circle cx="593" cy="404" r="38" fill="#5b220e"/>
+    <circle cx="431" cy="404" r="23" fill="#050000"/>
+    <circle cx="593" cy="404" r="23" fill="#050000"/>
+    <circle cx="449" cy="383" r="12" fill="#ffffff"/>
+    <circle cx="611" cy="383" r="12" fill="#ffffff"/>
+    <path d="M356 316c36-26 80-30 126-11" fill="none" stroke="#050000" stroke-width="20" stroke-linecap="round"/>
+    <path d="M542 305c46-19 90-15 126 11" fill="none" stroke="#050000" stroke-width="20" stroke-linecap="round"/>
+    <path d="M418 505c44 48 144 48 188 0" fill="none" stroke="#190000" stroke-width="22" stroke-linecap="round"/>
+    <path d="M440 513c42 22 102 22 144 0" fill="none" stroke="#ffffff" stroke-width="10" stroke-linecap="round" opacity="0.92"/>
+    <rect x="314" y="562" width="396" height="242" rx="42" fill="url(#vault)" stroke="#6d6d6d" stroke-width="10"/>
+    <rect x="346" y="596" width="332" height="174" rx="24" fill="#111111" stroke="#2c2c2c" stroke-width="8"/>
+    <circle cx="512" cy="683" r="73" fill="#171717" stroke="#4d4d4d" stroke-width="14"/>
+    <circle cx="512" cy="683" r="42" fill="#242424" stroke="#6d6d6d" stroke-width="7"/>
+    <path d="M394 725 450 626h44l-58 99h-42Zm82-99h45l63 99h-48l-15-25h-59l14-31h27l-27-43Zm96 0h44l38 64 36-64h44l-72 99h-18l-72-99Z" fill="#ff2020"/>
+  </g>
 </svg>

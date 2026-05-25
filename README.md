@@ -101,7 +101,7 @@ Then reinstall the iPhone PWA from the trusted URL:
 6. Launch AlgVault from the Home Screen.
 7. Confirm no network requests go to `172.20.10.6`.
 8. Confirm service worker scope is `/`.
-9. Confirm manifest `start_url` is `/`.
+9. Confirm manifest `start_url` is `/login`.
 
 Build and test checks:
 

@@ -44,6 +44,7 @@ from ...services.market_scanner import ScoredCandidate
 from ...services.one_h10_quality import ONE_H10_HORIZON_SECONDS, one_h10_forecast_live_blockers
 from ...services.provider_assets import normalize_provider, provider_collateral_asset, provider_feature_context
 from ...services.response_envelope import action_envelope, exception_envelope, readiness_envelope
+from ...services.seo import public_page
 from ...services.vault_allocation_assets import (
     BASE_VAULT_ALLOCATION_ASSETS,
     DEFAULT_ASSET_NETWORKS,
@@ -93,6 +94,16 @@ _LIVE_API_DELEGATED_ENDPOINTS = {
     "consumer.vault_cycle_status",
     "consumer.cycle_start_status",
 }
+_PUBLIC_CONTENT_ENDPOINTS = {
+    "consumer.public_overview",
+    "consumer.public_features",
+    "consumer.public_pricing",
+    "consumer.public_mobile",
+    "consumer.public_mobile_pwa_alias",
+    "consumer.public_connectivity",
+    "consumer.public_broker_connectivity",
+    "consumer.public_security",
+}
 
 
 @consumer_bp.before_request
@@ -100,6 +111,8 @@ def _protect_consumer():
     if request.method == "OPTIONS":
         return None
     if request.endpoint and request.endpoint.startswith("consumer.legacy_"):
+        return None
+    if request.endpoint in _PUBLIC_CONTENT_ENDPOINTS:
         return None
     vault_diagnostic_endpoints = {
         "consumer.vault",
@@ -187,6 +200,50 @@ def home():
         wallet_overview=wallet_overview,
         pnl_history=pnl_history,
     )
+
+
+@consumer_bp.get("/overview/", strict_slashes=False)
+def public_overview():
+    return render_template("marketing/home.html", page=public_page("home"))
+
+
+@consumer_bp.get("/features/", strict_slashes=False)
+def public_features():
+    return _render_public_page("features")
+
+
+@consumer_bp.get("/pricing/", strict_slashes=False)
+def public_pricing():
+    return _render_public_page("pricing")
+
+
+@consumer_bp.get("/mobile/", strict_slashes=False)
+def public_mobile():
+    return _render_public_page("mobile")
+
+
+@consumer_bp.get("/mobile-pwa/", strict_slashes=False)
+def public_mobile_pwa_alias():
+    return redirect(url_for("consumer.public_mobile"), code=308)
+
+
+@consumer_bp.get("/connectivity/", strict_slashes=False)
+def public_connectivity():
+    return _render_public_page("connectivity")
+
+
+@consumer_bp.get("/broker-connectivity/", strict_slashes=False)
+def public_broker_connectivity():
+    return redirect(url_for("consumer.public_connectivity"), code=308)
+
+
+@consumer_bp.get("/security/", strict_slashes=False)
+def public_security():
+    return _render_public_page("security")
+
+
+def _render_public_page(key: str):
+    return render_template("marketing/page.html", page=public_page(key))
 
 
 @consumer_bp.get("/wallet/", strict_slashes=False)

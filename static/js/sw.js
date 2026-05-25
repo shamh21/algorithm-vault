@@ -1,18 +1,16 @@
-const CACHE_VERSION = "algvault-v21-vault-shell-polish-9";
+const CACHE_VERSION = "algvault-v44-public-brand-ios-pages-1";
+const LEGACY_CACHE_MARKER = "algvault-v21-vault-shell-polish-9";
 const SHELL_CACHE = `${CACHE_VERSION}-shell`;
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 
 const APP_SHELL = [
-  "/static/css/app.css",
   "/static/js/app-shell.js",
-  "/static/js/responsive-tables.js",
   "/manifest.json",
-  "/icons/algvault-ios-180.png",
-  "/icons/algvault-ios-192.png",
-  "/icons/algvault-ios-512.png",
-  "/icons/icon-192.png",
-  "/icons/icon-512.png",
-  "/icons/apple-touch-icon.png",
+  "/icons/favicon.ico",
+  "/icons/algvault-icon.svg",
+  "/icons/algvault-mask-icon.svg",
+  "/icons/algvault-mascot-180.png",
+  "/icons/algvault-mascot-192.png",
 ];
 
 const OFFLINE_HTML = `<!doctype html>
@@ -23,10 +21,10 @@ const OFFLINE_HTML = `<!doctype html>
   <meta name="theme-color" content="#050607">
   <title>AlgVault Offline</title>
   <style>
-    html,body{margin:0;min-height:100%;background:#050607;color:#f8fafc;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text",Inter,system-ui,sans-serif}
+    html,body{margin:0;min-height:100%;background:#030304;color:#f8fafc;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text",Inter,system-ui,sans-serif}
     main{min-height:100svh;display:grid;place-items:center;padding:calc(2rem + env(safe-area-inset-top)) max(1.25rem,env(safe-area-inset-right)) calc(2rem + env(safe-area-inset-bottom)) max(1.25rem,env(safe-area-inset-left))}
-    section{max-width:28rem;border:1px solid rgba(148,163,184,.2);border-radius:16px;padding:1.25rem;background:#101826;box-shadow:0 22px 56px rgba(0,0,0,.46)}
-    span{color:#7dd3fc;font-size:.74rem;font-weight:800;text-transform:uppercase}
+    section{max-width:28rem;border:1px solid rgba(255,45,45,.26);border-radius:14px;padding:1.25rem;background:linear-gradient(180deg,rgba(20,22,26,.96),rgba(5,5,6,.98));box-shadow:0 22px 56px rgba(0,0,0,.54),0 0 32px rgba(255,31,54,.12)}
+    span{color:#ff5a66;font-size:.74rem;font-weight:800;text-transform:uppercase}
     h1{margin:.35rem 0;font-size:1.35rem} p{margin:0;color:#aeb9ca}
   </style>
 </head>

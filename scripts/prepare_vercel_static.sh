@@ -21,4 +21,8 @@ if [[ -f "$ROOT_DIR/static/manifest.webmanifest" ]]; then
   cp "$ROOT_DIR/static/manifest.webmanifest" "$PUBLIC_DIR/manifest.webmanifest"
 fi
 
+if [[ -f "$ROOT_DIR/static/icons/favicon.ico" ]]; then
+  cp "$ROOT_DIR/static/icons/favicon.ico" "$PUBLIC_DIR/favicon.ico"
+fi
+
 find "$PUBLIC_DIR" -name ".DS_Store" -delete
