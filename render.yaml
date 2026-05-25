@@ -22,6 +22,18 @@ services:
         value: "false"
       - key: WORKER_PROCESS_CONFIGURED
         value: "true"
+      - key: WORKER_WALLET_ACTIVITY_RETENTION_ENABLED
+        value: "true"
+      - key: WORKER_WALLET_ACTIVITY_RETENTION_INTERVAL_SECONDS
+        value: "300"
+      - key: WORKER_WALLET_ACTIVITY_RETENTION_LIMIT
+        value: "50"
+      - key: WORKER_WALLET_CUSTODY_SYNC_ENABLED
+        value: "true"
+      - key: WORKER_WALLET_CUSTODY_SYNC_INTERVAL_SECONDS
+        value: "60"
+      - key: WORKER_WALLET_CUSTODY_SYNC_USER_LIMIT
+        value: "25"
       - key: SCHEMA_BOOTSTRAP_ENABLED
         value: "false"
       - key: ENABLE_LIVE_TRADING
@@ -129,6 +141,18 @@ services:
         value: "false"
       - key: WORKER_PROCESS_CONFIGURED
         value: "true"
+      - key: WORKER_WALLET_ACTIVITY_RETENTION_ENABLED
+        value: "true"
+      - key: WORKER_WALLET_ACTIVITY_RETENTION_INTERVAL_SECONDS
+        value: "300"
+      - key: WORKER_WALLET_ACTIVITY_RETENTION_LIMIT
+        value: "50"
+      - key: WORKER_WALLET_CUSTODY_SYNC_ENABLED
+        value: "true"
+      - key: WORKER_WALLET_CUSTODY_SYNC_INTERVAL_SECONDS
+        value: "60"
+      - key: WORKER_WALLET_CUSTODY_SYNC_USER_LIMIT
+        value: "25"
       - key: SCHEMA_BOOTSTRAP_ENABLED
         value: "false"
       - key: ENABLE_LIVE_TRADING

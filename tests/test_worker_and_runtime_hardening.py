@@ -15,6 +15,7 @@ from app.models import (
     StrategyRun,
     User,
     WalletAuditLog,
+    WalletTransaction,
     WalletWithdrawal,
     WorkerJobRun,
     WorkerLease,
@@ -99,6 +100,60 @@ def test_worker_runner_executes_one_shot_job_with_lease(app) -> None:
         assert results[0]["status"] == "complete"
         assert results[0]["job_name"] == "strategy_starter"
         assert WorkerLease.query.filter_by(lease_name="strategy_starter:singleton").one().status == "released"
+
+
+def test_worker_vault_cycle_enforcement_resumes_due_cycles(app, monkeypatch) -> None:
+    with app.app_context():
+        app.config["WORKER_MODE"] = "worker"
+        service = WorkerLeaseService(app.config, owner_id="cycle-worker-test")
+        services = app.extensions["services"]
+        monkeypatch.setattr(
+            services["vault_cycle_trading_enforcer"],
+            "enforce_active_cycles",
+            lambda user_id: [{"changed": False, "user_id": user_id}],
+        )
+        monkeypatch.setattr(
+            services["vault_cycle_orchestrator"],
+            "resume_due_cycles",
+            lambda user_id: [{"handled": True, "status": "complete", "user_id": user_id}],
+        )
+
+        results = _run_due_jobs(service, job_filter={"vault_cycle_enforcement"})
+        payload = results[0]["result"]
+
+        assert results[0]["ok"] is True
+        assert payload["cycle_count"] == 1
+        assert payload["settlement_count"] == 1
+        assert payload["settlements"][0]["status"] == "complete"
+
+
+def test_worker_wallet_activity_retention_prunes_off_get_path(app) -> None:
+    with app.app_context():
+        user = User(username="activity-retention", password_hash="hash", role="user")
+        db.session.add(user)
+        db.session.flush()
+        now = datetime.utcnow()
+        for index in range(55):
+            db.session.add(
+                WalletTransaction(
+                    user_id=user.id,
+                    asset="USDC",
+                    amount=float(index),
+                    transaction_type="deposit",
+                    status="complete",
+                    created_at=now + timedelta(minutes=index),
+                )
+            )
+        db.session.commit()
+        app.config["WORKER_MODE"] = "worker"
+        app.config["WORKER_WALLET_ACTIVITY_RETENTION_LIMIT"] = 50
+        service = WorkerLeaseService(app.config, owner_id="activity-retention-test")
+
+        results = _run_due_jobs(service, job_filter={"wallet_activity_retention"})
+
+        assert results[0]["ok"] is True
+        assert results[0]["result"]["pruned_count"] == 5
+        assert WalletTransaction.query.filter_by(user_id=user.id).count() == 50
 
 
 def test_runtime_config_blocks_unsafe_production_withdrawals() -> None:

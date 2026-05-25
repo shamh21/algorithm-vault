@@ -95,6 +95,7 @@
     stream: root.dataset.streamUrl,
     activity: root.dataset.activityUrl,
     dashboardData: root.dataset.dashboardDataUrl,
+    dashboardMarket: root.dataset.dashboardMarketUrl,
     chartModule: root.dataset.chartModuleSrc,
     chartLib: root.dataset.chartLibSrc,
   };
@@ -135,6 +136,7 @@
       chart: 0,
       activity: 0,
       dashboard: 0,
+      market: 0,
     },
     forecastExpiresAt: 0,
     destroyed: false,
@@ -145,6 +147,7 @@
       chart: { id: 0, controller: null },
       activity: { id: 0, controller: null },
       dashboard: { id: 0, controller: null },
+      market: { id: 0, controller: null },
     },
   };
 
@@ -799,6 +802,20 @@
     }
   };
 
+  const fetchMarketSummary = async () => {
+    if (!urls.dashboardMarket) return;
+    try {
+      const payload = await requestJson("market", urls.dashboardMarket);
+      if (!payload || !shouldApplyPayload("market", payload)) return;
+      renderMarketSummary(payload.market_summary);
+      writeRestoreCache({ payload: { ...(state.restoreCache?.payload || initialPayload), ...payload } });
+    } catch (error) {
+      if (error.name !== "AbortError") {
+        renderMarketSummary(initialPayload.market_summary);
+      }
+    }
+  };
+
   const renderActivity = () => {
     renderVirtual(refs.activity, state.activity, ACTIVITY_ROW_HEIGHT, (row) => {
       const item = document.createElement("article");
@@ -1057,6 +1074,7 @@
   const startPolling = () => {
     stopPolling();
     const tick = () => {
+      fetchMarketSummary();
       fetchOpportunities(false);
       fetchActivity();
     };
@@ -1175,6 +1193,7 @@
     const refreshDashboard = () => {
       setConnectionState(navigator.onLine === false ? "offline" : "connecting");
       fetchVaultPulse();
+      fetchMarketSummary();
       fetchOpportunities(true);
       fetchActivity();
       connectStream();
@@ -1225,6 +1244,7 @@
         startPolling();
       } else {
         setConnectionState(navigator.onLine === false ? "offline" : "connecting");
+        fetchMarketSummary();
         fetchOpportunities(false);
         fetchActivity();
         connectStream();
@@ -1282,6 +1302,7 @@
   if (!restoreDisplayCache()) setConnectionState("connecting");
   if (!state.active) updateEmptyForecast();
   fetchVaultPulse();
+  fetchMarketSummary();
   fetchOpportunities(false);
   fetchActivity();
   connectStream();

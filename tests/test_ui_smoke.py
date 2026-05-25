@@ -34,6 +34,7 @@ from app.models import (
     WalletTransaction,
     WalletWithdrawal,
 )
+from app.routes import consumer as consumer_routes
 from app.services.hyperliquid_client import ClientSnapshot
 from app.services.wallet_custody import BroadcastResult, GeneratedWallet, RealWalletCustodyService, WalletBalanceSnapshot
 
@@ -547,7 +548,41 @@ def test_activity_page_redirects_to_dashboard(app) -> None:
     assert VaultCycle.query.filter_by(user_id=user.id).count() == 55
 
 
-def test_wallet_activity_is_paginated_and_retained_to_50_records(app) -> None:
+def test_wallet_page_is_read_only_for_sync_and_address_work(app, monkeypatch) -> None:
+    _patch_market_data(app)
+    user, secret = _create_user(username="walletreadonly")
+    db.session.add(WalletBalance(user_id=user.id, asset="USDC", available_balance=100.0, estimated_usd_value=100.0))
+    db.session.add(
+        WalletTransaction(
+            user_id=user.id,
+            asset="USDC",
+            amount=25.0,
+            transaction_type="deposit",
+            status="complete",
+        )
+    )
+    db.session.commit()
+
+    def unexpected(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("wallet GET should not run write-heavy sync work")
+
+    monkeypatch.setattr(consumer_routes, "_sync_completed_cycles", unexpected)
+    monkeypatch.setattr(consumer_routes, "_sync_real_wallet_balances", unexpected)
+    monkeypatch.setattr(consumer_routes, "_ensure_deposit_address", unexpected)
+    monkeypatch.setattr(app.extensions["services"]["wallet_activity"], "prune_user_activity", unexpected)
+    monkeypatch.setattr(app.extensions["services"]["wallet_custody"], "sync_user", unexpected)
+
+    client = app.test_client()
+    _login(client, user.username, secret)
+    response = client.get("/wallet")
+
+    assert response.status_code == 200
+    assert WalletBalance.query.filter_by(user_id=user.id).count() == 1
+    assert DepositAddress.query.filter_by(user_id=user.id).count() == 0
+    assert WalletTransaction.query.filter_by(user_id=user.id).count() == 1
+
+
+def test_wallet_activity_is_paginated_without_get_path_pruning(app) -> None:
     _patch_market_data(app)
     user, secret = _create_user(username="paginated")
     db.session.add(WalletBalance(user_id=user.id, asset="USDC", available_balance=100.0, estimated_usd_value=100.0))
@@ -570,11 +605,11 @@ def test_wallet_activity_is_paginated_and_retained_to_50_records(app) -> None:
     first_page = client.get("/wallet")
 
     assert first_page.status_code == 200
-    assert WalletTransaction.query.filter_by(user_id=user.id).count() == 50
+    assert WalletTransaction.query.filter_by(user_id=user.id).count() == 55
     assert b"54 USDC" in first_page.data
     assert b"50 USDC" in first_page.data
     assert b"49 USDC" not in first_page.data
-    assert b"Page 1 of 10" in first_page.data
+    assert b"Page 1 of 11" in first_page.data
 
     second_page = client.get("/wallet?activity_page=2")
 

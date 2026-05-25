@@ -199,6 +199,10 @@ def test_vercel_target_selects_production_config(monkeypatch) -> None:
             "postgresql+psycopg://bot:secret@db.example.invalid/tradingbot",
             "postgresql+psycopg://bot:secret@db.example.invalid/tradingbot",
         ),
+        (
+            "postgresql://bot:secret@db.example.invalid/tradingbot?sslmode=require&supa=base-pooler.x",
+            "postgresql+psycopg://bot:secret@db.example.invalid/tradingbot?sslmode=require",
+        ),
     ],
 )
 def test_database_url_uses_psycopg_driver_for_hosted_postgres(monkeypatch, raw_url, normalized) -> None:

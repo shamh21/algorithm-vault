@@ -8,7 +8,7 @@ import os
 import shutil
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 try:
     from hyperliquid.utils import constants as hl_constants
@@ -52,10 +52,20 @@ def _parse_origin_list(value: str | None, defaults: list[str] | tuple[str, ...] 
 def _normalize_database_url(value: str | None, default: str) -> str:
     raw = str(value or default).strip() or default
     if raw.startswith("postgres://"):
-        return "postgresql+psycopg://" + raw.removeprefix("postgres://")
+        raw = "postgresql+psycopg://" + raw.removeprefix("postgres://")
+        return _strip_unsupported_postgres_query(raw)
     if raw.startswith("postgresql://"):
-        return "postgresql+psycopg://" + raw.removeprefix("postgresql://")
-    return raw
+        raw = "postgresql+psycopg://" + raw.removeprefix("postgresql://")
+        return _strip_unsupported_postgres_query(raw)
+    return _strip_unsupported_postgres_query(raw)
+
+
+def _strip_unsupported_postgres_query(raw: str) -> str:
+    parsed = urlparse(raw)
+    if parsed.scheme not in {"postgres", "postgresql", "postgresql+psycopg"} or not parsed.query:
+        return raw
+    params = [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True) if key.lower() != "supa"]
+    return urlunparse(parsed._replace(query=urlencode(params)))
 
 
 def _prepare_recovery_sqlite_database_url(default_url: str) -> tuple[str, bool]:
@@ -248,6 +258,15 @@ class BaseConfig:
     WORKER_STRATEGY_STARTER_ENABLED = _as_bool(os.getenv("WORKER_STRATEGY_STARTER_ENABLED"), default=True)
     WORKER_VAULT_ENFORCEMENT_ENABLED = _as_bool(os.getenv("WORKER_VAULT_ENFORCEMENT_ENABLED"), default=True)
     WORKER_TREASURY_SOLVENCY_ENABLED = _as_bool(os.getenv("WORKER_TREASURY_SOLVENCY_ENABLED"), default=True)
+    WORKER_WALLET_ACTIVITY_RETENTION_ENABLED = _as_bool(os.getenv("WORKER_WALLET_ACTIVITY_RETENTION_ENABLED"), default=True)
+    WORKER_WALLET_ACTIVITY_RETENTION_INTERVAL_SECONDS = max(
+        1,
+        _as_int(os.getenv("WORKER_WALLET_ACTIVITY_RETENTION_INTERVAL_SECONDS"), 300),
+    )
+    WORKER_WALLET_ACTIVITY_RETENTION_LIMIT = max(1, _as_int(os.getenv("WORKER_WALLET_ACTIVITY_RETENTION_LIMIT"), 50))
+    WORKER_WALLET_CUSTODY_SYNC_ENABLED = _as_bool(os.getenv("WORKER_WALLET_CUSTODY_SYNC_ENABLED"), default=True)
+    WORKER_WALLET_CUSTODY_SYNC_INTERVAL_SECONDS = max(1, _as_int(os.getenv("WORKER_WALLET_CUSTODY_SYNC_INTERVAL_SECONDS"), 60))
+    WORKER_WALLET_CUSTODY_SYNC_USER_LIMIT = max(1, _as_int(os.getenv("WORKER_WALLET_CUSTODY_SYNC_USER_LIMIT"), 25))
     SECRET_KEY = os.getenv("FLASK_SECRET_KEY", "dev-secret-change-me")
     ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin").strip() or "admin"
     ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "").strip()
@@ -379,6 +398,10 @@ class BaseConfig:
     DASHBOARD_TRADE_LIST_STALE_SECONDS = _as_float(os.getenv("DASHBOARD_TRADE_LIST_STALE_SECONDS"), 10.0)
     DASHBOARD_STATIC_SEGMENT_TTL_SECONDS = _as_float(os.getenv("DASHBOARD_STATIC_SEGMENT_TTL_SECONDS"), 5.0)
     DASHBOARD_STATIC_SEGMENT_STALE_SECONDS = _as_float(os.getenv("DASHBOARD_STATIC_SEGMENT_STALE_SECONDS"), 30.0)
+    DASHBOARD_SHELL_SEGMENT_TTL_SECONDS = _as_float(os.getenv("DASHBOARD_SHELL_SEGMENT_TTL_SECONDS"), 5.0)
+    DASHBOARD_SHELL_SEGMENT_STALE_SECONDS = _as_float(os.getenv("DASHBOARD_SHELL_SEGMENT_STALE_SECONDS"), 30.0)
+    DASHBOARD_MARKET_SEGMENT_TTL_SECONDS = _as_float(os.getenv("DASHBOARD_MARKET_SEGMENT_TTL_SECONDS"), 15.0)
+    DASHBOARD_MARKET_SEGMENT_STALE_SECONDS = _as_float(os.getenv("DASHBOARD_MARKET_SEGMENT_STALE_SECONDS"), 90.0)
     DASHBOARD_PAGE_SIZE = _as_int(os.getenv("DASHBOARD_PAGE_SIZE"), 30)
     DASHBOARD_OPPORTUNITY_LIMIT = _as_int(os.getenv("DASHBOARD_OPPORTUNITY_LIMIT"), 30)
     DASHBOARD_OPPORTUNITY_TTL_SECONDS = _as_float(os.getenv("DASHBOARD_OPPORTUNITY_TTL_SECONDS"), 10.0)
@@ -1082,6 +1105,15 @@ class BaseConfig:
             "WORKER_PROCESS_CONFIGURED": cls.WORKER_PROCESS_CONFIGURED,
             "WORKER_LEASE_TTL_SECONDS": cls.WORKER_LEASE_TTL_SECONDS,
             "WORKER_POLL_SECONDS": cls.WORKER_POLL_SECONDS,
+            "WORKER_STRATEGY_STARTER_ENABLED": cls.WORKER_STRATEGY_STARTER_ENABLED,
+            "WORKER_VAULT_ENFORCEMENT_ENABLED": cls.WORKER_VAULT_ENFORCEMENT_ENABLED,
+            "WORKER_TREASURY_SOLVENCY_ENABLED": cls.WORKER_TREASURY_SOLVENCY_ENABLED,
+            "WORKER_WALLET_ACTIVITY_RETENTION_ENABLED": cls.WORKER_WALLET_ACTIVITY_RETENTION_ENABLED,
+            "WORKER_WALLET_ACTIVITY_RETENTION_INTERVAL_SECONDS": cls.WORKER_WALLET_ACTIVITY_RETENTION_INTERVAL_SECONDS,
+            "WORKER_WALLET_ACTIVITY_RETENTION_LIMIT": cls.WORKER_WALLET_ACTIVITY_RETENTION_LIMIT,
+            "WORKER_WALLET_CUSTODY_SYNC_ENABLED": cls.WORKER_WALLET_CUSTODY_SYNC_ENABLED,
+            "WORKER_WALLET_CUSTODY_SYNC_INTERVAL_SECONDS": cls.WORKER_WALLET_CUSTODY_SYNC_INTERVAL_SECONDS,
+            "WORKER_WALLET_CUSTODY_SYNC_USER_LIMIT": cls.WORKER_WALLET_CUSTODY_SYNC_USER_LIMIT,
             "SCHEMA_BOOTSTRAP_ENABLED": cls.SCHEMA_BOOTSTRAP_ENABLED,
             "ALLOW_PRODUCTION_SCHEMA_BOOTSTRAP": cls.ALLOW_PRODUCTION_SCHEMA_BOOTSTRAP,
             "DEFER_DATABASE_STARTUP_ERRORS": cls.DEFER_DATABASE_STARTUP_ERRORS,
@@ -1125,6 +1157,10 @@ class BaseConfig:
             "DASHBOARD_TRADE_LIST_STALE_SECONDS": cls.DASHBOARD_TRADE_LIST_STALE_SECONDS,
             "DASHBOARD_STATIC_SEGMENT_TTL_SECONDS": cls.DASHBOARD_STATIC_SEGMENT_TTL_SECONDS,
             "DASHBOARD_STATIC_SEGMENT_STALE_SECONDS": cls.DASHBOARD_STATIC_SEGMENT_STALE_SECONDS,
+            "DASHBOARD_SHELL_SEGMENT_TTL_SECONDS": cls.DASHBOARD_SHELL_SEGMENT_TTL_SECONDS,
+            "DASHBOARD_SHELL_SEGMENT_STALE_SECONDS": cls.DASHBOARD_SHELL_SEGMENT_STALE_SECONDS,
+            "DASHBOARD_MARKET_SEGMENT_TTL_SECONDS": cls.DASHBOARD_MARKET_SEGMENT_TTL_SECONDS,
+            "DASHBOARD_MARKET_SEGMENT_STALE_SECONDS": cls.DASHBOARD_MARKET_SEGMENT_STALE_SECONDS,
             "PROVIDER_TIMEOUT_SECONDS": cls.PROVIDER_TIMEOUT_SECONDS,
             "PROVIDER_RETRY_ATTEMPTS": cls.PROVIDER_RETRY_ATTEMPTS,
             "PROVIDER_RETRY_SLEEP_SECONDS": cls.PROVIDER_RETRY_SLEEP_SECONDS,

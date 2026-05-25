@@ -192,11 +192,9 @@ def home():
 @consumer_bp.get("/wallet/", strict_slashes=False)
 def wallet():
     user = current_user()
-    _sync_completed_cycles(user)
-    balances = _wallet_balances(user)
-    wallet_summary = get_service("wallet_summary").summary_for_user(user, balances=balances)
+    balances = _wallet_balances_read_only(user)
+    wallet_summary = get_service("wallet_summary").summary_for_user(user, balances=balances, sync_custody=False)
     activity_page = get_service("wallet_activity").page_for_user(user.id, page=_wallet_activity_page_number())
-    commit_with_retry()
     return render_template(
         "wallet.html",
         balances=wallet_summary.balances,
@@ -1732,7 +1730,7 @@ def _wallet_balances(user) -> list[WalletBalance]:
     for balance in balances:
         network = _asset_networks(balance.asset)[0]
         if balance.active_deposit_address_id is None:
-            address = _ensure_deposit_address(user.id, balance.asset, network, balance)
+            address = _ensure_deposit_address(user.id, balance.asset, network, balance, commit_link=False)
             if address is not None:
                 balance.active_deposit_address_id = address.id
                 changed = True
@@ -1747,6 +1745,15 @@ def _wallet_balances(user) -> list[WalletBalance]:
     if changed:
         commit_with_retry()
     return balances
+
+
+def _wallet_balances_read_only(user) -> list[WalletBalance]:
+    return (
+        WalletBalance.query.options(joinedload(WalletBalance.active_deposit_address))
+        .filter_by(user_id=user.id)
+        .order_by(WalletBalance.asset.asc())
+        .all()
+    )
 
 
 def _default_vault_asset(balances: list[WalletBalance]) -> str:
@@ -4554,7 +4561,14 @@ def _active_deposit_address(user_id: int, asset: str, network: str) -> DepositAd
     )
 
 
-def _ensure_deposit_address(user_id: int, asset: str, network: str, balance: WalletBalance | None = None) -> DepositAddress | None:
+def _ensure_deposit_address(
+    user_id: int,
+    asset: str,
+    network: str,
+    balance: WalletBalance | None = None,
+    *,
+    commit_link: bool = True,
+) -> DepositAddress | None:
     address = _active_deposit_address(user_id, asset, network)
     if address is None:
         address = _new_deposit_address(user_id, asset, network)
@@ -4562,7 +4576,8 @@ def _ensure_deposit_address(user_id: int, asset: str, network: str, balance: Wal
         return None
     if balance is not None and balance.active_deposit_address_id != address.id:
         balance.active_deposit_address_id = address.id
-        commit_with_retry()
+        if commit_link:
+            commit_with_retry()
     return address
 
 

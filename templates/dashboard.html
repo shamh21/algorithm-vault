@@ -10,6 +10,7 @@
   data-stream-url="{{ url_for('dashboard.dashboard_stream') }}"
   data-activity-url="{{ url_for('dashboard.dashboard_activity') }}"
   data-dashboard-data-url="{{ url_for('dashboard.dashboard_data', refresh_exchange=1) if refresh_exchange else url_for('dashboard.dashboard_data') }}"
+  data-dashboard-market-url="{{ url_for('dashboard.dashboard_market') }}"
   data-performance-url="{{ url_for('dashboard.dashboard_performance') }}"
   data-chart-module-src="{{ url_for('static', filename='js/dashboard-chart.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}"
   data-chart-lib-src="{{ url_for('static', filename='js/vendor/lightweight-charts.standalone.production.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}"
@@ -20,6 +21,7 @@
       "pnl": pnl,
       "risk_status": risk_status,
       "market_summary": market_summary,
+      "market_data_deferred": market_data_deferred|default(false),
       "strategy_rankings": strategy_rankings,
       "balances": balances,
       "positions": positions,

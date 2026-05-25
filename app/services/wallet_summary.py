@@ -202,8 +202,14 @@ class WalletSummaryService:
             "comparisons": comparisons,
         }
 
-    def summary_for_user(self, user: User, *, balances: list[WalletBalance] | None = None) -> ProfileWalletSummary:
-        sync_report = self._sync_and_reconcile_custody(user.id)
+    def summary_for_user(
+        self,
+        user: User,
+        *,
+        balances: list[WalletBalance] | None = None,
+        sync_custody: bool = True,
+    ) -> ProfileWalletSummary:
+        sync_report = self._sync_and_reconcile_custody(user.id) if sync_custody else {"touched": False}
         balance_views = self._balance_views(user.id, balances=None if sync_report.get("touched") else balances)
         return ProfileWalletSummary(
             user=user,

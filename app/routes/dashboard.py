@@ -55,6 +55,7 @@ def dashboard_data():
             "risk_status": payload["risk_status"],
             "alerts": payload["alerts"],
             "market_summary": payload["market_summary"],
+            "market_data_deferred": payload.get("market_data_deferred", False),
             "paper_equity_curve": payload["paper_equity_curve"],
             "latest_feature_snapshot": payload["latest_feature_snapshot"],
             "pnl": payload["pnl"],
@@ -68,6 +69,21 @@ def dashboard_data():
                 "strategy_rankings": rankings,
             },
         }
+    )
+
+
+@dashboard_bp.get("/api/dashboard/market")
+def dashboard_market():
+    mode = get_current_mode()
+    market_mode = market_mode_for(mode)
+    payload_service = get_service("dashboard_payload")
+    return jsonify(
+        payload_service.get_market_payload(
+            mode=mode,
+            market_mode=market_mode,
+            market_data=get_service("market_data"),
+            feature_engine=get_service("feature_engine"),
+        )
     )
 
 

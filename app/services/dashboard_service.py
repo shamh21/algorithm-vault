@@ -80,18 +80,16 @@ class DashboardPayloadService:
         )
         active_connection = trading_connections.active_tradable_connection(user.id) if user else None
         risk_status = self._safe_risk_status(risk_engine, mode, user, active_connection)
+        shell_ops_payload = self._get_cached_segment(
+            self._shell_ops_segment_key(user, mode),
+            "DASHBOARD_SHELL_SEGMENT_TTL_SECONDS",
+            "DASHBOARD_SHELL_SEGMENT_STALE_SECONDS",
+            self._cached_shell_ops_payload,
+            "dashboard-shell-ops",
+        )
         positions = self._limit_rows(account_payload.get("positions"), 30)
         recent_trades = self._limit_rows(account_payload.get("recent_trades"), 30)
         open_orders = self._limit_rows(account_payload.get("open_orders"), 30)
-        strategy_rankings = (
-            StrategyRanking.query.order_by(
-                StrategyRanking.score.desc(),
-                StrategyRanking.created_at.desc(),
-            )
-            .limit(6)
-            .all()
-        )
-        strategy_runs = StrategyRun.query.order_by(StrategyRun.created_at.desc()).limit(6).all()
         payload = {
             "mode": mode,
             "modes": ["live", "paper", "shadow_live", "paper_shadow"],
@@ -103,9 +101,9 @@ class DashboardPayloadService:
             "pnl": _pnl(mode, None, positions, recent_trades),
             "paper_equity_curve": [],
             "risk_status": risk_status,
-            "strategy_runs": [self._serialize_strategy_run(run) for run in strategy_runs],
+            "strategy_runs": shell_ops_payload["strategy_runs"],
             "strategy_definitions": [],
-            "strategy_rankings": [self._serialize_ranking(row) for row in strategy_rankings],
+            "strategy_rankings": shell_ops_payload["strategy_rankings"],
             "latest_feature_snapshot": {},
             "external_adapter_status": {},
             "pattern_model_status": {},
@@ -118,6 +116,7 @@ class DashboardPayloadService:
             "provider_health": dict(account_payload.get("provider_health") or {}),
             "recent_risk": [],
             "market_summary": [],
+            "market_data_deferred": True,
             "shell": True,
         }
         self.metrics["last_assembly_ms"] = (time.perf_counter() - started_at) * 1000
@@ -141,7 +140,6 @@ class DashboardPayloadService:
         self.metrics["requests"] += 1
         started_at = time.perf_counter()
 
-        market_mode = str(market_mode or "testnet")
         account_payload = self._get_cached_segment(
             self._account_segment_key(user, mode, refresh_exchange),
             "DASHBOARD_ACCOUNT_SEGMENT_TTL_SECONDS",
@@ -160,7 +158,7 @@ class DashboardPayloadService:
             self._static_segment_key(user, mode),
             "DASHBOARD_STATIC_SEGMENT_TTL_SECONDS",
             "DASHBOARD_STATIC_SEGMENT_STALE_SECONDS",
-            lambda: self._cached_static_payload(mode, market_mode, registry, order_manager, market_data, feature_engine),
+            lambda: self._cached_static_payload(mode, registry, order_manager),
             "dashboard-static",
         )
 
@@ -194,6 +192,7 @@ class DashboardPayloadService:
             "provider_health": dict(account_payload.get("provider_health") or {}),
             "recent_risk": static_payload["recent_risk"],
             "market_summary": static_payload["market_summary"],
+            "market_data_deferred": True,
         }
         assembly_ms = (time.perf_counter() - started_at) * 1000
         self.metrics["last_assembly_ms"] = assembly_ms
@@ -205,6 +204,36 @@ class DashboardPayloadService:
             ",".join(("account", "trades", "static")),
         )
         return payload
+
+    def get_market_payload(
+        self,
+        *,
+        mode: str,
+        market_mode: str,
+        market_data: Any,
+        feature_engine: Any,
+    ) -> dict[str, Any]:
+        self.metrics["requests"] += 1
+        market_mode = str(market_mode or "testnet")
+        try:
+            return self._get_cached_segment(
+                self._market_segment_key(mode, market_mode),
+                "DASHBOARD_MARKET_SEGMENT_TTL_SECONDS",
+                "DASHBOARD_MARKET_SEGMENT_STALE_SECONDS",
+                lambda: self._cached_market_payload(market_mode, market_data, feature_engine),
+                "dashboard-market",
+            )
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "market_summary": [],
+                "latest_feature_snapshot": {},
+                "external_adapter_status": {},
+                "pattern_model_status": {},
+                "market_data_deferred": True,
+                "updated_at": time.time(),
+                "cache": self._market_cache_metadata(status="error"),
+                "error": {"type": exc.__class__.__name__, "message": self._clean_text(str(exc))},
+            }
 
     def activity_payload(self, *, limit: int = 30, cursor: str | None = None) -> dict[str, Any]:
         """Return a bounded mixed dashboard activity feed."""
@@ -647,15 +676,28 @@ class DashboardPayloadService:
             "open_orders": list(account_payload.get("open_orders") or []),
         }
 
+    def _cached_shell_ops_payload(self) -> dict[str, Any]:
+        strategy_runs = StrategyRun.query.order_by(StrategyRun.created_at.desc()).limit(6).all()
+        strategy_rankings = (
+            StrategyRanking.query.order_by(
+                StrategyRanking.score.desc(),
+                StrategyRanking.created_at.desc(),
+            )
+            .limit(6)
+            .all()
+        )
+        return {
+            "strategy_runs": [self._serialize_strategy_run(run) for run in strategy_runs],
+            "strategy_rankings": [self._serialize_ranking(row) for row in strategy_rankings],
+        }
+
     def _cached_static_payload(
         self,
         mode: str,
-        market_mode: str,
         registry: Any,
         order_manager: Any,
-        market_data: Any,
-        feature_engine: Any,
     ) -> dict[str, Any]:
+        _ = order_manager
         strategy_runs = StrategyRun.query.order_by(StrategyRun.created_at.desc()).limit(10).all()
         strategy_rankings = (
             StrategyRanking.query.order_by(
@@ -680,12 +722,28 @@ class DashboardPayloadService:
             "local_orders": [self._serialize_order(item) for item in local_orders],
             "audits": [self._serialize_audit(item) for item in audits],
             "recent_risk": [self._serialize_risk_event(item) for item in recent_risk],
-            "market_summary": self._safe_market_summary(market_data, market_mode, self.config),
-            "latest_feature_snapshot": self._latest_feature_snapshot(feature_engine, market_data, market_mode, self.config),
-            "external_adapter_status": feature_engine.external_status,
-            "pattern_model_status": feature_engine.pattern_status,
+            "market_summary": [],
+            "latest_feature_snapshot": {},
+            "external_adapter_status": {},
+            "pattern_model_status": {},
+            "market_data_deferred": True,
             "paper_equity_curve": [],
             "modes": ["live", "paper", "shadow_live", "paper_shadow"],
+        }
+
+    def _cached_market_payload(self, market_mode: str, market_data: Any, feature_engine: Any) -> dict[str, Any]:
+        market_summary = self._safe_market_summary(market_data, market_mode, self.config)
+        latest_feature_snapshot = self._latest_feature_snapshot(feature_engine, market_data, market_mode, self.config)
+        error = self._market_payload_error(market_summary, latest_feature_snapshot)
+        return {
+            "market_summary": market_summary,
+            "latest_feature_snapshot": latest_feature_snapshot,
+            "external_adapter_status": getattr(feature_engine, "external_status", {}),
+            "pattern_model_status": getattr(feature_engine, "pattern_status", {}),
+            "market_data_deferred": False,
+            "updated_at": time.time(),
+            "cache": self._market_cache_metadata(status="error" if error else "available"),
+            "error": error,
         }
 
     @staticmethod
@@ -900,6 +958,34 @@ class DashboardPayloadService:
     @staticmethod
     def _static_segment_key(user: Any, mode: str) -> tuple[Any, ...]:
         return ("static", int(user.id) if user is not None else 0, str(mode))
+
+    @staticmethod
+    def _shell_ops_segment_key(user: Any, mode: str) -> tuple[Any, ...]:
+        return ("shell-ops", int(user.id) if user is not None else 0, str(mode))
+
+    @staticmethod
+    def _market_segment_key(mode: str, market_mode: str) -> tuple[Any, ...]:
+        return ("market", str(mode), str(market_mode))
+
+    def _market_cache_metadata(self, *, status: str) -> dict[str, Any]:
+        ttl = self._config_float("DASHBOARD_MARKET_SEGMENT_TTL_SECONDS", 15.0)
+        stale_ttl = max(ttl, self._config_float("DASHBOARD_MARKET_SEGMENT_STALE_SECONDS", ttl or 15.0))
+        return {
+            "segment": "dashboard-market",
+            "status": status,
+            "ttl_seconds": ttl,
+            "stale_seconds": stale_ttl,
+        }
+
+    def _market_payload_error(self, market_summary: list[dict[str, Any]], latest_feature_snapshot: dict[str, Any]) -> dict[str, str] | None:
+        for row in market_summary:
+            if not isinstance(row, dict):
+                continue
+            if row.get("status") == "error" or row.get("error"):
+                return {"type": "provider_error", "message": self._clean_text(row.get("error") or "Market summary unavailable.")}
+        if isinstance(latest_feature_snapshot, dict) and latest_feature_snapshot.get("error"):
+            return {"type": "feature_snapshot_error", "message": self._clean_text(latest_feature_snapshot.get("error"))}
+        return None
 
     def _config_float(self, key: str, default: float) -> float:
         try:

@@ -6,7 +6,6 @@ from dataclasses import dataclass
 
 from ..models import WalletTransaction
 
-
 DEFAULT_ACTIVITY_RETENTION_LIMIT = 50
 DEFAULT_ACTIVITY_PAGE_SIZE = 5
 
@@ -64,12 +63,10 @@ class WalletActivityService:
         ]
         if len(keep_ids) < limit:
             return 0
-        return (
-            WalletTransaction.query.filter(
-                WalletTransaction.user_id == user_id,
-                ~WalletTransaction.id.in_(keep_ids),
-            ).delete(synchronize_session=False)
-        )
+        return WalletTransaction.query.filter(
+            WalletTransaction.user_id == user_id,
+            ~WalletTransaction.id.in_(keep_ids),
+        ).delete(synchronize_session=False)
 
     def recent_for_user(self, user_id: int, *, limit: int = DEFAULT_ACTIVITY_RETENTION_LIMIT) -> list[WalletTransaction]:
         return (
@@ -87,7 +84,7 @@ class WalletActivityService:
         per_page: int = DEFAULT_ACTIVITY_PAGE_SIZE,
         retention_limit: int = DEFAULT_ACTIVITY_RETENTION_LIMIT,
     ) -> WalletActivityPage:
-        self.prune_user_activity(user_id, limit=retention_limit)
+        _ = retention_limit
         per_page = max(1, int(per_page))
         requested_page = max(1, int(page))
         query = WalletTransaction.query.filter(WalletTransaction.user_id == int(user_id))

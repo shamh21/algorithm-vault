@@ -344,6 +344,7 @@ def test_dashboard_new_api_routes_remain_admin_protected(app) -> None:
     assert client.get("/admin/api/dashboard/chart").status_code in {302, 401, 403}
     assert client.get("/admin/api/dashboard/stream?once=1").status_code in {302, 401, 403}
     assert client.get("/admin/api/dashboard/activity").status_code in {302, 401, 403}
+    assert client.get("/admin/api/dashboard/market").status_code in {302, 401, 403}
 
 
 def test_dashboard_render_refreshes_provider_snapshot_on_open(app, monkeypatch) -> None:
@@ -391,6 +392,7 @@ def test_dashboard_render_refreshes_provider_snapshot_on_open(app, monkeypatch) 
     assert calls["count"] == 1
     assert b"Dynamic Opportunities" in response.data
     assert b'data-dashboard-data-url="/admin/api/dashboard-data?refresh_exchange=1"' in response.data
+    assert b'data-dashboard-market-url="/admin/api/dashboard/market"' in response.data
     assert b"500.00" in response.data
     assert b"Provider Health" in response.data
     assert b"Manual Order Entry" not in response.data
@@ -412,8 +414,12 @@ def test_dashboard_data_refresh_returns_provider_health_and_cached_ops_rows(app,
     monkeypatch.setattr(dashboard_routes, "require_admin", lambda: None)
     monkeypatch.setattr(dashboard_routes, "current_user", lambda: admin)
     services = app.extensions["services"]
-    services["market_data"].get_dashboard_market_summary = lambda symbols, timeframe, mode: []
-    services["market_data"].get_candles = lambda symbol, timeframe, mode, limit: []
+
+    def unexpected_market_call(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("/admin/api/dashboard-data should not call provider-backed market data")
+
+    services["market_data"].get_dashboard_market_summary = unexpected_market_call
+    services["market_data"].get_candles = unexpected_market_call
 
     def live_snapshot(*args: Any, **kwargs: Any) -> ClientSnapshot:
         return ClientSnapshot(
@@ -433,6 +439,9 @@ def test_dashboard_data_refresh_returns_provider_health_and_cached_ops_rows(app,
     assert response.status_code == 200
     assert payload["account_snapshot"]["status"] == "live"
     assert payload["provider_health"]["status"] == "online"
+    assert payload["market_summary"] == []
+    assert payload["latest_feature_snapshot"] == {}
+    assert payload["market_data_deferred"] is True
     assert payload["positions"][0]["symbol"] == "BTC"
     assert payload["open_orders"][0]["symbol"] == "BTC"
     assert payload["recent_trades"][0]["closed_pnl"] == 1.25
@@ -454,6 +463,70 @@ def test_dashboard_data_refresh_returns_provider_health_and_cached_ops_rows(app,
     assert degraded["positions"][0]["symbol"] == "BTC"
     assert degraded["provider_health"]["status"] == "degraded"
     assert "Hyperliquid unavailable" in degraded["provider_health"]["impact"]
+
+
+def test_dashboard_market_endpoint_returns_provider_backed_market_payload(app, monkeypatch) -> None:
+    admin = User(username="dash-market-admin", password_hash=password_hash("password123"), role="admin")
+    db.session.add(admin)
+    db.session.commit()
+    monkeypatch.setattr(dashboard_routes, "require_admin", lambda: None)
+    monkeypatch.setattr(dashboard_routes, "current_user", lambda: admin)
+    services = app.extensions["services"]
+    calls = {"summary": 0, "candles": 0}
+
+    def market_summary(symbols: list[str], timeframe: str, mode: str) -> list[dict[str, Any]]:
+        calls["summary"] += 1
+        return [{"symbol": "BTC", "mid": 100.0, "change_pct": 0.25, "timeframe": timeframe, "mode": mode}]
+
+    def candles(symbol: str, timeframe: str, mode: str, limit: int) -> list[dict[str, Any]]:
+        calls["candles"] += 1
+        return [{"time": 1_700_000_000 + index * 60, "open": 100, "high": 101, "low": 99, "close": 100, "volume": 1} for index in range(80)]
+
+    class Snapshot:
+        def as_dict(self) -> dict[str, Any]:
+            return {"symbol": "BTC", "timeframe": "15m", "source": "test"}
+
+    services["market_data"].get_dashboard_market_summary = market_summary
+    services["market_data"].get_candles = candles
+    monkeypatch.setattr(services["feature_engine"], "snapshot", lambda **kwargs: Snapshot())
+
+    response = app.test_client().get("/admin/api/dashboard/market")
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert calls == {"summary": 1, "candles": 1}
+    assert payload["market_data_deferred"] is False
+    assert payload["market_summary"][0]["symbol"] == "BTC"
+    assert payload["latest_feature_snapshot"]["source"] == "test"
+    assert "updated_at" in payload
+    assert payload["cache"]["segment"] == "dashboard-market"
+    assert payload["cache"]["status"] == "available"
+    assert payload["error"] is None
+
+
+def test_dashboard_market_endpoint_returns_error_metadata_on_provider_failure(app, monkeypatch) -> None:
+    admin = User(username="dash-market-error-admin", password_hash=password_hash("password123"), role="admin")
+    db.session.add(admin)
+    db.session.commit()
+    monkeypatch.setattr(dashboard_routes, "require_admin", lambda: None)
+    monkeypatch.setattr(dashboard_routes, "current_user", lambda: admin)
+    services = app.extensions["services"]
+    services["dashboard_payload"]._cache.clear()
+    services["dashboard_payload"]._inflight.clear()
+
+    def unavailable(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        raise RuntimeError("provider unavailable")
+
+    services["market_data"].get_dashboard_market_summary = unavailable
+
+    response = app.test_client().get("/admin/api/dashboard/market")
+    payload = response.get_json()
+
+    assert response.status_code == 200
+    assert payload["market_data_deferred"] is False
+    assert payload["market_summary"][0]["status"] == "error"
+    assert payload["cache"]["status"] == "error"
+    assert payload["error"]["type"] == "provider_error"
 
 
 def test_dashboard_risk_status_failure_keeps_ops_console_available(app, monkeypatch) -> None:
@@ -516,6 +589,7 @@ def test_dashboard_frontend_uses_lazy_chart_module_and_abortable_requests() -> N
     assert "renderAccountSummary" in source
     assert "renderMarketSummary" in source
     assert "payload.market_summary" in source
+    assert "dashboardMarket" in source
     assert "strategyRankingsTable" in source
     assert "payload.strategy_rankings" in source
     assert 'state.filter === "long" ? "buy"' in source
@@ -523,6 +597,7 @@ def test_dashboard_frontend_uses_lazy_chart_module_and_abortable_requests() -> N
     assert "data-dashboard-connection-banner" in template
     assert "data-dashboard-retry" in template
     assert "data-market-tape" in template
+    assert "data-dashboard-market-url" in template
     assert re.search(r"<summary>Automation Rankings</summary>.*?<tbody data-strategy-rankings-table>", template, re.S)
     assert re.search(r"<summary>Open Orders</summary>.*?<tbody data-open-orders-table>", template, re.S)
     assert re.search(r"<summary>Positions</summary>.*?<tbody data-positions-table>", template, re.S)
