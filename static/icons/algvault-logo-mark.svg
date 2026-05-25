@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+  <title id="title">AlgVault logo mark</title>
+  <desc id="desc">A premium red AlgVault AV mark on a dark rounded square.</desc>
+  <defs>
+    <linearGradient id="markBg" x1="16" y1="12" x2="112" y2="116" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#241116"/>
+      <stop offset="0.48" stop-color="#090a0d"/>
+      <stop offset="1" stop-color="#050607"/>
+    </linearGradient>
+    <linearGradient id="markRed" x1="25" y1="24" x2="106" y2="105" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ff6b74"/>
+      <stop offset="0.42" stop-color="#ff1f36"/>
+      <stop offset="1" stop-color="#a80817"/>
+    </linearGradient>
+    <filter id="redGlow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="7" stdDeviation="8" flood-color="#000000" flood-opacity="0.55"/>
+      <feDropShadow dx="0" dy="0" stdDeviation="6" flood-color="#ff1f36" flood-opacity="0.38"/>
+    </filter>
+  </defs>
+  <rect x="7" y="7" width="114" height="114" rx="24" fill="url(#markBg)" stroke="#ff1f36" stroke-opacity="0.34" stroke-width="2"/>
+  <path d="M22 94 53 29l33 65H72L53 56 35 94H22Z" fill="url(#markRed)" filter="url(#redGlow)"/>
+  <path d="M66 29h15l13 32 14-32h14L95 94h-4L66 29Z" fill="url(#markRed)" filter="url(#redGlow)"/>
+  <path d="M43 79h26l-6-12H49l-6 12Z" fill="#050607" opacity="0.82"/>
+  <path d="M25 103h78" stroke="#ff1f36" stroke-opacity="0.18" stroke-width="2" stroke-linecap="round"/>
+</svg>

@@ -395,7 +395,7 @@ def test_pwa_manifest_has_ios_install_shape(app) -> None:
     assert payload["short_name"] == "AlgVault"
     assert payload["display"] == "standalone"
     assert payload["id"] == "/"
-    assert payload["start_url"] == "/"
+    assert payload["start_url"] == "/login"
     assert payload["scope"] == "/"
     assert payload["background_color"] == "#050607"
     assert payload["theme_color"] == "#050607"

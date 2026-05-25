@@ -14,7 +14,7 @@ def test_manifest_contains_dark_standalone_pwa_contract(app) -> None:
     assert manifest["name"] == "AlgVault"
     assert manifest["short_name"] == "AlgVault"
     assert "vault" in manifest["description"].lower()
-    assert manifest["start_url"] == "/"
+    assert manifest["start_url"] == "/login"
     assert manifest["scope"] == "/"
     assert manifest["display"] == "standalone"
     assert manifest["background_color"] == "#050607"
@@ -28,6 +28,7 @@ def test_manifest_contains_dark_standalone_pwa_contract(app) -> None:
     assert icons["512x512"]["purpose"] == "any maskable"
     assert icons["180x180"]["src"] == "/icons/algvault-ios-180.png"
     assert "/admin/panic/" not in {shortcut["url"] for shortcut in manifest["shortcuts"]}
+    assert "/login" in {shortcut["url"] for shortcut in manifest["shortcuts"]}
     assert "/convert/" in {shortcut["url"] for shortcut in manifest["shortcuts"]}
 
 
@@ -49,7 +50,7 @@ def test_base_template_has_dark_ios_pwa_metadata(app) -> None:
     assert '<meta name="color-scheme" content="dark">' in html
     assert '<meta name="apple-mobile-web-app-capable" content="yes">' in html
     assert '<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">' in html
-    assert '<link rel="apple-touch-icon" href="/icons/algvault-ios-180.png">' in html
+    assert '<link rel="apple-touch-icon" sizes="180x180" href="/icons/algvault-mascot-180.png">' in html
     assert "data-theme-toggle" not in html
     assert "av-color-theme" in html
     assert 'data-component="AlgVaultLaunchAnimation"' in html

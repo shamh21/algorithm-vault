@@ -6,6 +6,14 @@ export const metadata: Metadata = {
   title: "Invite Codes · AlgVault Admin",
   description: "Mobile admin dashboard for invite-code profit-share controls.",
   applicationName: "AlgVault Invite Admin",
+  robots: {
+    index: false,
+    follow: false,
+    googleBot: {
+      index: false,
+      follow: false
+    }
+  },
   appleWebApp: {
     capable: true,
     title: "Invite Admin",

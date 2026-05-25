@@ -396,7 +396,7 @@ def test_auth_and_private_routes_are_noindexed(app) -> None:
 
     root = client.get("/")
     assert root.status_code == 302
-    assert root.location == "/overview/"
+    assert root.location in {"/login", "/login?next=/"}
     assert root.headers["X-Robots-Tag"] == "noindex, nofollow"
 
     login = client.get("/login")

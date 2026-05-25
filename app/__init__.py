@@ -15,7 +15,7 @@ import time
 from typing import Any
 
 from dotenv import load_dotenv
-from flask import Flask, Response, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, redirect, request, send_from_directory
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError
@@ -111,6 +111,17 @@ from .services.rapid_ml_trader import RapidMLTraderService
 from .services.risk_engine import RiskEngine
 from .services.realtime_market import RealtimeMarketService
 from .services.self_custody_wallet import SelfCustodyWalletService
+from .services.seo import (
+    PUBLIC_HTML_CACHE_CONTROL,
+    SEO_ASSET_CACHE_CONTROL,
+    is_public_indexable_path,
+    is_seo_asset_path,
+    public_navigation,
+    robots_txt,
+    seo_context,
+    should_noindex_path,
+    sitemap_xml,
+)
 from .services.treasury_solvency import TreasurySolvencyEngine
 from .services.strategy_runner import StrategyManager
 from .services.trading_connections import TradingConnectionService
@@ -386,17 +397,25 @@ def create_app(test_config: dict | None = None) -> Flask:
     @app.context_processor
     def inject_globals():
         mode = "live"
+        user = current_user()
         return {
             "current_app": app,
             "nav_mode": mode,
             "live_enabled": app.config["ENABLE_LIVE_TRADING"],
-            "current_user": current_user(),
+            "current_user": user,
             "admin_authenticated": admin_authenticated(),
             "admin_configured": admin_configured(),
-            "crypto_rail_assets": _crypto_rail_assets(),
+            "crypto_rail_assets": _crypto_rail_assets() if user is not None else [],
             "csrf_token": csrf_token,
             "csrf_input": csrf_input,
             "format_duration_seconds": format_duration_seconds,
+            "public_seo_pages": public_navigation(),
+            "seo": seo_context(
+                app,
+                endpoint=request.endpoint,
+                path=request.path,
+                authenticated=user is not None,
+            ),
         }
 
     with app.app_context():
@@ -506,6 +525,15 @@ def _register_operational_routes(app: Flask) -> None:
             max_age=0,
         )
 
+    @app.get("/manifest.webmanifest")
+    def pwa_manifest_webmanifest():
+        return send_from_directory(
+            app.static_folder,
+            "manifest.webmanifest",
+            mimetype="application/manifest+json",
+            max_age=0,
+        )
+
     @app.get("/sw.js")
     def pwa_service_worker():
         return send_from_directory(
@@ -515,9 +543,21 @@ def _register_operational_routes(app: Flask) -> None:
             max_age=0,
         )
 
+    @app.get("/favicon.ico")
+    def pwa_favicon():
+        return redirect("/icons/favicon.ico", code=308)
+
     @app.get("/icons/<path:filename>")
     def pwa_icon(filename: str):
         return send_from_directory(Path(app.static_folder) / "icons", filename)
+
+    @app.get("/robots.txt")
+    def seo_robots_txt():
+        return Response(robots_txt(app), mimetype="text/plain")
+
+    @app.get("/sitemap.xml")
+    def seo_sitemap_xml():
+        return Response(sitemap_xml(app), mimetype="application/xml")
 
     @app.get("/healthz")
     def healthz():
@@ -1167,9 +1207,27 @@ def _set_response_headers(app: Flask, response: Response) -> Response:
             )
 
     path = request.path.lower()
+    try:
+        authenticated = current_user() is not None
+    except Exception:  # noqa: BLE001
+        db.session.rollback()
+        authenticated = False
+    if should_noindex_path(path, endpoint=request.endpoint, authenticated=authenticated):
+        response.headers.setdefault("X-Robots-Tag", "noindex, nofollow")
+
     if path.startswith("/admin/api/") or (path.startswith("/api/vault-cycles/") and path.endswith("/process-profit-share")):
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-    cacheable_static_response = request.endpoint == "static" or path in {"/manifest.json", "/sw.js"} or path.startswith("/icons/")
+    cacheable_static_response = (
+        request.endpoint == "static"
+        or path in {"/favicon.ico", "/manifest.json", "/manifest.webmanifest", "/sw.js"}
+        or path.startswith("/icons/")
+    )
+    seo_asset_response = is_seo_asset_path(path)
+    public_html_response = (
+        is_public_indexable_path(path, endpoint=request.endpoint, authenticated=authenticated)
+        and response.status_code < 400
+        and response.mimetype == "text/html"
+    )
     if cacheable_static_response:
         if path.endswith("/sw.js") or path.endswith("static/js/sw.js"):
             max_age = max(0, int(app.config.get("SERVICE_WORKER_CACHE_SECONDS", 0) or 0))
@@ -1181,6 +1239,10 @@ def _set_response_headers(app: Flask, response: Response) -> Response:
         elif any(path.endswith(ext) for ext in (".css", ".js", ".png", ".jpg", ".jpeg", ".webp", ".svg", ".ico", ".woff2")):
             max_age = max(0, int(app.config.get("STATIC_CACHE_SECONDS", 31_536_000) or 31_536_000))
             response.headers["Cache-Control"] = f"public, max-age={max_age}, immutable"
+    elif seo_asset_response:
+        response.headers["Cache-Control"] = SEO_ASSET_CACHE_CONTROL
+    elif public_html_response:
+        response.headers["Cache-Control"] = PUBLIC_HTML_CACHE_CONTROL
     else:
         response.headers.setdefault("Cache-Control", "private, no-store, no-cache, must-revalidate, max-age=0")
         response.headers.setdefault("Pragma", "no-cache")

@@ -3,7 +3,7 @@
   "short_name": "AlgVault",
   "description": "Secure iOS-first AlgVault command center for automated portfolio allocation, strategy monitoring, provider status, and vault activity.",
   "id": "/",
-  "start_url": "/",
+  "start_url": "/login",
   "scope": "/",
   "lang": "en-US",
   "dir": "ltr",
@@ -42,9 +42,9 @@
   ],
   "shortcuts": [
     {
-      "name": "Portfolio overview",
-      "short_name": "Portfolio",
-      "url": "/",
+      "name": "Sign in",
+      "short_name": "Sign in",
+      "url": "/login",
       "icons": [
         {
           "src": "/icons/icon-192.png",
