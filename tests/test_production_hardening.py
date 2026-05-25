@@ -4,10 +4,12 @@ import importlib
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from sqlalchemy.pool import NullPool
 
-from app import _should_load_repo_dotenv, create_app
+from app import _configure_engine_options, _should_load_repo_dotenv, create_app
 from app.auth import password_hash, password_matches
 from app.extensions import db
 from app.models import User
@@ -199,6 +201,10 @@ def test_vercel_target_selects_production_config(monkeypatch) -> None:
             "postgresql+psycopg://bot:secret@db.example.invalid/tradingbot",
             "postgresql+psycopg://bot:secret@db.example.invalid/tradingbot",
         ),
+        (
+            "postgresql://bot:secret@aws-1-us-east-1.pooler.supabase.com:6543/postgres?sslmode=require&supa=base-pooler.x&pgbouncer=true",
+            "postgresql+psycopg://bot:secret@aws-1-us-east-1.pooler.supabase.com:6543/postgres?sslmode=require",
+        ),
     ],
 )
 def test_database_url_uses_psycopg_driver_for_hosted_postgres(monkeypatch, raw_url, normalized) -> None:
@@ -210,6 +216,23 @@ def test_database_url_uses_psycopg_driver_for_hosted_postgres(monkeypatch, raw_u
 
         assert normalized == reloaded.BaseConfig.SQLALCHEMY_DATABASE_URI
     importlib.reload(config_module)
+
+
+def test_vercel_postgres_uses_nullpool_to_release_serverless_connections(monkeypatch) -> None:
+    monkeypatch.delenv("VERCEL", raising=False)
+    app = SimpleNamespace(
+        config={
+            "DEPLOYMENT_TARGET": "vercel",
+            "SQLALCHEMY_DATABASE_URI": "postgresql+psycopg://bot:secret@aws-1-us-east-1.pooler.supabase.com/postgres",
+        }
+    )
+
+    _configure_engine_options(app)
+
+    options = app.config["SQLALCHEMY_ENGINE_OPTIONS"]
+    assert options["pool_pre_ping"] is True
+    assert options["poolclass"] is NullPool
+    assert "pool_recycle" not in options
 
 
 def test_repo_dotenv_is_skipped_for_vercel_and_production_runtime() -> None:

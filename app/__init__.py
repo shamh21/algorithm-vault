@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 from collections.abc import Mapping
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 import json
 import logging
@@ -404,7 +405,7 @@ def create_app(test_config: dict | None = None) -> Flask:
             "live_enabled": app.config["ENABLE_LIVE_TRADING"],
             "current_user": user,
             "admin_authenticated": admin_authenticated(),
-            "admin_configured": admin_configured(),
+            "admin_configured": _safe_admin_configured(app),
             "crypto_rail_assets": _crypto_rail_assets() if user is not None else [],
             "csrf_token": csrf_token,
             "csrf_input": csrf_input,
@@ -646,6 +647,16 @@ def _register_error_handlers(app: Flask) -> None:
             500,
             {"Content-Type": "text/html; charset=utf-8"},
         )
+
+
+def _safe_admin_configured(app: Flask) -> bool:
+    try:
+        return admin_configured()
+    except Exception as exc:  # noqa: BLE001
+        with suppress(Exception):
+            db.session.rollback()
+        app.logger.warning("Admin configured lookup unavailable during shell render: %s", exc.__class__.__name__)
+        return bool(app.config.get("ADMIN_PASSWORD"))
 
 
 def _operational_status(app: Flask) -> dict[str, Any]:
@@ -1268,7 +1279,11 @@ def _configure_engine_options(app: Flask) -> None:
     if uri.startswith(("postgresql://", "postgresql+", "postgres://")):
         options = dict(app.config.get("SQLALCHEMY_ENGINE_OPTIONS") or {})
         options.setdefault("pool_pre_ping", True)
-        options.setdefault("pool_recycle", 1800)
+        deployment_target = str(app.config.get("DEPLOYMENT_TARGET", "") or "").strip().lower()
+        if _env_flag(os.getenv("VERCEL")) or deployment_target == "vercel":
+            options.setdefault("poolclass", NullPool)
+        else:
+            options.setdefault("pool_recycle", 1800)
         app.config["SQLALCHEMY_ENGINE_OPTIONS"] = options
         return
     if not uri.startswith("sqlite"):

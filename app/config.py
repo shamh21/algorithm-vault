@@ -8,7 +8,7 @@ import os
 import shutil
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 try:
     from hyperliquid.utils import constants as hl_constants
@@ -19,6 +19,24 @@ except ImportError:  # pragma: no cover - import fallback for environments witho
         MAINNET_API_URL = "https://api.hyperliquid.xyz"
 
     hl_constants = _FallbackConstants()
+
+
+_POSTGRES_CONNECT_QUERY_KEYS = {
+    "application_name",
+    "connect_timeout",
+    "gssencmode",
+    "keepalives",
+    "keepalives_count",
+    "keepalives_idle",
+    "keepalives_interval",
+    "options",
+    "sslcert",
+    "sslkey",
+    "sslmode",
+    "sslrootcert",
+    "target_session_attrs",
+    "tcp_user_timeout",
+}
 
 
 def _as_bool(value: str | None, default: bool = False) -> bool:
@@ -52,10 +70,21 @@ def _parse_origin_list(value: str | None, defaults: list[str] | tuple[str, ...] 
 def _normalize_database_url(value: str | None, default: str) -> str:
     raw = str(value or default).strip() or default
     if raw.startswith("postgres://"):
-        return "postgresql+psycopg://" + raw.removeprefix("postgres://")
+        return _sanitize_postgres_database_url("postgresql+psycopg://" + raw.removeprefix("postgres://"))
     if raw.startswith("postgresql://"):
-        return "postgresql+psycopg://" + raw.removeprefix("postgresql://")
-    return raw
+        return _sanitize_postgres_database_url("postgresql+psycopg://" + raw.removeprefix("postgresql://"))
+    return _sanitize_postgres_database_url(raw)
+
+
+def _sanitize_postgres_database_url(raw: str) -> str:
+    parsed = urlparse(raw)
+    if parsed.scheme not in {"postgres", "postgresql", "postgresql+psycopg"} or not parsed.query:
+        return raw
+    parsed_query = parse_qsl(parsed.query, keep_blank_values=True)
+    kept = [(key, value) for key, value in parsed_query if key.lower() in _POSTGRES_CONNECT_QUERY_KEYS]
+    if len(kept) == len(parsed_query):
+        return raw
+    return urlunparse(parsed._replace(query=urlencode(kept)))
 
 
 def _prepare_recovery_sqlite_database_url(default_url: str) -> tuple[str, bool]:

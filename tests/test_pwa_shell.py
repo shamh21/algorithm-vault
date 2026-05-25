@@ -74,6 +74,20 @@ def test_login_shell_shows_redacted_operations_snapshot(app) -> None:
     assert "TREASURY_ENCRYPTION_KEY" not in html
 
 
+def test_login_shell_renders_when_admin_lookup_is_unavailable(app, monkeypatch) -> None:
+    import app as app_module
+
+    def unavailable_admin_lookup() -> bool:
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(app_module, "admin_configured", unavailable_admin_lookup)
+
+    response = app.test_client().get("/login")
+
+    assert response.status_code == 200
+    assert "Sign In" in response.get_data(as_text=True)
+
+
 def test_base_template_uses_command_center_bottom_nav() -> None:
     html = Path("templates/base.html").read_text(encoding="utf-8")
     for label in ("Dashboard", "Wallet", "Convert", "Vault", "Settings"):
