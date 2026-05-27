@@ -6630,3 +6630,113 @@ body:has(.security-landing) .public-footer {
     transform: translateY(-0.35rem) scale(1.025);
   }
 }
+
+/* AV Guard mascot polish. Presentational marks use a small transparent cutout while PWA icons keep their install-safe backgrounds. */
+.brand-mark {
+  overflow: hidden;
+  border-color: rgba(255, 45, 45, 0.34);
+  border-radius: 16px;
+  background:
+    radial-gradient(circle at 50% 42%, rgba(255, 45, 45, 0.22), transparent 62%),
+    linear-gradient(145deg, rgba(255, 255, 255, 0.05), rgba(255, 45, 45, 0.08)),
+    #030304;
+  box-shadow:
+    0 0 24px rgba(255, 45, 45, 0.12),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.045);
+}
+
+.brand-mark picture,
+.public-terminal__brand picture,
+.overview-phone__brand picture,
+.overview-network__core picture,
+.mobile-phone__brand picture,
+.mobile-install-prompt__app picture {
+  display: block;
+  flex: 0 0 auto;
+}
+
+.brand-mark picture {
+  width: 100%;
+  height: 100%;
+}
+
+.brand-mark img,
+.public-terminal__brand img,
+.overview-phone__brand img,
+.overview-network__core img,
+.mobile-phone__brand img,
+.mobile-install-prompt__app img {
+  display: block;
+  object-fit: contain;
+  object-position: center bottom;
+  filter: drop-shadow(0 7px 12px rgba(0, 0, 0, 0.36));
+}
+
+.brand-mark img {
+  width: 100%;
+  height: 100%;
+  padding: 0.12rem;
+  border-radius: inherit;
+}
+
+.public-terminal__brand img,
+.mobile-install-prompt__app img {
+  width: 2.65rem;
+  height: 2.65rem;
+  padding: 0.12rem;
+  border: 1px solid rgba(255, 45, 45, 0.24);
+  border-radius: 13px;
+  background:
+    radial-gradient(circle at 50% 42%, rgba(255, 45, 45, 0.2), transparent 66%),
+    rgba(3, 3, 4, 0.92);
+  box-shadow: 0 12px 28px rgba(255, 45, 45, 0.09);
+}
+
+.overview-phone__brand picture,
+.mobile-phone__brand picture {
+  width: 1.35rem;
+  height: 1.35rem;
+}
+
+.overview-phone__brand img,
+.mobile-phone__brand img {
+  width: 100%;
+  height: 100%;
+  padding: 0.04rem;
+  border-radius: 7px;
+  background: rgba(255, 45, 45, 0.08);
+}
+
+.overview-network__core {
+  border-color: rgba(255, 45, 45, 0.28);
+  background:
+    radial-gradient(circle at 50% 42%, rgba(255, 45, 45, 0.16), transparent 68%),
+    #050607;
+  box-shadow:
+    0 0 34px rgba(255, 45, 45, 0.18),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+}
+
+.overview-network__core picture {
+  width: 3.45rem;
+  height: 3.45rem;
+}
+
+.overview-network__core img {
+  width: 100%;
+  height: 100%;
+  border-radius: 0;
+}
+
+@media (max-width: 640px) {
+  .public-terminal__brand img,
+  .mobile-install-prompt__app img {
+    width: 2.45rem;
+    height: 2.45rem;
+  }
+
+  .overview-network__core picture {
+    width: 3.15rem;
+    height: 3.15rem;
+  }
+}

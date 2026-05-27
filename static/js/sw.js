@@ -1,4 +1,4 @@
-const CACHE_VERSION = "algvault-v22-avguard-mascot-1";
+const CACHE_VERSION = "algvault-v23-avguard-mascot-polish-1";
 const SHELL_CACHE = `${CACHE_VERSION}-shell`;
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 
@@ -10,6 +10,10 @@ const APP_SHELL = [
   "/icons/favicon.ico",
   "/icons/algvault-icon.svg",
   "/icons/algvault-mask-icon.svg",
+  "/icons/algvault-avguard-mark-96.png",
+  "/icons/algvault-avguard-mark-96.webp",
+  "/icons/algvault-avguard-mark-192.png",
+  "/icons/algvault-avguard-mark-192.webp",
   "/icons/algvault-mascot-192.png",
   "/icons/algvault-ios-180.png",
   "/icons/algvault-ios-192.png",

@@ -74,7 +74,10 @@ def test_login_shell_shows_redacted_operations_snapshot(app) -> None:
     assert "login-redblack-auth-8" in html
     assert "auth-pwa-polish-5" in html
     assert "avguard-mascot-1" in html
+    assert "avguard-mascot-polish-1" in html
     assert 'class="auth-mascot-lockup"' in html
+    assert "/icons/algvault-avguard-mark-192.webp" in html
+    assert "/icons/algvault-avguard-mark-192.png" in html
     assert 'class="auth-shell auth-login-shell"' in html
     assert 'class="vault-card auth-card auth-login-card"' in html
     assert "Continue to Wallet" in html
@@ -128,7 +131,10 @@ def test_register_shell_preserves_invite_signup_flow(app) -> None:
     assert "register-redblack-auth-2" in html
     assert "auth-pwa-polish-5" in html
     assert "avguard-mascot-1" in html
+    assert "avguard-mascot-polish-1" in html
     assert 'class="auth-mascot-lockup"' in html
+    assert "/icons/algvault-avguard-mark-192.webp" in html
+    assert "/icons/algvault-avguard-mark-192.png" in html
     assert 'class="auth-shell auth-register-shell"' in html
     assert 'class="vault-card auth-card auth-register-card"' in html
     assert 'class="card-kicker auth-register-badge">Invite Required</span>' in html
@@ -202,12 +208,16 @@ def test_avguard_mascot_assets_have_expected_dimensions() -> None:
     assert _png_size(icons / "algvault-avguard-full.png") == (768, 1132)
     assert _png_size(icons / "algvault-avguard-bust.png") == (1024, 1024)
     assert _png_size(icons / "algvault-avguard-sprite.png") == (2048, 512)
+    assert _png_size(icons / "algvault-avguard-mark-96.png") == (96, 96)
+    assert _png_size(icons / "algvault-avguard-mark-192.png") == (192, 192)
     assert (icons / "favicon.ico").read_bytes()[:4] == b"\x00\x00\x01\x00"
 
     for webp in (
         "algvault-avguard-full.webp",
         "algvault-avguard-bust.webp",
         "algvault-avguard-sprite.webp",
+        "algvault-avguard-mark-96.webp",
+        "algvault-avguard-mark-192.webp",
     ):
         payload = (icons / webp).read_bytes()
         assert payload[:4] == b"RIFF"
@@ -225,6 +235,10 @@ def test_service_worker_precaches_only_safe_shell_assets() -> None:
     assert '"/icons/favicon.ico"' in app_shell
     assert '"/icons/algvault-icon.svg"' in app_shell
     assert '"/icons/algvault-mask-icon.svg"' in app_shell
+    assert '"/icons/algvault-avguard-mark-96.png"' in app_shell
+    assert '"/icons/algvault-avguard-mark-96.webp"' in app_shell
+    assert '"/icons/algvault-avguard-mark-192.png"' in app_shell
+    assert '"/icons/algvault-avguard-mark-192.webp"' in app_shell
     assert '"/icons/algvault-mascot-192.png"' in app_shell
     assert '"/icons/algvault-ios-180.png"' in app_shell
     assert '"/icons/algvault-ios-192.png"' in app_shell

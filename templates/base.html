@@ -19,7 +19,7 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="msapplication-TileColor" content="#050607">
     <meta name="msapplication-TileImage" content="/icons/algvault-mascot-144.png">
-    {% set asset_v = current_app.config.get('ASSET_VERSION', '1') ~ '-algvault-admin-dashboard-fix-2-backtests-ui-1-algvault-mascot-brand-1-algvault-treasury-ops-1-ops-bridge-readiness-1-redblack-pwa-1-settings-control-center-2-public-pages-focus-1-login-pwa-1-convert-refresh-1-wallet-redesign-1-backtests-iphone-console-1-overview-exchange-2-features-exchange-1-mobile-pwa-premium-1-connectivity-ops-1-pricing-exchange-1-security-ops-1-login-redblack-auth-8-register-redblack-auth-2-auth-pwa-polish-5-avguard-mascot-1' %}
+    {% set asset_v = current_app.config.get('ASSET_VERSION', '1') ~ '-algvault-admin-dashboard-fix-2-backtests-ui-1-algvault-mascot-brand-1-algvault-treasury-ops-1-ops-bridge-readiness-1-redblack-pwa-1-settings-control-center-2-public-pages-focus-1-login-pwa-1-convert-refresh-1-wallet-redesign-1-backtests-iphone-console-1-overview-exchange-2-features-exchange-1-mobile-pwa-premium-1-connectivity-ops-1-pricing-exchange-1-security-ops-1-login-redblack-auth-8-register-redblack-auth-2-auth-pwa-polish-5-avguard-mascot-1-avguard-mascot-polish-1' %}
     <script>
       try {
         const storedTheme = window.localStorage.getItem("av-color-theme");
@@ -54,7 +54,7 @@
     <link rel="apple-touch-icon" href="/icons/algvault-ios-180.png">
     <link rel="apple-touch-icon" sizes="180x180" href="/icons/algvault-mascot-180.png">
     <link rel="apple-touch-icon-precomposed" sizes="180x180" href="/icons/algvault-mascot-180.png">
-    <link rel="preload" as="image" href="/icons/algvault-mascot-192.png" imagesrcset="/icons/algvault-mascot-64.png 64w, /icons/algvault-mascot-192.png 192w" imagesizes="64px">
+    <link rel="preload" as="image" href="/icons/algvault-avguard-mark-192.webp" imagesrcset="/icons/algvault-avguard-mark-96.webp 96w, /icons/algvault-avguard-mark-192.webp 192w" imagesizes="64px" type="image/webp">
     {% set stylesheet_filename = 'css/public.css' if page_seo.is_public else 'css/app.css' %}
     <link rel="preload" as="style" href="{{ url_for('static', filename=stylesheet_filename) }}?v={{ asset_v }}">
     <link rel="stylesheet" href="{{ url_for('static', filename=stylesheet_filename) }}?v={{ asset_v }}">
@@ -161,7 +161,10 @@
     <header class="site-header app-topbar" data-app-topbar>
       <a class="brand-lockup" href="{% if admin_authenticated %}{{ url_for('dashboard.index') }}{% elif not current_user %}{{ url_for('consumer.public_overview') }}{% else %}{{ url_for('consumer.home') }}{% endif %}">
         <span class="brand-mark brand-mark--mascot" aria-hidden="true">
-          <img src="/icons/algvault-mascot-64.png" alt="" width="64" height="64" decoding="async">
+          <picture>
+            <source srcset="/icons/algvault-avguard-mark-96.webp" type="image/webp">
+            <img src="/icons/algvault-avguard-mark-96.png" alt="" width="96" height="96" decoding="async">
+          </picture>
         </span>
         <span class="brand-copy">
           <span class="eyebrow">AlgVault</span>
@@ -355,7 +358,10 @@
       <footer class="public-footer" aria-label="AlgVault public navigation">
         <div class="public-footer__brand">
           <span class="brand-mark brand-mark--mascot" aria-hidden="true">
-            <img src="/icons/algvault-mascot-64.png" alt="" width="64" height="64" loading="lazy" decoding="async">
+            <picture>
+              <source srcset="/icons/algvault-avguard-mark-96.webp" type="image/webp">
+              <img src="/icons/algvault-avguard-mark-96.png" alt="" width="96" height="96" loading="lazy" decoding="async">
+            </picture>
           </span>
           <div>
             <strong>AlgVault</strong>

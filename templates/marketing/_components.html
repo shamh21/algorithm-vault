@@ -43,7 +43,10 @@
         </div>
         <div class="public-terminal" aria-label="{{ page.nav_label }} status preview">
           <div class="public-terminal__brand">
-            <img src="/icons/algvault-mascot-64.png" alt="" width="64" height="64" decoding="async" {% if home %}fetchpriority="high"{% else %}loading="lazy"{% endif %}>
+            <picture>
+              <source srcset="/icons/algvault-avguard-mark-96.webp" type="image/webp">
+              <img src="/icons/algvault-avguard-mark-96.png" alt="" width="96" height="96" decoding="async" {% if home %}fetchpriority="high"{% else %}loading="lazy"{% endif %}>
+            </picture>
             <div>
               <span>{{ page.eyebrow }}</span>
               <strong>{{ page.nav_label }} readiness</strong>
