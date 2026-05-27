@@ -17408,12 +17408,12 @@ body:has(.wallet-flow-shell) .crypto-rail {
   }
 }
 
-/* Login auth red/black exchange theme. Scoped to /login only. */
-html:has(.auth-login-shell) {
+/* Auth red/black exchange theme. Scoped to login/register auth screens only. */
+html:has(:is(.auth-login-shell, .auth-register-shell)) {
   min-width: 0;
 }
 
-body:has(.auth-login-shell) {
+body:has(:is(.auth-login-shell, .auth-register-shell)) {
   --auth-bg: #050505;
   --auth-bg-soft: #07070a;
   --auth-panel: #0d0d10;
@@ -17442,7 +17442,7 @@ body:has(.auth-login-shell) {
     linear-gradient(180deg, var(--auth-bg) 0%, var(--auth-bg-soft) 48%, #030304 100%);
 }
 
-body:has(.auth-login-shell)::before {
+body:has(:is(.auth-login-shell, .auth-register-shell))::before {
   background-image:
     linear-gradient(rgba(255, 255, 255, 0.018) 1px, transparent 1px),
     linear-gradient(90deg, rgba(255, 255, 255, 0.014) 1px, transparent 1px),
@@ -17450,69 +17450,69 @@ body:has(.auth-login-shell)::before {
   opacity: 0.62;
 }
 
-body:has(.auth-login-shell) .app-body {
+body:has(:is(.auth-login-shell, .auth-register-shell)) .app-body {
   min-width: 0;
   width: 100%;
   max-width: 100%;
   overflow-x: hidden;
 }
 
-body:has(.auth-login-shell) .site-header.app-topbar::before {
+body:has(:is(.auth-login-shell, .auth-register-shell)) .site-header.app-topbar::before {
   border-bottom-color: rgba(225, 29, 72, 0.18);
   background:
     linear-gradient(180deg, rgba(8, 8, 11, 0.94), rgba(5, 5, 5, 0.86)),
     rgba(5, 5, 5, 0.92);
 }
 
-body:has(.auth-login-shell) .brand-copy .eyebrow,
-body:has(.auth-login-shell) .public-topbar-link:hover,
-body:has(.auth-login-shell) .card-kicker,
-.auth-login-shell .text-link {
+body:has(:is(.auth-login-shell, .auth-register-shell)) .brand-copy .eyebrow,
+body:has(:is(.auth-login-shell, .auth-register-shell)) .public-topbar-link:hover,
+body:has(:is(.auth-login-shell, .auth-register-shell)) .card-kicker,
+:is(.auth-login-shell, .auth-register-shell) .text-link {
   color: var(--auth-accent-strong);
 }
 
-body:has(.auth-login-shell) .page-shell.app-main {
+body:has(:is(.auth-login-shell, .auth-register-shell)) .page-shell.app-main {
   width: min(720px, calc(100% - 2rem - var(--safe-left) - var(--safe-right)));
 }
 
-body:has(.auth-login-shell) .flash-stack {
+body:has(:is(.auth-login-shell, .auth-register-shell)) .flash-stack {
   width: min(720px, calc(100% - 2rem - var(--safe-left) - var(--safe-right)));
 }
 
-body:has(.auth-login-shell) .flash {
+body:has(:is(.auth-login-shell, .auth-register-shell)) .flash {
   border-color: var(--auth-border);
   color: var(--auth-muted-strong);
   background: rgba(13, 13, 16, 0.94);
   box-shadow: 0 18px 44px rgba(0, 0, 0, 0.42);
 }
 
-body:has(.auth-login-shell) .flash.success {
+body:has(:is(.auth-login-shell, .auth-register-shell)) .flash.success {
   border-color: rgba(23, 201, 100, 0.32);
   color: #bdf8d5;
   background: rgba(23, 201, 100, 0.08);
 }
 
-body:has(.auth-login-shell) .flash.warning {
+body:has(:is(.auth-login-shell, .auth-register-shell)) .flash.warning {
   border-color: rgba(245, 165, 36, 0.36);
   color: #ffd99a;
   background: rgba(245, 165, 36, 0.09);
 }
 
-body:has(.auth-login-shell) .flash.danger,
-body:has(.auth-login-shell) .flash.error {
+body:has(:is(.auth-login-shell, .auth-register-shell)) .flash.danger,
+body:has(:is(.auth-login-shell, .auth-register-shell)) .flash.error {
   border-color: rgba(255, 90, 102, 0.36);
   color: #ffc2c7;
   background: rgba(255, 90, 102, 0.09);
 }
 
-.auth-login-shell {
+:is(.auth-login-shell, .auth-register-shell) {
   width: 100%;
   min-height: min(760px, calc(100svh - 8rem));
   place-items: center;
   padding: clamp(1rem, 4vw, 2rem) max(0.75rem, var(--safe-right)) clamp(1rem, 4vw, 2rem) max(0.75rem, var(--safe-left));
 }
 
-.auth-login-card {
+:is(.auth-login-card, .auth-register-card) {
   position: relative;
   display: grid;
   gap: 1rem;
@@ -17531,7 +17531,7 @@ body:has(.auth-login-shell) .flash.error {
   overflow: hidden;
 }
 
-.auth-login-card::before {
+:is(.auth-login-card, .auth-register-card)::before {
   content: "";
   position: absolute;
   inset: 0 0 auto;
@@ -17539,7 +17539,7 @@ body:has(.auth-login-shell) .flash.error {
   background: linear-gradient(90deg, transparent, rgba(244, 63, 94, 0.7), transparent);
 }
 
-.auth-login-card h1 {
+:is(.auth-login-card, .auth-register-card) h1 {
   margin-bottom: 0.1rem;
   color: var(--auth-text);
   font-size: clamp(2.35rem, 10vw, 3.7rem);
@@ -17547,11 +17547,48 @@ body:has(.auth-login-shell) .flash.error {
   letter-spacing: 0;
 }
 
-.auth-login-card > .muted {
+:is(.auth-login-card, .auth-register-card) > .muted {
   margin: 0;
   color: var(--auth-muted-strong);
   font-size: 0.95rem;
   line-height: 1.48;
+}
+
+.auth-register-card {
+  width: min(100%, 33rem);
+}
+
+body:has(:is(.auth-login-shell, .auth-register-shell)) .auth-register-card .auth-register-badge {
+  display: inline-flex;
+  align-items: center;
+  width: max-content;
+  max-width: 100%;
+  min-height: 1.9rem;
+  padding: 0.32rem 0.62rem;
+  border: 1px solid rgba(244, 63, 94, 0.38);
+  border-radius: 999px;
+  color: #ffd6dd;
+  background: rgba(225, 29, 72, 0.12);
+  letter-spacing: 0.08em;
+}
+
+body:has(:is(.auth-login-shell, .auth-register-shell)) .auth-register-card .auth-register-invite-note,
+body:has(:is(.auth-login-shell, .auth-register-shell)) .auth-register-card .auth-register-disabled {
+  margin: 0.05rem 0;
+  padding: 0.78rem 0.85rem;
+  border: 1px solid rgba(245, 165, 36, 0.32);
+  border-radius: 0.72rem;
+  color: #ffdfab;
+  background:
+    linear-gradient(180deg, rgba(245, 165, 36, 0.092), rgba(255, 255, 255, 0.012)),
+    var(--auth-panel-inset);
+}
+
+body:has(:is(.auth-login-shell, .auth-register-shell)) .auth-register-card .auth-register-invite-note code,
+body:has(:is(.auth-login-shell, .auth-register-shell)) .auth-register-card .auth-register-disabled code {
+  color: #ffffff;
+  border-color: rgba(244, 63, 94, 0.26);
+  background: rgba(225, 29, 72, 0.12);
 }
 
 .auth-login-card .auth-route-context {
@@ -17619,18 +17656,18 @@ body:has(.auth-login-shell) .flash.error {
   background: rgba(245, 165, 36, 0.11);
 }
 
-.auth-login-form {
+:is(.auth-login-form, .auth-register-form) {
   gap: 0.88rem;
 }
 
-.auth-login-form label {
+:is(.auth-login-form, .auth-register-form) label {
   gap: 0.48rem;
   color: var(--auth-text);
   font-size: 0.9rem;
   font-weight: 880;
 }
 
-.auth-login-form input {
+:is(.auth-login-form, .auth-register-form) input {
   min-height: 3.35rem;
   border-color: var(--auth-border-strong);
   border-radius: 0.7rem;
@@ -17643,11 +17680,11 @@ body:has(.auth-login-shell) .flash.error {
     box-shadow 160ms ease;
 }
 
-.auth-login-form input::placeholder {
+:is(.auth-login-form, .auth-register-form) input::placeholder {
   color: rgba(200, 206, 216, 0.56);
 }
 
-body:has(.auth-login-shell) .auth-login-form input:focus-visible {
+body:has(:is(.auth-login-shell, .auth-register-shell)) :is(.auth-login-form, .auth-register-form) input:focus-visible {
   border-color: rgba(244, 63, 94, 0.58);
   outline: 2px solid var(--auth-focus);
   outline-offset: 2px;
@@ -17656,7 +17693,7 @@ body:has(.auth-login-shell) .auth-login-form input:focus-visible {
     inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 
-body:has(.auth-login-shell) button.primary.auth-login-submit {
+body:has(:is(.auth-login-shell, .auth-register-shell)) button.primary:is(.auth-login-submit, .auth-register-submit) {
   min-height: 3.4rem;
   border-color: rgba(244, 63, 94, 0.68);
   border-radius: 0.72rem;
@@ -17675,12 +17712,12 @@ body:has(.auth-login-shell) button.primary.auth-login-submit {
     filter 160ms ease;
 }
 
-body:has(.auth-login-shell) button.primary.auth-login-submit:focus-visible {
+body:has(:is(.auth-login-shell, .auth-register-shell)) button.primary:is(.auth-login-submit, .auth-register-submit):focus-visible {
   outline: 2px solid var(--auth-focus);
   outline-offset: 3px;
 }
 
-body:has(.auth-login-shell) button.primary.auth-login-submit:disabled {
+body:has(:is(.auth-login-shell, .auth-register-shell)) button.primary:is(.auth-login-submit, .auth-register-submit):disabled {
   cursor: not-allowed;
   border-color: rgba(255, 255, 255, 0.08);
   color: rgba(248, 250, 252, 0.58);
@@ -17689,16 +17726,16 @@ body:has(.auth-login-shell) button.primary.auth-login-submit:disabled {
   transform: none;
 }
 
-.auth-login-card .text-link {
+:is(.auth-login-card, .auth-register-card) .text-link {
   text-underline-offset: 0.18em;
   transition: color 160ms ease;
 }
 
-.auth-login-card .text-link:hover {
+:is(.auth-login-card, .auth-register-card) .text-link:hover {
   color: #ffffff;
 }
 
-body:has(.auth-login-shell) .public-footer {
+body:has(:is(.auth-login-shell, .auth-register-shell)) .public-footer {
   width: min(720px, calc(100% - 2rem - var(--safe-left) - var(--safe-right)));
   max-width: 100%;
   margin-right: auto;
@@ -17707,16 +17744,16 @@ body:has(.auth-login-shell) .public-footer {
   overflow-wrap: anywhere;
 }
 
-body:has(.auth-login-shell) .public-footer__brand,
-body:has(.auth-login-shell) .public-footer__grid,
-body:has(.auth-login-shell) .public-footer__links,
-body:has(.auth-login-shell) .public-footer__note {
+body:has(:is(.auth-login-shell, .auth-register-shell)) .public-footer__brand,
+body:has(:is(.auth-login-shell, .auth-register-shell)) .public-footer__grid,
+body:has(:is(.auth-login-shell, .auth-register-shell)) .public-footer__links,
+body:has(:is(.auth-login-shell, .auth-register-shell)) .public-footer__note {
   min-width: 0;
   max-width: 100%;
 }
 
 @media (hover: hover) and (pointer: fine) {
-  body:has(.auth-login-shell) button.primary.auth-login-submit:not(:disabled):hover {
+  body:has(:is(.auth-login-shell, .auth-register-shell)) button.primary:is(.auth-login-submit, .auth-register-submit):not(:disabled):hover {
     border-color: rgba(255, 116, 130, 0.74);
     filter: brightness(1.04);
     box-shadow:
@@ -17727,43 +17764,43 @@ body:has(.auth-login-shell) .public-footer__note {
 }
 
 @media (max-width: 620px) {
-  body:has(.auth-login-shell) .page-shell.app-main,
-  body:has(.auth-login-shell) .flash-stack {
+  body:has(:is(.auth-login-shell, .auth-register-shell)) .page-shell.app-main,
+  body:has(:is(.auth-login-shell, .auth-register-shell)) .flash-stack {
     width: min(100%, calc(100% - 1.05rem - var(--safe-left) - var(--safe-right)));
   }
 
-  body:has(.auth-login-shell) .site-header.app-topbar {
+  body:has(:is(.auth-login-shell, .auth-register-shell)) .site-header.app-topbar {
     width: min(100%, calc(100% - 0.85rem - var(--safe-left) - var(--safe-right)));
   }
 
-  body:has(.auth-login-shell) .public-topnav,
-  body:has(.auth-login-shell) .public-topbar-link,
-  body:has(.auth-login-shell) .public-topbar-cta,
-  body:has(.auth-login-shell) .topbar-actions {
+  body:has(:is(.auth-login-shell, .auth-register-shell)) .public-topnav,
+  body:has(:is(.auth-login-shell, .auth-register-shell)) .public-topbar-link,
+  body:has(:is(.auth-login-shell, .auth-register-shell)) .public-topbar-cta,
+  body:has(:is(.auth-login-shell, .auth-register-shell)) .topbar-actions {
     display: none;
   }
 
-  body:has(.auth-login-shell) .brand-copy strong {
+  body:has(:is(.auth-login-shell, .auth-register-shell)) .brand-copy strong {
     max-width: 42vw;
   }
 
-  .auth-login-shell {
+  :is(.auth-login-shell, .auth-register-shell) {
     min-height: auto;
     padding-top: calc(0.55rem + var(--safe-top));
     padding-bottom: calc(1rem + var(--safe-bottom));
   }
 
-  .auth-login-card {
+  :is(.auth-login-card, .auth-register-card) {
     gap: 0.72rem;
     border-radius: 0.72rem;
     padding: 0.78rem;
   }
 
-  .auth-login-card h1 {
+  :is(.auth-login-card, .auth-register-card) h1 {
     font-size: clamp(2rem, 13vw, 2.7rem);
   }
 
-  .auth-login-card > .muted {
+  :is(.auth-login-card, .auth-register-card) > .muted {
     font-size: 0.86rem;
     line-height: 1.34;
   }
@@ -17810,27 +17847,34 @@ body:has(.auth-login-shell) .public-footer__note {
     line-height: 1.28;
   }
 
-  .auth-login-form {
+  :is(.auth-login-form, .auth-register-form) {
     gap: 0.7rem;
   }
 
-  .auth-login-form label {
+  :is(.auth-login-form, .auth-register-form) label {
     gap: 0.34rem;
     font-size: 0.84rem;
   }
 
-  .auth-login-form input {
+  :is(.auth-login-form, .auth-register-form) input {
     min-height: 3rem;
   }
 
-  body:has(.auth-login-shell) button.primary.auth-login-submit {
+  body:has(:is(.auth-login-shell, .auth-register-shell)) .auth-register-card .auth-register-invite-note,
+  body:has(:is(.auth-login-shell, .auth-register-shell)) .auth-register-card .auth-register-disabled {
+    padding: 0.62rem;
+    font-size: 0.78rem;
+    line-height: 1.3;
+  }
+
+  body:has(:is(.auth-login-shell, .auth-register-shell)) button.primary:is(.auth-login-submit, .auth-register-submit) {
     min-height: 3.05rem;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .auth-login-shell *,
-  body:has(.auth-login-shell) .flash {
+  :is(.auth-login-shell, .auth-register-shell) *,
+  body:has(:is(.auth-login-shell, .auth-register-shell)) .flash {
     transition: none;
   }
 }

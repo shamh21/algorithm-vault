@@ -105,6 +105,39 @@ def test_login_shell_renders_when_admin_lookup_is_unavailable(app, monkeypatch) 
     assert "Sign In" in response.get_data(as_text=True)
 
 
+def test_register_shell_preserves_invite_signup_flow(app) -> None:
+    app.config["SIGNUP_INVITE_CODE"] = "join-code"
+    response = app.test_client().get("/register")
+    html = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert "css/app.css" in html
+    assert "register-redblack-auth-2" in html
+    assert 'class="auth-shell auth-register-shell"' in html
+    assert 'class="vault-card auth-card auth-register-card"' in html
+    assert 'class="card-kicker auth-register-badge">Invite Required</span>' in html
+    assert "Create Account" in html
+    assert "Registration requires an invite code" in html
+    assert 'method="post" action="/register"' in html
+    assert 'class="form-grid auth-register-form"' in html
+    assert 'name="csrf_token"' in html
+    assert 'name="username"' in html
+    assert 'name="password"' in html
+    assert 'name="confirm_password"' in html
+    assert 'name="invite_code"' in html
+    assert 'autocomplete="username"' in html
+    assert 'autocomplete="new-password"' in html
+    assert 'minlength="8"' in html
+    assert 'class="muted auth-register-invite-note"' in html
+    assert "positive Vault Cycle profit" in html
+    assert "deposits, principal, or losses" in html
+    assert 'class="primary auth-register-submit"' in html
+    assert 'href="/login"' in html
+    assert "Continue with Google" not in html
+    assert "Forgot password" not in html
+    assert "Remember this device" not in html
+
+
 def test_base_template_uses_command_center_bottom_nav() -> None:
     html = Path("templates/base.html").read_text(encoding="utf-8")
     for label in ("Dashboard", "Wallet", "Convert", "Vault", "Settings"):

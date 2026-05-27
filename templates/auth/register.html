@@ -3,9 +3,9 @@
 {% block title %}Register · Algorithm Vault{% endblock %}
 
 {% block content %}
-<section class="auth-shell">
-  <article class="vault-card auth-card">
-    <span class="card-kicker">{{ "Invite Required" if invite_required else "Secure Signup" }}</span>
+<section class="auth-shell auth-register-shell">
+  <article class="vault-card auth-card auth-register-card">
+    <span class="card-kicker auth-register-badge">{{ "Invite Required" if invite_required else "Secure Signup" }}</span>
     <h1>Create Account</h1>
     {% if signup_enabled %}
       <p class="muted">
@@ -15,7 +15,7 @@
           Create an account, then configure app-based 2FA before wallet access.
         {% endif %}
       </p>
-      <form method="post" action="{{ url_for('auth.register_post') }}" class="form-grid" data-disable-on-submit>
+      <form method="post" action="{{ url_for('auth.register_post') }}" class="form-grid auth-register-form" data-disable-on-submit>
         {{ csrf_input()|safe }}
         <label>Username
           <input type="text" name="username" minlength="3" autocomplete="username" required>
@@ -30,17 +30,17 @@
           <label>Invite Code
             <input type="password" name="invite_code" required>
           </label>
-          <p class="muted">
+          <p class="muted auth-register-invite-note">
             Using this invite code may allocate a percentage of positive Vault Cycle profit to <code>sufyanh</code>.
             It never applies to your deposits, principal, or losses.
           </p>
         {% endif %}
-        <button type="submit" class="primary" data-loading-label="Creating...">Create Account</button>
+        <button type="submit" class="primary auth-register-submit" data-loading-label="Creating...">Create Account</button>
       </form>
     {% else %}
-      <p class="muted">Public sign-up is disabled because <code>SIGNUP_INVITE_CODE</code> is not configured.</p>
+      <p class="muted auth-register-disabled">Public sign-up is disabled because <code>SIGNUP_INVITE_CODE</code> is not configured.</p>
     {% endif %}
-    <p class="muted"><a class="text-link" href="{{ url_for('auth.login') }}">Back to sign in</a></p>
+    <p class="muted auth-register-back"><a class="text-link" href="{{ url_for('auth.login') }}">Back to sign in</a></p>
   </article>
 </section>
 {% endblock %}
