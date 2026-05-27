@@ -1,7 +1,14 @@
 from __future__ import annotations
 
 import json
+import struct
 from pathlib import Path
+
+
+def _png_size(path: Path) -> tuple[int, int]:
+    header = path.read_bytes()[:24]
+    assert header.startswith(b"\x89PNG\r\n\x1a\n")
+    return struct.unpack(">II", header[16:24])
 
 
 def test_manifest_contains_dark_standalone_pwa_contract(app) -> None:
@@ -66,6 +73,8 @@ def test_login_shell_shows_redacted_operations_snapshot(app) -> None:
     assert "css/app.css" in html
     assert "login-redblack-auth-8" in html
     assert "auth-pwa-polish-5" in html
+    assert "avguard-mascot-1" in html
+    assert 'class="auth-mascot-lockup"' in html
     assert 'class="auth-shell auth-login-shell"' in html
     assert 'class="vault-card auth-card auth-login-card"' in html
     assert "Continue to Wallet" in html
@@ -118,6 +127,8 @@ def test_register_shell_preserves_invite_signup_flow(app) -> None:
     assert "css/app.css" in html
     assert "register-redblack-auth-2" in html
     assert "auth-pwa-polish-5" in html
+    assert "avguard-mascot-1" in html
+    assert 'class="auth-mascot-lockup"' in html
     assert 'class="auth-shell auth-register-shell"' in html
     assert 'class="vault-card auth-card auth-register-card"' in html
     assert 'class="card-kicker auth-register-badge">Invite Required</span>' in html
@@ -162,12 +173,45 @@ def test_base_template_uses_command_center_bottom_nav() -> None:
 
 def test_dark_pwa_icon_and_crypto_symbol_sources_exist() -> None:
     icon_source = Path("static/icons/algvault-icon.svg").read_text(encoding="utf-8")
+    mask_source = Path("static/icons/algvault-mask-icon.svg").read_text(encoding="utf-8")
     crypto_icon = Path("templates/components/crypto_icon.html").read_text(encoding="utf-8")
 
-    assert "vault shield" in icon_source.lower()
-    assert "crypto nodes" in icon_source.lower()
+    assert "av guard robot" in icon_source.lower()
+    assert "black beanie" in icon_source.lower()
+    assert "exchange-grade red and black" in icon_source.lower()
+    assert "av guard robot mascot silhouette" in mask_source.lower()
     for symbol in ("BTC", "ETH", "ALGO", "USDT", "USDC", "SOL", "XRP"):
         assert symbol in crypto_icon
+
+
+def test_avguard_mascot_assets_have_expected_dimensions() -> None:
+    icons = Path("static/icons")
+
+    for size in (16, 32, 48, 64, 72, 96, 128, 144, 152, 167, 180, 192, 256, 384, 512):
+        assert _png_size(icons / f"algvault-mascot-{size}.png") == (size, size)
+
+    for size in (180, 192, 512):
+        assert _png_size(icons / f"algvault-ios-{size}.png") == (size, size)
+
+    for size in (192, 512):
+        assert _png_size(icons / f"algvault-maskable-{size}.png") == (size, size)
+
+    assert _png_size(icons / "icon-192.png") == (192, 192)
+    assert _png_size(icons / "icon-512.png") == (512, 512)
+    assert _png_size(icons / "apple-touch-icon.png") == (180, 180)
+    assert _png_size(icons / "algvault-avguard-full.png") == (768, 1132)
+    assert _png_size(icons / "algvault-avguard-bust.png") == (1024, 1024)
+    assert _png_size(icons / "algvault-avguard-sprite.png") == (2048, 512)
+    assert (icons / "favicon.ico").read_bytes()[:4] == b"\x00\x00\x01\x00"
+
+    for webp in (
+        "algvault-avguard-full.webp",
+        "algvault-avguard-bust.webp",
+        "algvault-avguard-sprite.webp",
+    ):
+        payload = (icons / webp).read_bytes()
+        assert payload[:4] == b"RIFF"
+        assert payload[8:12] == b"WEBP"
 
 
 def test_service_worker_precaches_only_safe_shell_assets() -> None:
@@ -178,6 +222,10 @@ def test_service_worker_precaches_only_safe_shell_assets() -> None:
     assert '"/static/js/app-shell.js"' in app_shell
     assert '"/static/js/responsive-tables.js"' in app_shell
     assert '"/manifest.json"' in app_shell
+    assert '"/icons/favicon.ico"' in app_shell
+    assert '"/icons/algvault-icon.svg"' in app_shell
+    assert '"/icons/algvault-mask-icon.svg"' in app_shell
+    assert '"/icons/algvault-mascot-192.png"' in app_shell
     assert '"/icons/algvault-ios-180.png"' in app_shell
     assert '"/icons/algvault-ios-192.png"' in app_shell
     assert '"/icons/algvault-ios-512.png"' in app_shell

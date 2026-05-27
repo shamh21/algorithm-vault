@@ -5,6 +5,9 @@
 {% block content %}
 <section class="auth-shell auth-register-shell">
   <article class="vault-card auth-card auth-register-card">
+    <div class="auth-mascot-lockup" aria-hidden="true">
+      <img src="/icons/algvault-mascot-192.png" alt="" width="192" height="192" decoding="async">
+    </div>
     <span class="card-kicker auth-register-badge">{{ "Invite Required" if invite_required else "Secure Signup" }}</span>
     <h1>Create Account</h1>
     {% if signup_enabled %}

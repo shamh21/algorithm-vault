@@ -1,4 +1,4 @@
-const CACHE_VERSION = "algvault-v21-vault-shell-polish-9";
+const CACHE_VERSION = "algvault-v22-avguard-mascot-1";
 const SHELL_CACHE = `${CACHE_VERSION}-shell`;
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 
@@ -7,6 +7,10 @@ const APP_SHELL = [
   "/static/js/app-shell.js",
   "/static/js/responsive-tables.js",
   "/manifest.json",
+  "/icons/favicon.ico",
+  "/icons/algvault-icon.svg",
+  "/icons/algvault-mask-icon.svg",
+  "/icons/algvault-mascot-192.png",
   "/icons/algvault-ios-180.png",
   "/icons/algvault-ios-192.png",
   "/icons/algvault-ios-512.png",

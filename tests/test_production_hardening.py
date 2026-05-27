@@ -451,11 +451,12 @@ def test_ios_pwa_head_tags_target_algvault(app) -> None:
 def test_service_worker_clears_old_algvault_and_tradingbot_caches(app) -> None:
     worker = app.test_client().get("/static/js/sw.js").get_data(as_text=True)
 
-    assert 'const CACHE_VERSION = "algvault-v21-vault-shell-polish-9"' in worker
+    assert 'const CACHE_VERSION = "algvault-v22-avguard-mascot-1"' in worker
     assert 'name.startsWith("algvault-") || name.startsWith("tradingbot-")' in worker
     assert "self.clients.claim()" in worker
     assert "/manifest.json" in worker
     assert "/icons/algvault-ios-192.png" in worker
+    assert "/icons/algvault-mascot-192.png" in worker
 
 
 def test_service_worker_offline_fallback_does_not_cache_trading_state(app) -> None:

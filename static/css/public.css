@@ -163,6 +163,9 @@ button.secondary {
   width: 36px;
   height: 36px;
   display: block;
+  object-fit: cover;
+  object-position: center 42%;
+  border-radius: inherit;
 }
 
 .brand-copy {
@@ -600,6 +603,8 @@ button.secondary {
   border: 1px solid rgba(255, 45, 45, 0.28);
   border-radius: 999px;
   background: #030304;
+  object-fit: cover;
+  object-position: center 42%;
 }
 
 .public-terminal__brand span,
@@ -1388,6 +1393,9 @@ button.secondary {
 .overview-phone__brand img {
   width: 1.15rem;
   height: 1.15rem;
+  border-radius: 999px;
+  object-fit: cover;
+  object-position: center 42%;
 }
 
 .overview-phone__menu {
@@ -2038,6 +2046,9 @@ button.secondary {
 .overview-network__core img {
   width: 3.2rem;
   height: 3.2rem;
+  border-radius: 999px;
+  object-fit: cover;
+  object-position: center 42%;
 }
 
 .overview-network__node {
@@ -2211,6 +2222,16 @@ button.secondary {
   .overview-hero {
     gap: 1rem;
     padding-top: 1.35rem;
+    overflow: hidden;
+  }
+
+  .overview-hero__ambient {
+    right: 0;
+    left: 0;
+  }
+
+  .overview-hero__orbit {
+    display: none;
   }
 
   .overview-hero h1 {
