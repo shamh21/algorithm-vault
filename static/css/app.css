@@ -17415,7 +17415,7 @@ html:has(:is(.auth-login-shell, .auth-register-shell)) {
 
 body:has(:is(.auth-login-shell, .auth-register-shell)) {
   --auth-bg: #050505;
-  --auth-bg-soft: #07070a;
+  --auth-bg-soft: #060608;
   --auth-panel: #0d0d10;
   --auth-panel-elevated: #111114;
   --auth-panel-inset: #08080b;
@@ -17433,12 +17433,15 @@ body:has(:is(.auth-login-shell, .auth-register-shell)) {
   --auth-success: #17c964;
   --auth-warning: #f5a524;
   --auth-danger: #ff5a66;
+  --auth-radius-card: 0.92rem;
   min-width: 0;
+  min-height: 100dvh;
   width: 100%;
   max-width: 100%;
   background:
-    radial-gradient(circle at 16% -8%, rgba(225, 29, 72, 0.16), transparent 24rem),
-    radial-gradient(circle at 86% 12%, rgba(244, 63, 94, 0.08), transparent 24rem),
+    radial-gradient(ellipse at 50% -16%, rgba(255, 255, 255, 0.045), transparent 31rem),
+    radial-gradient(circle at 12% 12%, rgba(225, 29, 72, 0.095), transparent 24rem),
+    radial-gradient(circle at 92% 18%, rgba(244, 63, 94, 0.055), transparent 22rem),
     linear-gradient(180deg, var(--auth-bg) 0%, var(--auth-bg-soft) 48%, #030304 100%);
 }
 
@@ -17457,11 +17460,45 @@ body:has(:is(.auth-login-shell, .auth-register-shell)) .app-body {
   overflow-x: hidden;
 }
 
+body:has(:is(.auth-login-shell, .auth-register-shell)) .site-header.app-topbar {
+  width: min(1120px, calc(100vw - 1.5rem - var(--safe-left) - var(--safe-right)));
+  padding-block: 0.66rem;
+}
+
 body:has(:is(.auth-login-shell, .auth-register-shell)) .site-header.app-topbar::before {
   border-bottom-color: rgba(225, 29, 72, 0.18);
   background:
     linear-gradient(180deg, rgba(8, 8, 11, 0.94), rgba(5, 5, 5, 0.86)),
     rgba(5, 5, 5, 0.92);
+}
+
+body:has(:is(.auth-login-shell, .auth-register-shell)) .public-topnav {
+  display: none;
+}
+
+body:has(.auth-login-shell) .public-topbar-link[href="/login"],
+body:has(.auth-register-shell) .public-topbar-cta[href="/register"] {
+  display: none;
+}
+
+body:has(:is(.auth-login-shell, .auth-register-shell)) .button-link.primary.public-topbar-cta {
+  border-color: rgba(244, 63, 94, 0.58);
+  color: #ffffff;
+  background:
+    linear-gradient(180deg, rgba(244, 63, 94, 0.96), rgba(159, 13, 44, 0.96)),
+    var(--auth-accent);
+  box-shadow: 0 12px 28px rgba(225, 29, 72, 0.2);
+}
+
+body:has(:is(.auth-login-shell, .auth-register-shell)) .mode-chip {
+  border-color: rgba(23, 201, 100, 0.22);
+  color: #c8f7db;
+  background: rgba(13, 13, 16, 0.82);
+}
+
+body:has(:is(.auth-login-shell, .auth-register-shell)) .nav-toggle.secondary {
+  border-color: rgba(255, 255, 255, 0.11);
+  background: rgba(17, 17, 20, 0.82);
 }
 
 body:has(:is(.auth-login-shell, .auth-register-shell)) .brand-copy .eyebrow,
@@ -17472,7 +17509,11 @@ body:has(:is(.auth-login-shell, .auth-register-shell)) .card-kicker,
 }
 
 body:has(:is(.auth-login-shell, .auth-register-shell)) .page-shell.app-main {
-  width: min(720px, calc(100% - 2rem - var(--safe-left) - var(--safe-right)));
+  width: min(720px, calc(100% - 1.5rem - var(--safe-left) - var(--safe-right)));
+  padding-top: clamp(0.45rem, 2.2vw, 1rem);
+  padding-right: 0;
+  padding-bottom: max(1.25rem, calc(var(--safe-bottom) + 1.25rem));
+  padding-left: 0;
 }
 
 body:has(:is(.auth-login-shell, .auth-register-shell)) .flash-stack {
@@ -17507,9 +17548,9 @@ body:has(:is(.auth-login-shell, .auth-register-shell)) .flash.error {
 
 :is(.auth-login-shell, .auth-register-shell) {
   width: 100%;
-  min-height: min(760px, calc(100svh - 8rem));
+  min-height: min(720px, calc(100dvh - 6.4rem));
   place-items: center;
-  padding: clamp(1rem, 4vw, 2rem) max(0.75rem, var(--safe-right)) clamp(1rem, 4vw, 2rem) max(0.75rem, var(--safe-left));
+  padding: clamp(0.75rem, 3vw, 1.35rem) max(0.75rem, var(--safe-right)) clamp(0.85rem, 3vw, 1.5rem) max(0.75rem, var(--safe-left));
 }
 
 :is(.auth-login-card, .auth-register-card) {
@@ -17517,9 +17558,9 @@ body:has(:is(.auth-login-shell, .auth-register-shell)) .flash.error {
   display: grid;
   gap: 1rem;
   width: min(100%, 30rem);
-  padding: clamp(1.05rem, 3.5vw, 1.45rem);
+  padding: clamp(1rem, 2.9vw, 1.32rem);
   border: 1px solid var(--auth-accent-border);
-  border-radius: 0.85rem;
+  border-radius: var(--auth-radius-card);
   color: var(--auth-text);
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.048), rgba(255, 255, 255, 0.014)),
@@ -17542,8 +17583,8 @@ body:has(:is(.auth-login-shell, .auth-register-shell)) .flash.error {
 :is(.auth-login-card, .auth-register-card) h1 {
   margin-bottom: 0.1rem;
   color: var(--auth-text);
-  font-size: clamp(2.35rem, 10vw, 3.7rem);
-  line-height: 0.95;
+  font-size: clamp(2.1rem, 8vw, 3.1rem);
+  line-height: 0.98;
   letter-spacing: 0;
 }
 
@@ -17598,9 +17639,9 @@ body:has(:is(.auth-login-shell, .auth-register-shell)) .auth-register-card .auth
 }
 
 .auth-login-card .auth-ops-panel {
-  gap: 0.78rem;
+  gap: 0.7rem;
   margin: 0.1rem 0 0.15rem;
-  padding: 0.85rem;
+  padding: 0.78rem;
   border: 1px solid var(--auth-border);
   border-radius: 0.75rem;
   background:
@@ -17614,12 +17655,12 @@ body:has(:is(.auth-login-shell, .auth-register-shell)) .auth-register-card .auth
 
 .auth-login-card .auth-ops-grid {
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 0.6rem;
+  gap: 0.5rem;
 }
 
 .auth-login-card .auth-ops-grid div {
   min-width: 0;
-  padding: 0.58rem;
+  padding: 0.52rem;
   border: 1px solid rgba(255, 255, 255, 0.07);
   border-radius: 0.58rem;
   background: rgba(255, 255, 255, 0.025);
@@ -17657,7 +17698,7 @@ body:has(:is(.auth-login-shell, .auth-register-shell)) .auth-register-card .auth
 }
 
 :is(.auth-login-form, .auth-register-form) {
-  gap: 0.88rem;
+  gap: 0.82rem;
 }
 
 :is(.auth-login-form, .auth-register-form) label {
@@ -17668,11 +17709,12 @@ body:has(:is(.auth-login-shell, .auth-register-shell)) .auth-register-card .auth
 }
 
 :is(.auth-login-form, .auth-register-form) input {
-  min-height: 3.35rem;
+  min-height: 3.2rem;
   border-color: var(--auth-border-strong);
   border-radius: 0.7rem;
   color: var(--auth-text);
   background: rgba(3, 3, 4, 0.72);
+  font-size: 1rem;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035);
   transition:
     border-color 160ms ease,
@@ -17694,7 +17736,7 @@ body:has(:is(.auth-login-shell, .auth-register-shell)) :is(.auth-login-form, .au
 }
 
 body:has(:is(.auth-login-shell, .auth-register-shell)) button.primary:is(.auth-login-submit, .auth-register-submit) {
-  min-height: 3.4rem;
+  min-height: 3.22rem;
   border-color: rgba(244, 63, 94, 0.68);
   border-radius: 0.72rem;
   color: #ffffff;
@@ -17736,20 +17778,85 @@ body:has(:is(.auth-login-shell, .auth-register-shell)) button.primary:is(.auth-l
 }
 
 body:has(:is(.auth-login-shell, .auth-register-shell)) .public-footer {
-  width: min(720px, calc(100% - 2rem - var(--safe-left) - var(--safe-right)));
-  max-width: 100%;
-  margin-right: auto;
-  margin-left: auto;
-  border-top-color: rgba(225, 29, 72, 0.12);
-  overflow-wrap: anywhere;
+  display: none;
 }
 
-body:has(:is(.auth-login-shell, .auth-register-shell)) .public-footer__brand,
-body:has(:is(.auth-login-shell, .auth-register-shell)) .public-footer__grid,
-body:has(:is(.auth-login-shell, .auth-register-shell)) .public-footer__links,
-body:has(:is(.auth-login-shell, .auth-register-shell)) .public-footer__note {
-  min-width: 0;
-  max-width: 100%;
+body:has(:is(.auth-login-shell, .auth-register-shell)) .sw-update-banner {
+  right: max(0.75rem, var(--safe-right));
+  bottom: calc(max(0.75rem, var(--safe-bottom)) + 0.1rem);
+  border-color: rgba(244, 63, 94, 0.34);
+  color: var(--auth-text);
+  background: rgba(13, 13, 16, 0.96);
+  box-shadow:
+    0 18px 42px rgba(0, 0, 0, 0.58),
+    0 0 0 1px rgba(255, 255, 255, 0.025);
+}
+
+body:has(:is(.auth-login-shell, .auth-register-shell)) .sw-update-banner button {
+  min-height: 2.35rem;
+  border: 1px solid rgba(244, 63, 94, 0.6);
+  color: #ffffff;
+  background:
+    linear-gradient(180deg, rgba(244, 63, 94, 0.98), rgba(159, 13, 44, 0.98)),
+    var(--auth-accent);
+  box-shadow: 0 10px 22px rgba(225, 29, 72, 0.22);
+}
+
+@media (min-width: 900px) {
+  body:has(:is(.auth-login-shell, .auth-register-shell)) .page-shell.app-main {
+    width: min(1060px, calc(100% - 2rem - var(--safe-left) - var(--safe-right)));
+  }
+
+  :is(.auth-login-card, .auth-register-card) {
+    width: min(100%, 60rem);
+    grid-template-columns: minmax(0, 1.06fr) minmax(22.5rem, 0.94fr);
+    column-gap: 1.25rem;
+    row-gap: 0.72rem;
+    align-items: start;
+  }
+
+  .auth-register-card {
+    min-height: 31rem;
+  }
+
+  .auth-login-card > .card-kicker,
+  .auth-login-card > h1,
+  .auth-login-card > .auth-route-context,
+  .auth-login-card > .muted:not(:last-child),
+  .auth-login-card > .auth-ops-panel {
+    grid-column: 1;
+  }
+
+  .auth-login-card > .auth-login-form {
+    grid-column: 2;
+    grid-row: 1 / span 5;
+    align-self: center;
+    padding: 0.08rem 0 0;
+  }
+
+  .auth-register-card > .auth-register-badge,
+  .auth-register-card > h1,
+  .auth-register-card > .muted,
+  .auth-register-card > .auth-register-disabled,
+  .auth-register-card > .auth-register-back {
+    grid-column: 1;
+  }
+
+  .auth-register-card > .auth-register-form {
+    grid-column: 2;
+    grid-row: 1 / span 5;
+    align-self: center;
+    padding: 0.08rem 0 0;
+  }
+
+  .auth-login-card > .muted:last-child {
+    grid-column: 2;
+    margin-top: -0.15rem;
+  }
+
+  .auth-login-card .auth-ops-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (hover: hover) and (pointer: fine) {
@@ -17771,6 +17878,7 @@ body:has(:is(.auth-login-shell, .auth-register-shell)) .public-footer__note {
 
   body:has(:is(.auth-login-shell, .auth-register-shell)) .site-header.app-topbar {
     width: min(100%, calc(100% - 0.85rem - var(--safe-left) - var(--safe-right)));
+    padding-block: 0.52rem;
   }
 
   body:has(:is(.auth-login-shell, .auth-register-shell)) .public-topnav,
@@ -17786,18 +17894,18 @@ body:has(:is(.auth-login-shell, .auth-register-shell)) .public-footer__note {
 
   :is(.auth-login-shell, .auth-register-shell) {
     min-height: auto;
-    padding-top: calc(0.55rem + var(--safe-top));
-    padding-bottom: calc(1rem + var(--safe-bottom));
+    padding-top: calc(0.35rem + var(--safe-top));
+    padding-bottom: calc(0.85rem + var(--safe-bottom));
   }
 
   :is(.auth-login-card, .auth-register-card) {
-    gap: 0.72rem;
+    gap: 0.62rem;
     border-radius: 0.72rem;
-    padding: 0.78rem;
+    padding: 0.82rem;
   }
 
   :is(.auth-login-card, .auth-register-card) h1 {
-    font-size: clamp(2rem, 13vw, 2.7rem);
+    font-size: clamp(1.85rem, 11vw, 2.35rem);
   }
 
   :is(.auth-login-card, .auth-register-card) > .muted {
@@ -17847,8 +17955,20 @@ body:has(:is(.auth-login-shell, .auth-register-shell)) .public-footer__note {
     line-height: 1.28;
   }
 
+  .auth-login-card .auth-login-form {
+    order: 10;
+  }
+
+  .auth-login-card > .muted:last-child {
+    order: 12;
+  }
+
+  .auth-login-card .auth-ops-panel {
+    order: 20;
+  }
+
   :is(.auth-login-form, .auth-register-form) {
-    gap: 0.7rem;
+    gap: 0.64rem;
   }
 
   :is(.auth-login-form, .auth-register-form) label {
@@ -17857,18 +17977,31 @@ body:has(:is(.auth-login-shell, .auth-register-shell)) .public-footer__note {
   }
 
   :is(.auth-login-form, .auth-register-form) input {
-    min-height: 3rem;
+    min-height: 2.95rem;
   }
 
   body:has(:is(.auth-login-shell, .auth-register-shell)) .auth-register-card .auth-register-invite-note,
   body:has(:is(.auth-login-shell, .auth-register-shell)) .auth-register-card .auth-register-disabled {
-    padding: 0.62rem;
-    font-size: 0.78rem;
-    line-height: 1.3;
+    padding: 0.56rem;
+    font-size: 0.76rem;
+    line-height: 1.26;
   }
 
   body:has(:is(.auth-login-shell, .auth-register-shell)) button.primary:is(.auth-login-submit, .auth-register-submit) {
-    min-height: 3.05rem;
+    min-height: 3rem;
+  }
+
+  body:has(:is(.auth-login-shell, .auth-register-shell)) .sw-update-banner {
+    right: max(0.62rem, var(--safe-right));
+    bottom: calc(max(0.62rem, var(--safe-bottom)) + 0.1rem);
+    left: max(0.62rem, var(--safe-left));
+    display: flex;
+    justify-content: space-between;
+    width: auto;
+  }
+
+  body:has(:is(.auth-login-shell, .auth-register-shell)) .sw-update-banner button {
+    min-width: 5rem;
   }
 }
 

@@ -41,13 +41,13 @@
     <form method="post" action="{{ url_for('auth.login_post', next=request.args.get('next', '')) }}" class="form-grid auth-login-form" data-disable-on-submit>
       {{ csrf_input()|safe }}
       <label>Username
-        <input type="text" name="username" value="{{ username or '' }}" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+        <input type="text" name="username" value="{{ username or '' }}" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="next" required>
       </label>
       <label>Password
-        <input type="password" name="password" autocomplete="current-password" required>
+        <input type="password" name="password" autocomplete="current-password" enterkeyhint="next" required>
       </label>
       <label>Authenticator Code
-        <input type="text" name="totp_code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" placeholder="000000" {% if require_2fa %}required autofocus{% endif %}>
+        <input type="text" name="totp_code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" enterkeyhint="done" placeholder="000000" {% if require_2fa %}required autofocus{% endif %}>
       </label>
       <button type="submit" class="primary auth-login-submit" data-loading-label="Signing in...">Sign In</button>
     </form>
