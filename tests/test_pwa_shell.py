@@ -65,7 +65,7 @@ def test_login_shell_shows_redacted_operations_snapshot(app) -> None:
     assert response.status_code == 200
     assert "css/app.css" in html
     assert "login-redblack-auth-8" in html
-    assert "auth-pwa-polish-4" in html
+    assert "auth-pwa-polish-5" in html
     assert 'class="auth-shell auth-login-shell"' in html
     assert 'class="vault-card auth-card auth-login-card"' in html
     assert "Continue to Wallet" in html
@@ -117,7 +117,7 @@ def test_register_shell_preserves_invite_signup_flow(app) -> None:
     assert response.status_code == 200
     assert "css/app.css" in html
     assert "register-redblack-auth-2" in html
-    assert "auth-pwa-polish-4" in html
+    assert "auth-pwa-polish-5" in html
     assert 'class="auth-shell auth-register-shell"' in html
     assert 'class="vault-card auth-card auth-register-card"' in html
     assert 'class="card-kicker auth-register-badge">Invite Required</span>' in html
@@ -137,11 +137,10 @@ def test_register_shell_preserves_invite_signup_flow(app) -> None:
     assert 'spellcheck="false"' in html
     assert 'enterkeyhint="next"' in html
     assert 'enterkeyhint="done"' in html
-    assert 'aria-describedby="invite-profit-share-note"' in html
     assert 'minlength="8"' in html
-    assert 'class="muted auth-register-invite-note" id="invite-profit-share-note"' in html
-    assert "positive Vault Cycle profit" in html
-    assert "deposits, principal, or losses" in html
+    assert "positive Vault Cycle profit" not in html
+    assert "deposits, principal, or losses" not in html
+    assert "invite-profit-share-note" not in html
     assert 'class="primary auth-register-submit"' in html
     assert 'href="/login"' in html
     assert "Continue with Google" not in html

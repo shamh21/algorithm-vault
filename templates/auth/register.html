@@ -28,12 +28,8 @@
         </label>
         {% if invite_required %}
           <label>Invite Code
-            <input type="password" name="invite_code" autocomplete="one-time-code" enterkeyhint="done" aria-describedby="invite-profit-share-note" required>
+            <input type="password" name="invite_code" autocomplete="one-time-code" enterkeyhint="done" required>
           </label>
-          <p class="muted auth-register-invite-note" id="invite-profit-share-note">
-            Using this invite code may allocate a percentage of positive Vault Cycle profit to <code>sufyanh</code>.
-            It never applies to your deposits, principal, or losses.
-          </p>
         {% endif %}
         <button type="submit" class="primary auth-register-submit" data-loading-label="Creating...">Create Account</button>
       </form>
