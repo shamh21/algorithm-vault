@@ -63,13 +63,30 @@ def test_login_shell_shows_redacted_operations_snapshot(app) -> None:
     html = response.get_data(as_text=True)
 
     assert response.status_code == 200
+    assert "css/app.css" in html
+    assert "login-redblack-auth-8" in html
+    assert 'class="auth-shell auth-login-shell"' in html
+    assert 'class="vault-card auth-card auth-login-card"' in html
     assert "Continue to Wallet" in html
     assert "Production Status" in html
     assert "Database" in html
+    assert "Mode" in html
     assert "Withdrawals" in html
     assert "Treasury" in html
+    assert 'method="post" action="/login?next=/wallet/"' in html
+    assert 'class="form-grid auth-login-form"' in html
+    assert 'name="csrf_token"' in html
+    assert 'name="username"' in html
+    assert 'name="password"' in html
+    assert 'name="totp_code"' in html
     assert 'autocapitalize="none"' in html
+    assert 'autocomplete="current-password"' in html
     assert 'maxlength="6"' in html
+    assert 'class="primary auth-login-submit"' in html
+    assert 'href="/register"' in html
+    assert "Continue with Google" not in html
+    assert "Forgot password" not in html
+    assert "Remember this device" not in html
     assert "WALLET_MPC_SIGNER_TOKEN" not in html
     assert "TREASURY_ENCRYPTION_KEY" not in html
 
