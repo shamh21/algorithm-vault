@@ -705,6 +705,8 @@ def _apple_pay_purchase_status(app: Flask) -> dict[str, Any]:
             "treasury_fee_bps": readiness.get("treasury_fee_bps"),
             "allowed_assets": readiness.get("allowed_assets", {}),
             "domain_association_configured": bool(str(app.config.get("APPLE_PAY_DOMAIN_ASSOCIATION", "") or "").strip()),
+            "treasury_signer_configured": bool(service.treasury_signer_url and service.treasury_signer_token),
+            "treasury_signer_provider": service.treasury_signer_provider,
             "fulfillment_worker_enabled": bool(app.config.get("WORKER_APPLE_PAY_FULFILLMENT_ENABLED", True)),
             "fulfillment_worker": readiness.get("fulfillment_worker", {}),
             "card_buy": {
@@ -722,6 +724,8 @@ def _apple_pay_purchase_status(app: Flask) -> dict[str, Any]:
                 "gateway_public_configured": bool((card_readiness.get("gateway", {}) or {}).get("public_config") or {}),
                 "treasury_fee_asset": "ETH",
                 "treasury_fee_address_configured": bool(str(app.config.get("APPLE_PAY_TREASURY_FEE_ADDRESS", "") or "").strip()),
+                "treasury_signer_configured": bool(service.treasury_signer_url and service.treasury_signer_token),
+                "treasury_signer_provider": service.treasury_signer_provider,
                 "oneinch_configured": bool(str(app.config.get("ONEINCH_API_KEY", "") or "").strip()),
                 "oneinch_base_url": app.config.get("ONEINCH_API_BASE_URL"),
                 "fulfillment_worker_enabled": bool(app.config.get("WORKER_APPLE_PAY_FULFILLMENT_ENABLED", True)),

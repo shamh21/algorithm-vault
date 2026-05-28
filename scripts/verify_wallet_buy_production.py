@@ -131,6 +131,14 @@ def required_env_names(mode: str) -> set[str]:
     return set(REQUIRED_CARD_ENV_NAMES)
 
 
+def _internal_treasury_signer_active(apple_pay: dict[str, Any], mode: str) -> bool:
+    payload = apple_pay
+    if mode == "card":
+        card = apple_pay.get("card_buy") if isinstance(apple_pay.get("card_buy"), dict) else {}
+        payload = card
+    return payload.get("treasury_signer_provider") == "internal_mpc" and payload.get("treasury_signer_configured") is True
+
+
 def _list_value(payload: dict[str, Any], *keys: str) -> list[str]:
     for key in keys:
         value = payload.get(key)
@@ -180,7 +188,12 @@ def main() -> int:
 
     if not args.skip_vercel_env:
         names = vercel_env_names(scope=args.scope)
-        missing_env = sorted(required_env_names(args.mode) - names)
+        required = required_env_names(args.mode)
+        if args.mode in {"apple-pay", "both"} and _internal_treasury_signer_active(apple_pay, "apple-pay"):
+            required -= {"APPLE_PAY_TREASURY_SIGNER_URL", "APPLE_PAY_TREASURY_SIGNER_TOKEN"}
+        if args.mode in {"card", "both"} and _internal_treasury_signer_active(apple_pay, "card"):
+            required -= {"APPLE_PAY_TREASURY_SIGNER_URL", "APPLE_PAY_TREASURY_SIGNER_TOKEN"}
+        missing_env = sorted(required - names)
         if missing_env:
             failures.append("Vercel production env is missing: " + ", ".join(missing_env))
 

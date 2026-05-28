@@ -394,6 +394,30 @@ def test_apple_pay_readiness_accepts_recent_worker_heartbeat_in_production(app) 
     assert readiness["fulfillment_worker"]["recent"] is True
 
 
+def test_wallet_buy_can_use_internal_mpc_treasury_signer(app) -> None:
+    _configure_treasury_transfer_apple_pay(app)
+    app.config.update(
+        APPLE_PAY_TREASURY_SIGNER_URL="",
+        APPLE_PAY_TREASURY_SIGNER_TOKEN="",
+        WALLET_BUY_INTERNAL_TREASURY_SIGNER_ENABLED=True,
+        WALLET_INTERNAL_MPC_SIGNER_ENABLED=True,
+        WALLET_MPC_SIGNER_TOKEN="mpc-token",
+        WALLET_MPC_SIGNER_ENCRYPTION_KEY="fernet-key-placeholder",
+        PUBLIC_APP_ORIGIN="https://algvault.app",
+        PUBLIC_API_ORIGIN="",
+    )
+    service = app.extensions["services"]["wallet_apple_pay_purchase"]
+
+    readiness = service.readiness()
+
+    assert readiness["ready"] is True
+    assert service.treasury_signer_provider == "internal_mpc"
+    assert service.treasury_signer_url == "https://algvault.app/_internal/mpc-signer/wallet-buy/treasury-transfer"
+    assert service.treasury_signer_token == "mpc-token"
+    assert "APPLE_PAY_TREASURY_SIGNER_URL must be configured" not in readiness["blockers"]
+    assert "APPLE_PAY_TREASURY_SIGNER_TOKEN must be configured" not in readiness["blockers"]
+
+
 def test_apple_pay_quote_uses_net_from_charge_fee_math(app) -> None:
     fake = _configure_apple_pay(app)
     user, _deposit = _user_with_deposit()

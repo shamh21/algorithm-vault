@@ -12,14 +12,18 @@ from app.models import (
     AuditLog,
     MLModelRegistry,
     MLOfflineModel,
+    Setting,
     StrategyRun,
     User,
+    WalletAccount,
+    WalletAddress,
     WalletAuditLog,
     WalletWithdrawal,
     WorkerJobRun,
     WorkerLease,
 )
 from app.services.model_registry import ModelRegistryService
+from app.services.wallet_custody import BroadcastResult
 from app.services.withdrawal_config import automatic_withdrawal_blockers, wallet_withdrawals_enabled
 from app.services.worker_lease import WorkerLeaseService
 from app.settings_validation import RuntimeConfigError, validate_runtime_config
@@ -148,6 +152,112 @@ def test_apple_pay_fulfillment_cron_runs_single_job_with_sanitized_response(app)
     assert lease.status == "released"
     assert lease.heartbeat_at is not None
     assert run.status == "complete"
+
+
+def test_internal_mpc_signer_wallet_buy_treasury_transfer_is_idempotent(app, monkeypatch) -> None:
+    from app.routes import internal_mpc_signer as signer_module
+
+    class _FakeAdapter:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def sign_and_broadcast(self, withdrawal: WalletWithdrawal, private_key: str) -> BroadcastResult:
+            self.calls.append(
+                {
+                    "asset": withdrawal.asset,
+                    "destination": withdrawal.destination_address,
+                    "amount": withdrawal.amount,
+                    "private_key": private_key,
+                }
+            )
+            tx_hash = "0xfee" if withdrawal.asset == "ETH" and withdrawal.destination_address.endswith("3333") else "0xuser"
+            return BroadcastResult("submitted", tx_hash, {"raw_transaction": "0xsecret"})
+
+    fake_adapter = _FakeAdapter()
+    monkeypatch.setattr(signer_module, "_adapter_for", lambda _asset, _network: fake_adapter)
+
+    key = Fernet.generate_key()
+    source_address = "0x2222222222222222222222222222222222222222"
+    with app.app_context():
+        app.config.update(
+            WALLET_INTERNAL_MPC_SIGNER_ENABLED=True,
+            WALLET_MPC_SIGNER_TOKEN="signer-token",
+            WALLET_MPC_SIGNER_ENCRYPTION_KEY=key.decode(),
+        )
+        user = User(username="treasury", password_hash="hash")
+        db.session.add(user)
+        db.session.flush()
+        account = WalletAccount(user_id=user.id, provider="mpc_signer", asset="USDT", network="Ethereum")
+        db.session.add(account)
+        db.session.flush()
+        wallet_address = WalletAddress(
+            user_id=user.id,
+            wallet_account_id=account.id,
+            asset="USDT",
+            network="Ethereum",
+            address=source_address,
+            status="active",
+        )
+        wallet_address.encrypted_metadata = {"custody": "mpc", "signer_key_id": "signer_usdt"}
+        db.session.add(wallet_address)
+        Setting.set_json(
+            "internal_mpc_signer_keys_v1",
+            {
+                "keys": {
+                    "signer_usdt": {
+                        "user_id": user.id,
+                        "asset": "USDT",
+                        "network": "Ethereum",
+                        "address": source_address,
+                        "encrypted_private_key": Fernet(key).encrypt(b"private-key").decode(),
+                    }
+                }
+            },
+        )
+        db.session.commit()
+        client = app.test_client()
+        payload = {
+            "external_order_id": "wapo_test",
+            "fulfillment_kind": "treasury_transfer",
+            "asset": "USDT",
+            "network": "Ethereum",
+            "source_address": source_address,
+            "destination_address": "0x1111111111111111111111111111111111111111",
+            "amount": 10.5,
+            "signer_key_id": "signer_usdt",
+            "require_treasury_fee_transfer": True,
+            "treasury_fee_address": "0x3333333333333333333333333333333333333333",
+            "treasury_fee_eth_amount": 0.001,
+        }
+
+        first = client.post(
+            "/_internal/mpc-signer/wallet-buy/treasury-transfer",
+            json=payload,
+            headers={"Authorization": "Bearer signer-token"},
+        )
+        second = client.post(
+            "/_internal/mpc-signer/wallet-buy/treasury-transfer",
+            json=payload,
+            headers={"Authorization": "Bearer signer-token"},
+        )
+        withdrawals = WalletWithdrawal.query.filter_by(workflow_type="wallet_buy_fulfillment").all()
+
+    assert first.status_code == 200
+    assert first.get_json() == {
+        "ok": True,
+        "provider_reference": "0xuser",
+        "status": "complete",
+        "treasury_tx_hash": "0xfee",
+        "tx_hash": "0xuser",
+    }
+    assert second.status_code == 200
+    assert second.get_json() == first.get_json()
+    assert len(fake_adapter.calls) == 2
+    assert fake_adapter.calls[0]["private_key"] == "private-key"
+    assert len(withdrawals) == 2
+    assert {withdrawal.provider_reference for withdrawal in withdrawals} == {"0xuser", "0xfee"}
+    assert "raw_transaction" not in first.get_data(as_text=True)
+    assert "0xsecret" not in first.get_data(as_text=True)
 
 
 def test_runtime_config_blocks_unsafe_production_withdrawals() -> None:

@@ -704,6 +704,17 @@ class WalletApplePayPurchaseService:
     def _oneinch_provider_configured(self) -> bool:
         return bool(self.oneinch_api_key)
 
+    def _internal_treasury_signer_available(self) -> bool:
+        if not bool(self.config.get("WALLET_BUY_INTERNAL_TREASURY_SIGNER_ENABLED", True)):
+            return False
+        if not bool(self.config.get("WALLET_INTERNAL_MPC_SIGNER_ENABLED", False)):
+            return False
+        if not str(self.config.get("WALLET_MPC_SIGNER_TOKEN", "") or "").strip():
+            return False
+        if not str(self.config.get("WALLET_MPC_SIGNER_ENCRYPTION_KEY", "") or "").strip():
+            return False
+        return bool(str(self.config.get("PUBLIC_APP_ORIGIN") or self.config.get("PUBLIC_API_ORIGIN") or "").strip())
+
     @property
     def treasury_source_address(self) -> str:
         return str(self.config.get("APPLE_PAY_TREASURY_SOURCE_ADDRESS", "") or "").strip()
@@ -714,11 +725,29 @@ class WalletApplePayPurchaseService:
 
     @property
     def treasury_signer_url(self) -> str:
-        return str(self.config.get("APPLE_PAY_TREASURY_SIGNER_URL", "") or "").strip()
+        configured = str(self.config.get("APPLE_PAY_TREASURY_SIGNER_URL", "") or "").strip()
+        if configured:
+            return configured
+        if self._internal_treasury_signer_available():
+            origin = str(self.config.get("PUBLIC_APP_ORIGIN") or self.config.get("PUBLIC_API_ORIGIN") or "").strip().rstrip("/")
+            if origin:
+                return f"{origin}/_internal/mpc-signer/wallet-buy/treasury-transfer"
+        return ""
 
     @property
     def treasury_signer_token(self) -> str:
-        return str(self.config.get("APPLE_PAY_TREASURY_SIGNER_TOKEN", "") or "").strip()
+        configured = str(self.config.get("APPLE_PAY_TREASURY_SIGNER_TOKEN", "") or "").strip()
+        if configured:
+            return configured
+        if self._internal_treasury_signer_available():
+            return str(self.config.get("WALLET_MPC_SIGNER_TOKEN", "") or "").strip()
+        return ""
+
+    @property
+    def treasury_signer_provider(self) -> str:
+        if str(self.config.get("APPLE_PAY_TREASURY_SIGNER_URL", "") or "").strip():
+            return "external"
+        return "internal_mpc" if self._internal_treasury_signer_available() else ""
 
     @property
     def treasury_fee_bps(self) -> float:
