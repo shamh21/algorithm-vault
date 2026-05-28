@@ -473,6 +473,8 @@ def test_consumer_pages_render_wallet_and_vault_experience(app) -> None:
     assert b"Withdraw" in wallet.data
     assert b"Convert" in wallet.data
     assert b"Buy with Card" in wallet.data
+    assert b"Buy with Apple Pay" in wallet.data
+    assert b'data-onramp-method="apple_pay"' in wallet.data
     assert b"wallet-card-buy-data" in wallet.data
     assert b"wallet-apple-pay-data" in wallet.data
     assert b"wallet-card-buy-1" in wallet.data

@@ -66,6 +66,8 @@
   const panel = document.querySelector("[data-wallet-card-buy-panel]");
   const csrfToken = panel?.getAttribute("data-csrf-token") || "";
   const dialog = sheet.querySelector(".wallet-onramp-dialog");
+  const dialogTitle = sheet.querySelector("#wallet-onramp-title");
+  const dialogCopy = sheet.querySelector("[data-wallet-onramp-copy]");
   const stateNode = sheet.querySelector("[data-wallet-onramp-state]");
   const submitButton = sheet.querySelector("[data-wallet-onramp-submit]");
   const assetSelect = sheet.querySelector("[data-onramp-asset]");
@@ -94,6 +96,8 @@
     method: "card",
     phase: "idle",
     order: null,
+    applePayRequest: null,
+    applePaySession: null,
     gatewayToken: "",
     pollTimer: null,
     lastFocus: null,
@@ -133,8 +137,17 @@
 
   const resetQuote = () => {
     clearPolling();
+    if (state.applePaySession) {
+      try {
+        state.applePaySession.abort();
+      } catch (error) {
+        // The session may already be complete or canceled.
+      }
+    }
     state.phase = "idle";
     state.order = null;
+    state.applePayRequest = null;
+    state.applePaySession = null;
     state.gatewayToken = "";
     if (tokenInput) tokenInput.value = "";
     if (quoteWrap) quoteWrap.hidden = true;
@@ -154,6 +167,13 @@
   const setMethod = (method) => {
     state.method = method === "apple_pay" ? "apple_pay" : "card";
     const config = activeConfig();
+    if (dialogTitle) dialogTitle.textContent = state.method === "apple_pay" ? "Buy with Apple Pay" : "Buy with Card";
+    if (dialogCopy) {
+      dialogCopy.textContent =
+        state.method === "apple_pay"
+          ? "Review the server quote, then authorize with Apple Pay on this device."
+          : "Review the server quote, then authorize with hosted tokenized card fields.";
+    }
     methodButtons.forEach((button) => {
       const selected = button.getAttribute("data-onramp-method") === state.method;
       button.setAttribute("aria-selected", selected ? "true" : "false");
@@ -267,7 +287,7 @@
   const quote = async () => {
     const config = activeConfig();
     if (!window.navigator.onLine) {
-      setMessage("Offline. Reconnect before requesting a card quote.", "warning");
+      setMessage("Offline. Reconnect before requesting a quote.", "warning");
       return;
     }
     if (!config.ready) {
@@ -284,6 +304,7 @@
       const idempotencyKey = `wallet-${state.method}-${Date.now()}`;
       const data = await requestJson(config.quote_url, payload(), idempotencyKey);
       state.order = data.order;
+      state.applePayRequest = data.apple_pay_request || {};
       state.phase = "quoted";
       if (quoteSkeleton) quoteSkeleton.hidden = true;
       renderQuote(data.order);
@@ -302,6 +323,114 @@
     }
   };
 
+  const applePayAvailable = () => {
+    const ApplePay = window.ApplePaySession;
+    return Boolean(ApplePay && typeof ApplePay.canMakePayments === "function" && ApplePay.canMakePayments());
+  };
+
+  const applePayStatus = (success) => {
+    const ApplePay = window.ApplePaySession;
+    return success ? ApplePay.STATUS_SUCCESS : ApplePay.STATUS_FAILURE;
+  };
+
+  const applePayPaymentRequest = () => {
+    const config = activeConfig();
+    const request = state.applePayRequest || {};
+    const totalCharged = Number(state.order?.total_charged || state.order?.fiat_gross_amount || amountInput?.value || 0);
+    return {
+      countryCode: request.countryCode || config.country_code || "CA",
+      currencyCode: request.currencyCode || state.order?.fiat_currency || config.fiat_currency || "USD",
+      merchantCapabilities: request.merchantCapabilities || config.merchant_capabilities || ["supports3DS"],
+      supportedNetworks: request.supportedNetworks || config.supported_networks || [],
+      lineItems: request.lineItems || state.order?.line_items || [],
+      total: request.total || {
+        label: config.display_name || "AlgVault",
+        amount: totalCharged.toFixed(2),
+      },
+    };
+  };
+
+  const authorizeApplePay = () => {
+    const config = activeConfig();
+    if (!state.order?.order_id) {
+      quote();
+      return;
+    }
+    if (!config.ready) {
+      setMessage(config.unavailable_copy || "Apple Pay is unavailable.", "warning");
+      return;
+    }
+    if (!applePayAvailable()) {
+      setMessage("Apple Pay is not available in this browser or on this device.", "warning");
+      return;
+    }
+    const paymentRequest = applePayPaymentRequest();
+    if (!paymentRequest.supportedNetworks.length || !paymentRequest.total?.amount) {
+      setMessage("Apple Pay request details are incomplete. Refresh the quote and try again.", "danger");
+      return;
+    }
+
+    let session;
+    let suppressCancelMessage = false;
+    try {
+      session = new window.ApplePaySession(3, paymentRequest);
+    } catch (error) {
+      setMessage(error.message || "Apple Pay could not be started on this device.", "danger");
+      return;
+    }
+
+    state.applePaySession = session;
+    state.phase = "authorizing";
+    setBusy(true, "Authorizing");
+    setMessage("Opening Apple Pay...", "muted");
+
+    session.onvalidatemerchant = async (event) => {
+      try {
+        const data = await requestJson(
+          config.merchant_session_url,
+          { validation_url: event.validationURL, initiative_context: window.location.hostname },
+          `wallet-apple-merchant-${state.order.order_id}`,
+        );
+        session.completeMerchantValidation(data.merchant_session);
+      } catch (error) {
+        suppressCancelMessage = true;
+        setBusy(false, "Authorize Apple Pay");
+        setMessage(error.message || "Apple Pay merchant validation failed.", "danger");
+        session.abort();
+      }
+    };
+
+    session.onpaymentauthorized = async (event) => {
+      try {
+        const data = await requestJson(
+          config.authorize_url,
+          { order_id: state.order.order_id, payment_token: event.payment?.token || {} },
+          `wallet-apple-auth-${state.order.order_id}`,
+        );
+        state.order = data.order;
+        renderQuote(data.order);
+        session.completePayment(applePayStatus(true));
+        setMessage("Payment captured. Fulfillment is pending treasury execution.", "success");
+        setBusy(false, "Processing");
+        pollStatus(true);
+      } catch (error) {
+        suppressCancelMessage = true;
+        session.completePayment(applePayStatus(false));
+        setBusy(false, "Authorize Apple Pay");
+        setMessage(error.message || "Apple Pay authorization failed.", "danger");
+      }
+    };
+
+    session.oncancel = () => {
+      state.phase = "quoted";
+      state.applePaySession = null;
+      setBusy(false, "Authorize Apple Pay");
+      if (!suppressCancelMessage) setMessage("Apple Pay was canceled before authorization.", "warning");
+    };
+
+    session.begin();
+  };
+
   const authorize = async () => {
     if (!state.order?.order_id) {
       await quote();
@@ -309,7 +438,7 @@
     }
     const config = activeConfig();
     if (state.method !== "card") {
-      setMessage("Apple Pay quote is ready. Use Apple Pay on a supported device to authorize.", "warning");
+      authorizeApplePay();
       return;
     }
     const token = state.gatewayToken || tokenInput?.value || "";
@@ -431,7 +560,7 @@
   });
   form.addEventListener("submit", (event) => {
     event.preventDefault();
-    if (state.phase === "quoted" && state.method === "card") {
+    if (state.phase === "quoted") {
       authorize();
     } else {
       quote();

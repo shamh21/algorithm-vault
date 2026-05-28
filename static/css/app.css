@@ -17437,6 +17437,10 @@ body:has(.wallet-flow-shell) .crypto-rail {
   line-height: 1.5;
 }
 
+.wallet-card-buy-readiness span {
+  display: block;
+}
+
 .wallet-card-buy-actions {
   display: flex;
   flex-wrap: wrap;

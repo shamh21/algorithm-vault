@@ -169,6 +169,8 @@ def test_wallet_onramp_limits_do_not_drive_direct_apple_pay_wallet_ui(app) -> No
     assert "wallet-card-buy-1" in html
     assert "wallet-card-buy-data" in html
     assert 'data-onramp-method="card"' in html
+    assert 'data-onramp-method="apple_pay"' in html
+    assert "Buy with Apple Pay" in html
     assert 'data-onramp-amount-preset="5"' not in html
 
 

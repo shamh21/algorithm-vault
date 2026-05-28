@@ -46,12 +46,21 @@
       <a href="{{ wallet_view.primary_deposit_href }}" class="button-link primary">Deposit {{ wallet_view.primary_asset }}</a>
       <button
         type="button"
-        class="button-link primary wallet-buy-card-trigger"
+        class="button-link primary"
         data-wallet-buy-open
         data-onramp-method="card"
         {% if not wallet_view.card_buy.enabled %}aria-disabled="true"{% endif %}
       >
         Buy with Card
+      </button>
+      <button
+        type="button"
+        class="button-link secondary"
+        data-wallet-buy-open
+        data-onramp-method="apple_pay"
+        {% if not wallet_view.apple_pay.enabled %}aria-disabled="true"{% endif %}
+      >
+        Apple Pay
       </button>
       {% if wallet_view.withdrawals_ready %}
         <a href="{{ wallet_view.primary_withdraw_href }}" class="button-link secondary">Withdraw {{ wallet_view.primary_asset }}</a>
@@ -89,13 +98,16 @@
         class="button-link secondary"
         data-wallet-buy-open
         data-onramp-method="apple_pay"
-        {% if not wallet_view.apple_pay.enabled %}disabled aria-disabled="true"{% endif %}
+        {% if not wallet_view.apple_pay.enabled %}aria-disabled="true"{% endif %}
       >
         Buy with Apple Pay
       </button>
     </div>
-    {% if not wallet_view.card_buy.ready %}
-      <p class="wallet-card-buy-readiness">{{ wallet_view.card_buy.unavailable_copy }}</p>
+    {% if not wallet_view.card_buy.ready or not wallet_view.apple_pay.ready %}
+      <p class="wallet-card-buy-readiness">
+        {% if not wallet_view.card_buy.ready %}<span>{{ wallet_view.card_buy.unavailable_copy }}</span>{% endif %}
+        {% if not wallet_view.apple_pay.ready %}<span>{{ wallet_view.apple_pay.unavailable_copy }}</span>{% endif %}
+      </p>
     {% endif %}
   </section>
 
@@ -113,15 +125,15 @@
         <div>
           <span class="card-kicker">Secure Purchase</span>
           <h2 id="wallet-onramp-title">Buy with Card</h2>
-          <p>Review the server quote, then authorize with hosted tokenized card fields.</p>
+          <p data-wallet-onramp-copy>Review the server quote, then authorize with hosted tokenized card fields.</p>
         </div>
-        <button type="button" class="wallet-onramp-close" data-wallet-onramp-close aria-label="Close buy with card">Close</button>
+        <button type="button" class="wallet-onramp-close" data-wallet-onramp-close aria-label="Close purchase sheet">Close</button>
       </header>
 
       <form class="wallet-onramp-form" data-wallet-onramp-form novalidate>
         <div class="wallet-onramp-methods" role="tablist" aria-label="Payment method">
           <button type="button" data-onramp-method="card" aria-selected="true">Card</button>
-          <button type="button" data-onramp-method="apple_pay" {% if not wallet_view.apple_pay.enabled %}disabled{% endif %}>Apple Pay</button>
+          <button type="button" data-onramp-method="apple_pay" {% if not wallet_view.apple_pay.enabled %}aria-disabled="true"{% endif %}>Apple Pay</button>
         </div>
 
         <div class="wallet-onramp-grid">
@@ -209,7 +221,7 @@
         </div>
 
         <p class="wallet-onramp-disclaimer">
-          AlgVault never handles raw PAN or CVV. Card data is tokenized by the configured gateway and wallet credit waits for captured payment plus fulfillment.
+          AlgVault never handles raw PAN, CVV, or Apple Pay payment credentials. Payment details are tokenized by the configured gateway and wallet credit waits for captured payment plus fulfillment.
         </p>
         <p class="wallet-onramp-state" data-wallet-onramp-state id="wallet-onramp-status" role="status" aria-live="polite" hidden></p>
 
