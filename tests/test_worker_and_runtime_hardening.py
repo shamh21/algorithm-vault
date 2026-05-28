@@ -101,6 +101,55 @@ def test_worker_runner_executes_one_shot_job_with_lease(app) -> None:
         assert WorkerLease.query.filter_by(lease_name="strategy_starter:singleton").one().status == "released"
 
 
+def test_apple_pay_fulfillment_cron_requires_secret(app) -> None:
+    with app.app_context():
+        app.config["CRON_SECRET"] = "cron-secret"
+        client = app.test_client()
+
+        missing = client.get("/_internal/cron/apple-pay-fulfillment")
+        invalid = client.get("/_internal/cron/apple-pay-fulfillment", headers={"Authorization": "Bearer wrong"})
+
+    assert missing.status_code == 401
+    assert invalid.status_code == 401
+
+
+def test_apple_pay_fulfillment_cron_runs_single_job_with_sanitized_response(app) -> None:
+    class _WalletApplePayPurchase:
+        calls = 0
+
+        def process_pending_orders(self):
+            self.calls += 1
+            return {"processed": 0, "orders": []}
+
+    fake_purchase = _WalletApplePayPurchase()
+    with app.app_context():
+        app.config["CRON_SECRET"] = "cron-secret"
+        app.extensions["services"]["wallet_apple_pay_purchase"] = fake_purchase
+        client = app.test_client()
+
+        response = client.get(
+            "/_internal/cron/apple-pay-fulfillment",
+            headers={"Authorization": "Bearer cron-secret", "x-vercel-id": "sfo1::cron-test"},
+        )
+        payload = response.get_json()
+        lease = WorkerLease.query.filter_by(lease_name="apple_pay_fulfillment:singleton").one()
+        run = WorkerJobRun.query.filter_by(job_name="apple_pay_fulfillment").one()
+
+    assert response.status_code == 200
+    assert payload == {
+        "ok": True,
+        "job": "apple_pay_fulfillment",
+        "status": "complete",
+        "processed": 0,
+        "failed": 0,
+        "result_count": 1,
+    }
+    assert fake_purchase.calls == 1
+    assert lease.status == "released"
+    assert lease.heartbeat_at is not None
+    assert run.status == "complete"
+
+
 def test_runtime_config_blocks_unsafe_production_withdrawals() -> None:
     config = {
         "DEPLOYMENT_TARGET": "production",

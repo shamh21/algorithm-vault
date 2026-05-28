@@ -6,6 +6,7 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
+import hmac
 import json
 import logging
 import os
@@ -592,6 +593,25 @@ def _register_operational_routes(app: Flask) -> None:
     def ops_status():
         return jsonify(_operational_status(app))
 
+    @app.get("/_internal/cron/apple-pay-fulfillment")
+    def cron_apple_pay_fulfillment():
+        expected = str(app.config.get("CRON_SECRET", "") or "").strip()
+        header = str(request.headers.get("Authorization", "") or "")
+        supplied = header.removeprefix("Bearer ").strip() if header.startswith("Bearer ") else ""
+        if not expected or not supplied or not hmac.compare_digest(expected, supplied):
+            return jsonify({"ok": False, "error": "unauthorized"}), 401
+
+        from .workers.runner import _run_due_jobs
+
+        owner_hint = str(request.headers.get("x-vercel-id") or "manual").strip()[:96] or "manual"
+        lease_service = WorkerLeaseService(app.config, owner_id=f"vercel-cron:{owner_hint}")
+        results = _run_due_jobs(lease_service, job_filter={"apple_pay_fulfillment"})
+        summary = _cron_worker_summary(results)
+        status = 200 if summary["ok"] else 500
+        if summary["status"] == "lease_blocked":
+            status = 409
+        return jsonify(summary), status
+
 
 def _register_error_handlers(app: Flask) -> None:
     @app.errorhandler(HTTPException)
@@ -1033,6 +1053,28 @@ def _elapsed_seconds(now: datetime, then: datetime) -> float:
     elif now.tzinfo is not None and then.tzinfo is None:
         then = then.replace(tzinfo=UTC)
     return max(0.0, (now - then).total_seconds())
+
+
+def _cron_worker_summary(results: list[dict[str, Any]]) -> dict[str, Any]:
+    status = "not_run"
+    processed = 0
+    failed = 0
+    if results:
+        first = results[0]
+        status = str(first.get("status") or "unknown")
+        result = first.get("result") if isinstance(first.get("result"), dict) else {}
+        processed = int(result.get("processed") or 0)
+        orders = result.get("orders")
+        if isinstance(orders, list):
+            failed = sum(1 for order in orders if isinstance(order, dict) and str(order.get("status") or "") == "failed")
+    return {
+        "ok": bool(results) and all(bool(result.get("ok")) for result in results),
+        "job": "apple_pay_fulfillment",
+        "status": status,
+        "processed": processed,
+        "failed": failed,
+        "result_count": len(results),
+    }
 
 
 def _trading_status(now: datetime, app: Flask) -> dict[str, Any]:
