@@ -686,6 +686,7 @@ def _apple_pay_purchase_status(app: Flask) -> dict[str, Any]:
             "allowed_assets": readiness.get("allowed_assets", {}),
             "domain_association_configured": bool(str(app.config.get("APPLE_PAY_DOMAIN_ASSOCIATION", "") or "").strip()),
             "fulfillment_worker_enabled": bool(app.config.get("WORKER_APPLE_PAY_FULFILLMENT_ENABLED", True)),
+            "fulfillment_worker": readiness.get("fulfillment_worker", {}),
             "card_buy": {
                 "available": True,
                 "ready": bool(card_readiness.get("ready")),
@@ -698,10 +699,13 @@ def _apple_pay_purchase_status(app: Flask) -> dict[str, Any]:
                 "allowed_assets": card_readiness.get("allowed_assets", {}),
                 "gateway_tokenization_configured": bool(str(app.config.get("CARD_GATEWAY_TOKENIZATION_URL", "") or "").strip()),
                 "gateway_authorize_configured": bool(str(app.config.get("CARD_GATEWAY_AUTHORIZE_URL", "") or "").strip()),
-                "gateway_public_configured": bool(app.config.get("CARD_GATEWAY_PUBLIC_CONFIG") or {}),
+                "gateway_public_configured": bool((card_readiness.get("gateway", {}) or {}).get("public_config") or {}),
+                "treasury_fee_asset": "ETH",
+                "treasury_fee_address_configured": bool(str(app.config.get("APPLE_PAY_TREASURY_FEE_ADDRESS", "") or "").strip()),
                 "oneinch_configured": bool(str(app.config.get("ONEINCH_API_KEY", "") or "").strip()),
                 "oneinch_base_url": app.config.get("ONEINCH_API_BASE_URL"),
                 "fulfillment_worker_enabled": bool(app.config.get("WORKER_APPLE_PAY_FULFILLMENT_ENABLED", True)),
+                "fulfillment_worker": card_readiness.get("fulfillment_worker", {}),
             },
         }
     except Exception:  # noqa: BLE001
@@ -959,26 +963,33 @@ def _worker_status(now: datetime, app: Flask | None = None) -> dict[str, Any]:
         recent_expected = 0
         active_expected = 0
         seen_expected: set[str] = set()
+        stale_expected: list[str] = []
+        job_leases: dict[str, dict[str, Any]] = {}
         for lease in leases:
             lag = _elapsed_seconds(now, lease.heartbeat_at) if lease.heartbeat_at else None
             if lag is not None:
                 max_lag = max(max_lag, lag)
             is_expected = lease.lease_name in expected_leases
+            recent = lag is not None and lag <= stale_after
             if is_expected:
                 seen_expected.add(lease.lease_name)
-                if lag is not None and lag <= stale_after:
+                if recent:
                     recent_expected += 1
-                if str(lease.status or "").lower() in {"running", "active", "complete"} and lag is not None and lag <= stale_after:
+                else:
+                    stale_expected.append(lease.lease_name)
+                if str(lease.status or "").lower() in {"running", "active", "complete"} and recent:
                     active_expected += 1
-            rows.append(
-                {
-                    "lease_name": lease.lease_name,
-                    "status": lease.status,
-                    "heartbeat_lag_seconds": lag,
-                    "expires_at": lease.expires_at.isoformat() if lease.expires_at else None,
-                    "expected": is_expected,
-                }
-            )
+            row = {
+                "lease_name": lease.lease_name,
+                "status": lease.status,
+                "heartbeat_lag_seconds": lag,
+                "expires_at": lease.expires_at.isoformat() if lease.expires_at else None,
+                "expected": is_expected,
+                "recent": recent,
+            }
+            rows.append(row)
+            if is_expected and lease.lease_name.endswith(":singleton"):
+                job_leases[lease.lease_name[: -len(":singleton")]] = row
         missing_expected = [lease_name for lease_name in expected_leases if lease_name not in seen_expected]
         return {
             "available": True,
@@ -987,10 +998,14 @@ def _worker_status(now: datetime, app: Flask | None = None) -> dict[str, Any]:
             "stale_after_seconds": stale_after,
             "dedicated_expected": dedicated_expected,
             "enabled_jobs": enabled_jobs,
+            "expected_leases": expected_leases,
+            "missing_expected_leases": missing_expected,
+            "stale_expected_leases": stale_expected,
             "expected_lease_names": expected_leases,
             "missing_expected_lease_names": missing_expected,
             "recent_expected_lease_count": recent_expected,
             "active_expected_lease_count": active_expected,
+            "job_leases": job_leases,
         }
     except Exception:  # noqa: BLE001
         db.session.rollback()
@@ -1001,10 +1016,14 @@ def _worker_status(now: datetime, app: Flask | None = None) -> dict[str, Any]:
             "stale_after_seconds": stale_after,
             "dedicated_expected": dedicated_expected,
             "enabled_jobs": enabled_jobs,
+            "expected_leases": expected_leases,
+            "missing_expected_leases": expected_leases,
+            "stale_expected_leases": [],
             "expected_lease_names": expected_leases,
             "missing_expected_lease_names": expected_leases,
             "recent_expected_lease_count": 0,
             "active_expected_lease_count": 0,
+            "job_leases": {},
         }
 
 

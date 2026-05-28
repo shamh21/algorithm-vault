@@ -32,6 +32,7 @@ from ..models import (
     WalletApplePayPurchaseOrder,
     WalletLedgerEvent,
     WalletTransaction,
+    WorkerLease,
 )
 from ..runtime import get_current_mode, market_mode_for
 from .vault_allocation_assets import asset_usd_price as shared_asset_usd_price
@@ -52,6 +53,15 @@ APPLE_PAY_FULFILLMENT_KINDS = {"evm_swap", "treasury_transfer"}
 APPLE_PAY_EXCLUDED_ASSETS = {"ALGV"}
 APPLE_PAY_TREASURY_TRANSFER_ASSETS = {"BTC", "ETH", "SOL", "USDC", "USDT", "XRP"}
 APPLE_PAY_EVM_ASSETS = {"ETH", "USDC", "USDT"}
+CARD_BUY_ASSETS = {"ETH", "USDC", "USDT"}
+TREASURY_FEE_ASSET = "ETH"
+WALLET_BUY_PLATFORM_FEE_BPS = 250.0
+APPLE_PAY_NETWORK_CANONICAL = {
+    "amex": "amex",
+    "discover": "discover",
+    "mastercard": "masterCard",
+    "visa": "visa",
+}
 EVM_CHAIN_IDS = {
     "ethereum": 1,
     "base": 8453,
@@ -112,7 +122,7 @@ class WalletApplePayPurchaseService:
             blockers.append("APPLE_PAY_GATEWAY_API_KEY must be configured")
         if not self.gateway_webhook_secret:
             blockers.append("APPLE_PAY_GATEWAY_WEBHOOK_SECRET must be configured")
-        if self._uses_fulfillment_kind(allowed_assets, "evm_swap") and not self.oneinch_api_key:
+        if self._uses_fulfillment_kind(allowed_assets, "evm_swap") and not self._oneinch_provider_configured():
             blockers.append("ONEINCH_API_KEY must be configured when evm_swap assets are enabled")
         if not allowed_assets:
             blockers.append("APPLE_PAY_BUY_ALLOWED_ASSETS_JSON must allow at least one configured asset/network")
@@ -127,6 +137,11 @@ class WalletApplePayPurchaseService:
             blockers.append("APPLE_PAY_MIN_FIAT_USD must be greater than zero")
         if self.max_fiat_usd < self.min_fiat_usd:
             blockers.append("APPLE_PAY_MAX_FIAT_USD must be greater than or equal to minimum")
+        if not bool(self.config.get("WORKER_APPLE_PAY_FULFILLMENT_ENABLED", True)):
+            blockers.append("WORKER_APPLE_PAY_FULFILLMENT_ENABLED must be true")
+        worker_status = self._apple_pay_fulfillment_worker_status(payment_method=APPLE_PAY_METHOD)
+        if worker_status.get("required") and not worker_status.get("recent"):
+            blockers.append("apple_pay_fulfillment worker heartbeat must be recent")
         return {
             "ready": not blockers,
             "enabled": self.enabled,
@@ -141,12 +156,13 @@ class WalletApplePayPurchaseService:
             "max_fiat_usd": self.max_fiat_usd,
             "treasury_fee_bps": self.treasury_fee_bps,
             "allowed_assets": {asset: list(networks.keys()) for asset, networks in allowed_assets.items()},
+            "fulfillment_worker": worker_status,
             "card_buy": self.card_readiness(),
         }
 
     def card_readiness(self) -> dict[str, Any]:
         blockers: list[str] = []
-        allowed_assets = self.allowed_assets
+        allowed_assets, asset_blockers = self._card_allowed_assets(self.allowed_assets)
         if not self.card_enabled:
             blockers.append("CARD_BUY_ENABLED must be true")
         if not self.crypto_sale_approved:
@@ -163,15 +179,27 @@ class WalletApplePayPurchaseService:
             blockers.append("CARD_GATEWAY_API_KEY must be configured")
         if not self.card_gateway_webhook_secret:
             blockers.append("CARD_GATEWAY_WEBHOOK_SECRET must be configured")
-        if self._uses_fulfillment_kind(allowed_assets, "evm_swap") and not self.oneinch_api_key:
-            blockers.append("ONEINCH_API_KEY must be configured when evm_swap assets are enabled")
+        if not self.card_gateway_public_config:
+            blockers.append("CARD_GATEWAY_PUBLIC_CONFIG_JSON must expose gateway public configuration")
         if not allowed_assets:
-            blockers.append("APPLE_PAY_BUY_ALLOWED_ASSETS_JSON must allow at least one configured asset/network")
+            blockers.append("APPLE_PAY_BUY_ALLOWED_ASSETS_JSON must allow at least one EVM card-buy asset/network")
+        blockers.extend(asset_blockers)
         blockers.extend(self._allowed_asset_readiness_blockers(allowed_assets))
+        if not self.treasury_fee_address:
+            blockers.append("APPLE_PAY_TREASURY_FEE_ADDRESS must be configured")
         if not self.treasury_signer_url:
             blockers.append("APPLE_PAY_TREASURY_SIGNER_URL must be configured")
         if not self.treasury_signer_token:
             blockers.append("APPLE_PAY_TREASURY_SIGNER_TOKEN must be configured")
+        if abs(float(self.treasury_fee_bps or 0.0) - WALLET_BUY_PLATFORM_FEE_BPS) > 1e-9:
+            blockers.append("WALLET_BUY_PLATFORM_FEE_BPS must be 250")
+        if self._eth_usd_price_context()[0] <= 0:
+            blockers.append("ETH treasury fee pricing must be available")
+        if not bool(self.config.get("WORKER_APPLE_PAY_FULFILLMENT_ENABLED", True)):
+            blockers.append("WORKER_APPLE_PAY_FULFILLMENT_ENABLED must be true")
+        worker_status = self._apple_pay_fulfillment_worker_status(payment_method=CARD_METHOD)
+        if worker_status.get("required") and not worker_status.get("recent"):
+            blockers.append("apple_pay_fulfillment worker heartbeat must be recent")
         if self.card_enabled and not self._orders_table_ready():
             blockers.append("Wallet purchase order migration must be applied")
         if self.min_fiat_usd <= 0:
@@ -190,6 +218,7 @@ class WalletApplePayPurchaseService:
             "treasury_fee_bps": self.treasury_fee_bps,
             "allowed_assets": {asset: list(networks.keys()) for asset, networks in allowed_assets.items()},
             "gateway": self.card_gateway_client_config(),
+            "fulfillment_worker": worker_status,
         }
 
     def create_quote_order(
@@ -333,6 +362,7 @@ class WalletApplePayPurchaseService:
                 code="apple_pay_missing_token",
                 order=order,
             )
+        self._revalidate_order_quote(order)
         readiness = self.card_readiness() if expected_method == CARD_METHOD else self.readiness()
         if not readiness["ready"]:
             raise WalletApplePayPurchaseError(
@@ -340,7 +370,6 @@ class WalletApplePayPurchaseService:
                 code="apple_pay_not_ready",
                 order=order,
             )
-        self._revalidate_order_quote(order)
 
         payload = self._gateway_authorize_payload(order, payment_token)
         idem = self._normalize_idempotency_key(idempotency_key or order.idempotency_key)
@@ -493,6 +522,8 @@ class WalletApplePayPurchaseService:
             else:
                 swap_payload = self._request_oneinch_swap(order)
                 signer_payload = self._request_evm_swap_signer(order, swap_payload)
+        except WalletApplePayPurchaseError:
+            raise
         except Exception as exc:  # noqa: BLE001
             order.status = "failed"
             order.failure_reason = self._safe_error(exc)
@@ -510,7 +541,20 @@ class WalletApplePayPurchaseService:
             )
         order.fulfillment_tx_hash = str(signer_payload.get("tx_hash") or signer_payload.get("transaction_hash") or "").strip() or None
         order.treasury_tx_hash = str(signer_payload.get("treasury_tx_hash") or "").strip() or None
-        order.status = self._normalize_fulfillment_status(signer_payload.get("status") or "transfer_submitted")
+        normalized_status = self._normalize_fulfillment_status(signer_payload.get("status") or "transfer_submitted")
+        validation_error = self._fulfillment_response_error(order, normalized_status)
+        if validation_error:
+            order.status = "failed"
+            order.failure_reason = validation_error
+            order.details = {
+                **order.details,
+                "oneinch_swap": self._safe_gateway_details(swap_payload) if swap_payload else {},
+                "signer_response": self._safe_gateway_details(signer_payload),
+                "fulfillment_error": validation_error,
+            }
+            db.session.flush()
+            raise WalletApplePayPurchaseError(validation_error, code="apple_pay_fulfillment_failed", order=order)
+        order.status = normalized_status
         if order.status == "complete":
             order.completed_at = datetime.utcnow()
         order.details = {
@@ -525,6 +569,7 @@ class WalletApplePayPurchaseService:
         quote = order.details.get("quote") if isinstance(order.details, dict) else {}
         expired = self._quote_expired(order) and order.status == "quoted"
         status = "expired" if expired else order.status
+        treasury_fee = self._order_treasury_fee_details(order)
         return {
             "order_id": order.public_id,
             "asset": order.asset,
@@ -536,9 +581,15 @@ class WalletApplePayPurchaseService:
             "net_asset_amount": order.net_asset_amount,
             "purchase_amount": order.fiat_gross_amount,
             "algvault_fee": order.treasury_fee_usd,
+            "algvault_fee_label": "AlgVault fee, paid to ETH treasury",
             "provider_network_estimate": order.execution_fee_usd,
             "total_charged": order.fiat_gross_amount,
             "estimated_receive_amount": order.net_asset_amount,
+            "treasury_fee_address": self.treasury_fee_address,
+            "treasury_fee_asset": treasury_fee["treasury_fee_asset"],
+            "treasury_fee_eth_amount": treasury_fee["treasury_fee_eth_amount"],
+            "treasury_fee_eth_price_usd": treasury_fee["treasury_fee_eth_price_usd"],
+            "treasury_fee_price_source": treasury_fee["treasury_fee_price_source"],
             "payment_method": order.payment_method,
             "status": status,
             "failure_reason": order.failure_reason,
@@ -584,9 +635,14 @@ class WalletApplePayPurchaseService:
     def apple_pay_networks(self) -> list[str]:
         raw = self.config.get("APPLE_PAY_SUPPORTED_NETWORKS")
         if isinstance(raw, list):
-            values = [str(item).strip().lower() for item in raw if str(item).strip()]
+            raw_values = [str(item).strip() for item in raw if str(item).strip()]
         else:
-            values = [item.strip().lower() for item in str(raw or "visa,masterCard,amex,discover").split(",") if item.strip()]
+            raw_values = [item.strip() for item in str(raw or "visa,masterCard,amex,discover").split(",") if item.strip()]
+        values: list[str] = []
+        for item in raw_values:
+            normalized = self._canonical_apple_pay_network(item)
+            if normalized and normalized not in values:
+                values.append(normalized)
         return values or ["visa", "masterCard"]
 
     @property
@@ -645,6 +701,9 @@ class WalletApplePayPurchaseService:
     def oneinch_base_url(self) -> str:
         return str(self.config.get("ONEINCH_API_BASE_URL", "https://api.1inch.com/swap/v6.1") or "").strip().rstrip("/")
 
+    def _oneinch_provider_configured(self) -> bool:
+        return bool(self.oneinch_api_key)
+
     @property
     def treasury_source_address(self) -> str:
         return str(self.config.get("APPLE_PAY_TREASURY_SOURCE_ADDRESS", "") or "").strip()
@@ -663,8 +722,7 @@ class WalletApplePayPurchaseService:
 
     @property
     def treasury_fee_bps(self) -> float:
-        fallback = float(self.config.get("APPLE_PAY_TREASURY_FEE_BPS", 250.0) or 250.0)
-        return max(0.0, float(self.config.get("WALLET_BUY_PLATFORM_FEE_BPS", fallback) or fallback))
+        return self._wallet_buy_treasury_fee_bps()
 
     @property
     def execution_fee_buffer_bps(self) -> float:
@@ -730,7 +788,9 @@ class WalletApplePayPurchaseService:
         fiat_gross_amount: float,
         destination_address: str,
     ) -> dict[str, Any]:
+        self._assert_oneinch_swap_provider_available()
         treasury_fee = self._round_money(fiat_gross_amount * self.treasury_fee_bps / 10_000)
+        treasury_fee_details = self._treasury_fee_quote(treasury_fee)
         quote_amount = max(0.0, fiat_gross_amount - treasury_fee)
         oneinch_quote = self._request_oneinch_quote(asset=asset, network=network, amount_usd=quote_amount)
         execution_fee = self._execution_fee_from_oneinch(oneinch_quote)
@@ -749,7 +809,7 @@ class WalletApplePayPurchaseService:
         source_units = str(int(max(0.0, net_swap_amount_usd) * (10**source_decimals)))
         line_items = [
             {"label": f"Estimated {asset} delivered", "amount": self._money_text(net_amount)},
-            {"label": "AlgVault treasury fee", "amount": self._money_text(treasury_fee)},
+            {"label": "AlgVault fee, paid to ETH treasury", "amount": self._money_text(treasury_fee)},
             {"label": "Network execution estimate", "amount": self._money_text(execution_fee)},
             {"label": "Total charged", "amount": self._money_text(fiat_gross_amount)},
         ]
@@ -760,6 +820,7 @@ class WalletApplePayPurchaseService:
             "fiat_currency": fiat_currency,
             "fiat_gross_amount": self._round_money(fiat_gross_amount),
             "treasury_fee_usd": treasury_fee,
+            **treasury_fee_details,
             "execution_fee_usd": execution_fee,
             "net_asset_amount": net_amount,
             "fulfillment_kind": "evm_swap",
@@ -789,6 +850,7 @@ class WalletApplePayPurchaseService:
         if asset_price <= 0:
             raise WalletApplePayPurchaseError(f"{asset} reference pricing is unavailable.", code="apple_pay_price_unavailable")
         treasury_fee = self._round_money(fiat_gross_amount * self.treasury_fee_bps / 10_000)
+        treasury_fee_details = self._treasury_fee_quote(treasury_fee)
         quote_amount_usd = max(0.0, fiat_gross_amount - treasury_fee)
         estimated_asset_amount = quote_amount_usd / asset_price
         execution_fee, fee_native_amount = self._estimate_treasury_transfer_fee_usd(
@@ -810,7 +872,7 @@ class WalletApplePayPurchaseService:
         )
         line_items = [
             {"label": f"Estimated {asset} delivered", "amount": self._money_text(net_amount)},
-            {"label": "AlgVault treasury fee", "amount": self._money_text(treasury_fee)},
+            {"label": "AlgVault fee, paid to ETH treasury", "amount": self._money_text(treasury_fee)},
             {"label": "Network execution estimate", "amount": self._money_text(execution_fee)},
             {"label": "Total charged", "amount": self._money_text(fiat_gross_amount)},
         ]
@@ -821,6 +883,7 @@ class WalletApplePayPurchaseService:
             "fiat_currency": fiat_currency,
             "fiat_gross_amount": self._round_money(fiat_gross_amount),
             "treasury_fee_usd": treasury_fee,
+            **treasury_fee_details,
             "execution_fee_usd": execution_fee,
             "net_asset_amount": net_amount,
             "fulfillment_kind": "treasury_transfer",
@@ -849,6 +912,16 @@ class WalletApplePayPurchaseService:
         payment_key = self._normalize_payment_method(payment_method)
         readiness = self.card_readiness() if payment_key == CARD_METHOD else self.readiness()
         if not readiness["ready"]:
+            if (
+                payment_key == CARD_METHOD
+                and self._is_swap_fulfillment_asset(asset, network)
+                and self.card_enabled
+                and not self._oneinch_provider_configured()
+            ):
+                raise WalletApplePayPurchaseError(
+                    "A low-fee swap provider is required for card buy fulfillment. Configure ONEINCH_API_KEY or disable card buys for EVM swap assets.",
+                    code="apple_pay_oneinch_provider_unavailable",
+                )
             raise WalletApplePayPurchaseError(
                 f"{self._payment_method_label(payment_key)} is not available until purchase readiness is complete.",
                 code="apple_pay_not_ready",
@@ -863,10 +936,15 @@ class WalletApplePayPurchaseService:
                 f"Enter a USD amount between ${self.min_fiat_usd:.0f} and ${self.max_fiat_usd:.0f}.",
                 code="apple_pay_bad_amount",
             )
-        networks = self.allowed_assets.get(asset, {})
+        networks = self._allowed_assets_for_payment_method(payment_key).get(asset, {})
         if network not in networks:
             raise WalletApplePayPurchaseError(
                 f"This asset/network is not enabled for {self._payment_method_label(payment_key)} buys.",
+                code="apple_pay_asset_not_allowed",
+            )
+        if payment_key == CARD_METHOD and self._fulfillment_kind(asset, network) != "treasury_transfer":
+            raise WalletApplePayPurchaseError(
+                "Card buys are limited to EVM treasury-transfer fulfillment for this release.",
                 code="apple_pay_asset_not_allowed",
             )
         if not str(getattr(deposit_address, "address", "") or "").strip():
@@ -875,6 +953,7 @@ class WalletApplePayPurchaseService:
             )
 
     def _request_oneinch_quote(self, *, asset: str, network: str, amount_usd: float) -> dict[str, Any]:
+        self._assert_oneinch_swap_provider_available()
         override = self.config.get("APPLE_PAY_EXECUTION_FEE_USD_OVERRIDE")
         if override is not None and float(override) >= 0:
             return {"gas": 0, "gasPrice": 0, "execution_fee_usd_override": float(override)}
@@ -906,6 +985,7 @@ class WalletApplePayPurchaseService:
         return data
 
     def _request_oneinch_swap(self, order: WalletApplePayPurchaseOrder) -> dict[str, Any]:
+        self._assert_oneinch_swap_provider_available()
         cfg = self._network_asset_config(order.asset, order.network)
         decimals = int(cfg.get("decimals", 6) or 6)
         quote = order.details.get("quote", {}) if isinstance(order.details, dict) else {}
@@ -939,6 +1019,7 @@ class WalletApplePayPurchaseService:
 
     def _request_evm_swap_signer(self, order: WalletApplePayPurchaseOrder, swap_payload: dict[str, Any]) -> dict[str, Any]:
         source_cfg = self._treasury_source_config(order.asset, order.network)
+        treasury_fee = self._order_treasury_fee_details(order)
         response = self.session.post(
             self.treasury_signer_url,
             json={
@@ -951,6 +1032,11 @@ class WalletApplePayPurchaseService:
                 "treasury_fee_address": self.treasury_fee_address,
                 "net_asset_amount": order.net_asset_amount,
                 "treasury_fee_usd": order.treasury_fee_usd,
+                "treasury_fee_asset": treasury_fee["treasury_fee_asset"],
+                "treasury_fee_eth_amount": treasury_fee["treasury_fee_eth_amount"],
+                "treasury_fee_eth_price_usd": treasury_fee["treasury_fee_eth_price_usd"],
+                "treasury_fee_price_source": treasury_fee["treasury_fee_price_source"],
+                "require_treasury_fee_transfer": self._treasury_fee_transfer_required(order),
                 "signer_route": source_cfg.get("signer_route") or source_cfg.get("route") or "",
                 "signer_key_id": source_cfg.get("signer_key_id") or source_cfg.get("key_id") or "",
                 "oneinch_swap": swap_payload.get("tx") or swap_payload,
@@ -966,6 +1052,7 @@ class WalletApplePayPurchaseService:
 
     def _request_treasury_transfer_signer(self, order: WalletApplePayPurchaseOrder) -> dict[str, Any]:
         source_cfg = self._treasury_source_config(order.asset, order.network)
+        treasury_fee = self._order_treasury_fee_details(order)
         response = self.session.post(
             self.treasury_signer_url,
             json={
@@ -980,6 +1067,12 @@ class WalletApplePayPurchaseService:
                 "fiat_currency": order.fiat_currency,
                 "fiat_gross_amount": order.fiat_gross_amount,
                 "treasury_fee_usd": order.treasury_fee_usd,
+                "treasury_fee_address": self.treasury_fee_address,
+                "treasury_fee_asset": treasury_fee["treasury_fee_asset"],
+                "treasury_fee_eth_amount": treasury_fee["treasury_fee_eth_amount"],
+                "treasury_fee_eth_price_usd": treasury_fee["treasury_fee_eth_price_usd"],
+                "treasury_fee_price_source": treasury_fee["treasury_fee_price_source"],
+                "require_treasury_fee_transfer": self._treasury_fee_transfer_required(order),
                 "execution_fee_usd": order.execution_fee_usd,
                 "signer_route": source_cfg.get("signer_route") or source_cfg.get("route") or "",
                 "signer_key_id": source_cfg.get("signer_key_id") or source_cfg.get("key_id") or "",
@@ -1068,6 +1161,7 @@ class WalletApplePayPurchaseService:
             "fiat_amount": order.fiat_gross_amount,
             "payment_method": payment_key,
             "line_items": quote.get("line_items", []),
+            "treasury_fee": self._order_treasury_fee_details(order),
             "capture": True,
         }
         if payment_key == CARD_METHOD:
@@ -1078,6 +1172,8 @@ class WalletApplePayPurchaseService:
 
     def _revalidate_order_quote(self, order: WalletApplePayPurchaseOrder) -> None:
         quote = order.details.get("quote", {}) if isinstance(order.details, dict) else {}
+        if self._is_swap_fulfillment_asset(order.asset, order.network):
+            self._assert_oneinch_swap_provider_available()
         expected_fee = self._round_money(float(order.fiat_gross_amount or 0.0) * self.treasury_fee_bps / 10_000)
         if abs(float(order.treasury_fee_usd or 0.0) - expected_fee) > 0.009:
             raise WalletApplePayPurchaseError(
@@ -1231,6 +1327,168 @@ class WalletApplePayPurchaseService:
                     "Treasury ETH gas inventory is insufficient for token fulfillment.",
                     code="apple_pay_inventory_insufficient",
                 )
+
+    def _treasury_fee_quote(self, treasury_fee_usd: float) -> dict[str, Any]:
+        fee_usd = self._round_money(max(0.0, float(treasury_fee_usd or 0.0)))
+        eth_price, price_source = self._eth_usd_price_context()
+        if fee_usd > 0 and eth_price <= 0:
+            raise WalletApplePayPurchaseError("ETH reference pricing is unavailable.", code="apple_pay_eth_price_unavailable")
+        fee_eth = self._round_asset_amount(TREASURY_FEE_ASSET, fee_usd / eth_price) if fee_usd > 0 else 0.0
+        return {
+            "treasury_fee_usd": fee_usd,
+            "treasury_fee_asset": TREASURY_FEE_ASSET,
+            "treasury_fee_eth_amount": fee_eth,
+            "treasury_fee_eth_price_usd": self._round_money(eth_price) if eth_price > 0 else 0.0,
+            "treasury_fee_price_source": price_source,
+            "treasury_fee_address": self.treasury_fee_address,
+        }
+
+    def _order_treasury_fee_details(self, order: WalletApplePayPurchaseOrder) -> dict[str, Any]:
+        quote = order.details.get("quote", {}) if isinstance(order.details, dict) else {}
+        if isinstance(quote, dict) and quote.get("treasury_fee_asset") and quote.get("treasury_fee_eth_amount") is not None:
+            return {
+                "treasury_fee_usd": float(quote.get("treasury_fee_usd") or order.treasury_fee_usd or 0.0),
+                "treasury_fee_asset": str(quote.get("treasury_fee_asset") or TREASURY_FEE_ASSET),
+                "treasury_fee_eth_amount": float(quote.get("treasury_fee_eth_amount") or 0.0),
+                "treasury_fee_eth_price_usd": float(quote.get("treasury_fee_eth_price_usd") or 0.0),
+                "treasury_fee_price_source": str(quote.get("treasury_fee_price_source") or ""),
+                "treasury_fee_address": str(quote.get("treasury_fee_address") or self.treasury_fee_address),
+            }
+        try:
+            return self._treasury_fee_quote(float(order.treasury_fee_usd or 0.0))
+        except WalletApplePayPurchaseError:
+            return {
+                "treasury_fee_usd": float(order.treasury_fee_usd or 0.0),
+                "treasury_fee_asset": TREASURY_FEE_ASSET,
+                "treasury_fee_eth_amount": 0.0,
+                "treasury_fee_eth_price_usd": 0.0,
+                "treasury_fee_price_source": "",
+                "treasury_fee_address": self.treasury_fee_address,
+            }
+
+    def _eth_usd_price_context(self) -> tuple[float, str]:
+        overrides = self.config.get("APPLE_PAY_ASSET_PRICE_USD") or {}
+        if isinstance(overrides, dict):
+            try:
+                configured = float(overrides.get("ETH") or overrides.get("eth") or 0.0)
+            except (TypeError, ValueError):
+                configured = 0.0
+            if configured > 0:
+                return configured, "asset_price_override"
+        market_price = shared_asset_usd_price(TREASURY_FEE_ASSET, self._market_price_lookup)
+        if market_price > 0:
+            return market_price, "market_data"
+        try:
+            fallback = float(self.config.get("PLATFORM_TREASURY_ETH_USD_FALLBACK", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            fallback = 0.0
+        if fallback > 0:
+            return fallback, "platform_treasury_eth_usd_fallback"
+        return 0.0, ""
+
+    def _fulfillment_response_error(self, order: WalletApplePayPurchaseOrder, normalized_status: str) -> str:
+        if normalized_status != "complete":
+            return ""
+        if not order.fulfillment_tx_hash:
+            return "Treasury signer did not return a user delivery transaction hash."
+        if self._treasury_fee_transfer_required(order) and not order.treasury_tx_hash:
+            return "Treasury signer did not return an ETH fee transfer transaction hash."
+        return ""
+
+    def _treasury_fee_transfer_required(self, order: WalletApplePayPurchaseOrder) -> bool:
+        return self._normalize_payment_method(order.payment_method) == CARD_METHOD and float(order.treasury_fee_usd or 0.0) > 0
+
+    def _apple_pay_fulfillment_worker_status(self, *, payment_method: str | None = None) -> dict[str, Any]:
+        required = self._requires_recent_fulfillment_worker(payment_method=payment_method)
+        if not required:
+            return {"required": False, "recent": True, "status": "not_required"}
+        stale_after = self._worker_stale_after_seconds()
+        status = {
+            "required": True,
+            "recent": False,
+            "status": "missing",
+            "stale_after_seconds": stale_after,
+            "heartbeat_lag_seconds": None,
+        }
+        if not has_app_context():
+            return status
+        try:
+            lease = WorkerLease.query.filter_by(lease_name="apple_pay_fulfillment:singleton").one_or_none()
+        except SQLAlchemyError:
+            return {**status, "status": "unavailable"}
+        if lease is None:
+            return status
+        lag = self._elapsed_seconds(datetime.utcnow(), lease.heartbeat_at) if lease.heartbeat_at else None
+        recent = lag is not None and lag <= stale_after
+        return {
+            **status,
+            "recent": recent,
+            "status": "recent" if recent else "stale",
+            "lease_status": lease.status,
+            "heartbeat_lag_seconds": lag,
+            "expires_at": lease.expires_at.isoformat() if lease.expires_at else None,
+        }
+
+    def _requires_recent_fulfillment_worker(self, *, payment_method: str | None = None) -> bool:
+        if bool(self.config.get("TESTING", False)):
+            return False
+        target = str(self.config.get("DEPLOYMENT_TARGET", "local") or "local").strip().lower()
+        if target not in {"vercel", "production", "prod", "vps", "postgres", "staging"}:
+            return False
+        if not bool(self.config.get("WORKER_APPLE_PAY_FULFILLMENT_ENABLED", True)):
+            return False
+        if payment_method == CARD_METHOD:
+            return bool(self.card_enabled)
+        if payment_method == APPLE_PAY_METHOD:
+            return bool(self.enabled)
+        return bool(self.enabled or self.card_enabled)
+
+    def _worker_stale_after_seconds(self) -> float:
+        try:
+            poll_seconds = max(1, int(self.config.get("WORKER_POLL_SECONDS", 15) or 15))
+            lease_ttl_seconds = max(1, int(self.config.get("WORKER_LEASE_TTL_SECONDS", 120) or 120))
+        except (TypeError, ValueError):
+            poll_seconds = 15
+            lease_ttl_seconds = 120
+        return float(max(60, poll_seconds * 6, lease_ttl_seconds))
+
+    @staticmethod
+    def _elapsed_seconds(now: datetime, then: datetime) -> float:
+        if then.tzinfo is not None and now.tzinfo is None:
+            now = now.replace(tzinfo=then.tzinfo)
+        return max(0.0, (now - then).total_seconds())
+
+    @staticmethod
+    def _canonical_apple_pay_network(value: str) -> str:
+        cleaned = str(value or "").strip()
+        key = "".join(ch for ch in cleaned.lower() if ch.isalnum())
+        return APPLE_PAY_NETWORK_CANONICAL.get(key, cleaned)
+
+    def _allowed_assets_for_payment_method(self, payment_method: str) -> dict[str, dict[str, dict[str, Any]]]:
+        if self._normalize_payment_method(payment_method) == CARD_METHOD:
+            return self._card_allowed_assets(self.allowed_assets)[0]
+        return self.allowed_assets
+
+    def _card_allowed_assets(
+        self,
+        allowed_assets: dict[str, dict[str, dict[str, Any]]],
+    ) -> tuple[dict[str, dict[str, dict[str, Any]]], list[str]]:
+        card_assets: dict[str, dict[str, dict[str, Any]]] = {}
+        blockers: list[str] = []
+        for asset, networks in allowed_assets.items():
+            asset_key = self._normalize_asset(asset)
+            if asset_key not in CARD_BUY_ASSETS:
+                blockers.append(f"Card buys do not support {asset_key} in this release")
+                continue
+            for network, cfg in networks.items():
+                if not self._is_evm_network(network):
+                    blockers.append(f"Card buys require an EVM network for {asset_key} on {network}")
+                    continue
+                if str(cfg.get("fulfillment_kind") or "").strip().lower() != "treasury_transfer":
+                    blockers.append(f"Card buys require treasury_transfer fulfillment for {asset_key} on {network}")
+                    continue
+                card_assets.setdefault(asset_key, {})[network] = cfg
+        return card_assets, blockers
 
     def _allowed_assets_from_config(self, raw: Any) -> dict[str, dict[str, dict[str, Any]]]:
         if not isinstance(raw, dict):
@@ -1432,6 +1690,8 @@ class WalletApplePayPurchaseService:
 
     def _asset_usd_price(self, asset: str) -> float:
         asset_key = self._normalize_asset(asset)
+        if asset_key == TREASURY_FEE_ASSET:
+            return self._eth_usd_price_context()[0]
         overrides = self.config.get("APPLE_PAY_ASSET_PRICE_USD") or {}
         if isinstance(overrides, dict):
             try:
@@ -1567,6 +1827,29 @@ class WalletApplePayPurchaseService:
             except (TypeError, ValueError):
                 continue
         return 0.0
+
+    def _wallet_buy_treasury_fee_bps(self) -> float:
+        try:
+            configured = float(
+                self.config.get(
+                    "WALLET_BUY_PLATFORM_FEE_BPS",
+                    self.config.get("APPLE_PAY_TREASURY_FEE_BPS", WALLET_BUY_PLATFORM_FEE_BPS),
+                )
+                or WALLET_BUY_PLATFORM_FEE_BPS
+            )
+        except (TypeError, ValueError):
+            configured = WALLET_BUY_PLATFORM_FEE_BPS
+        return configured
+
+    def _is_swap_fulfillment_asset(self, asset: str, network: str) -> bool:
+        return self._fulfillment_kind(asset, network) == "evm_swap"
+
+    def _assert_oneinch_swap_provider_available(self) -> None:
+        if not self._oneinch_provider_configured():
+            raise WalletApplePayPurchaseError(
+                "A low-fee swap provider is required for card buy fulfillment. Configure ONEINCH_API_KEY or disable card buys for EVM swap assets.",
+                code="apple_pay_oneinch_provider_unavailable",
+            )
 
     @staticmethod
     def _valid_url(value: str) -> bool:

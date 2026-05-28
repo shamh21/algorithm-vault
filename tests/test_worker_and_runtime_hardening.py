@@ -368,19 +368,36 @@ def test_ops_status_reports_card_buy_readiness_without_secret_values(app) -> Non
                 "CARD_GATEWAY_PUBLIC_CONFIG": {"publishable_key": "pk_test_card"},
                 "APPLE_PAY_CRYPTO_SALE_APPROVED": True,
                 "APPLE_PAY_BUY_ALLOWED_ASSETS": {
+                    "ETH": {"Ethereum": {"fulfillment_kind": "treasury_transfer", "chain_id": 1, "decimals": 18}},
+                    "USDC": {
+                        "Ethereum": {
+                            "fulfillment_kind": "treasury_transfer",
+                            "chain_id": 1,
+                            "token_address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+                            "decimals": 6,
+                        }
+                    },
                     "USDT": {
                         "Ethereum": {
+                            "fulfillment_kind": "treasury_transfer",
                             "chain_id": 1,
                             "token_address": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
                             "decimals": 6,
-                            "source_asset": "USDT",
-                            "source_token_address": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
                         }
-                    }
+                    },
+                },
+                "APPLE_PAY_TREASURY_SOURCE_WALLETS": {
+                    "ETH": {"Ethereum": {"source_address": "0x2222222222222222222222222222222222222222", "signer_route": "evm"}},
+                    "USDC": {"Ethereum": {"source_address": "0x2222222222222222222222222222222222222222", "signer_route": "evm"}},
+                    "USDT": {"Ethereum": {"source_address": "0x2222222222222222222222222222222222222222", "signer_route": "evm"}},
                 },
                 "APPLE_PAY_TREASURY_SOURCE_ADDRESS": "0x2222222222222222222222222222222222222222",
+                "APPLE_PAY_TREASURY_FEE_ADDRESS": "0x3333333333333333333333333333333333333333",
                 "APPLE_PAY_TREASURY_SIGNER_URL": "https://signer.example/submit",
                 "APPLE_PAY_TREASURY_SIGNER_TOKEN": "signer-secret",
+                "APPLE_PAY_ASSET_PRICE_USD": {"ETH": 3000.0},
+                "WALLET_EVM_RPC_URL": "https://evm.example.invalid",
+                "WALLET_BUY_PLATFORM_FEE_BPS": 250.0,
                 "ONEINCH_API_KEY": "oneinch-secret",
                 "ONEINCH_API_BASE_URL": "https://api.1inch.com/swap/v6.1",
             }
@@ -395,6 +412,10 @@ def test_ops_status_reports_card_buy_readiness_without_secret_values(app) -> Non
     assert card_buy["provider"] == "custom_card_gateway"
     assert card_buy["gateway_tokenization_configured"] is True
     assert card_buy["gateway_authorize_configured"] is True
+    assert card_buy["gateway_public_configured"] is True
+    assert card_buy["treasury_fee_asset"] == "ETH"
+    assert card_buy["treasury_fee_address_configured"] is True
+    assert sorted(card_buy["allowed_assets"]) == ["ETH", "USDC", "USDT"]
     assert card_buy["oneinch_configured"] is True
     assert card_buy["oneinch_base_url"] == "https://api.1inch.com/swap/v6.1"
     assert "card-secret" not in body
@@ -516,6 +537,10 @@ def test_worker_status_handles_timezone_aware_heartbeats(monkeypatch) -> None:
     assert status["available"] is True
     assert status["leases"][0]["lease_name"] == "test-aware-heartbeat"
     assert status["max_lease_lag_seconds"] >= 0
+    assert "expected_leases" in status
+    assert "missing_expected_leases" in status
+    assert "stale_expected_leases" in status
+    assert "job_leases" in status
 
 
 def test_wallet_withdrawals_auto_enable_for_ready_live_real_custody() -> None:

@@ -12,7 +12,15 @@ import requests
 from app.auth import password_hash
 from app.csrf import CSRF_SESSION_KEY
 from app.extensions import db
-from app.models import DepositAddress, User, WalletApplePayPurchaseOrder, WalletBalance, WalletLedgerEvent, WalletTransaction
+from app.models import (
+    DepositAddress,
+    User,
+    WalletApplePayPurchaseOrder,
+    WalletBalance,
+    WalletLedgerEvent,
+    WalletTransaction,
+    WorkerLease,
+)
 from app.services.wallet_apple_pay_purchase import WalletApplePayPurchaseError, WalletApplePayPurchaseService
 
 
@@ -121,6 +129,30 @@ def _configure_apple_pay(app, *, fake_session: _FakeSession | None = None) -> _F
 def _configure_card_buy(app, *, fake_session: _FakeSession | None = None) -> _FakeSession:
     fake = _configure_apple_pay(app, fake_session=fake_session)
     app.config.update(
+        APPLE_PAY_BUY_ALLOWED_ASSETS={
+            "ETH": {"Ethereum": {"fulfillment_kind": "treasury_transfer", "chain_id": 1, "decimals": 18}},
+            "USDC": {
+                "Ethereum": {
+                    "fulfillment_kind": "treasury_transfer",
+                    "chain_id": 1,
+                    "token_address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+                    "decimals": 6,
+                }
+            },
+            "USDT": {
+                "Ethereum": {
+                    "fulfillment_kind": "treasury_transfer",
+                    "chain_id": 1,
+                    "token_address": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+                    "decimals": 6,
+                }
+            },
+        },
+        APPLE_PAY_TREASURY_SOURCE_WALLETS={
+            "ETH": {"Ethereum": {"source_address": "0x2222222222222222222222222222222222222222", "signer_route": "evm"}},
+            "USDC": {"Ethereum": {"source_address": "0x2222222222222222222222222222222222222222", "signer_route": "evm"}},
+            "USDT": {"Ethereum": {"source_address": "0x2222222222222222222222222222222222222222", "signer_route": "evm"}},
+        },
         CARD_BUY_ENABLED=True,
         CARD_GATEWAY_TOKENIZATION_URL="https://card-gateway.example/tokenize",
         CARD_GATEWAY_AUTHORIZE_URL="https://card-gateway.example/authorize",
@@ -129,8 +161,17 @@ def _configure_card_buy(app, *, fake_session: _FakeSession | None = None) -> _Fa
         CARD_GATEWAY_PUBLIC_CONFIG={"publishable_key": "pk_test_card", "secret_key": "do-not-leak"},
         WALLET_BUY_PLATFORM_FEE_BPS=250.0,
         WALLET_BUY_QUOTE_TTL_SECONDS=300,
+        APPLE_PAY_ASSET_PRICE_USD={"ETH": 3000.0},
+        WALLET_EVM_RPC_URL="https://evm.example.invalid",
+        ONEINCH_API_KEY="",
     )
     return fake
+
+
+def _patch_card_buy_treasury_checks(app, monkeypatch, *, execution_fee: float = 3.15) -> None:
+    service = app.extensions["services"]["wallet_apple_pay_purchase"]
+    monkeypatch.setattr(service, "_estimate_treasury_transfer_fee_usd", lambda **_kwargs: (execution_fee, 0.00001))
+    monkeypatch.setattr(service, "_assert_treasury_inventory", lambda **_kwargs: None)
 
 
 def _treasury_transfer_allowed_assets() -> dict[str, Any]:
@@ -284,6 +325,16 @@ def test_apple_pay_readiness_requires_domain_association(app) -> None:
     assert "APPLE_PAY_DOMAIN_ASSOCIATION must be configured" in readiness["blockers"]
 
 
+def test_apple_pay_supported_networks_preserve_apple_casing(app) -> None:
+    _configure_apple_pay(app)
+    app.config["APPLE_PAY_SUPPORTED_NETWORKS"] = "visa,mastercard,amex,discover"
+    service = WalletApplePayPurchaseService(app.config)
+
+    readiness = service.readiness()
+
+    assert readiness["supported_networks"] == ["visa", "masterCard", "amex", "discover"]
+
+
 def test_apple_pay_readiness_requires_order_migration(app, monkeypatch) -> None:
     _configure_apple_pay(app)
     service = WalletApplePayPurchaseService(app.config)
@@ -312,6 +363,35 @@ def test_apple_pay_readiness_requires_oneinch_only_for_evm_swap_assets(app) -> N
     assert "ONEINCH_API_KEY must be configured when evm_swap assets are enabled" not in treasury_readiness["blockers"]
     assert sorted(treasury_readiness["allowed_assets"]) == ["BTC", "ETH", "SOL", "USDC", "USDT", "XRP"]
     assert "ALGV" not in treasury_readiness["allowed_assets"]
+
+
+def test_apple_pay_readiness_requires_recent_worker_heartbeat_in_production(app) -> None:
+    _configure_treasury_transfer_apple_pay(app)
+    app.config["DEPLOYMENT_TARGET"] = "vercel"
+    app.config["TESTING"] = False
+
+    readiness = app.extensions["services"]["wallet_apple_pay_purchase"].readiness()
+
+    assert readiness["ready"] is False
+    assert "apple_pay_fulfillment worker heartbeat must be recent" in readiness["blockers"]
+    assert readiness["fulfillment_worker"]["status"] == "missing"
+
+
+def test_apple_pay_readiness_accepts_recent_worker_heartbeat_in_production(app) -> None:
+    _configure_treasury_transfer_apple_pay(app)
+    app.config["DEPLOYMENT_TARGET"] = "vercel"
+    app.config["TESTING"] = False
+    lease = WorkerLease(lease_name="apple_pay_fulfillment:singleton")
+    lease.status = "released"
+    lease.heartbeat_at = datetime.utcnow()
+    lease.expires_at = datetime.utcnow()
+    db.session.add(lease)
+    db.session.commit()
+
+    readiness = app.extensions["services"]["wallet_apple_pay_purchase"].readiness()
+
+    assert readiness["ready"] is True
+    assert readiness["fulfillment_worker"]["recent"] is True
 
 
 def test_apple_pay_quote_uses_net_from_charge_fee_math(app) -> None:
@@ -432,8 +512,9 @@ def test_apple_pay_authorize_captures_gateway_without_storing_payment_token(app)
     assert gateway_call["json"]["apple_pay_token"]["paymentData"]["secret"] == "do-not-store"
 
 
-def test_card_buy_readiness_and_quote_return_gateway_config_without_secret(app) -> None:
+def test_card_buy_readiness_and_quote_return_gateway_config_without_secret(app, monkeypatch) -> None:
     _configure_card_buy(app)
+    _patch_card_buy_treasury_checks(app, monkeypatch)
     user, _deposit = _user_with_deposit()
     client = app.test_client()
     csrf_token = _login(client, user)
@@ -450,8 +531,13 @@ def test_card_buy_readiness_and_quote_return_gateway_config_without_secret(app) 
     assert order["payment_method"] == "card"
     assert order["purchase_amount"] == 100.0
     assert order["algvault_fee"] == 2.5
+    assert order["algvault_fee_label"] == "AlgVault fee, paid to ETH treasury"
+    assert order["treasury_fee_asset"] == "ETH"
+    assert order["treasury_fee_eth_amount"] == 0.000833333333333333
+    assert order["treasury_fee_eth_price_usd"] == 3000.0
     assert order["total_charged"] == 100.0
     assert order["estimated_receive_amount"] == 94.35
+    assert order["treasury_fee_address"] == "0x3333333333333333333333333333333333333333"
     assert order["expires_at"]
     assert payload["gateway"]["tokenization_url"] == "https://card-gateway.example/tokenize"
     assert payload["gateway"]["public_config"] == {"publishable_key": "pk_test_card"}
@@ -459,10 +545,158 @@ def test_card_buy_readiness_and_quote_return_gateway_config_without_secret(app) 
     assert "card_test_key" not in json.dumps(payload)
     stored = WalletApplePayPurchaseOrder.query.one()
     assert stored.payment_method == "card"
+    assert stored.details["quote"]["treasury_fee_asset"] == "ETH"
+    assert stored.details["quote"]["treasury_fee_eth_amount"] == 0.000833333333333333
 
 
-def test_card_authorize_uses_tokenized_gateway_without_storing_token(app) -> None:
+def test_card_buy_readiness_rejects_non_250_platform_fee(app) -> None:
+    _configure_card_buy(app)
+    app.config["WALLET_BUY_PLATFORM_FEE_BPS"] = 500.0
+    app.config["APPLE_PAY_TREASURY_FEE_BPS"] = 100.0
+
+    readiness = app.extensions["services"]["wallet_apple_pay_purchase"].card_readiness()
+
+    assert readiness["ready"] is False
+    assert "WALLET_BUY_PLATFORM_FEE_BPS must be 250" in readiness["blockers"]
+
+
+def test_card_buy_readiness_requires_gateway_public_config(app) -> None:
+    _configure_card_buy(app)
+    app.config["CARD_GATEWAY_PUBLIC_CONFIG"] = {"secret_key": "hidden-card-secret"}
+
+    readiness = app.extensions["services"]["wallet_apple_pay_purchase"].card_readiness()
+
+    assert readiness["ready"] is False
+    assert "CARD_GATEWAY_PUBLIC_CONFIG_JSON must expose gateway public configuration" in readiness["blockers"]
+    assert readiness["gateway"]["public_config"] == {}
+
+
+def test_card_buy_readiness_requires_recent_worker_heartbeat_in_production(app) -> None:
+    _configure_card_buy(app)
+    app.config["DEPLOYMENT_TARGET"] = "vercel"
+    app.config["TESTING"] = False
+
+    readiness = app.extensions["services"]["wallet_apple_pay_purchase"].card_readiness()
+
+    assert readiness["ready"] is False
+    assert "apple_pay_fulfillment worker heartbeat must be recent" in readiness["blockers"]
+    assert readiness["fulfillment_worker"]["status"] == "missing"
+
+
+def test_card_buy_readiness_accepts_recent_worker_heartbeat_in_production(app) -> None:
+    _configure_card_buy(app)
+    app.config["DEPLOYMENT_TARGET"] = "vercel"
+    app.config["TESTING"] = False
+    lease = WorkerLease(lease_name="apple_pay_fulfillment:singleton")
+    lease.status = "released"
+    lease.heartbeat_at = datetime.utcnow()
+    lease.expires_at = datetime.utcnow()
+    db.session.add(lease)
+    db.session.commit()
+
+    readiness = app.extensions["services"]["wallet_apple_pay_purchase"].card_readiness()
+
+    assert readiness["ready"] is True
+    assert readiness["fulfillment_worker"]["recent"] is True
+
+
+def test_card_buy_quote_defaults_to_platform_fee_when_override_missing(app, monkeypatch) -> None:
+    _configure_card_buy(app)
+    _patch_card_buy_treasury_checks(app, monkeypatch)
+    app.config.pop("WALLET_BUY_PLATFORM_FEE_BPS", None)
+    app.config.pop("APPLE_PAY_TREASURY_FEE_BPS", None)
+    user, _deposit = _user_with_deposit()
+    client = app.test_client()
+    csrf_token = _login(client, user)
+
+    response = client.post(
+        "/wallet/card/quote",
+        json={"asset": "USDT", "network": "Ethereum", "fiat_currency": "USD", "fiat_amount": 100},
+        headers={"X-CSRF-Token": csrf_token, "Idempotency-Key": "card-quote-default"},
+    )
+
+    assert response.status_code == 200
+    order = response.get_json()["order"]
+    assert order["treasury_fee_usd"] == 2.5
+    assert order["algvault_fee"] == 2.5
+    assert order["estimated_receive_amount"] == 94.35
+
+
+def test_card_authorize_rejects_malformed_treasury_fee_quote(app, monkeypatch) -> None:
+    _configure_card_buy(app)
+    _patch_card_buy_treasury_checks(app, monkeypatch)
+    user, _deposit = _user_with_deposit()
+    client = app.test_client()
+    csrf_token = _login(client, user)
+    quote_response = client.post(
+        "/wallet/card/quote",
+        json={"asset": "USDT", "network": "Ethereum", "fiat_currency": "USD", "fiat_amount": 100},
+        headers={"X-CSRF-Token": csrf_token, "Idempotency-Key": "card-auth-mismatch"},
+    )
+    order_id = quote_response.get_json()["order"]["order_id"]
+    order = WalletApplePayPurchaseOrder.query.filter_by(public_id=order_id).one()
+    order.treasury_fee_usd = 1.0
+    db.session.commit()
+
+    response = client.post(
+        "/wallet/card/authorize",
+        json={"order_id": order_id, "gateway_payment_token": {"token": "tok_card_secret"}},
+        headers={"X-CSRF-Token": csrf_token, "Idempotency-Key": "card-auth-mismatch"},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["code"] == "wallet_buy_quote_invalid"
+
+
+def test_card_authorize_uses_treasury_transfer_without_oneinch_provider(app, monkeypatch) -> None:
+    _configure_card_buy(app)
+    _patch_card_buy_treasury_checks(app, monkeypatch)
+    user, _deposit = _user_with_deposit()
+    client = app.test_client()
+    csrf_token = _login(client, user)
+    quote_response = client.post(
+        "/wallet/card/quote",
+        json={"asset": "USDT", "network": "Ethereum", "fiat_currency": "USD", "fiat_amount": 100},
+        headers={"X-CSRF-Token": csrf_token, "Idempotency-Key": "card-quote-disable-oneinch"},
+    )
+    order_id = quote_response.get_json()["order"]["order_id"]
+
+    app.config["ONEINCH_API_KEY"] = ""
+
+    response = client.post(
+        "/wallet/card/authorize",
+        json={"order_id": order_id, "gateway_payment_token": {"token": "tok_card_secret"}},
+        headers={"X-CSRF-Token": csrf_token, "Idempotency-Key": "card-auth-no-oneinch"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["order"]["status"] == "fulfillment_pending"
+
+
+def test_card_quote_fails_when_allowed_assets_are_not_evm_treasury_transfers(app) -> None:
+    _configure_card_buy(app)
+    app.config["APPLE_PAY_BUY_ALLOWED_ASSETS"] = _treasury_transfer_allowed_assets()
+    user, _deposit = _user_with_deposit()
+    client = app.test_client()
+    csrf_token = _login(client, user)
+
+    response = client.post(
+        "/wallet/card/quote",
+        json={"asset": "USDT", "network": "Ethereum", "fiat_currency": "USD", "fiat_amount": 100},
+        headers={"X-CSRF-Token": csrf_token, "Idempotency-Key": "card-quote-no-oneinch"},
+    )
+
+    assert response.status_code == 503
+    assert response.get_json()["code"] == "apple_pay_not_ready"
+    assert (
+        "Card buys do not support BTC in this release"
+        in app.extensions["services"]["wallet_apple_pay_purchase"].card_readiness()["blockers"]
+    )
+
+
+def test_card_authorize_uses_tokenized_gateway_without_storing_token(app, monkeypatch) -> None:
     fake = _configure_card_buy(app)
+    _patch_card_buy_treasury_checks(app, monkeypatch)
     user, _deposit = _user_with_deposit()
     client = app.test_client()
     csrf_token = _login(client, user)
@@ -487,11 +721,15 @@ def test_card_authorize_uses_tokenized_gateway_without_storing_token(app) -> Non
     gateway_call = next(call for call in fake.calls if call["method"] == "POST" and "card-gateway" in call["url"])
     assert gateway_call["headers"]["Authorization"] == "Bearer card_test_key"
     assert gateway_call["json"]["payment_method"] == "card"
+    assert gateway_call["json"]["treasury_fee"]["treasury_fee_usd"] == 2.5
+    assert gateway_call["json"]["treasury_fee"]["treasury_fee_asset"] == "ETH"
+    assert gateway_call["json"]["treasury_fee"]["treasury_fee_eth_amount"] == 0.000833333333333333
     assert gateway_call["json"]["gateway_payment_token"]["token"] == "tok_card_secret"
 
 
-def test_card_authorize_rejects_expired_quote(app) -> None:
+def test_card_authorize_rejects_expired_quote(app, monkeypatch) -> None:
     _configure_card_buy(app)
+    _patch_card_buy_treasury_checks(app, monkeypatch)
     user, _deposit = _user_with_deposit()
     client = app.test_client()
     csrf_token = _login(client, user)
@@ -675,6 +913,72 @@ def test_apple_pay_treasury_transfer_fulfillment_uses_signer_without_oneinch(app
     assert signer_call["json"]["fulfillment_kind"] == "treasury_transfer"
     assert signer_call["json"]["asset"] == "BTC"
     assert signer_call["json"]["source_address"] == "bc1qtreasurywallet"
+
+
+def test_card_treasury_transfer_fulfillment_sends_eth_fee_to_signer(app) -> None:
+    fake = _configure_card_buy(app)
+    user, deposit = _user_with_deposit("USDT", "Ethereum")
+    order = WalletApplePayPurchaseOrder(
+        user_id=user.id,
+        deposit_address_id=deposit.id,
+        asset="USDT",
+        network="Ethereum",
+        destination_address=deposit.address,
+        fiat_currency="USD",
+        fiat_gross_amount=100.0,
+        treasury_fee_usd=2.5,
+        execution_fee_usd=3.15,
+        net_asset_amount=94.35,
+        payment_method="card",
+        status="fulfillment_pending",
+        idempotency_key="fulfillment-card-treasury-fee",
+    )
+    db.session.add(order)
+    db.session.commit()
+
+    result = app.extensions["services"]["wallet_apple_pay_purchase"].process_pending_orders()
+
+    assert result["orders"][0]["status"] == "complete"
+    refreshed = db.session.get(WalletApplePayPurchaseOrder, order.id)
+    assert refreshed.status == "complete"
+    assert refreshed.fulfillment_tx_hash == "0xuser"
+    assert refreshed.treasury_tx_hash == "0xtreasury"
+    signer_call = next(call for call in fake.calls if call["method"] == "POST" and "signer" in call["url"])
+    assert signer_call["json"]["fulfillment_kind"] == "treasury_transfer"
+    assert signer_call["json"]["treasury_fee_asset"] == "ETH"
+    assert signer_call["json"]["treasury_fee_eth_amount"] == 0.000833333333333333
+    assert signer_call["json"]["treasury_fee_address"] == "0x3333333333333333333333333333333333333333"
+    assert signer_call["json"]["require_treasury_fee_transfer"] is True
+
+
+def test_card_treasury_transfer_fulfillment_fails_without_eth_fee_tx_hash(app) -> None:
+    _configure_card_buy(app, fake_session=_FakeSession(signer_payload={"status": "complete", "tx_hash": "0xuser"}))
+    user, deposit = _user_with_deposit("USDT", "Ethereum")
+    order = WalletApplePayPurchaseOrder(
+        user_id=user.id,
+        deposit_address_id=deposit.id,
+        asset="USDT",
+        network="Ethereum",
+        destination_address=deposit.address,
+        fiat_currency="USD",
+        fiat_gross_amount=100.0,
+        treasury_fee_usd=2.5,
+        execution_fee_usd=3.15,
+        net_asset_amount=94.35,
+        payment_method="card",
+        status="fulfillment_pending",
+        idempotency_key="fulfillment-card-missing-treasury-fee",
+    )
+    db.session.add(order)
+    db.session.commit()
+
+    result = app.extensions["services"]["wallet_apple_pay_purchase"].process_pending_orders()
+
+    assert result["orders"][0]["status"] == "failed"
+    refreshed = db.session.get(WalletApplePayPurchaseOrder, order.id)
+    assert refreshed.status == "failed"
+    assert "ETH fee transfer transaction hash" in refreshed.failure_reason
+    assert refreshed.completed_at is None
 
 
 def test_apple_pay_fulfillment_failure_records_failed_order(app) -> None:
