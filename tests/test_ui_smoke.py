@@ -246,6 +246,17 @@ class _LiveUsdtWalletAdapter(_LiveWalletAdapter):
         return WalletBalanceSnapshot(amount=amount, asset=asset, checked=True, confirmations=12)
 
 
+class _FailingSyncCustody:
+    enabled = True
+
+    def __init__(self) -> None:
+        self.sync_calls = 0
+
+    def sync_user(self, user_id: int) -> None:
+        self.sync_calls += 1
+        raise RuntimeError(f"custody sync should be skipped for user {user_id}")
+
+
 def _enable_live_wallets(app) -> tuple[_LiveWalletAdapter, RealWalletCustodyService]:
     app.config["USE_REAL_ADDRESSES"] = True
     app.config["WALLET_REAL_CUSTODY_ENABLED"] = True
@@ -502,6 +513,24 @@ def test_consumer_pages_render_wallet_and_vault_experience(app) -> None:
         b"Live is disabled until",
     ]:
         assert removed_copy not in settings.data
+
+
+def test_wallet_page_renders_when_live_sync_is_disabled(app) -> None:
+    _patch_market_data(app)
+    user, secret = _create_user(username="wallet-nosync")
+    _seed_wallet_balance(user)
+    failing_custody = _FailingSyncCustody()
+    app.extensions["services"]["wallet_custody"] = failing_custody
+    app.config["WALLET_PAGE_LIVE_SYNC_ENABLED"] = False
+    client = app.test_client()
+    _login(client, user.username, secret)
+
+    response = client.get("/wallet")
+
+    assert response.status_code == 200
+    assert b"Verified On-chain Value" in response.data
+    assert b"Buy with Card" in response.data
+    assert failing_custody.sync_calls == 0
 
 
 def test_activity_page_redirects_to_dashboard(app) -> None:

@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from sqlalchemy.pool import NullPool
 
 from app import _should_load_repo_dotenv, create_app
 from app.auth import password_hash, password_matches
@@ -210,6 +211,21 @@ def test_database_url_uses_psycopg_driver_for_hosted_postgres(monkeypatch, raw_u
 
         assert normalized == reloaded.BaseConfig.SQLALCHEMY_DATABASE_URI
     importlib.reload(config_module)
+
+
+def test_vercel_postgres_engine_options_disable_prepared_statements(app, monkeypatch) -> None:
+    import app as app_module
+
+    monkeypatch.setenv("VERCEL", "1")
+    app.config["SQLALCHEMY_DATABASE_URI"] = "postgresql+psycopg://bot:secret@db.example.invalid/tradingbot"
+    app.config["DEPLOYMENT_TARGET"] = "vercel"
+    app.config["SQLALCHEMY_ENGINE_OPTIONS"] = {}
+
+    app_module._configure_engine_options(app)
+
+    options = app.config["SQLALCHEMY_ENGINE_OPTIONS"]
+    assert options["poolclass"] is NullPool
+    assert options["connect_args"]["prepare_threshold"] is None
 
 
 def test_repo_dotenv_is_skipped_for_vercel_and_production_runtime() -> None:

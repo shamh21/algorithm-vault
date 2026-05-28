@@ -202,9 +202,19 @@ class WalletSummaryService:
             "comparisons": comparisons,
         }
 
-    def summary_for_user(self, user: User, *, balances: list[WalletBalance] | None = None) -> ProfileWalletSummary:
-        sync_report = self._sync_and_reconcile_custody(user.id)
-        balance_views = self._balance_views(user.id, balances=None if sync_report.get("touched") else balances)
+    def summary_for_user(
+        self,
+        user: User,
+        *,
+        balances: list[WalletBalance] | None = None,
+        sync_custody: bool = True,
+    ) -> ProfileWalletSummary:
+        sync_report = self._sync_and_reconcile_custody(user.id) if sync_custody else {"touched": False}
+        balance_views = self._balance_views(
+            user.id,
+            balances=None if sync_report.get("touched") else balances,
+            ignore_unverified_onchain=bool(sync_report.get("failed")),
+        )
         return ProfileWalletSummary(
             user=user,
             balances=balance_views,
@@ -319,7 +329,13 @@ class WalletSummaryService:
             query = query.filter(func.lower(User.username) == username.strip().lower())
         return query.one_or_none()
 
-    def _balance_views(self, user_id: int, *, balances: list[WalletBalance] | None = None) -> list[WalletBalanceView]:
+    def _balance_views(
+        self,
+        user_id: int,
+        *,
+        balances: list[WalletBalance] | None = None,
+        ignore_unverified_onchain: bool = False,
+    ) -> list[WalletBalanceView]:
         records = balances
         if records is None:
             records = (
@@ -330,6 +346,10 @@ class WalletSummaryService:
             )
         by_asset = {record.asset.upper(): record for record in records}
         onchain_by_asset = self._onchain_snapshots(user_id)
+        if ignore_unverified_onchain:
+            onchain_by_asset = {
+                asset: snapshot for asset, snapshot in onchain_by_asset.items() if str(snapshot.get("status") or "") == "checked"
+            }
         if _recovery_sqlite_active():
             onchain_by_asset = {
                 asset: snapshot for asset, snapshot in onchain_by_asset.items() if str(snapshot.get("status") or "") == "checked"
@@ -434,19 +454,22 @@ class WalletSummaryService:
         try:
             custody.sync_user(user_id)
             touched = True
-        except Exception as exc:  # noqa: BLE001
-            current_app.logger.warning("Wallet summary custody sync failed for user %s: %s", user_id, exc)
-        assets = {row.asset for row in WalletBalance.query.filter_by(user_id=user_id).all()} | {
-            row.asset for row in WalletAddress.query.filter_by(user_id=user_id, status="active").all()
-        }
-        for asset in assets:
-            try:
+
+            with db.session.no_autoflush:
+                assets = {row.asset for row in WalletBalance.query.filter_by(user_id=user_id).all()} | {
+                    row.asset for row in WalletAddress.query.filter_by(user_id=user_id, status="active").all()
+                }
+
+            for asset in assets:
                 custody.reconcile_custody_balance(user_id, asset)
                 touched = True
-            except Exception as exc:  # noqa: BLE001
-                current_app.logger.warning("Wallet summary custody reconciliation failed for user %s asset %s: %s", user_id, asset, exc)
-        if touched:
-            db.session.flush()
+
+            if touched:
+                db.session.flush()
+        except Exception as exc:  # noqa: BLE001
+            db.session.rollback()
+            current_app.logger.warning("Wallet summary custody sync failed for user %s: %s", user_id, exc)
+            return {"touched": False, "failed": True}
         return {"touched": touched}
 
     def _sync_status_by_asset(self, user_id: int) -> dict[str, dict[str, Any]]:

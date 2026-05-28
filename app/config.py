@@ -951,6 +951,10 @@ class BaseConfig:
     WALLET_CUSTODY_MODE = (
         "local_dev" if RECOVERY_SQLITE_ACTIVE else os.getenv("WALLET_CUSTODY_MODE", "local_dev").strip().lower() or "local_dev"
     )
+    WALLET_PAGE_LIVE_SYNC_ENABLED = _as_bool(
+        os.getenv("WALLET_PAGE_LIVE_SYNC_ENABLED"),
+        default=DEPLOYMENT_TARGET != "vercel" and not _as_bool(os.getenv("VERCEL"), default=False),
+    )
     WALLET_SIGNER_ISOLATION_REQUIRED = _as_bool(os.getenv("WALLET_SIGNER_ISOLATION_REQUIRED"), default=True)
     WALLET_SIGNER_ISOLATION_CONFIRMED = _as_bool(os.getenv("WALLET_SIGNER_ISOLATION_CONFIRMED"), default=False)
     WALLET_SDK_CHECKS_PASSED = _as_bool(os.getenv("WALLET_SDK_CHECKS_PASSED"), default=False)
@@ -1636,6 +1640,7 @@ class BaseConfig:
             "REALTIME_MARKET_MAX_STALE_SECONDS": cls.REALTIME_MARKET_MAX_STALE_SECONDS,
             "WALLET_PROVIDER": cls.WALLET_PROVIDER,
             "WALLET_CUSTODY_MODE": cls.WALLET_CUSTODY_MODE,
+            "WALLET_PAGE_LIVE_SYNC_ENABLED": cls.WALLET_PAGE_LIVE_SYNC_ENABLED,
             "WALLET_SIGNER_ISOLATION_REQUIRED": cls.WALLET_SIGNER_ISOLATION_REQUIRED,
             "WALLET_SIGNER_ISOLATION_CONFIRMED": cls.WALLET_SIGNER_ISOLATION_CONFIRMED,
             "WALLET_SDK_CHECKS_PASSED": cls.WALLET_SDK_CHECKS_PASSED,

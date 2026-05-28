@@ -188,6 +188,10 @@ def _vault_live_api_deferred_for_request() -> bool:
     return _request_origin() != live_origin
 
 
+def _wallet_page_live_sync_enabled() -> bool:
+    return bool(current_app.config.get("WALLET_PAGE_LIVE_SYNC_ENABLED", True))
+
+
 @consumer_bp.get("/")
 def home():
     user = current_user()
@@ -202,9 +206,14 @@ def home():
     wallet_summary = None
     wallet_error = ""
     try:
-        balances = _wallet_balances(user)
-        wallet_summary = get_service("wallet_summary").summary_for_user(user, balances=balances)
+        balances = _wallet_balances(user, sync_real=_wallet_page_live_sync_enabled())
+        wallet_summary = get_service("wallet_summary").summary_for_user(
+            user,
+            balances=balances,
+            sync_custody=_wallet_page_live_sync_enabled(),
+        )
     except Exception as exc:  # noqa: BLE001
+        db.session.rollback()
         current_app.logger.exception("Home wallet balance unavailable: %s", exc)
         wallet_error = "Total wallet balance is temporarily unavailable."
 
@@ -265,18 +274,29 @@ def _render_public_page(key: str):
 def wallet():
     user = current_user()
     _sync_completed_cycles(user)
-    balances = _wallet_balances(user)
-    wallet_summary = get_service("wallet_summary").summary_for_user(user, balances=balances)
+    balances = _wallet_balances(user, sync_real=_wallet_page_live_sync_enabled())
+    wallet_summary = get_service("wallet_summary").summary_for_user(
+        user,
+        balances=balances,
+        sync_custody=_wallet_page_live_sync_enabled(),
+    )
     activity_page = get_service("wallet_activity").page_for_user(user.id, page=_wallet_activity_page_number())
-    commit_with_retry()
+    wallet_view = _wallet_view_model(wallet_summary, activity_page.items)
+    allocation_chart = _wallet_allocation_payload(wallet_summary)
+    portfolio_trend = _portfolio_trend_payload(user, wallet_summary)
+    try:
+        commit_with_retry()
+    except Exception as exc:  # noqa: BLE001
+        db.session.rollback()
+        current_app.logger.warning("Wallet page commit skipped after render payload was built for user %s: %s", user.id, exc)
     return render_template(
         "wallet.html",
         balances=wallet_summary.balances,
         wallet_summary=wallet_summary,
-        wallet_view=_wallet_view_model(wallet_summary, activity_page.items),
+        wallet_view=wallet_view,
         portfolio_total=wallet_summary.portfolio_total_usd,
-        allocation_chart=_wallet_allocation_payload(wallet_summary),
-        portfolio_trend=_portfolio_trend_payload(user, wallet_summary),
+        allocation_chart=allocation_chart,
+        portfolio_trend=portfolio_trend,
         transactions=activity_page.items,
         activity_page=activity_page,
         networks=ASSET_NETWORKS,
@@ -2066,8 +2086,10 @@ def _positive_decimal(value: object) -> Decimal | None:
     return amount if amount > 0 and amount.is_finite() else None
 
 
-def _wallet_balances(user) -> list[WalletBalance]:
-    _sync_real_wallet_balances(user)
+def _wallet_balances(user, *, sync_real: bool | None = None) -> list[WalletBalance]:
+    should_sync = _wallet_page_live_sync_enabled() if sync_real is None else sync_real
+    if should_sync:
+        _sync_real_wallet_balances(user)
     balances = (
         WalletBalance.query.options(joinedload(WalletBalance.active_deposit_address))
         .filter_by(user_id=user.id)
@@ -2095,16 +2117,19 @@ def _wallet_balances(user) -> list[WalletBalance]:
         )
     else:
         existing = {balance.asset for balance in balances}
+        added_missing_asset = False
         for asset in wallet_assets:
             if asset not in existing:
                 db.session.add(WalletBalance(user_id=user.id, asset=asset, estimated_usd_value=0.0))
-        commit_with_retry()
-        balances = (
-            WalletBalance.query.options(joinedload(WalletBalance.active_deposit_address))
-            .filter_by(user_id=user.id)
-            .order_by(WalletBalance.asset.asc())
-            .all()
-        )
+                added_missing_asset = True
+        if added_missing_asset:
+            commit_with_retry()
+            balances = (
+                WalletBalance.query.options(joinedload(WalletBalance.active_deposit_address))
+                .filter_by(user_id=user.id)
+                .order_by(WalletBalance.asset.asc())
+                .all()
+            )
 
     changed = False
     for balance in balances:
@@ -2124,6 +2149,12 @@ def _wallet_balances(user) -> list[WalletBalance]:
                 changed = True
     if changed:
         commit_with_retry()
+        balances = (
+            WalletBalance.query.options(joinedload(WalletBalance.active_deposit_address))
+            .filter_by(user_id=user.id)
+            .order_by(WalletBalance.asset.asc())
+            .all()
+        )
     return balances
 
 
@@ -2145,6 +2176,7 @@ def _sync_real_wallet_balances(user) -> None:
         custody.sync_user(user.id)
         commit_with_retry()
     except Exception as exc:  # noqa: BLE001
+        db.session.rollback()
         current_app.logger.warning("Real wallet sync failed closed for user %s: %s", user.id, exc)
 
 
