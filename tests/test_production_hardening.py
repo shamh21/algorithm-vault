@@ -177,6 +177,7 @@ def test_vercel_target_selects_production_config(monkeypatch) -> None:
         scoped.delenv("FLASK_CONFIG", raising=False)
         scoped.setenv("DEPLOYMENT_TARGET", "vercel")
         scoped.setenv("WORKER_PROCESS_CONFIGURED", "true")
+        scoped.setenv("CRON_SECRET", "cron-secret")
 
         reloaded = importlib.reload(config_module)
 
@@ -185,6 +186,8 @@ def test_vercel_target_selects_production_config(monkeypatch) -> None:
         assert reloaded.ProductionConfig.SESSION_COOKIE_SECURE is True
         assert reloaded.ProductionConfig.PROXY_FIX_ENABLED is True
         assert reloaded.ProductionConfig.WORKER_PROCESS_CONFIGURED is True
+        assert reloaded.ProductionConfig.CRON_SECRET == "cron-secret"
+        assert reloaded.ProductionConfig.export_defaults()["CRON_SECRET"] == "[configured]"
     importlib.reload(config_module)
 
 
