@@ -166,7 +166,7 @@ def test_wallet_onramp_limits_do_not_drive_direct_apple_pay_wallet_ui(app) -> No
     assert response.status_code == 200
     html = response.get_data(as_text=True)
     assert "wallet-apple-pay-data" in html
-    assert "wallet-apple-pay-1" in html
+    assert "wallet-polish-1" in html
     assert "wallet-card-buy-data" in html
     assert 'data-onramp-method="card"' in html
     assert 'data-onramp-method="apple_pay"' in html

@@ -9,12 +9,12 @@
   <header class="wallet-hero-panel" aria-labelledby="wallet-page-title">
     <div class="wallet-hero-copy">
       <span class="card-kicker">Verified On-chain Value</span>
-      <h1 id="wallet-page-title">Total Portfolio Value</h1>
+      <h1 id="wallet-page-title">Wallet Command Center</h1>
       <p>Verified on-chain balances, conversion, funding actions, and recent wallet activity in one secure view.</p>
     </div>
 
     <div class="wallet-hero-balance" aria-label="Total portfolio balance">
-      <span>Total Portfolio Balance</span>
+      <span>Total Portfolio Value</span>
       <strong>${{ "%.2f"|format(wallet_view.portfolio_total) }}</strong>
       <small>Available ${{ "%.2f"|format(wallet_view.available_total) }} · Locked ${{ "%.2f"|format(wallet_view.locked_total) }}</small>
     </div>
@@ -301,9 +301,29 @@
       <span class="wallet-count">{{ wallet_view.asset_rows|length }} assets</span>
     </div>
 
+    <div class="wallet-asset-toolbar" aria-label="Wallet asset tools">
+      <label class="wallet-asset-search">
+        <span class="sr-only">Search wallet assets</span>
+        <input type="search" data-wallet-asset-search placeholder="Search assets or addresses" autocomplete="off">
+      </label>
+      <div class="wallet-asset-filters" role="group" aria-label="Asset filters">
+        <button type="button" data-wallet-asset-filter="all" aria-pressed="true">All</button>
+        <button type="button" data-wallet-asset-filter="funded" aria-pressed="false">Funded</button>
+        <button type="button" data-wallet-asset-filter="review" aria-pressed="false">Review</button>
+      </div>
+    </div>
+    <p class="wallet-asset-filter-empty" data-wallet-asset-empty hidden>No matching wallet assets.</p>
+
     <div class="wallet-asset-list">
       {% for row in wallet_view.asset_rows %}
-        <article class="wallet-card balance-card wallet-asset-row-card">
+        <article
+          class="wallet-card balance-card wallet-asset-row-card"
+          data-wallet-asset-card
+          data-wallet-asset="{{ row.asset }}"
+          data-wallet-status="{{ row.status.tone }}"
+          data-wallet-funded="{{ 'true' if row.value_usd > 0 else 'false' }}"
+          data-wallet-address="{{ row.address or '' }}"
+        >
           <div class="wallet-asset-identity">
             {{ crypto_icon(row.asset, "wallet-coin") }}
             <div>
@@ -419,6 +439,6 @@
 {% endblock %}
 
 {% block page_scripts %}
-<script defer src="{{ url_for('static', filename='js/wallet.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}-wallet-apple-pay-1"></script>
+<script defer src="{{ url_for('static', filename='js/wallet.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}-wallet-polish-1"></script>
 <script defer src="{{ url_for('static', filename='js/mini-charts.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}-mini-charts-1"></script>
 {% endblock %}

@@ -46,6 +46,53 @@
     window.addEventListener("offline", updateOfflineState, { passive: true });
   }
 
+  const assetSearch = document.querySelector("[data-wallet-asset-search]");
+  const assetFilterButtons = Array.from(document.querySelectorAll("[data-wallet-asset-filter]"));
+  const assetCards = Array.from(document.querySelectorAll("[data-wallet-asset-card]"));
+  const assetEmptyState = document.querySelector("[data-wallet-asset-empty]");
+  if (assetCards.length) {
+    let activeAssetFilter = "all";
+    const applyAssetFilters = () => {
+      const query = String(assetSearch?.value || "").trim().toLowerCase();
+      let visibleCount = 0;
+      assetCards.forEach((card) => {
+        const haystack = [
+          card.getAttribute("data-wallet-asset"),
+          card.getAttribute("data-wallet-address"),
+          card.textContent,
+        ]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase();
+        const status = String(card.getAttribute("data-wallet-status") || "").toLowerCase();
+        const funded = card.getAttribute("data-wallet-funded") === "true";
+        const matchesSearch = !query || haystack.includes(query);
+        const matchesFilter =
+          activeAssetFilter === "funded"
+            ? funded
+            : activeAssetFilter === "review"
+              ? status !== "success" && status !== "verified"
+              : true;
+        const visible = matchesSearch && matchesFilter;
+        card.hidden = !visible;
+        if (visible) visibleCount += 1;
+      });
+      if (assetEmptyState) assetEmptyState.hidden = visibleCount > 0;
+    };
+
+    assetSearch?.addEventListener("input", applyAssetFilters, { passive: true });
+    assetFilterButtons.forEach((button) => {
+      button.addEventListener("click", () => {
+        activeAssetFilter = button.getAttribute("data-wallet-asset-filter") || "all";
+        assetFilterButtons.forEach((item) => {
+          item.setAttribute("aria-pressed", item === button ? "true" : "false");
+        });
+        applyAssetFilters();
+      });
+    });
+    applyAssetFilters();
+  }
+
   const parseJson = (id, fallback) => {
     const node = document.getElementById(id);
     if (!node) return fallback;
@@ -109,6 +156,7 @@
   const money = (value, currency = "USD") =>
     new Intl.NumberFormat("en-US", { style: "currency", currency, maximumFractionDigits: 2 }).format(Number(value || 0));
   const amount = (value, asset) => `${Number(value || 0).toLocaleString("en-US", { maximumFractionDigits: 8 })} ${asset || ""}`.trim();
+  const isUnavailable = (button) => button.disabled || button.getAttribute("aria-disabled") === "true";
 
   const activeConfig = () => (state.method === "apple_pay" ? applePayConfig : cardConfig);
   const assets = () => {
@@ -540,14 +588,14 @@
 
   document.querySelectorAll("[data-wallet-buy-open]").forEach((button) => {
     button.addEventListener("click", () => {
-      if (button.hasAttribute("disabled")) return;
+      if (isUnavailable(button)) return;
       openSheet(button.getAttribute("data-onramp-method") || "card");
     });
   });
   sheet.querySelectorAll("[data-wallet-onramp-close]").forEach((button) => button.addEventListener("click", closeSheet));
   methodButtons.forEach((button) => {
     button.addEventListener("click", () => {
-      if (!button.disabled) setMethod(button.getAttribute("data-onramp-method") || "card");
+      if (!isUnavailable(button)) setMethod(button.getAttribute("data-onramp-method") || "card");
     });
   });
   amountPresetButtons.forEach((button) => {
