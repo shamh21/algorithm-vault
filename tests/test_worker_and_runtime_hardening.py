@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -258,6 +259,56 @@ def test_internal_mpc_signer_wallet_buy_treasury_transfer_is_idempotent(app, mon
     assert {withdrawal.provider_reference for withdrawal in withdrawals} == {"0xuser", "0xfee"}
     assert "raw_transaction" not in first.get_data(as_text=True)
     assert "0xsecret" not in first.get_data(as_text=True)
+
+
+def test_wallet_buy_treasury_source_discovery_redacts_key_material(app) -> None:
+    from scripts.discover_wallet_buy_treasury_sources import build_wallet_buy_treasury_report
+
+    with app.app_context():
+        user = User(username="wallet-buy-treasury", password_hash="hash")
+        db.session.add(user)
+        db.session.flush()
+        signer_records = {}
+        for index, asset in enumerate(("ETH", "USDC", "USDT"), start=1):
+            address = f"0x{index:040d}"
+            signer_key_id = f"signer_{asset.lower()}"
+            account = WalletAccount(user_id=user.id, provider="mpc_signer", asset=asset, network="Ethereum")
+            db.session.add(account)
+            db.session.flush()
+            wallet_address = WalletAddress(
+                user_id=user.id,
+                wallet_account_id=account.id,
+                asset=asset,
+                network="Ethereum",
+                address=address,
+                status="active",
+                onchain_balance=float(index),
+                onchain_status="verified",
+                onchain_checked_at=datetime.now(UTC).replace(tzinfo=None),
+            )
+            wallet_address.encrypted_metadata = {"custody": "mpc", "signer_key_id": signer_key_id}
+            db.session.add(wallet_address)
+            signer_records[signer_key_id] = {
+                "asset": asset,
+                "network": "Ethereum",
+                "address": address,
+                "encrypted_private_key": "do-not-print-private-key",
+                "private_key": "also-do-not-print",
+            }
+        Setting.set_json("internal_mpc_signer_keys_v1", {"keys": signer_records})
+        db.session.commit()
+
+        report = build_wallet_buy_treasury_report()
+
+    body = json.dumps(report)
+    assert report["ready_for_env"] is True
+    assert sorted(report["recommended_env_value"]) == ["ETH", "USDC", "USDT"]
+    assert report["recommended_env_value"]["USDT"]["Ethereum"]["signer_key_id"] == "signer_usdt"
+    assert report["fee_address_candidates"][0]["address"] == "0x0000000000000000000000000000000000000001"
+    assert "encrypted_private_key" not in body
+    assert "private_key" not in body
+    assert "do-not-print-private-key" not in body
+    assert "also-do-not-print" not in body
 
 
 def test_runtime_config_blocks_unsafe_production_withdrawals() -> None:

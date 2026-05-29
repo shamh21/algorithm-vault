@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 import pyotp
@@ -515,6 +516,16 @@ def test_consumer_pages_render_wallet_and_vault_experience(app) -> None:
         b"Live is disabled until",
     ]:
         assert removed_copy not in settings.data
+
+
+def test_wallet_card_gateway_js_restricts_tokenization_messages() -> None:
+    source = Path("static/js/wallet.js").read_text()
+
+    assert "state.gatewayOrigin = url.origin" in source
+    assert "event.origin !== state.gatewayOrigin" in source
+    assert "event.source !== gatewayFrame?.contentWindow" in source
+    assert "SENSITIVE_GATEWAY_PARAM_MARKERS" in source
+    assert '"password"' in source
 
 
 def test_wallet_page_renders_when_live_sync_is_disabled(app) -> None:

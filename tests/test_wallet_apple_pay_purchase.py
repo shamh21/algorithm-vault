@@ -595,6 +595,27 @@ def test_card_buy_readiness_requires_gateway_public_config(app) -> None:
     assert readiness["gateway"]["public_config"] == {}
 
 
+def test_card_gateway_public_config_allows_only_safe_primitive_fields(app) -> None:
+    _configure_card_buy(app)
+    app.config["CARD_GATEWAY_PUBLIC_CONFIG"] = {
+        "publishable_key": "pk_live_card",
+        "locale": "en-US",
+        "debug": False,
+        "secret_key": "hidden-card-secret",
+        "client-token": "hidden-token",
+        "style": {"theme": "dark"},
+        "allowed_networks": ["visa"],
+        "password_hint": "hidden-password",
+    }
+
+    gateway = app.extensions["services"]["wallet_apple_pay_purchase"].card_gateway_client_config()
+
+    assert gateway["public_config"] == {"publishable_key": "pk_live_card", "locale": "en-US", "debug": False}
+    assert "hidden-card-secret" not in json.dumps(gateway)
+    assert "hidden-token" not in json.dumps(gateway)
+    assert "hidden-password" not in json.dumps(gateway)
+
+
 def test_card_buy_readiness_requires_recent_worker_heartbeat_in_production(app) -> None:
     _configure_card_buy(app)
     app.config["DEPLOYMENT_TARGET"] = "vercel"

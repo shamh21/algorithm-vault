@@ -670,9 +670,11 @@ class WalletApplePayPurchaseService:
         raw = self.config.get("CARD_GATEWAY_PUBLIC_CONFIG") or {}
         if not isinstance(raw, dict):
             return {}
-        blocked = {"secret", "private", "api_key", "apikey", "bearer", "token"}
+        blocked = {"secret", "private", "api_key", "apikey", "bearer", "token", "password"}
         return {
-            str(key): value for key, value in raw.items() if not any(marker in str(key).lower().replace("-", "_") for marker in blocked)
+            str(key): value
+            for key, value in raw.items()
+            if isinstance(value, str | int | float | bool) and not any(marker in str(key).lower().replace("-", "_") for marker in blocked)
         }
 
     def card_gateway_client_config(self) -> dict[str, Any]:

@@ -99,9 +99,12 @@
     applePayRequest: null,
     applePaySession: null,
     gatewayToken: "",
+    gatewayOrigin: "",
     pollTimer: null,
     lastFocus: null,
   };
+
+  const SENSITIVE_GATEWAY_PARAM_MARKERS = ["secret", "private", "api_key", "apikey", "bearer", "token", "password"];
 
   const money = (value, currency = "USD") =>
     new Intl.NumberFormat("en-US", { style: "currency", currency, maximumFractionDigits: 2 }).format(Number(value || 0));
@@ -149,6 +152,7 @@
     state.applePayRequest = null;
     state.applePaySession = null;
     state.gatewayToken = "";
+    state.gatewayOrigin = "";
     if (tokenInput) tokenInput.value = "";
     if (quoteWrap) quoteWrap.hidden = true;
     if (quoteSkeleton) quoteSkeleton.hidden = true;
@@ -274,7 +278,16 @@
     const tokenizationUrl = gateway?.tokenization_url || activeConfig().gateway?.tokenization_url || "";
     if (gatewayFrame && tokenizationUrl) {
       const url = new URL(tokenizationUrl, window.location.origin);
+      state.gatewayOrigin = url.origin;
       if (state.order?.order_id) url.searchParams.set("order_id", state.order.order_id);
+      const publicConfig = gateway?.public_config || activeConfig().gateway?.public_config || {};
+      Object.entries(publicConfig).forEach(([key, value]) => {
+        const safeKey = String(key || "").trim();
+        const markerKey = safeKey.toLowerCase().replace(/-/g, "_");
+        const safeValue = ["string", "number", "boolean"].includes(typeof value);
+        if (!safeKey || !safeValue || SENSITIVE_GATEWAY_PARAM_MARKERS.some((marker) => markerKey.includes(marker))) return;
+        url.searchParams.set(safeKey, String(value));
+      });
       gatewayFrame.src = url.toString();
       gatewayFrame.hidden = false;
       if (tokenFallback) tokenFallback.hidden = true;
@@ -569,6 +582,7 @@
   window.addEventListener("message", (event) => {
     const data = event.data;
     if (!data || typeof data !== "object") return;
+    if (!state.gatewayOrigin || event.origin !== state.gatewayOrigin || event.source !== gatewayFrame?.contentWindow) return;
     if (data.type === "algvault.card.tokenized" && data.token) {
       state.gatewayToken = String(data.token);
       if (gatewayState) gatewayState.textContent = "Card token received";
