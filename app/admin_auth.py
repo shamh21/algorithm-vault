@@ -2,12 +2,28 @@
 
 from __future__ import annotations
 
+from functools import wraps
 from typing import Any, Callable
 
-from flask import Response, current_app
+from flask import Response, current_app, request
 
-from .auth import current_user, require_admin_user, two_factor_session_valid
+from .auth import current_user, require_admin_user, require_authenticated_user, two_factor_session_valid
 from .models import User
+
+
+_USER_BLUEPRINT_PREFIXES = ("dashboard.",)
+_USER_BACKTEST_ENDPOINTS = {
+    "backtests.index",
+    "backtests.symbols_api",
+    "backtests.quote_api",
+    "backtests.run",
+}
+_USER_ADMIN_DECORATED_ENDPOINTS = {
+    "admin.risk",
+    "admin.risk_state",
+    "admin.risk_audit_events",
+    "admin.refresh_risk_exchange_limits",
+}
 
 
 def admin_configured() -> bool:
@@ -26,11 +42,24 @@ def check_admin_credentials(username: str, password: str) -> bool:
     return bool(user and password_matches(user, password))
 
 
+def _authenticated_user_route() -> bool:
+    endpoint = str(request.endpoint or "")
+    return endpoint in _USER_BACKTEST_ENDPOINTS or endpoint.startswith(_USER_BLUEPRINT_PREFIXES)
+
+
 def require_admin() -> Response | None:
+    if _authenticated_user_route():
+        return require_authenticated_user()
     return require_admin_user()
 
 
 def admin_required(fn: Callable[..., Any]) -> Callable[..., Any]:
-    from .auth import admin_required as guard
+    @wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        endpoint = str(request.endpoint or "")
+        guard = require_authenticated_user() if endpoint in _USER_ADMIN_DECORATED_ENDPOINTS else require_admin_user()
+        if guard is not None:
+            return guard
+        return fn(*args, **kwargs)
 
-    return guard(fn)
+    return wrapper
