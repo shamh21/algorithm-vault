@@ -11,19 +11,15 @@ from .auth import current_user, require_admin_user, require_authenticated_user, 
 from .models import User
 
 
-_USER_BLUEPRINT_PREFIXES = ("dashboard.",)
-_USER_BACKTEST_ENDPOINTS = {
-    "backtests.index",
-    "backtests.symbols_api",
-    "backtests.quote_api",
-    "backtests.run",
-}
-_USER_ADMIN_DECORATED_ENDPOINTS = {
-    "admin.risk",
-    "admin.risk_state",
-    "admin.risk_audit_events",
-    "admin.refresh_risk_exchange_limits",
-}
+# These operational areas are available to every fully authenticated AlgVault
+# user. Other /admin routes remain restricted to administrators.
+_USER_ROUTE_PREFIXES = (
+    "/admin/dashboard",
+    "/admin/api/dashboard",
+    "/admin/api/performance",
+    "/admin/backtests",
+    "/admin/risk",
+)
 
 
 def admin_configured() -> bool:
@@ -43,8 +39,8 @@ def check_admin_credentials(username: str, password: str) -> bool:
 
 
 def _authenticated_user_route() -> bool:
-    endpoint = str(request.endpoint or "")
-    return endpoint in _USER_BACKTEST_ENDPOINTS or endpoint.startswith(_USER_BLUEPRINT_PREFIXES)
+    path = str(request.path or "").rstrip("/") or "/"
+    return any(path == prefix or path.startswith(f"{prefix}/") for prefix in _USER_ROUTE_PREFIXES)
 
 
 def require_admin() -> Response | None:
@@ -56,8 +52,7 @@ def require_admin() -> Response | None:
 def admin_required(fn: Callable[..., Any]) -> Callable[..., Any]:
     @wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
-        endpoint = str(request.endpoint or "")
-        guard = require_authenticated_user() if endpoint in _USER_ADMIN_DECORATED_ENDPOINTS else require_admin_user()
+        guard = require_authenticated_user() if _authenticated_user_route() else require_admin_user()
         if guard is not None:
             return guard
         return fn(*args, **kwargs)
