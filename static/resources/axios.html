@@ -1,0 +1,2237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>The Complete A-Z Guide to Axios: React & Flask</title>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Serif:ital,wght@0,400;0,700;1,400&family=Source+Code+Pro:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        /* Reset */
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { margin: 0; padding: 0; }
+
+        /* Page setup */
+        @page {
+            size: A4;
+            margin: 2.5cm 2cm;
+            @top-center { content: string(doctitle); font-size: 9pt; color: #666; font-family: 'Noto Serif', serif; }
+            @bottom-center { content: counter(page); font-size: 9pt; color: #666; }
+        }
+        @page :first { margin: 0; @top-center { content: none; } @bottom-center { content: none; } }
+        @page cover { @top-center { content: none; } @bottom-center { content: none; } }
+        @page toc { @top-center { content: none; } @bottom-center { content: none; } }
+
+        body {
+            font-family: 'Noto Serif', Georgia, serif;
+            font-size: 10.5pt;
+            line-height: 1.65;
+            color: #333;
+            text-align: justify;
+            text-align-last: left;
+            string-set: doctitle "";
+        }
+
+        /* Cover - Swiss Grid Style */
+        .cover {
+            width: 210mm;
+            height: 297mm;
+            margin: 0;
+            position: relative;
+            overflow: hidden;
+            page: cover;
+            page-break-after: always;
+            background: #fafafa;
+        }
+        .cover::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 8mm;
+            height: 100%;
+            background: #c0392b;
+        }
+        .cover::after {
+            content: '';
+            position: absolute;
+            bottom: 40mm;
+            right: 0;
+            width: 60%;
+            height: 3px;
+            background: #c0392b;
+        }
+        .cover-grid {
+            position: absolute;
+            top: 20mm;
+            right: 20mm;
+            width: 50mm;
+            height: 50mm;
+            border: 2px solid #ddd;
+        }
+        .cover-grid::before {
+            content: '';
+            position: absolute;
+            top: 10mm;
+            left: 10mm;
+            width: 50mm;
+            height: 50mm;
+            border: 2px solid #e0e0e0;
+        }
+        .cover-accent {
+            position: absolute;
+            bottom: 80mm;
+            left: 25mm;
+            width: 40mm;
+            height: 40mm;
+            background: rgba(192, 57, 43, 0.08);
+        }
+        .cover-content {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            text-align: center;
+            width: 75%;
+            z-index: 1;
+        }
+        .cover-badge {
+            display: inline-block;
+            padding: 4px 16px;
+            border: 1.5px solid #c0392b;
+            color: #c0392b;
+            font-size: 10pt;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            margin-bottom: 20mm;
+        }
+        .cover-title {
+            font-size: 32pt;
+            font-weight: 700;
+            color: #222;
+            margin-bottom: 8mm;
+            letter-spacing: 1px;
+        }
+        .cover-subtitle {
+            font-size: 14pt;
+            color: #666;
+            font-style: italic;
+            margin-bottom: 25mm;
+        }
+        .cover-meta {
+            font-size: 11pt;
+            color: #555;
+            line-height: 2;
+        }
+        .cover-meta p { margin: 0; }
+
+        /* TOC */
+        .toc-page {
+            page: toc;
+            page-break-after: always;
+        }
+        .toc-title {
+            font-size: 22pt;
+            font-weight: 700;
+            color: #222;
+            margin-bottom: 15mm;
+            padding-bottom: 4mm;
+            border-bottom: 2px solid #c0392b;
+        }
+        .toc { list-style: none; padding: 0; }
+        .toc li { margin-bottom: 2.5mm; }
+        .toc a {
+            text-decoration: none;
+            color: #333;
+            display: flex;
+            justify-content: space-between;
+        }
+        .toc a::after {
+            content: leader('.') target-counter(attr(href url), page);
+            flex-shrink: 0;
+            margin-left: 4mm;
+        }
+        .toc-letter {
+            font-weight: 700;
+            color: #c0392b;
+            display: inline-block;
+            width: 20px;
+        }
+        .toc-topic { color: #666; font-size: 9.5pt; }
+
+        /* Headings */
+        h1 {
+            font-size: 22pt;
+            font-weight: 700;
+            color: #222;
+            margin-top: 12mm;
+            margin-bottom: 6mm;
+            padding-bottom: 2mm;
+            border-bottom: 2px solid #c0392b;
+            page-break-after: avoid;
+            string-set: doctitle content();
+        }
+        h2 {
+            font-size: 14pt;
+            font-weight: 700;
+            color: #333;
+            margin-top: 8mm;
+            margin-bottom: 3mm;
+            page-break-after: avoid;
+        }
+        h3 {
+            font-size: 12pt;
+            font-weight: 700;
+            color: #444;
+            margin-top: 5mm;
+            margin-bottom: 2mm;
+            page-break-after: avoid;
+        }
+
+        /* Letter heading */
+        .letter-section {
+            page-break-before: always;
+        }
+        .letter-section:first-of-type {
+            page-break-before: auto;
+        }
+        .letter-heading {
+            font-size: 48pt;
+            font-weight: 700;
+            color: rgba(192, 57, 43, 0.12);
+            position: absolute;
+            right: 2cm;
+            margin-top: -5mm;
+            z-index: 0;
+            line-height: 1;
+        }
+
+        /* Paragraphs */
+        p { margin-bottom: 3mm; }
+
+        /* Code blocks */
+        pre {
+            background: #f5f5f5;
+            border: 1px solid #e0e0e0;
+            border-left: 3px solid #c0392b;
+            padding: 10px 14px;
+            font-family: 'Source Code Pro', 'Courier New', monospace;
+            font-size: 8.5pt;
+            line-height: 1.45;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            max-width: 100%;
+            page-break-inside: avoid;
+            margin-bottom: 4mm;
+        }
+        code {
+            font-family: 'Source Code Pro', 'Courier New', monospace;
+            font-size: 8.5pt;
+            background: #f0f0f0;
+            padding: 1px 4px;
+            border-radius: 2px;
+            word-break: break-word;
+        }
+        pre code {
+            background: none;
+            padding: 0;
+            border-radius: 0;
+            font-size: 8pt;
+        }
+
+        /* Tables */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 4mm 0;
+            font-size: 9.5pt;
+            max-width: 100%;
+            page-break-inside: avoid;
+        }
+        thead { border-top: 2px solid #333; border-bottom: 1px solid #333; }
+        tbody { border-bottom: 2px solid #333; }
+        th {
+            padding: 6px 8px;
+            text-align: left;
+            font-weight: 700;
+            background: #fafafa;
+        }
+        td { padding: 5px 8px; text-align: left; }
+        tr { page-break-inside: avoid; }
+
+        /* Info boxes */
+        .tip-box {
+            border-left: 3px solid #27ae60;
+            padding: 8px 12px;
+            background: #f8fdf9;
+            margin: 4mm 0;
+            page-break-inside: avoid;
+        }
+        .tip-box .tip-title {
+            font-weight: 700;
+            color: #27ae60;
+            font-size: 9.5pt;
+            margin-bottom: 2mm;
+        }
+        .warning-box {
+            border-left: 3px solid #e67e22;
+            padding: 8px 12px;
+            background: #fef8f0;
+            margin: 4mm 0;
+            page-break-inside: avoid;
+        }
+        .warning-box .warning-title {
+            font-weight: 700;
+            color: #e67e22;
+            font-size: 9.5pt;
+            margin-bottom: 2mm;
+        }
+
+        /* Lists */
+        ul, ol { margin: 3mm 0 3mm 6mm; }
+        li { margin-bottom: 1.5mm; }
+
+        /* Figure / Caption */
+        figure { margin: 5mm 0; page-break-inside: avoid; text-align: center; }
+        figcaption { font-size: 9pt; color: #666; margin-top: 2mm; }
+        figcaption::before { content: attr(data-label) "  "; font-weight: 700; }
+
+        /* Utility */
+        .text-muted { color: #888; }
+        .font-bold { font-weight: 700; }
+
+        /* Prevent overflow */
+        pre, table, figure, img, svg, blockquote {
+            max-width: 100%;
+            box-sizing: border-box;
+        }
+        figure img, figure svg { max-width: 80%; max-height: 40vh; height: auto; }
+        a { word-break: break-all; color: #c0392b; text-decoration: none; }
+
+        /* React / Flask tags */
+        .tag {
+            display: inline-block;
+            padding: 1px 8px;
+            font-size: 7.5pt;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-left: 4px;
+            border-radius: 2px;
+        }
+        .tag-react { background: #e3f2fd; color: #1565c0; }
+        .tag-flask { background: #e8f5e9; color: #2e7d32; }
+        .tag-pattern { background: #fff3e0; color: #e65100; }
+    </style>
+</head>
+<body>
+
+<!-- ==================== COVER ==================== -->
+<div class="cover">
+    <div class="cover-grid"></div>
+    <div class="cover-accent"></div>
+    <div class="cover-content">
+        <div class="cover-badge">Advanced Reference</div>
+        <h1 class="cover-title" style="border:none; padding:0; margin-bottom:8mm; color:#222;">The Complete A&ndash;Z Guide to Axios</h1>
+        <p class="cover-subtitle">Deep Patterns for React Frontends & Flask Backends</p>
+        <div class="cover-meta">
+            <p>Promise-Based HTTP Client Architecture</p>
+            <p>Interceptors, Security, Error Handling &amp; Production Patterns</p>
+            <p style="margin-top:10mm;">2025</p>
+        </div>
+    </div>
+</div>
+
+<!-- ==================== TOC ==================== -->
+<div class="toc-page">
+    <h2 class="toc-title">Contents</h2>
+    <ul class="toc">
+        <li><a href="#sec-a"><span class="toc-letter">A</span>&nbsp;&nbsp;Axios API &amp; Architecture <span class="toc-topic">Core Concepts</span></a></li>
+        <li><a href="#sec-b"><span class="toc-letter">B</span>&nbsp;&nbsp;BaseURL &amp; Environment Config <span class="toc-topic">Configuration</span></a></li>
+        <li><a href="#sec-c"><span class="toc-letter">C</span>&nbsp;&nbsp;Cancellation &amp; AbortController <span class="toc-topic">Request Lifecycle</span></a></li>
+        <li><a href="#sec-d"><span class="toc-letter">D</span>&nbsp;&nbsp;Defaults &amp; Global Instances <span class="toc-topic">Setup Patterns</span></a></li>
+        <li><a href="#sec-e"><span class="toc-letter">E</span>&nbsp;&nbsp;Error Handling &amp; Retry Logic <span class="toc-topic">Resilience</span></a></li>
+        <li><a href="#sec-f"><span class="toc-letter">F</span>&nbsp;&nbsp;Flask CORS &amp; Blueprint Integration <span class="toc-topic">Backend</span></a></li>
+        <li><a href="#sec-g"><span class="toc-letter">G</span>&nbsp;&nbsp;GET Requests &amp; React Hooks <span class="toc-topic">Data Fetching</span></a></li>
+        <li><a href="#sec-h"><span class="toc-letter">H</span>&nbsp;&nbsp;Headers &amp; Authentication Tokens <span class="toc-topic">Security</span></a></li>
+        <li><a href="#sec-i"><span class="toc-letter">I</span>&nbsp;&nbsp;Interceptors Deep Dive <span class="toc-topic">Middleware</span></a></li>
+        <li><a href="#sec-j"><span class="toc-letter">J</span>&nbsp;&nbsp;JSON Transforms &amp; Serialisation <span class="toc-topic">Data Processing</span></a></li>
+        <li><a href="#sec-k"><span class="toc-letter">K</span>&nbsp;&nbsp;Keep-Alive &amp; Connection Reuse <span class="toc-topic">Performance</span></a></li>
+        <li><a href="#sec-l"><span class="toc-letter">L</span>&nbsp;&nbsp;Loading States &amp; React Suspense <span class="toc-topic">UX Patterns</span></a></li>
+        <li><a href="#sec-m"><span class="toc-letter">M</span>&nbsp;&nbsp;Mocking, MSW &amp; Testing <span class="toc-topic">Test Strategy</span></a></li>
+        <li><a href="#sec-n"><span class="toc-letter">N</span>&nbsp;&nbsp;Node.js vs Browser Differences <span class="toc-topic">Environment</span></a></li>
+        <li><a href="#sec-o"><span class="toc-letter">O</span>&nbsp;&nbsp;OAuth 2.0 / JWT Authentication Flow <span class="toc-topic">Auth Architecture</span></a></li>
+        <li><a href="#sec-p"><span class="toc-letter">P</span>&nbsp;&nbsp;POST, PUT, PATCH, DELETE <span class="toc-topic">Mutations</span></a></li>
+        <li><a href="#sec-q"><span class="toc-letter">Q</span>&nbsp;&nbsp;Query Parameters &amp; URL Encoding <span class="toc-topic">URL Handling</span></a></li>
+        <li><a href="#sec-r"><span class="toc-letter">R</span>&nbsp;&nbsp;React Query / TanStack Query <span class="toc-topic">State Management</span></a></li>
+        <li><a href="#sec-s"><span class="toc-letter">S</span>&nbsp;&nbsp;Security: CSRF, XSS, CSP <span class="toc-topic">Hardening</span></a></li>
+        <li><a href="#sec-t"><span class="toc-letter">T</span>&nbsp;&nbsp;Timeouts &amp; Exponential Backoff <span class="toc-topic">Reliability</span></a></li>
+        <li><a href="#sec-u"><span class="toc-letter">U</span>&nbsp;&nbsp;Uploads: Multipart / FormData <span class="toc-topic">File Handling</span></a></li>
+        <li><a href="#sec-v"><span class="toc-letter">V</span>&nbsp;&nbsp;Validation with Zod / Yup <span class="toc-topic">Schema Guarding</span></a></li>
+        <li><a href="#sec-w"><span class="toc-letter">W</span>&nbsp;&nbsp;Wrappers &amp; Custom Hooks <span class="toc-topic">Abstraction</span></a></li>
+        <li><a href="#sec-x"><span class="toc-letter">X</span>&nbsp;&nbsp;XMLHttpRequest Internals <span class="toc-topic">Deep Dive</span></a></li>
+        <li><a href="#sec-y"><span class="toc-letter">Y</span>&nbsp;&nbsp; YAML Config &amp; Env Management <span class="toc-topic">DevOps</span></a></li>
+        <li><a href="#sec-z"><span class="toc-letter">Z</span>&nbsp;&nbsp;Zero-Dependency Alternatives <span class="toc-topic">Comparison</span></a></li>
+    </ul>
+</div>
+
+<!-- ==================== A ==================== -->
+<div class="letter-section" id="sec-a">
+    <div class="letter-heading">A</div>
+    <h1>Axios API &amp; Architecture</h1>
+
+    <p>Axios is a promise-based HTTP client that works in both browser and Node.js environments. Its architecture is built around the concept of <strong>instances</strong>&mdash;configurable, reusable request factories that centralise behaviour across your application.</p>
+
+    <h2>Core Design Principles</h2>
+    <ul>
+        <li><strong>Promise-based</strong> &mdash; Native Promise API with async/await support; no callback hell.</li>
+        <li><strong>Instance-centric</strong> &mdash; Create pre-configured instances via <code>axios.create()</code> rather than mutating the global <code>axios</code> object.</li>
+        <li><strong>Interceptor pipeline</strong> &mdash; Request and response middleware that transform data, attach headers, or handle errors uniformly.</li>
+        <li><strong>Automatic transforms</strong> &mdash; JSON request/response body parsing without manual <code>JSON.stringify()</code> or <code>response.json()</code>.</li>
+        <li><strong>Browser/Node dual-target</strong> &mdash; Uses <code>XMLHttpRequest</code> in browsers and <code>http</code> module in Node.js transparently.</li>
+    </ul>
+
+    <h2>The Request Config Object</h2>
+    <p>Every Axios request accepts a config object controlling its behaviour:</p>
+
+<pre><code>interface AxiosRequestConfig {
+  url?: string;
+  method?: 'get' | 'post' | 'put' | 'patch' | 'delete' | 'head' | 'options';
+  baseURL?: string;
+  headers?: Record&lt;string, string&gt;;
+  params?: Record&lt;string, any&gt;;
+  data?: any;
+  timeout?: number;
+  timeoutErrorMessage?: string;
+  withCredentials?: boolean;
+  auth?: { username: string; password: string };
+  responseType?: 'arraybuffer' | 'blob' | 'document' | 'json' | 'text' | 'stream';
+  responseEncoding?: string;
+  xsrfCookieName?: string;
+  xsrfHeaderName?: string;
+  onUploadProgress?: (progressEvent: ProgressEvent) =&gt; void;
+  onDownloadProgress?: (progressEvent: ProgressEvent) =&gt; void;
+  validateStatus?: (status: number) =&gt; boolean;
+  maxRedirects?: number;
+  decompress?: boolean;
+}</code></pre>
+
+    <div class="tip-box">
+        <div class="tip-title">Architecture Tip</div>
+        <p>Never use the global <code>axios</code> directly in production applications. Always create dedicated instances per API domain (e.g., <code>authApi</code>, <code>dataApi</code>) to prevent configuration leakage between modules.</p>
+    </div>
+</div>
+
+<!-- ==================== B ==================== -->
+<div class="letter-section" id="sec-b">
+    <div class="letter-heading">B</div>
+    <h1>BaseURL &amp; Environment Configuration</h1>
+
+    <p>Environment-aware <code>baseURL</code> configuration is the foundation of a maintainable Axios setup. Hardcoding URLs leads to deployment friction and prevents multi-environment CI/CD pipelines.</p>
+
+    <h2>Environment-Driven Pattern</h2>
+
+<pre><code>// config/api.ts
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL
+  || process.env.REACT_APP_API_BASE_URL
+  || 'http://localhost:5000';
+
+export const apiClient = axios.create({
+  baseURL: `${API_BASE_URL}/api/v1`,
+  headers: {
+    'Content-Type': 'application/json',
+  },
+});
+</code></pre>
+
+    <h2>Vite + Flask Environment Matrix</h2>
+    <table>
+        <thead><tr><th>Environment</th><th>Vite <code>.env</code></th><th>Flask <code>config.py</code></th></tr></thead>
+        <tbody>
+            <tr><td>Development</td><td><code>VITE_API_BASE_URL=http://localhost:5000</code></td><td><code>FLASK_ENV=development</code>, CORS wide-open</td></tr>
+            <tr><td>Staging</td><td><code>VITE_API_BASE_URL=https://staging-api.app.com</code></td><td><code>FLASK_ENV=staging</code>, restricted origins</td></tr>
+            <tr><td>Production</td><td><code>VITE_API_BASE_URL=https://api.app.com</code></td><td><code>FLASK_ENV=production</code>, strict CSP + CORS</td></tr>
+        </tbody>
+    </table>
+
+    <h2>Multiple API Domains</h2>
+    <p>Applications often consume multiple backends. Use named instances:</p>
+
+<pre><code>export const internalApi = axios.create({
+  baseURL: import.meta.env.VITE_INTERNAL_API,
+  timeout: 5000,
+});
+
+export const externalApi = axios.create({
+  baseURL: import.meta.env.VITE_EXTERNAL_API,
+  timeout: 10000,
+  headers: { 'X-API-Key': import.meta.env.VITE_EXTERNAL_KEY },
+});
+
+export const uploadApi = axios.create({
+  baseURL: import.meta.env.VITE_UPLOAD_API,
+  timeout: 60000,
+  headers: { 'Content-Type': 'multipart/form-data' },
+});
+</code></pre>
+
+    <div class="tag tag-react">React</div> <div class="tag tag-pattern">Pattern</div>
+</div>
+
+<!-- ==================== C ==================== -->
+<div class="letter-section" id="sec-c">
+    <div class="letter-heading">C</div>
+    <h1>Cancellation &amp; AbortController</h1>
+
+    <p>Request cancellation prevents race conditions in React components and reduces unnecessary server load. Axios supports the standard <code>AbortController</code> API (v0.22.0+), replacing the deprecated <code>CancelToken</code>.</p>
+
+    <h2>React Component Cleanup Pattern</h2>
+
+<pre><code>useEffect(() =&gt; {
+  const controller = new AbortController();
+
+  apiClient.get('/dashboard', { signal: controller.signal })
+    .then(response =&gt; setData(response.data))
+    .catch(err =&gt; {
+      if (axios.isCancel(err)) {
+        console.log('Request cancelled:', err.message);
+      } else {
+        setError(err);
+      }
+    });
+
+  return () =&gt; controller.abort('Component unmounted');
+}, []);
+</code></pre>
+
+    <h2>Debounce Search with Cancellation</h2>
+
+<pre><code>const useSearch = (query: string) =&gt; {
+  const [results, setResults] = useState([]);
+  const controllerRef = useRef&lt;AbortController | null&gt;(null);
+
+  useEffect(() =&gt; {
+    if (!query) return;
+
+    controllerRef.current?.abort();
+    controllerRef.current = new AbortController();
+
+    apiClient.get('/search', {
+      params: { q: query },
+      signal: controllerRef.current.signal,
+    }).then(r =&gt; setResults(r.data));
+
+    return () =&gt; controllerRef.current?.abort();
+  }, [query]);
+
+  return results;
+};
+</code></pre>
+
+    <h2>Flask: Detecting Cancelled Requests</h2>
+
+<pre><code>@app.route('/api/long-task')
+def long_task():
+    try:
+        for i in range(10):
+            time.sleep(1)
+            # Check if client disconnected (WSGI may raise ClientDisconnected)
+        return jsonify({"done": True})
+    except GeneratorExit:
+        app.logger.info("Client disconnected mid-request")
+        raise
+</code></pre>
+
+    <div class="warning-box">
+        <div class="warning-title">Warning</div>
+        <p>AbortController only prevents the client from processing the response. The server may still complete the request. For truly interruptible operations, implement server-side cancellation tokens or use WebSockets.</p>
+    </div>
+</div>
+
+<!-- ==================== D ==================== -->
+<div class="letter-section" id="sec-d">
+    <div class="letter-heading">D</div>
+    <h1>Defaults &amp; Global Instances</h1>
+
+    <p>Axios instances inherit defaults that can be overridden per-request. Understanding the precedence hierarchy prevents subtle configuration bugs.</p>
+
+    <h2>Precedence Hierarchy (Low to High)</h2>
+    <ol>
+        <li>Library defaults (<code>axios.defaults</code>)</li>
+        <li>Instance defaults (<code>instance.defaults</code>)</li>
+        <li>Request config (per-call)</li>
+    </ol>
+
+    <h2>Production Instance Setup</h2>
+
+<pre><code>// lib/api.ts
+import axios, { AxiosError } from 'axios';
+
+export const api = axios.create({
+  baseURL: import.meta.env.VITE_API_URL,
+  timeout: 10000,
+  headers: {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+  },
+  validateStatus: (status) =&gt; status &lt; 500,
+});
+
+// Merge defaults dynamically
+api.defaults.headers.common['X-Client-Version'] = APP_VERSION;
+api.defaults.headers.common['X-Request-ID'] = crypto.randomUUID();
+</code></pre>
+
+    <h2>Conditional Defaults</h2>
+
+<pre><code>// Set auth header only when token exists
+api.defaults.headers.common['Authorization'] = token
+  ? `Bearer ${token}`
+  : undefined;
+
+// Override per-request
+api.get('/public/health', {
+  headers: { Authorization: undefined }, // strip auth for public endpoints
+});
+</code></pre>
+
+    <div class="tag tag-react">React</div> <div class="tag tag-pattern">Pattern</div>
+</div>
+
+<!-- ==================== E ==================== -->
+<div class="letter-section" id="sec-e">
+    <div class="letter-heading">E</div>
+    <h1>Error Handling &amp; Retry Logic</h1>
+
+    <p>Robust error handling distinguishes prototype code from production systems. Axios errors carry rich metadata through the <code>AxiosError</code> class.</p>
+
+    <h2>AxiosError Structure</h2>
+
+<pre><code>interface AxiosError&lt;T = unknown&gt; extends Error {
+  config: AxiosRequestConfig;
+  code?: string;              // 'ECONNABORTED', 'ERR_NETWORK', etc.
+  request?: XMLHttpRequest;   // raw request object
+  response?: AxiosResponse&lt;T&gt;; // response if server replied
+  isAxiosError: boolean;
+  toJSON: () =&gt; object;
+}</code></pre>
+
+    <h2>Typed Error Handler</h2>
+
+<pre><code>class ApiError extends Error {
+  constructor(
+    public status: number,
+    public code: string,
+    message: string,
+    public errors?: Record&lt;string, string[]&gt;
+  ) { super(message); }
+}
+
+const handleError = (error: unknown): never =&gt; {
+  if (axios.isAxiosError(error)) {
+    if (error.response) {
+      const { status, data } = error.response;
+      throw new ApiError(status, data.code, data.message, data.errors);
+    }
+    if (error.request) {
+      throw new ApiError(0, 'NETWORK_ERROR', 'No response received');
+    }
+    throw new ApiError(0, 'REQUEST_FAILED', error.message);
+  }
+  throw error;
+};
+</code></pre>
+
+    <h2>Exponential Backoff Retry</h2>
+
+<pre><code>const fetchWithRetry = async &lt;T&gt;(
+  request: () =&gt; Promise&lt;T&gt;,
+  maxRetries = 3,
+  baseDelay = 300
+): Promise&lt;T&gt; =&gt; {
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt &lt;= maxRetries; attempt++) {
+    try {
+      return await request();
+    } catch (err) {
+      lastError = err;
+      if (!axios.isAxiosError(err) || (err.response?.status ?? 0) &lt; 500) throw err;
+
+      const delay = baseDelay * Math.pow(2, attempt);
+      await new Promise(r =&gt; setTimeout(r, delay + Math.random() * 100));
+    }
+  }
+  throw lastError;
+};
+
+// Usage
+const data = await fetchWithRetry(() =&gt; api.get('/critical-data'));
+</code></pre>
+
+    <div class="tip-box">
+        <div class="tip-title">Retry Strategy</div>
+        <p>Only retry idempotent operations (GET, PUT, DELETE) and 5xx errors. Never blindly retry POST requests&mdash;use idempotency keys if retry is necessary.</p>
+    </div>
+</div>
+
+<!-- ==================== F ==================== -->
+<div class="letter-section" id="sec-f">
+    <div class="letter-heading">F</div>
+    <h1>Flask CORS &amp; Blueprint Integration</h1>
+
+    <p>A React frontend communicating with a Flask backend requires careful CORS configuration and structured API design via Flask Blueprints.</p>
+
+    <h2>Flask-CORS Configuration</h2>
+
+<pre><code>from flask import Flask
+from flask_cors import CORS
+from flask_smorest import Api
+
+def create_app(config_name='production'):
+    app = Flask(__name__)
+
+    if config_name == 'development':
+        CORS(app, origins=['http://localhost:5173'], supports_credentials=True)
+    else:
+        CORS(app, origins=[os.getenv('FRONTEND_URL')],
+             supports_credentials=True,
+             allow_headers=['Content-Type', 'Authorization', 'X-Request-ID'],
+             expose_headers=['X-Total-Count', 'X-Page-Count'])
+
+    return app
+</code></pre>
+
+    <h2>Blueprint Structure for API</h2>
+
+<pre><code># api/users.py
+from flask_smorest import Blueprint
+from schemas import UserSchema, UserUpdateSchema
+
+blp = Blueprint('users', 'users', url_prefix='/api/v1/users',
+                description='User management')
+
+@blp.route('/')
+@blp.response(200, UserSchema(many=True))
+@blp.paginate()
+def get_users():
+    return User.query.all()
+
+@blp.route('/&lt;int:user_id&gt;')
+@blp.response(200, UserSchema)
+def get_user(user_id):
+    return User.query.get_or_404(user_id)
+
+@blp.route('/', methods=['POST'])
+@blp.arguments(UserSchema)
+@blp.response(201, UserSchema)
+def create_user(data):
+    return UserService.create(data)
+
+# Register in app factory
+api.register_blueprint(blp)
+</code></pre>
+
+    <h2>Flask Error Response Format</h2>
+
+<pre><code>@app.errorhandler(400)
+def bad_request(error):
+    return jsonify({
+        "code": "VALIDATION_ERROR",
+        "message": str(error.description),
+        "errors": getattr(error, 'data', {}).get('messages', {})
+    }), 400
+</code></pre>
+
+    <div class="tag tag-flask">Flask</div> <div class="tag tag-pattern">Pattern</div>
+</div>
+
+<!-- ==================== G ==================== -->
+<div class="letter-section" id="sec-g">
+    <div class="letter-heading">G</div>
+    <h1>GET Requests &amp; React Hooks</h1>
+
+    <p>GET requests form the majority of API traffic. Proper hook-based patterns prevent request waterfalls, duplicate fetches, and stale closures.</p>
+
+    <h2>useApi Hook Pattern</h2>
+
+<pre><code>interface UseApiOptions&lt;T&gt; {
+  url: string;
+  params?: Record&lt;string, unknown&gt;;
+  enabled?: boolean;
+  onSuccess?: (data: T) =&gt; void;
+  onError?: (error: ApiError) =&gt; void;
+}
+
+function useApi&lt;T&gt;(options: UseApiOptions&lt;T&gt;) {
+  const [state, setState] = useState&lt;{
+    data: T | null;
+    error: ApiError | null;
+    isLoading: boolean;
+  }&gt;({ data: null, error: null, isLoading: options.enabled !== false });
+
+  useEffect(() =&gt; {
+    if (options.enabled === false) return;
+
+    const controller = new AbortController();
+    setState(s =&gt; ({ ...s, isLoading: true, error: null }));
+
+    api.get&lt;T&gt;(options.url, {
+      params: options.params,
+      signal: controller.signal,
+    })
+    .then(res =&gt; {
+      setState({ data: res.data, error: null, isLoading: false });
+      options.onSuccess?.(res.data);
+    })
+    .catch(err =&gt; {
+      if (axios.isCancel(err)) return;
+      const apiErr = normalizeError(err);
+      setState({ data: null, error: apiErr, isLoading: false });
+      options.onError?.(apiErr);
+    });
+
+    return () =&gt; controller.abort();
+  }, [options.url, JSON.stringify(options.params), options.enabled]);
+
+  return state;
+}
+</code></pre>
+
+    <h2>Prefetching with React Router</h2>
+
+<pre><code>// Prefetch on link hover
+const prefetchUser = (userId: string) =&gt; {
+  queryClient.prefetchQuery({
+    queryKey: ['user', userId],
+    queryFn: () =&gt; api.get(`/users/${userId}`).then(r =&gt; r.data),
+    staleTime: 60_000,
+  });
+};
+
+// In JSX
+&lt;Link to={`/users/${id}`} onMouseEnter={() =&gt; prefetchUser(id)}&gt;
+  {user.name}
+&lt;/Link&gt;
+</code></pre>
+
+    <div class="tag tag-react">React</div>
+</div>
+
+<!-- ==================== H ==================== -->
+<div class="letter-section" id="sec-h">
+    <div class="letter-heading">H</div>
+    <h1>Headers &amp; Authentication Tokens</h1>
+
+    <p>Header management is the backbone of authenticated API communication. Centralised header injection via interceptors eliminates repetitive auth code.</p>
+
+    <h2>Token Refresh Pattern</h2>
+
+<pre><code>let isRefreshing = false;
+let refreshSubscribers: ((token: string) =&gt; void)[] = [];
+
+api.interceptors.response.use(
+  (response) =&gt; response,
+  async (error: AxiosError) =&gt; {
+    const originalRequest = error.config!;
+
+    if (error.response?.status === 401 &amp;&amp; !originalRequest._retry) {
+      if (isRefreshing) {
+        return new Promise(resolve =&gt; {
+          refreshSubscribers.push(token =&gt; {
+            originalRequest.headers['Authorization'] = `Bearer ${token}`;
+            resolve(api(originalRequest));
+          });
+        });
+      }
+
+      originalRequest._retry = true;
+      isRefreshing = true;
+
+      try {
+        const rs = await axios.post(`${API_URL}/auth/refresh`, {
+          refreshToken: getRefreshToken(),
+        });
+        const { accessToken } = rs.data;
+        setAccessToken(accessToken);
+
+        refreshSubscribers.forEach(cb =&gt; cb(accessToken));
+        refreshSubscribers = [];
+
+        originalRequest.headers['Authorization'] = `Bearer ${accessToken}`;
+        return api(originalRequest);
+      } finally {
+        isRefreshing = false;
+      }
+    }
+    return Promise.reject(error);
+  }
+);
+</code></pre>
+
+    <h2>CSRF Token Header (Flask-WTF)</h2>
+
+<pre><code>// Axios auto-reads XSRF-TOKEN cookie; just configure names
+api.defaults.xsrfCookieName = 'csrf_access_token';
+api.defaults.xsrfHeaderName = 'X-CSRF-TOKEN';
+
+// Flask: set double-submit cookie
+from flask_wtf.csrf import generate_csrf
+
+@app.after_request
+def set_csrf_cookie(response):
+    response.set_cookie('csrf_access_token', generate_csrf(),
+                        secure=True, samesite='Lax')
+    return response
+</code></pre>
+
+    <div class="tag tag-react">React</div> <div class="tag tag-flask">Flask</div> <div class="tag tag-pattern">Pattern</div>
+</div>
+
+<!-- ==================== I ==================== -->
+<div class="letter-section" id="sec-i">
+    <div class="letter-heading">I</div>
+    <h1>Interceptors Deep Dive</h1>
+
+    <p>Interceptors form a middleware pipeline around every request and response. They execute in FIFO order for requests and LIFO order for responses.</p>
+
+    <h2>Execution Order</h2>
+    <pre><code>Request:  Interceptor A -&gt; Interceptor B -&gt; Server
+Response: Server -&gt; Interceptor B -&gt; Interceptor A</code></pre>
+
+    <h2>Complete Interceptor Stack</h2>
+
+<pre><code>// 1. Request: inject auth token
+api.interceptors.request.use(config =&gt; {
+  const token = getAccessToken();
+  if (token) config.headers.Authorization = `Bearer ${token}`;
+  config.headers['X-Request-ID'] = crypto.randomUUID();
+  config.metadata = { startTime: Date.now() };
+  return config;
+});
+
+// 2. Request: logging (dev only)
+if (import.meta.env.DEV) {
+  api.interceptors.request.use(config =&gt; {
+    console.log(`[API] ${config.method?.toUpperCase()} ${config.url}`);
+    return config;
+  });
+}
+
+// 3. Response: normalize errors
+api.interceptors.response.use(
+  response =&gt; {
+    // Log timing
+    const duration = Date.now() - (response.config.metadata?.startTime ?? 0);
+    response.headers['x-response-time'] = `${duration}ms`;
+    return response;
+  },
+  async error =&gt; {
+    // Circuit breaker pattern
+    if (error.response?.status === 503) {
+      await circuitBreaker.recordFailure();
+    }
+    return Promise.reject(error);
+  }
+);
+
+// Eject interceptors when needed (e.g., logout)
+const authInterceptorId = api.interceptors.request.use(/* ... */);
+api.interceptors.request.eject(authInterceptorId);
+</code></pre>
+
+    <h2>Interceptor ID Management</h2>
+    <p>Store interceptor IDs when you need dynamic ejection (e.g., switching accounts):</p>
+
+<pre><code>const interceptorMap = new Map&lt;string, number&gt;();
+
+export const registerInterceptor = (name: string, interceptor: any) =&gt; {
+  const id = api.interceptors.request.use(interceptor);
+  interceptorMap.set(name, id);
+};
+
+export const unregisterInterceptor = (name: string) =&gt; {
+  const id = interceptorMap.get(name);
+  if (id !== undefined) {
+    api.interceptors.request.eject(id);
+    interceptorMap.delete(name);
+  }
+};
+</code></pre>
+
+    <div class="tip-box">
+        <div class="tip-title">Interceptor Best Practice</div>
+        <p>Always return <code>config</code> from request interceptors and <code>response</code> from response handlers. Forgetting the return causes silent request failures that are difficult to debug.</p>
+    </div>
+</div>
+
+<!-- ==================== J ==================== -->
+<div class="letter-section" id="sec-j">
+    <div class="letter-heading">J</div>
+    <h1>JSON Transforms &amp; Serialisation</h1>
+
+    <p>Axios automatically serialises request bodies to JSON and parses JSON responses. Override <code>transformRequest</code> and <code>transformResponse</code> for custom formats.</p>
+
+    <h2>Custom Date Parsing</h2>
+
+<pre><code>// Parse ISO date strings to Date objects automatically
+api.defaults.transformResponse = [
+  ...(axios.defaults.transformResponse as AxiosTransformer[]),
+  (data) =&gt; {
+    if (typeof data !== 'object' || data === null) return data;
+    return deepMap(data, (value) =&gt; {
+      if (typeof value === 'string' &amp;&amp; ISO_DATE_REGEX.test(value)) {
+        return new Date(value);
+      }
+      return value;
+    });
+  }
+];
+</code></pre>
+
+    <h2>Snake Case to Camel Case</h2>
+
+<pre><code>import { camelCase, isPlainObject, mapKeys, mapValues } from 'lodash';
+
+const transformKeys = (obj: unknown, transformer: (s: string) =&gt; string): unknown =&gt; {
+  if (Array.isArray(obj)) return obj.map(v =&gt; transformKeys(v, transformer));
+  if (isPlainObject(obj)) {
+    return mapValues(
+      mapKeys(obj as Record&lt;string, unknown&gt;, (_, k) =&gt; transformer(k)),
+      v =&gt; transformKeys(v, transformer)
+    );
+  }
+  return obj;
+};
+
+// Flask sends snake_case; React expects camelCase
+api.defaults.transformResponse = [
+  ...(axios.defaults.transformResponse as AxiosTransformer[]),
+  data =&gt; transformKeys(data, camelCase)
+];
+</code></pre>
+
+    <h2>Flask: JSON Encoder for Custom Types</h2>
+
+<pre><code>from flask.json import JSONEncoder
+from datetime import datetime, date
+from decimal import Decimal
+
+class CustomJSONEncoder(JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        if isinstance(obj, date):
+            return obj.isoformat()
+        if isinstance(obj, Decimal):
+            return float(obj)
+        if isinstance(obj, set):
+            return list(obj)
+        return super().default(obj)
+
+app.json_encoder = CustomJSONEncoder
+</code></pre>
+
+    <div class="tag tag-flask">Flask</div>
+</div>
+
+<!-- ==================== K ==================== -->
+<div class="letter-section" id="sec-k">
+    <div class="letter-heading">K</div>
+    <h1>Keep-Alive &amp; Connection Reuse</h1>
+
+    <p>HTTP Keep-Alive reuses TCP connections across requests, significantly reducing latency for high-frequency API calls from React SPAs.</p>
+
+    <h2>Browser Keep-Alive (Automatic)</h2>
+    <p>Browsers automatically reuse connections to the same origin. No configuration needed. However, cross-origin requests with <code>withCredentials: true</code> require server-side <code>Access-Control-Allow-Credentials</code>.</p>
+
+    <h2>Node.js Agent Configuration</h2>
+
+<pre><code>import http from 'http';
+import https from 'https';
+
+const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 50 });
+const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 50 });
+
+const api = axios.create({
+  httpAgent,
+  httpsAgent,
+});
+</code></pre>
+
+    <h2>Flask/Gunicorn Keep-Alive</h2>
+
+<pre><code># gunicorn.conf.py
+bind = "0.0.0.0:5000"
+workers = 4
+worker_class = "gthread"
+threads = 4
+keepalive = 5  # seconds
+worker_connections = 1000
+</code></pre>
+
+    <table>
+        <thead><tr><th>Scenario</th><th>Connection Behaviour</th><th>Optimisation</th></tr></thead>
+        <tbody>
+            <tr><td>Same-origin API</td><td>Browser pools automatically</td><td>Use HTTP/2 if possible</td></tr>
+            <tr><td>CORS cross-origin</td><td>Separate pool per origin</td><td>Minimise preflight with simple requests</td></tr>
+            <tr><td>Server-to-server</td><td>Explicit agent config needed</td><td>Enable keepAlive, tune maxSockets</td></tr>
+        </tbody>
+    </table>
+</div>
+
+<!-- ==================== L ==================== -->
+<div class="letter-section" id="sec-l">
+    <div class="letter-heading">L</div>
+    <h1>Loading States &amp; React Suspense</h1>
+
+    <p>Loading state management directly impacts perceived performance. Combine Axios with React Suspense for declarative loading boundaries.</p>
+
+    <h2>Suspense-Compatible Data Fetching</h2>
+
+<pre><code>// Create a resource wrapper that Suspense understands
+function createResource&lt;T&gt;(promise: Promise&lt;T&gt;) {
+  let status: 'pending' | 'success' | 'error' = 'pending';
+  let result: T;
+  let error: unknown;
+
+  const suspender = promise.then(
+    r =&gt; { status = 'success'; result = r; },
+    e =&gt; { status = 'error'; error = e; }
+  );
+
+  return {
+    read(): T {
+      if (status === 'pending') throw suspender;
+      if (status === 'error') throw error;
+      return result;
+    }
+  };
+}
+
+// Usage in component
+const UserProfile: React.FC&lt;{ userId: string }&gt; = ({ userId }) =&gt; {
+  const resource = useMemo(
+    () =&gt; createResource(api.get(`/users/${userId}`).then(r =&gt; r.data)),
+    [userId]
+  );
+
+  const user = resource.read(); // Suspends until resolved
+  return &lt;div&gt;{user.name}&lt;/div&gt;;
+};
+
+// Wrap with Suspense boundary
+&lt;Suspense fallback={&lt;Skeleton height={200} /&gt;}&gt;
+  &lt;UserProfile userId={id} /&gt;
+&lt;/Suspense&gt;
+</code></pre>
+
+    <h2>Optimistic UI with Loading States</h2>
+
+<pre><code>const useMutation = &lt;TData, TVariables&gt;(
+  mutationFn: (vars: TVariables) =&gt; Promise&lt;TData&gt;,
+  options?: { onSuccess?: () =&gt; void }
+) =&gt; {
+  const [state, setState] = useState&lt;{ isLoading: boolean; error: Error | null }&gt;(
+    { isLoading: false, error: null }
+  );
+
+  const mutate = async (variables: TVariables) =&gt; {
+    setState({ isLoading: true, error: null });
+    try {
+      const result = await mutationFn(variables);
+      setState({ isLoading: false, error: null });
+      options?.onSuccess?.();
+      return result;
+    } catch (error) {
+      setState({ isLoading: false, error: error as Error });
+      throw error;
+    }
+  };
+
+  return { mutate, ...state };
+};
+</code></pre>
+
+    <div class="tag tag-react">React</div> <div class="tag tag-pattern">Pattern</div>
+</div>
+
+<!-- ==================== M ==================== -->
+<div class="letter-section" id="sec-m">
+    <div class="letter-heading">M</div>
+    <h1>Mocking, MSW &amp; Testing</h1>
+
+    <p>Reliable testing requires deterministic API responses. Mock Service Worker (MSW) intercepts network requests at the browser level, providing the most realistic test environment.</p>
+
+    <h2>MSW Setup for React + Flask</h2>
+
+<pre><code>// mocks/handlers.ts
+import { http, HttpResponse } from 'msw';
+
+export const handlers = [
+  http.get('/api/v1/users', () =&gt; {
+    return HttpResponse.json([
+      { id: 1, name: 'Alice', email: 'alice@example.com' },
+      { id: 2, name: 'Bob', email: 'bob@example.com' },
+    ]);
+  }),
+
+  http.post('/api/v1/users', async ({ request }) =&gt; {
+    const body = await request.json();
+    return HttpResponse.json({ id: 3, ...body }, { status: 201 });
+  }),
+
+  http.get('/api/v1/users/:id', ({ params }) =&gt; {
+    const { id } = params;
+    if (id === '999') {
+      return HttpResponse.json({ code: 'NOT_FOUND', message: 'User not found' },
+        { status: 404 });
+    }
+    return HttpResponse.json({ id: Number(id), name: 'Test User' });
+  }),
+];
+</code></pre>
+
+    <h2>MSW Server Setup (Node/Tests)</h2>
+
+<pre><code>// mocks/server.ts
+import { setupServer } from 'msw/node';
+import { handlers } from './handlers';
+
+export const server = setupServer(...handlers);
+
+// setupTests.ts
+import { server } from './mocks/server';
+
+beforeAll(() =&gt; server.listen({ onUnhandledRequest: 'error' }));
+afterEach(() =&gt; server.resetHandlers());
+afterAll(() =&gt; server.close());
+
+// Override per-test
+server.use(
+  http.get('/api/v1/users', () =&gt; {
+    return HttpResponse.json([], { status: 500 });
+  })
+);
+</code></pre>
+
+    <h2>Testing React Components with Axios</h2>
+
+<pre><code>import { render, screen, waitFor } from '@testing-library/react';
+import { UserList } from './UserList';
+
+it('renders users from API', async () =&gt; {
+  render(&lt;UserList /&gt;);
+
+  await waitFor(() =&gt; {
+    expect(screen.getByText('Alice')).toBeInTheDocument();
+  });
+});
+
+it('shows error state on failure', async () =&gt; {
+  server.use(
+    http.get('/api/v1/users', () =&gt;
+      HttpResponse.json({ message: 'Server error' }, { status: 500 })
+    )
+  );
+
+  render(&lt;UserList /&gt;);
+  await waitFor(() =&gt; {
+    expect(screen.getByText(/error/i)).toBeInTheDocument();
+  });
+});
+</code></pre>
+
+    <div class="tag tag-react">React</div>
+</div>
+
+<!-- ==================== N ==================== -->
+<div class="letter-section" id="sec-n">
+    <div class="letter-heading">N</div>
+    <h1>Node.js vs Browser Differences</h1>
+
+    <p>Axios abstracts environment differences, but understanding the underlying adapters is critical for isomorphic applications and SSR.</p>
+
+    <table>
+        <thead><tr><th>Feature</th><th>Browser</th><th>Node.js</th></tr></thead>
+        <tbody>
+            <tr><td>HTTP Engine</td><td>XMLHttpRequest</td><td><code>http</code> / <code>https</code> modules</td></tr>
+            <tr><td>Cookies</td><td>Managed by browser (withCredentials)</td><td>Manual jar management (tough-cookie)</td></tr>
+            <tr><td>CORS</td><td>Browser-enforced</td><td>No CORS concept</td></tr>
+            <tr><td>Progress</td><td>ProgressEvent</td><td>onUploadProgress via stream events</td></tr>
+            <tr><td>Proxies</td><td>System proxy or none</td><td><code>proxy</code> config or env vars</td></tr>
+            <tr><td>Max body size</td><td>Browser limit (~2GB)</td><td>Configurable / unlimited</td></tr>
+            <tr><td>Streaming</td><td>ReadableStream (responseType: stream)</td><td>PassThrough stream</td></tr>
+        </tbody>
+    </table>
+
+    <h2>Proxy Configuration in Node.js</h2>
+
+<pre><code>// For corporate proxies or scraping scenarios
+const api = axios.create({
+  proxy: {
+    protocol: 'http',
+    host: 'proxy.company.com',
+    port: 8080,
+    auth: { username: 'user', password: 'pass' }
+  }
+});
+
+// Or use environment variable
+// HTTP_PROXY=http://proxy:8080 (axios respects this in Node)
+</code></pre>
+
+    <h2>Next.js / SSR Considerations</h2>
+
+<pre><code>// Detect environment and adjust baseURL
+const baseURL = typeof window === 'undefined'
+  ? process.env.INTERNAL_API_URL      // server-side: internal network
+  : process.env.NEXT_PUBLIC_API_URL;  // client-side: public URL
+
+const api = axios.create({ baseURL });
+</code></pre>
+</div>
+
+<!-- ==================== O ==================== -->
+<div class="letter-section" id="sec-o">
+    <div class="letter-heading">O</div>
+    <h1>OAuth 2.0 / JWT Authentication Flow</h1>
+
+    <p>Modern React-Flask architectures use JWT access/refresh token pairs stored in httpOnly cookies or memory, with Axios managing the silent refresh cycle.</p>
+
+    <h2>Architecture Overview</h2>
+    <pre style="white-space:pre; font-size:8pt;">React SPA          Axios           Flask Backend
+   |                 |                    |
+   | -- login ------&gt;| -- POST /auth ------&gt;|
+   |                 |                    | verify, set httpOnly refresh cookie
+   |                 | &lt;-- { accessToken }-|
+   |                 | store in memory    |
+   | &lt;-- success --- |                    |
+   |                 |                    |
+   | -- API call ---&gt;| -- with Bearer ----&gt;|
+   |                 |                    | verify JWT
+   |                 | &lt;-- 401 expired ---|
+   |                 | -- POST /refresh ---&gt;|
+   |                 |                    | verify refresh token cookie
+   |                 | &lt;-- new accessToken |
+   |                 | retry original     |
+   | &lt;-- data -------|&lt;--------------------|
+</code></pre>
+
+    <h2>Flask-JWT-Extended Setup</h2>
+
+<pre><code>from flask_jwt_extended import (
+    JWTManager, create_access_token, create_refresh_token,
+    jwt_required, get_jwt_identity, set_refresh_cookies
+)
+
+jwt = JWTManager(app)
+app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(minutes=15)
+app.config['JWT_REFRESH_TOKEN_EXPIRES'] = timedelta(days=7)
+app.config['JWT_COOKIE_CSRF_PROTECT'] = True
+app.config['JWT_CSRF_IN_COOKIES'] = True
+
+@app.route('/auth/login', methods=['POST'])
+def login():
+    user = authenticate(request.json)
+    access = create_access_token(identity=user.id)
+    refresh = create_refresh_token(identity=user.id)
+    resp = jsonify({"access_token": access})
+    set_refresh_cookies(resp, refresh)
+    return resp, 200
+
+@app.route('/auth/refresh', methods=['POST'])
+@jwt_required(refresh=True)
+def refresh():
+    identity = get_jwt_identity()
+    return jsonify({"access_token": create_access_token(identity=identity)})
+</code></pre>
+
+    <div class="tag tag-flask">Flask</div> <div class="tag tag-pattern">Pattern</div>
+</div>
+
+<!-- ==================== P ==================== -->
+<div class="letter-section" id="sec-p">
+    <div class="letter-heading">P</div>
+    <h1>POST, PUT, PATCH, DELETE</h1>
+
+    <p>Mutation methods require different handling from GET requests: optimistic updates, rollback on failure, and proper cache invalidation.</p>
+
+    <h2>Type-Safe API Client Pattern</h2>
+
+<pre><code>// types/api.ts
+interface CreateUserPayload {
+  name: string;
+  email: string;
+  role: 'admin' | 'user';
+}
+
+interface UpdateUserPayload {
+  name?: string;
+  email?: string;
+  role?: 'admin' | 'user';
+}
+
+// api/users.ts
+export const usersApi = {
+  create: (data: CreateUserPayload) =&gt;
+    api.post&lt;User&gt;('/users', data),
+
+  update: (id: string, data: UpdateUserPayload) =&gt;
+    api.patch&lt;User&gt;(`/users/${id}`, data),
+
+  replace: (id: string, data: CreateUserPayload) =&gt;
+    api.put&lt;User&gt;(`/users/${id}`, data),
+
+  remove: (id: string) =&gt;
+    api.delete(`/users/${id}`),
+
+  batchUpdate: (ids: string[], data: Partial&lt;UpdateUserPayload&gt;) =&gt;
+    Promise.all(ids.map(id =&gt; api.patch(`/users/${id}`, data))),
+};
+</code></pre>
+
+    <h2>Optimistic Update with Rollback</h2>
+
+<pre><code>const updateUserOptimistic = async (userId: string, updates: Partial&lt;User&gt;) =&gt; {
+  const previousUsers = queryClient.getQueryData&lt;User[]&gt;(['users']);
+
+  // Optimistically update cache
+  queryClient.setQueryData(['users'], (old: User[] | undefined) =&gt;
+    old?.map(u =&gt; u.id === userId ? { ...u, ...updates } : u) ?? []
+  );
+
+  try {
+    const { data } = await usersApi.update(userId, updates);
+    return data;
+  } catch (error) {
+    // Rollback on failure
+    queryClient.setQueryData(['users'], previousUsers);
+    throw error;
+  }
+};
+</code></pre>
+
+    <h2>Flask: Idempotent Updates</h2>
+
+<pre><code>@blp.route('/&lt;int:user_id&gt;', methods=['PATCH'])
+@blp.arguments(UserUpdateSchema)
+@blp.response(200, UserSchema)
+def update_user(data, user_id):
+    user = User.query.get_or_404(user_id)
+
+    # Check idempotency key for safe retries
+    idempotency_key = request.headers.get('Idempotency-Key')
+    if idempotency_key:
+        cached = cache.get(f"idempotency:{idempotency_key}")
+        if cached:
+            return jsonify(cached), 200
+
+    for key, value in data.items():
+        setattr(user, key, value)
+    db.session.commit()
+
+    if idempotency_key:
+        cache.set(f"idempotency:{idempotency_key}", user.to_dict(), ex=3600)
+
+    return user
+</code></pre>
+
+    <div class="tag tag-react">React</div> <div class="tag tag-flask">Flask</div>
+</div>
+
+<!-- ==================== Q ==================== -->
+<div class="letter-section" id="sec-q">
+    <div class="letter-heading">Q</div>
+    <h1>Query Parameters &amp; URL Encoding</h1>
+
+    <p>Proper query parameter handling is essential for filtering, pagination, and search endpoints. Axios delegates to the browser's <code>URLSearchParams</code> or the <code>paramsSerializer</code> option.</p>
+
+    <h2>Complex Query Serialization</h2>
+
+<pre><code>import qs from 'qs';
+
+const api = axios.create({
+  paramsSerializer: params =&gt; {
+    return qs.stringify(params, {
+      arrayFormat: 'brackets',   // tags[]=foo&amp;tags[]=bar
+      encode: false,             // let Axios handle encoding
+      allowDots: true,           // nested.objects
+    });
+  }
+});
+
+// Usage
+api.get('/products', {
+  params: {
+    category: 'electronics',
+    tags: ['new', 'sale'],
+    price: { min: 100, max: 500 },
+    sort: '-created_at',
+  }
+});
+// Produces: /products?category=electronics&amp;tags[]=new&amp;tags[]=sale&amp;price[min]=100&amp;price[max]=500&amp;sort=-created_at
+</code></pre>
+
+    <h2>Flask: Parsing Complex Parameters</h2>
+
+<pre><code>from webargs import fields
+from webargs.flaskparser import use_args
+
+product_args = {
+    'category': fields.Str(required=False),
+    'tags': fields.List(fields.Str(), required=False),
+    'price': fields.Nested({
+        'min': fields.Float(),
+        'max': fields.Float()
+    }, required=False),
+    'sort': fields.Str(missing='-created_at'),
+    'page': fields.Int(missing=1),
+    'per_page': fields.Int(missing=20, validate=lambda x: x &lt;= 100),
+}
+
+@app.route('/api/v1/products')
+@use_args(product_args, location="query")
+def get_products(args):
+    query = Product.query
+    if args.get('category'):
+        query = query.filter_by(category=args['category'])
+    if args.get('tags'):
+        query = query.filter(Product.tags.overlap(args['tags']))
+    return paginate(query, args['page'], args['per_page'])
+</code></pre>
+
+    <div class="tag tag-flask">Flask</div>
+</div>
+
+<!-- ==================== R ==================== -->
+<div class="letter-section" id="sec-r">
+    <div class="letter-heading">R</div>
+    <h1>React Query / TanStack Query</h1>
+
+    <p>TanStack Query (formerly React Query) elevates Axios from a mere HTTP client to a complete server-state management solution. It handles caching, deduping, background refetching, and infinite scroll.</p>
+
+    <h2>Basic Query Integration</h2>
+
+<pre><code>import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { api } from './lib/api';
+
+// Query hook
+const useUsers = (filters?: UserFilters) =&gt; {
+  return useQuery({
+    queryKey: ['users', filters],
+    queryFn: async () =&gt; {
+      const { data } = await api.get('/users', { params: filters });
+      return data;
+    },
+    staleTime: 60_000,      // Data fresh for 60s
+    gcTime: 300_000,        // Keep in cache for 5min after unmount
+    retry: (count, error) =&gt; {
+      if (axios.isAxiosError(error) &amp;&amp; error.response?.status === 404)
+        return false;
+      return count &lt; 3;
+    },
+  });
+};
+
+// Mutation hook
+const useCreateUser = () =&gt; {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (payload: CreateUserPayload) =&gt;
+      api.post('/users', payload).then(r =&gt; r.data),
+    onSuccess: () =&gt; {
+      queryClient.invalidateQueries({ queryKey: ['users'] });
+    },
+  });
+};
+</code></pre>
+
+    <h2>Infinite Scroll Pattern</h2>
+
+<pre><code>const useInfiniteUsers = () =&gt; {
+  return useInfiniteQuery({
+    queryKey: ['users', 'infinite'],
+    queryFn: async ({ pageParam = 1 }) =&gt; {
+      const { data, headers } = await api.get('/users', {
+        params: { page: pageParam, per_page: 20 }
+      });
+      return {
+        users: data,
+        nextPage: headers['x-next-page'] ? pageParam + 1 : undefined,
+      };
+    },
+    getNextPageParam: (lastPage) =&gt; lastPage.nextPage,
+    initialPageParam: 1,
+  });
+};
+</code></pre>
+
+    <div class="tag tag-react">React</div> <div class="tag tag-pattern">Pattern</div>
+</div>
+
+<!-- ==================== S ==================== -->
+<div class="letter-section" id="sec-s">
+    <div class="letter-heading">S</div>
+    <h1>Security: CSRF, XSS, CSP</h1>
+
+    <p>Security hardening is non-negotiable for production React-Flask applications. Each layer of the stack requires specific protections.</p>
+
+    <h2>CSRF Protection with Flask</h2>
+
+<pre><code>from flask_wtf.csrf import CSRFProtect
+
+csrf = CSRFProtect(app)
+
+# For SPA: use double-submit cookie pattern
+@app.route('/api/csrf-token', methods=['GET'])
+def get_csrf_token():
+    return jsonify({"csrf_token": generate_csrf()})
+
+# React: Axios reads XSRF-TOKEN cookie automatically
+api.defaults.xsrfCookieName = 'csrf_token';
+api.defaults.xsrfHeaderName = 'X-CSRF-Token';
+</code></pre>
+
+    <h2>XSS Prevention</h2>
+    <ul>
+        <li><strong>Never store JWT in localStorage</strong> &mdash; vulnerable to XSS extraction. Use httpOnly cookies or memory-only storage with refresh token rotation.</li>
+        <li><strong>Sanitise HTML responses</strong> &mdash; if displaying rich text from API, use DOMPurify:</li>
+    </ul>
+
+<pre><code>import DOMPurify from 'dompurify';
+
+const RichContent = ({ html }: { html: string }) =&gt; {
+  const clean = DOMPurify.sanitize(html);
+  return &lt;div dangerouslySetInnerHTML={{ __html: clean }} /&gt;;
+};
+</code></pre>
+
+    <h2>Content Security Policy Headers (Flask)</h2>
+
+<pre><code>from flask_talisman import Talisman
+
+Talisman(app,
+    content_security_policy={
+        'default-src': "'self'",
+        'script-src': ["'self'", "'unsafe-inline'"],  # adjust for build tooling
+        'style-src': ["'self'", "'unsafe-inline'"],
+        'connect-src': ["'self'", "https://api.yourapp.com"],
+        'img-src': ["'self'", "data:", "https:"],
+    },
+    force_https=True,
+    strict_transport_security=True,
+    session_cookie_secure=True,
+    session_cookie_http_only=True,
+)
+</code></pre>
+
+    <table>
+        <thead><tr><th>Threat</th><th>Vector</th><th>Mitigation</th></tr></thead>
+        <tbody>
+            <tr><td>CSRF</td><td>Cross-site form submission</td><td>Double-submit cookies, SameSite=Lax</td></tr>
+            <tr><td>XSS</td><td>Injected scripts</td><td>httpOnly cookies, DOMPurify, CSP</td></tr>
+            <tr><td>MITM</td><td>Network interception</td><td>HTTPS only, HSTS headers</td></tr>
+            <tr><td>Token theft</td><td>XSS + localStorage</td><td>Memory-only tokens, refresh rotation</td></tr>
+        </tbody>
+    </table>
+
+    <div class="tag tag-flask">Flask</div> <div class="tag tag-pattern">Pattern</div>
+</div>
+
+<!-- ==================== T ==================== -->
+<div class="letter-section" id="sec-t">
+    <div class="letter-heading">T</div>
+    <h1>Timeouts &amp; Exponential Backoff</h1>
+
+    <p>Timeouts prevent requests from hanging indefinitely. Combined with exponential backoff and jitter, they create resilient systems that degrade gracefully.</p>
+
+    <h2>Tiered Timeout Strategy</h2>
+
+<pre><code>// Different operations need different timeouts
+const API_TIMEOUTS = {
+  default: 10_000,     // 10s for standard requests
+  upload: 120_000,     // 2min for file uploads
+  search: 5_000,       // 5s for search (fail fast)
+  report: 30_000,      // 30s for report generation
+} as const;
+
+const api = axios.create({ timeout: API_TIMEOUTS.default });
+
+// Per-request override
+api.post('/uploads', formData, { timeout: API_TIMEOUTS.upload });
+api.get('/search', { params: { q }, timeout: API_TIMEOUTS.search });
+</code></pre>
+
+    <h2>Retry with Exponential Backoff &amp; Jitter</h2>
+
+<pre><code>const sleep = (ms: number) =&gt; new Promise(r =&gt; setTimeout(r, ms));
+
+const retryWithBackoff = async &lt;T&gt;(
+  fn: () =&gt; Promise&lt;T&gt;,
+  options: { maxRetries?: number; baseDelay?: number; maxDelay?: number } = {}
+): Promise&lt;T&gt; =&gt; {
+  const { maxRetries = 3, baseDelay = 300, maxDelay = 10_000 } = options;
+
+  for (let attempt = 0; attempt &lt;= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      const isRetryable = axios.isAxiosError(error) &amp;&amp;
+        (!error.response || error.response.status &gt;= 500 ||
+         error.code === 'ECONNABORTED' || error.code === 'ERR_NETWORK');
+
+      if (!isRetryable || attempt === maxRetries) throw error;
+
+      const exponential = baseDelay * Math.pow(2, attempt);
+      const jitter = Math.random() * exponential * 0.5;
+      const delay = Math.min(exponential + jitter, maxDelay);
+
+      console.warn(`Retry ${attempt + 1}/${maxRetries} after ${delay.toFixed(0)}ms`);
+      await sleep(delay);
+    }
+  }
+  throw new Error('Unreachable');
+};
+</code></pre>
+
+    <h2>Flask: Setting Server-Side Timeouts</h2>
+
+<pre><code>from flask import Flask, g
+import time
+
+@app.before_request
+def start_timer():
+    g.start = time.time()
+
+@app.after_request
+def log_slow_requests(response):
+    elapsed = time.time() - g.start
+    if elapsed &gt; 5:
+        app.logger.warning(f"Slow request: {request.path} took {elapsed:.2f}s")
+    return response
+
+# Gunicorn timeout (must exceed Axios timeout)
+# gunicorn --timeout 30 --keep-alive 2 app:create_app()
+</code></pre>
+
+    <div class="tag tag-react">React</div> <div class="tag tag-flask">Flask</div> <div class="tag tag-pattern">Pattern</div>
+</div>
+
+<!-- ==================== U ==================== -->
+<div class="letter-section" id="sec-u">
+    <div class="letter-heading">U</div>
+    <h1>Uploads: Multipart / FormData</h1>
+
+    <p>File uploads require <code>multipart/form-data</code> encoding and progress tracking. Axios handles the <code>Content-Type</code> boundary automatically when passed a <code>FormData</code> object.</p>
+
+    <h2>File Upload with Progress</h2>
+
+<pre><code>const uploadFile = async (
+  file: File,
+  onProgress: (percent: number) =&gt; void
+): Promise&lt;UploadResult&gt; =&gt; {
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('metadata', JSON.stringify({ name: file.name }));
+
+  const { data } = await api.post('/uploads', formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data',  // Axios overrides with boundary
+    },
+    onUploadProgress: (event) =&gt; {
+      const percent = event.total
+        ? Math.round((event.loaded * 100) / event.total)
+        : 0;
+      onProgress(percent);
+    },
+    timeout: 120_000,
+  });
+
+  return data;
+};
+
+// React component
+const FileUpload = () =&gt; {
+  const [progress, setProgress] = useState(0);
+
+  const handleDrop = useCallback((files: File[]) =&gt; {
+    uploadFile(files[0], setProgress);
+  }, []);
+
+  return (
+    &lt;div&gt;
+      &lt;DropZone onDrop={handleDrop} /&gt;
+      &lt;ProgressBar value={progress} /&gt;
+    &lt;/div&gt;
+  );
+};
+</code></pre>
+
+    <h2>Multiple File Upload with Cancellation</h2>
+
+<pre><code>const uploadMultiple = async (files: File[]) =&gt; {
+  const controller = new AbortController();
+
+  const uploads = files.map(file =&gt; {
+    const formData = new FormData();
+    formData.append('file', file);
+    return api.post('/uploads', formData, {
+      signal: controller.signal,
+      onUploadProgress: (e) =&gt; updateFileProgress(file.name, e),
+    });
+  });
+
+  // Cancel all on user action
+  const cancelAll = () =&gt; controller.abort('User cancelled');
+
+  return { promise: Promise.all(uploads), cancelAll };
+};
+</code></pre>
+
+    <h2>Flask: Handling Multipart Uploads</h2>
+
+<pre><code>from flask import request
+from werkzeug.utils import secure_filename
+import os
+
+UPLOAD_FOLDER = '/var/uploads'
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'pdf'}
+
+@app.route('/api/v1/uploads', methods=['POST'])
+def upload_file():
+    if 'file' not in request.files:
+        return jsonify({"error": "No file part"}), 400
+
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"error": "No selected file"}), 400
+
+    if file and allowed_file(file.filename):
+        filename = secure_filename(file.filename)
+        # Add UUID prefix to prevent collisions
+        unique_name = f"{uuid.uuid4()}_{filename}"
+        file.save(os.path.join(UPLOAD_FOLDER, unique_name))
+        return jsonify({"filename": unique_name, "url": f"/files/{unique_name}"}), 201
+
+    return jsonify({"error": "Invalid file type"}), 400
+</code></pre>
+
+    <div class="tag tag-react">React</div> <div class="tag tag-flask">Flask</div>
+</div>
+
+<!-- ==================== V ==================== -->
+<div class="letter-section" id="sec-v">
+    <div class="letter-heading">V</div>
+    <h1>Validation with Zod / Yup</h1>
+
+    <p>Runtime validation of API responses prevents type-safety violations and catches malformed data before it reaches your UI components.</p>
+
+    <h2>Zod Schema Validation</h2>
+
+<pre><code>import { z } from 'zod';
+
+const UserSchema = z.object({
+  id: z.number().int().positive(),
+  name: z.string().min(1).max(100),
+  email: z.string().email(),
+  role: z.enum(['admin', 'user', 'viewer']),
+  createdAt: z.string().datetime().transform(s =&gt; new Date(s)),
+  avatar: z.string().url().nullable(),
+});
+
+type User = z.infer&lt;typeof UserSchema&gt;;
+
+// Axios response validator
+const validateResponse = &lt;T&gt;(
+  schema: z.ZodSchema&lt;T&gt;,
+  response: unknown
+): T =&gt; {
+  const result = schema.safeParse(response);
+  if (!result.success) {
+    console.error('API response validation failed:', result.error.flatten());
+    throw new Error(`Invalid response: ${result.error.message}`);
+  }
+  return result.data;
+};
+
+// Usage
+const fetchUser = async (id: string): Promise&lt;User&gt; =&gt; {
+  const { data } = await api.get(`/users/${id}`);
+  return validateResponse(UserSchema, data);
+};
+</code></pre>
+
+    <h2>React Hook with Validation</h2>
+
+<pre><code>const useValidatedQuery = &lt;T&gt;(
+  key: string[],
+  fetcher: () =&gt; Promise&lt;unknown&gt;,
+  schema: z.ZodSchema&lt;T&gt;
+) =&gt; {
+  return useQuery({
+    queryKey: key,
+    queryFn: async () =&gt; {
+      const raw = await fetcher();
+      return validateResponse(schema, raw);
+    },
+  });
+};
+
+// Usage
+const { data, isLoading, error } = useValidatedQuery(
+  ['user', userId],
+  () =&gt; api.get(`/users/${userId}`).then(r =&gt; r.data),
+  UserSchema
+);
+</code></pre>
+
+    <h2>Flask: Request Validation with Marshmallow</h2>
+
+<pre><code>from marshmallow import Schema, fields, validate, ValidationError
+
+class UserSchema(Schema):
+    name = fields.Str(required=True, validate=validate.Length(min=1, max=100))
+    email = fields.Email(required=True)
+    role = fields.Str(validate=validate.OneOf(['admin', 'user', 'viewer']))
+
+@app.route('/api/v1/users', methods=['POST'])
+def create_user():
+    schema = UserSchema()
+    try:
+        data = schema.load(request.json)
+    except ValidationError as err:
+        return jsonify({"code": "VALIDATION_ERROR", "errors": err.messages}), 400
+
+    user = User(**data)
+    db.session.add(user)
+    db.session.commit()
+    return jsonify(schema.dump(user)), 201
+</code></pre>
+
+    <div class="tag tag-react">React</div> <div class="tag tag-flask">Flask</div>
+</div>
+
+<!-- ==================== W ==================== -->
+<div class="letter-section" id="sec-w">
+    <div class="letter-heading">W</div>
+    <h1>Wrappers &amp; Custom Hooks</h1>
+
+    <p>Abstracting Axios into domain-specific hooks and service modules creates a maintainable, testable API layer that decouples your UI from transport concerns.</p>
+
+    <h2>Domain API Module Pattern</h2>
+
+<pre><code>// services/UserService.ts
+import { api } from '@/lib/api';
+import { UserSchema } from '@/schemas';
+import type { User, CreateUserInput, UpdateUserInput } from '@/types';
+
+export class UserServiceError extends Error {
+  constructor(public code: string, message: string) { super(message); }
+}
+
+export const UserService = {
+  async getAll(filters?: UserFilters): Promise&lt;User[]&gt; {
+    const { data } = await api.get('/users', { params: filters });
+    return z.array(UserSchema).parse(data);
+  },
+
+  async getById(id: string): Promise&lt;User&gt; {
+    const { data } = await api.get(`/users/${id}`);
+    return UserSchema.parse(data);
+  },
+
+  async create(input: CreateUserInput): Promise&lt;User&gt; {
+    const { data } = await api.post('/users', input);
+    return UserSchema.parse(data);
+  },
+
+  async update(id: string, input: UpdateUserInput): Promise&lt;User&gt; {
+    const { data } = await api.patch(`/users/${id}`, input);
+    return UserSchema.parse(data);
+  },
+
+  async delete(id: string): Promise&lt;void&gt; {
+    await api.delete(`/users/${id}`);
+  },
+};
+</code></pre>
+
+    <h2>Composite Hook Pattern</h2>
+
+<pre><code>// hooks/useUsers.ts
+export const useUsers = () =&gt; {
+  const query = useQuery({
+    queryKey: ['users'],
+    queryFn: () =&gt; UserService.getAll(),
+  });
+
+  const create = useMutation({
+    mutationFn: UserService.create,
+    onSuccess: () =&gt; queryClient.invalidateQueries({ queryKey: ['users'] }),
+  });
+
+  const update = useMutation({
+    mutationFn: ({ id, data }: { id: string; data: UpdateUserInput }) =&gt;
+      UserService.update(id, data),
+    onSuccess: () =&gt; queryClient.invalidateQueries({ queryKey: ['users'] }),
+  });
+
+  const remove = useMutation({
+    mutationFn: UserService.delete,
+    onSuccess: () =&gt; queryClient.invalidateQueries({ queryKey: ['users'] }),
+  });
+
+  return {
+    users: query.data ?? [],
+    isLoading: query.isLoading,
+    error: query.error,
+    create: create.mutateAsync,
+    update: update.mutateAsync,
+    remove: remove.mutateAsync,
+  };
+};
+</code></pre>
+
+    <div class="tip-box">
+        <div class="tip-title">Architecture Tip</div>
+        <p>Keep Axios imports confined to your <code>lib/api.ts</code> file and service modules. React components should import from <code>@/services</code>, never directly from <code>axios</code>. This allows swapping the HTTP client later with minimal refactoring.</p>
+    </div>
+
+    <div class="tag tag-react">React</div> <div class="tag tag-pattern">Pattern</div>
+</div>
+
+<!-- ==================== X ==================== -->
+<div class="letter-section" id="sec-x">
+    <div class="letter-heading">X</div>
+    <h1>XMLHttpRequest Internals</h1>
+
+    <p>Axios uses <code>XMLHttpRequest</code> (XHR) in browsers. Understanding its internals helps debug edge cases and appreciate Axios's design decisions.</p>
+
+    <h2>XHR vs Fetch API: Why Axios Uses XHR</h2>
+    <table>
+        <thead><tr><th>Capability</th><th>XHR</th><th>Fetch API</th></tr></thead>
+        <tbody>
+            <tr><td>Progress tracking</td><td>Native (<code>onprogress</code>)</td><td>Requires ReadableStream</td></tr>
+            <tr><td>Synchronous cancellation</td><td><code>abort()</code></td><td>AbortController</td></tr>
+            <tr><td>Timeout handling</td><td>Built-in (<code>timeout</code>)</td><td>Requires AbortController</td></tr>
+            <tr><td>Upload progress</td><td>Native (<code>onuploadprogress</code>)</td><td>Not directly available</td></tr>
+            <tr><td>Response type control</td><td>Native (<code>responseType</code>)</td><td>Manual handling</td></tr>
+        </tbody>
+    </table>
+
+    <h2>Custom Axios Adapter (Advanced)</h2>
+    <p>For specialised environments (e.g., React Native with custom networking), replace the default adapter:</p>
+
+<pre><code>import { getAdapter } from 'axios';
+
+const customAdapter = async (config: InternalAxiosRequestConfig) =&gt; {
+  // Custom fetch/XHR logic
+  const adapter = config.adapter ?? getAdapter('http');
+  // Add custom timing, logging, or alternative transport
+  return adapter(config);
+};
+
+const api = axios.create({ adapter: customAdapter });
+</code></pre>
+
+    <h2>React Native Considerations</h2>
+
+<pre><code>// React Native has built-in networking; Axios works out of the box
+// However, for file uploads in RN:
+
+import RNFS from 'react-native-fs';
+
+const uploadFromRN = async (localUri: string) =&gt; {
+  const formData = new FormData();
+  formData.append('file', {
+    uri: localUri,
+    name: 'photo.jpg',
+    type: 'image/jpeg',
+  } as any);
+
+  return api.post('/uploads', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    onUploadProgress: (e) =&gt; console.log(e.loaded / e.total),
+  });
+};
+</code></pre>
+</div>
+
+<!-- ==================== Y ==================== -->
+<div class="letter-section" id="sec-y">
+    <div class="letter-heading">Y</div>
+    <h1>YAML Config &amp; Environment Management</h1>
+
+    <p>Environment configuration should be declarative and version-controlled. YAML-based configuration enables consistent environments across development, CI, and production.</p>
+
+    <h2>Declarative API Configuration</h2>
+
+<pre><code># config/api.yml
+development:
+  baseURL: http://localhost:5000/api/v1
+  timeout: 10000
+  retries: 1
+  logLevel: debug
+
+staging:
+  baseURL: https://staging-api.example.com/api/v1
+  timeout: 15000
+  retries: 3
+  logLevel: warn
+
+production:
+  baseURL: https://api.example.com/api/v1
+  timeout: 10000
+  retries: 3
+  logLevel: error
+  security:
+    csrf: true
+    hsts: true
+</code></pre>
+
+    <h2>Runtime Config Loader</h2>
+
+<pre><code>import yaml from 'js-yaml';
+
+interface ApiConfig {
+  baseURL: string;
+  timeout: number;
+  retries: number;
+  logLevel: 'debug' | 'info' | 'warn' | 'error';
+  security?: { csrf?: boolean; hsts?: boolean };
+}
+
+const loadConfig = (): ApiConfig =&gt; {
+  const env = import.meta.env.VITE_APP_ENV || 'development';
+  const configFile = import.meta.glob('./config/api.yml', { as: 'raw', eager: true });
+  const allConfigs = yaml.load(configFile['./config/api.yml']) as Record&lt;string, ApiConfig&gt;;
+  return allConfigs[env];
+};
+
+const config = loadConfig();
+export const api = axios.create({
+  baseURL: config.baseURL,
+  timeout: config.timeout,
+});
+</code></pre>
+
+    <h2>Flask: Environment-Based Configuration</h2>
+
+<pre><code># config.py
+import os
+
+class Config:
+    SECRET_KEY = os.getenv('SECRET_KEY')
+    SQLALCHEMY_TRACK_MODIFICATIONS = False
+
+class DevelopmentConfig(Config):
+    DEBUG = True
+    SQLALCHEMY_DATABASE_URI = 'postgresql://localhost/devdb'
+    CORS_ORIGINS = ['http://localhost:5173']
+
+class ProductionConfig(Config):
+    DEBUG = False
+    SQLALCHEMY_DATABASE_URI = os.getenv('DATABASE_URL')
+    CORS_ORIGINS = [os.getenv('FRONTEND_URL')]
+
+config_map = {
+    'development': DevelopmentConfig,
+    'production': ProductionConfig,
+}
+</code></pre>
+
+    <div class="tag tag-flask">Flask</div>
+</div>
+
+<!-- ==================== Z ==================== -->
+<div class="letter-section" id="sec-z">
+    <div class="letter-heading">Z</div>
+    <h1>Zero-Dependency Alternatives</h1>
+
+    <p>While Axios remains the industry standard, understanding alternatives helps make informed architectural decisions and appreciate Axios's trade-offs.</p>
+
+    <table>
+        <thead><tr><th>Library</th><th>Size</th><th>Strengths</th><th>When to Choose</th></tr></thead>
+        <tbody>
+            <tr>
+                <td><strong>Axios</strong></td>
+                <td>~13 KB</td>
+                <td>Interceptors, cancel, XHR progress, wide ecosystem</td>
+                <td>Default choice; complex requirements</td>
+            </tr>
+            <tr>
+                <td><strong>Fetch API</strong></td>
+                <td>0 KB (builtin)</td>
+                <td>Native, streaming, zero bundle</td>
+                <td>Simple requests, modern browsers, size-critical apps</td>
+            </tr>
+            <tr>
+                <td><strong>ky</strong></td>
+                <td>~5 KB</td>
+                <td>Fetch-based, modern API, retries built-in</td>
+                <td>Modern apps wanting fetch with conveniences</td>
+            </tr>
+            <tr>
+                <td><strong>ofetch</strong></td>
+                <td>~5 KB</td>
+                <td>Fetch-based, auto-retry, dedup, Nuxt ecosystem</td>
+                <td>Nuxt/Vue projects, isomorphic apps</td>
+            </tr>
+            <tr>
+                <td><strong>redaxios</strong></td>
+                <td>~2 KB</td>
+                <td>Axios API on top of fetch, drop-in replacement</td>
+                <td>Migration path from Axios to fetch</td>
+            </tr>
+            <tr>
+                <td><strong>wretch</strong></td>
+                <td>~4 KB</td>
+                <td>Fluent API, fetch-based, middleware</td>
+                <td>Developer experience priority</td>
+            </tr>
+        </tbody>
+    </table>
+
+    <h2>Fetch vs Axios: Quick Comparison</h2>
+
+<pre><code>// Fetch: manual error handling, no timeout built-in
+const fetchUsers = async () =&gt; {
+  const controller = new AbortController();
+  const timeout = setTimeout(() =&gt; controller.abort(), 10000);
+
+  try {
+    const res = await fetch('/api/users', {
+      signal: controller.signal,
+      headers: { 'Accept': 'application/json' },
+    });
+    clearTimeout(timeout);
+
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return await res.json();
+  } catch (err) {
+    clearTimeout(timeout);
+    throw err;
+  }
+};
+
+// Axios: interceptors, automatic JSON, timeout, cancel built-in
+const getUsers = () =&gt; api.get('/users', { timeout: 10000 });
+</code></pre>
+
+    <h2>When to Migrate Away from Axios</h2>
+    <ul>
+        <li><strong>Bundle size critical</strong> &mdash; Mobile apps where every KB matters</li>
+        <li><strong>Streaming responses</strong> &mdash; Server-Sent Events, large file downloads (native Fetch/Streams API is more capable)</li>
+        <li><strong>Edge runtimes</strong> &mdash; Cloudflare Workers, Deno Deploy where XHR is unavailable</li>
+        <li><strong>Simplicity sufficient</strong> &mdash; Apps with only a few simple GET/POST calls</li>
+    </ul>
+
+    <div class="tip-box">
+        <div class="tip-title">Decision Framework</div>
+        <p>Start with Axios for any non-trivial project. Its interceptor ecosystem, mature TypeScript support, and extensive documentation reduce development time. Only consider alternatives if bundle size or specific Fetch capabilities become blockers.</p>
+    </div>
+</div>
+
+</body>
+</html>
