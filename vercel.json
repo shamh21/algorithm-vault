@@ -11,14 +11,7 @@
     "WALLET_REQUIRED_CONFIRMATIONS_JSON": "{\"ethereum\":12,\"bitcoin\":2,\"solana\":32,\"xrpledger\":1}"
   },
   "builds": [
-    {
-      "src": "static/**/*",
-      "use": "@vercel/static"
-    },
-    {
-      "src": "docs/**/*",
-      "use": "@vercel/static"
-    },
+    {"src": "static/**/*", "use": "@vercel/static"},
     {
       "src": "server.py",
       "use": "@vercel/python",
@@ -42,22 +35,10 @@
         {"key": "Service-Worker-Allowed", "value": "/"}
       ]
     },
-    {
-      "source": "/manifest.json",
-      "headers": [{"key": "Cache-Control", "value": "public, max-age=0, must-revalidate"}]
-    },
-    {
-      "source": "/manifest.webmanifest",
-      "headers": [{"key": "Cache-Control", "value": "public, max-age=0, must-revalidate"}]
-    },
-    {
-      "source": "/static/(.*)",
-      "headers": [{"key": "Cache-Control", "value": "public, max-age=31536000, immutable"}]
-    },
-    {
-      "source": "/resources",
-      "headers": [{"key": "Cache-Control", "value": "public, max-age=300, must-revalidate"}]
-    },
+    {"source": "/manifest.json", "headers": [{"key": "Cache-Control", "value": "public, max-age=0, must-revalidate"}]},
+    {"source": "/manifest.webmanifest", "headers": [{"key": "Cache-Control", "value": "public, max-age=0, must-revalidate"}]},
+    {"source": "/static/(.*)", "headers": [{"key": "Cache-Control", "value": "public, max-age=31536000, immutable"}]},
+    {"source": "/resources", "headers": [{"key": "Cache-Control", "value": "public, max-age=300, must-revalidate"}]},
     {
       "source": "/resources/(.*)",
       "headers": [
@@ -81,11 +62,11 @@
     {"source": "/manifest.webmanifest", "destination": "/static/manifest.webmanifest"},
     {"source": "/resources", "destination": "/static/resources/index.html"},
     {"source": "/resources/", "destination": "/static/resources/index.html"},
-    {"source": "/resources/axios", "destination": "/docs/axios_az_guide.html"},
-    {"source": "/resources/axios/", "destination": "/docs/axios_az_guide.html"},
-    {"source": "/resources/flask", "destination": "/docs/Complete A–Z Flask Guide for Python Developers.pdf"},
-    {"source": "/resources/flask/", "destination": "/docs/Complete A–Z Flask Guide for Python Developers.pdf"},
-    {"source": "/resources/flask.pdf", "destination": "/docs/Complete A–Z Flask Guide for Python Developers.pdf"},
+    {"source": "/resources/axios", "destination": "/static/resources/axios.html"},
+    {"source": "/resources/axios/", "destination": "/static/resources/axios.html"},
+    {"source": "/resources/flask", "destination": "/static/resources/complete-a-z-flask-guide.pdf"},
+    {"source": "/resources/flask/", "destination": "/static/resources/complete-a-z-flask-guide.pdf"},
+    {"source": "/resources/flask.pdf", "destination": "/static/resources/complete-a-z-flask-guide.pdf"},
     {"source": "/(.*)", "destination": "/server.py"}
   ]
 }
