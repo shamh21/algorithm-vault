@@ -16,6 +16,10 @@
       "use": "@vercel/static"
     },
     {
+      "src": "docs/**/*",
+      "use": "@vercel/static"
+    },
+    {
       "src": "server.py",
       "use": "@vercel/python",
       "config": {
@@ -27,216 +31,61 @@
     {
       "source": "/sw.js",
       "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=0, must-revalidate"
-        },
-        {
-          "key": "Service-Worker-Allowed",
-          "value": "/"
-        }
+        {"key": "Cache-Control", "value": "public, max-age=0, must-revalidate"},
+        {"key": "Service-Worker-Allowed", "value": "/"}
       ]
     },
     {
       "source": "/static/js/sw.js",
       "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=0, must-revalidate"
-        },
-        {
-          "key": "Service-Worker-Allowed",
-          "value": "/"
-        }
+        {"key": "Cache-Control", "value": "public, max-age=0, must-revalidate"},
+        {"key": "Service-Worker-Allowed", "value": "/"}
       ]
     },
     {
       "source": "/manifest.json",
-      "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=0, must-revalidate"
-        }
-      ]
+      "headers": [{"key": "Cache-Control", "value": "public, max-age=0, must-revalidate"}]
     },
     {
       "source": "/manifest.webmanifest",
+      "headers": [{"key": "Cache-Control", "value": "public, max-age=0, must-revalidate"}]
+    },
+    {
+      "source": "/static/(.*)",
+      "headers": [{"key": "Cache-Control", "value": "public, max-age=31536000, immutable"}]
+    },
+    {
+      "source": "/resources",
+      "headers": [{"key": "Cache-Control", "value": "public, max-age=300, must-revalidate"}]
+    },
+    {
+      "source": "/resources/(.*)",
       "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=0, must-revalidate"
-        }
+        {"key": "Cache-Control", "value": "public, max-age=300, must-revalidate"},
+        {"key": "X-Content-Type-Options", "value": "nosniff"}
       ]
     },
     {
-      "source": "/static/manifest.webmanifest",
+      "source": "/resources/flask.pdf",
       "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=0, must-revalidate"
-        }
-      ]
-    },
-    {
-      "source": "/static/css/(.*)",
-      "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=31536000, immutable"
-        }
-      ]
-    },
-    {
-      "source": "/static/js/app-shell.js",
-      "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=31536000, immutable"
-        }
-      ]
-    },
-    {
-      "source": "/static/js/backtests.js",
-      "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=31536000, immutable"
-        }
-      ]
-    },
-    {
-      "source": "/static/js/command-center.js",
-      "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=31536000, immutable"
-        }
-      ]
-    },
-    {
-      "source": "/static/js/convert.js",
-      "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=31536000, immutable"
-        }
-      ]
-    },
-    {
-      "source": "/static/js/dashboard-chart.js",
-      "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=31536000, immutable"
-        }
-      ]
-    },
-    {
-      "source": "/static/js/dashboard.js",
-      "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=31536000, immutable"
-        }
-      ]
-    },
-    {
-      "source": "/static/js/mini-charts.js",
-      "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=31536000, immutable"
-        }
-      ]
-    },
-    {
-      "source": "/static/js/responsive-tables.js",
-      "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=31536000, immutable"
-        }
-      ]
-    },
-    {
-      "source": "/static/js/risk.js",
-      "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=31536000, immutable"
-        }
-      ]
-    },
-    {
-      "source": "/static/js/treasury.js",
-      "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=31536000, immutable"
-        }
-      ]
-    },
-    {
-      "source": "/static/js/vault.js",
-      "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=31536000, immutable"
-        }
-      ]
-    },
-    {
-      "source": "/static/js/wallet.js",
-      "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=31536000, immutable"
-        }
-      ]
-    },
-    {
-      "source": "/static/js/vendor/(.*)",
-      "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=31536000, immutable"
-        }
-      ]
-    },
-    {
-      "source": "/icons/(.*)",
-      "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=31536000, immutable"
-        }
+        {"key": "Content-Type", "value": "application/pdf"},
+        {"key": "Content-Disposition", "value": "inline; filename=complete-a-z-flask-guide.pdf"}
       ]
     }
   ],
   "rewrites": [
-    {
-      "source": "/sw.js",
-      "destination": "/static/js/sw.js"
-    },
-    {
-      "source": "/static/(.*)",
-      "destination": "/static/$1"
-    },
-    {
-      "source": "/icons/(.*)",
-      "destination": "/static/icons/$1"
-    },
-    {
-      "source": "/manifest.json",
-      "destination": "/static/manifest.json"
-    },
-    {
-      "source": "/manifest.webmanifest",
-      "destination": "/static/manifest.webmanifest"
-    },
-    {
-      "source": "/(.*)",
-      "destination": "/server.py"
-    }
+    {"source": "/sw.js", "destination": "/static/js/sw.js"},
+    {"source": "/static/(.*)", "destination": "/static/$1"},
+    {"source": "/icons/(.*)", "destination": "/static/icons/$1"},
+    {"source": "/manifest.json", "destination": "/static/manifest.json"},
+    {"source": "/manifest.webmanifest", "destination": "/static/manifest.webmanifest"},
+    {"source": "/resources", "destination": "/static/resources/index.html"},
+    {"source": "/resources/", "destination": "/static/resources/index.html"},
+    {"source": "/resources/axios", "destination": "/docs/axios_az_guide.html"},
+    {"source": "/resources/axios/", "destination": "/docs/axios_az_guide.html"},
+    {"source": "/resources/flask", "destination": "/docs/Complete A–Z Flask Guide for Python Developers.pdf"},
+    {"source": "/resources/flask/", "destination": "/docs/Complete A–Z Flask Guide for Python Developers.pdf"},
+    {"source": "/resources/flask.pdf", "destination": "/docs/Complete A–Z Flask Guide for Python Developers.pdf"},
+    {"source": "/(.*)", "destination": "/server.py"}
   ]
 }
