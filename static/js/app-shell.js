@@ -319,6 +319,36 @@
       }
     }
 
+    // iOS Install Hint — show on Safari/iOS when not in standalone mode
+    const initIosInstallHint = () => {
+      try {
+        const hint = document.getElementById("ios-install-hint");
+        if (!hint) return;
+        const DISMISS_KEY = "av-ios-hint-dismissed";
+        const isDismissed = window.localStorage.getItem(DISMISS_KEY) === "1";
+        if (isDismissed) return;
+
+        const isIos = /iP(hone|od|ad)/.test(navigator.userAgent);
+        const isSafari = /^((?!chrome|android|crios|fxios).)*safari/i.test(navigator.userAgent);
+        const isStandalone = window.navigator.standalone === true ||
+          window.matchMedia("(display-mode: standalone)").matches;
+
+        if (isIos && isSafari && !isStandalone) {
+          hint.hidden = false;
+          hint.classList.add("is-visible");
+          const dismiss = document.getElementById("ios-install-hint-dismiss");
+          if (dismiss) {
+            dismiss.addEventListener("click", () => {
+              hint.hidden = true;
+              hint.classList.remove("is-visible");
+              try { window.localStorage.setItem(DISMISS_KEY, "1"); } catch {}
+            });
+          }
+        }
+      } catch {}
+    };
+    initIosInstallHint();
+
     const registerServiceWorker = () => {
       const supportsServiceWorker = "serviceWorker" in navigator;
       const hostname = window.location.hostname;

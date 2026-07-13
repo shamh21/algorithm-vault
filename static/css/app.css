@@ -1,6 +1,7 @@
 :root {
-  /* AlgVault neon trading palette. */
-  --font-stack: "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  /* AlgVault neon trading palette — iOS-first font stack. */
+  --font-stack: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Inter", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "SF Mono", "Geist Mono", "Fira Code", ui-monospace, monospace;
   --safe-top: env(safe-area-inset-top);
   --safe-right: env(safe-area-inset-right);
   --safe-bottom: env(safe-area-inset-bottom);
@@ -435,13 +436,14 @@ tr:hover td {
 
 @media (max-width: 720px) {
   :root {
-    --radius-lg: 1rem;
+    --radius-lg: 0.9rem;
   }
 
   body {
     background:
-      radial-gradient(circle at top left, rgba(240, 185, 11, 0.16), transparent 20rem),
-      linear-gradient(180deg, #0b0f14 0%, #0f1621 100%);
+      radial-gradient(circle at 16% -8%, rgba(255, 31, 54, 0.16), transparent 22rem),
+      radial-gradient(circle at 88% 6%, rgba(155, 77, 255, 0.16), transparent 20rem),
+      linear-gradient(180deg, #030304 0%, #09090b 52%, #030304 100%);
   }
 
   .site-header {
@@ -17410,4 +17412,468 @@ body:has(.wallet-flow-shell) .crypto-rail {
     scroll-behavior: auto;
     transition: none;
   }
+}
+
+/* ═══════════════════════════════════════════════
+   iOS / iPhone PWA IMPROVEMENTS — v23
+   Applied: font, inputs, animations, cockpit, chips,
+   sparklines, install hint, safe-area, tabular nums
+   ═══════════════════════════════════════════════ */
+
+/* Prevent iOS Safari zoom on input focus (≥16px required) */
+input,
+select,
+textarea {
+  font-size: max(1rem, 16px) !important;
+}
+
+/* Tabular numerics for all trading/balance values */
+.av-balance-value,
+.av-metric strong,
+.av-metric-value,
+.trade-metric strong,
+.trade-metric-value,
+.vault-pulse-balance,
+.vault-pulse-change,
+.market-tape-row span,
+.market-tape-row em,
+.balance-pill,
+.opportunity-score,
+.forecast-summary-grid strong,
+.intelligence-list dd,
+code,
+.font-mono {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+/* ── Keyframe library ── */
+@keyframes av-panel-enter {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes av-glow-pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.55; }
+}
+
+@keyframes av-sparkline-draw {
+  from { stroke-dashoffset: 200; }
+  to   { stroke-dashoffset: 0; }
+}
+
+@keyframes av-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes av-slide-up {
+  from { opacity: 0; transform: translateY(14px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes av-status-ping {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%       { opacity: 0.42; transform: scale(0.78); }
+}
+
+/* ── Animation utilities ── */
+@media (prefers-reduced-motion: no-preference) {
+  .av-panel-enter {
+    animation: av-panel-enter 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  .av-slide-up {
+    animation: av-slide-up 0.32s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+
+  .av-fade-in {
+    animation: av-fade-in 0.22s ease both;
+  }
+
+  .av-status-ping {
+    animation: av-status-ping 2.2s ease-in-out infinite;
+  }
+
+  .av-glow-pulse {
+    animation: av-glow-pulse 2.6s ease-in-out infinite;
+  }
+
+  .av-enter-1 { animation-delay: 0ms; }
+  .av-enter-2 { animation-delay: 55ms; }
+  .av-enter-3 { animation-delay: 110ms; }
+  .av-enter-4 { animation-delay: 165ms; }
+  .av-enter-5 { animation-delay: 220ms; }
+
+  /* SVG sparkline line draw-in */
+  .av-sparkline-path {
+    stroke-dasharray: 200;
+    stroke-dashoffset: 200;
+    animation: av-sparkline-draw 0.8s cubic-bezier(0.22, 1, 0.36, 1) 0.15s both;
+  }
+}
+
+/* ── Status chips ── */
+.av-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  padding: 0.22rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  line-height: 1.3;
+}
+
+.av-chip .av-chip-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.av-chip-fresh,
+.av-chip-ready {
+  background: rgba(0, 192, 118, 0.12);
+  border: 1px solid rgba(0, 192, 118, 0.28);
+  color: #4dffa0;
+}
+.av-chip-fresh .av-chip-dot,
+.av-chip-ready .av-chip-dot { background: #00c076; }
+
+.av-chip-guarded,
+.av-chip-stale {
+  background: rgba(255, 153, 0, 0.1);
+  border: 1px solid rgba(255, 153, 0, 0.26);
+  color: #ffb74d;
+}
+.av-chip-guarded .av-chip-dot,
+.av-chip-stale .av-chip-dot { background: #ff9900; }
+
+.av-chip-danger,
+.av-chip-blocked {
+  background: rgba(255, 77, 79, 0.12);
+  border: 1px solid rgba(255, 77, 79, 0.3);
+  color: #ff6b70;
+}
+.av-chip-danger .av-chip-dot,
+.av-chip-blocked .av-chip-dot { background: #ff4d4f; }
+
+.av-chip-offline {
+  background: rgba(95, 95, 114, 0.12);
+  border: 1px solid rgba(95, 95, 114, 0.26);
+  color: #9090a8;
+}
+.av-chip-offline .av-chip-dot { background: #5f5f72; }
+
+.av-chip-auth,
+.av-chip-required {
+  background: rgba(155, 77, 255, 0.12);
+  border: 1px solid rgba(155, 77, 255, 0.3);
+  color: #c58bff;
+}
+.av-chip-auth .av-chip-dot,
+.av-chip-required .av-chip-dot { background: #9b4dff; }
+
+/* ── Readiness Cockpit ── */
+.readiness-cockpit {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 0.45rem;
+  padding: 0.8rem;
+  border: 1px solid rgba(192, 92, 255, 0.2);
+  border-radius: var(--radius-md);
+  background: linear-gradient(135deg, rgba(255, 31, 54, 0.05), rgba(155, 77, 255, 0.08)), rgba(9, 9, 11, 0.88);
+  margin-bottom: 1rem;
+}
+
+.cockpit-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.5rem 0.2rem 0.4rem;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  min-height: 60px;
+  text-align: center;
+}
+
+.cockpit-cell-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.cockpit-cell-label {
+  font-size: 0.6rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  margin-top: 0.1rem;
+}
+
+.cockpit-cell-state {
+  font-size: 0.62rem;
+  font-weight: 700;
+  color: var(--muted-strong);
+  letter-spacing: 0.02em;
+  line-height: 1.2;
+}
+
+.cockpit-cell.is-ready   .cockpit-cell-dot { background: #00c076; }
+.cockpit-cell.is-ready   .cockpit-cell-state { color: #4dffa0; }
+.cockpit-cell.is-stale   .cockpit-cell-dot { background: #ff9900; }
+.cockpit-cell.is-stale   .cockpit-cell-state { color: #ffb74d; }
+.cockpit-cell.is-danger  .cockpit-cell-dot { background: #ff4d4f; }
+.cockpit-cell.is-danger  .cockpit-cell-state { color: #ff6b70; }
+.cockpit-cell.is-offline .cockpit-cell-dot { background: #5f5f72; }
+.cockpit-cell.is-auth    .cockpit-cell-dot { background: #9b4dff; }
+.cockpit-cell.is-auth    .cockpit-cell-state { color: #c58bff; }
+
+/* ── Inline SVG sparkline ── */
+.av-svg-sparkline {
+  display: block;
+  width: 100%;
+  height: 36px;
+  overflow: visible;
+}
+
+.av-sparkline-line {
+  fill: none;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.av-sparkline-area {
+  opacity: 0.14;
+}
+
+/* ── iOS install hint panel ── */
+.ios-install-hint {
+  display: none;
+  align-items: flex-start;
+  gap: 0.75rem;
+  padding: 0.85rem 1rem;
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(155, 77, 255, 0.28);
+  background: linear-gradient(135deg, rgba(155, 77, 255, 0.1), rgba(255, 31, 54, 0.06)), rgba(9, 9, 11, 0.88);
+  margin-bottom: 1rem;
+}
+
+.ios-install-hint.is-visible {
+  display: flex;
+}
+
+.ios-install-hint-icon {
+  font-size: 1.4rem;
+  line-height: 1;
+  flex-shrink: 0;
+  margin-top: 0.1rem;
+}
+
+.ios-install-hint-copy strong {
+  display: block;
+  font-size: 0.82rem;
+  font-weight: 800;
+  color: var(--ink);
+  margin-bottom: 0.2rem;
+}
+
+.ios-install-hint-copy p {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.ios-install-hint-dismiss {
+  margin-left: auto;
+  flex-shrink: 0;
+  min-height: 32px;
+  min-width: 32px;
+  padding: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.9rem;
+}
+
+/* ── Password visibility toggle ── */
+.pw-wrap {
+  position: relative;
+}
+
+.pw-toggle {
+  position: absolute;
+  right: 0.65rem;
+  top: 50%;
+  transform: translateY(-50%);
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+
+.pw-toggle:focus-visible {
+  outline: 2px solid rgba(155, 77, 255, 0.5);
+  outline-offset: 2px;
+}
+
+.pw-wrap input[type="password"],
+.pw-wrap input[type="text"] {
+  padding-right: 3rem;
+}
+
+/* ── Auth form improvements (iPhone-safe) ── */
+.auth-shell {
+  padding-top: max(1.5rem, env(safe-area-inset-top));
+}
+
+.auth-card {
+  padding: 1.25rem;
+  border-radius: var(--radius-lg);
+  border: 1px solid rgba(192, 92, 255, 0.22);
+  background: linear-gradient(135deg, rgba(255, 31, 54, 0.06), rgba(155, 77, 255, 0.09)), rgba(13, 13, 16, 0.96);
+  box-shadow: 0 24px 56px rgba(0, 0, 0, 0.52), 0 0 36px rgba(155, 77, 255, 0.07), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.auth-card h1 {
+  font-size: clamp(1.4rem, 5vw, 1.8rem);
+  letter-spacing: -0.03em;
+  margin: 0.2rem 0 0.6rem;
+}
+
+.auth-card input,
+.auth-card select {
+  min-height: 52px;
+  border-radius: var(--radius-md);
+  border-color: rgba(192, 92, 255, 0.2);
+  background: rgba(6, 6, 9, 0.82);
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.auth-card input:focus,
+.auth-card select:focus {
+  border-color: rgba(192, 92, 255, 0.52);
+  box-shadow: 0 0 0 3px rgba(155, 77, 255, 0.14), 0 0 20px rgba(155, 77, 255, 0.08);
+  background: rgba(10, 10, 14, 0.92);
+}
+
+.auth-card button.primary {
+  min-height: 52px;
+  background: linear-gradient(180deg, #d91e35, #a6152a);
+  color: #ffffff;
+  border-color: rgba(255, 31, 54, 0.52);
+  box-shadow: 0 10px 28px rgba(255, 31, 54, 0.2);
+  letter-spacing: 0.01em;
+}
+
+.auth-card button.primary:hover {
+  filter: brightness(1.08);
+}
+
+/* ── Tighter mobile bottom nav ── */
+@media (max-width: 760px) {
+  .bottom-nav {
+    /* Extra glow border on iPhone */
+    border-top: 1px solid rgba(192, 92, 255, 0.18);
+    box-shadow: 0 -8px 28px rgba(0, 0, 0, 0.42), 0 -1px 0 rgba(255, 31, 54, 0.12);
+  }
+
+  .bottom-nav .bottom-nav-item {
+    /* Ensure 44px tap target */
+    min-height: 52px;
+    padding-top: 0.5rem;
+    padding-bottom: calc(0.5rem + env(safe-area-inset-bottom) * 0.4);
+  }
+
+  .bottom-nav .bottom-nav-item.active .nav-icon {
+    filter: drop-shadow(0 0 6px rgba(255, 31, 54, 0.6));
+  }
+}
+
+/* ── iPhone widths ── */
+@media (max-width: 430px) {
+  .readiness-cockpit {
+    grid-template-columns: repeat(5, 1fr);
+    gap: 0.3rem;
+    padding: 0.6rem;
+  }
+
+  .cockpit-cell {
+    padding: 0.4rem 0.1rem 0.35rem;
+    min-height: 54px;
+  }
+
+  .cockpit-cell-label {
+    font-size: 0.55rem;
+  }
+}
+
+@media (max-width: 390px) {
+  .readiness-cockpit {
+    grid-template-columns: repeat(5, 1fr);
+    gap: 0.2rem;
+    padding: 0.5rem 0.45rem;
+  }
+
+  .cockpit-cell-label {
+    display: none;
+  }
+
+  .cockpit-cell-state {
+    font-size: 0.6rem;
+  }
+}
+
+/* ── SW update banner ── */
+.sw-update-banner {
+  position: fixed;
+  bottom: calc(var(--bottom-nav-height, 72px) + max(0.75rem, env(safe-area-inset-bottom)));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.6rem 1rem;
+  border-radius: 999px;
+  background: linear-gradient(135deg, rgba(255, 31, 54, 0.92), rgba(155, 77, 255, 0.88));
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55);
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: #ffffff;
+  white-space: nowrap;
+}
+
+.sw-update-banner button {
+  min-height: 32px;
+  padding: 0.2rem 0.75rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.18);
+  border-color: rgba(255, 255, 255, 0.26);
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #ffffff;
 }

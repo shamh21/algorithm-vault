@@ -1,16 +1,16 @@
 {% extends "base.html" %}
 
-{% block title %}Sign In · Algorithm Vault{% endblock %}
+{% block title %}Sign In · AlgVault{% endblock %}
 
 {% block content %}
-<section class="auth-shell">
+<section class="auth-shell av-panel-enter av-enter-1">
   <article class="vault-card auth-card">
     <span class="card-kicker">Secure Access</span>
     <h1>Sign In</h1>
     {% if next_destination %}
       <p class="auth-route-context">Continue to {{ next_destination }}</p>
     {% endif %}
-    <p class="muted">Use your password and, when enabled, your 6-digit authenticator code.</p>
+    <p class="muted">Use your username, password, and 6-digit authenticator code.</p>
     {% if ops_snapshot %}
       <section class="auth-ops-panel auth-ops-panel-{{ ops_snapshot.tone }}" aria-label="Production operations snapshot">
         <div class="auth-ops-head">
@@ -40,18 +40,78 @@
     {% endif %}
     <form method="post" action="{{ url_for('auth.login_post', next=request.args.get('next', '')) }}" class="form-grid" data-disable-on-submit>
       {{ csrf_input()|safe }}
-      <label>Username
-        <input type="text" name="username" value="{{ username or '' }}" autocomplete="username" autocapitalize="none" spellcheck="false" required>
-      </label>
-      <label>Password
-        <input type="password" name="password" autocomplete="current-password" required>
-      </label>
-      <label>Authenticator Code
-        <input type="text" name="totp_code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" placeholder="000000" {% if require_2fa %}required autofocus{% endif %}>
-      </label>
-      <button type="submit" class="primary" data-loading-label="Signing in...">Sign In</button>
+      <label for="auth-username">Username</label>
+      <input
+        id="auth-username"
+        type="text"
+        name="username"
+        value="{{ username or '' }}"
+        autocomplete="username"
+        autocapitalize="none"
+        autocorrect="off"
+        spellcheck="false"
+        enterkeyhint="next"
+        required
+        autofocus
+      >
+      <label for="auth-password">Password</label>
+      <div class="pw-wrap">
+        <input
+          id="auth-password"
+          type="password"
+          name="password"
+          autocomplete="current-password"
+          enterkeyhint="next"
+          required
+        >
+        <button
+          type="button"
+          class="pw-toggle"
+          aria-label="Show password"
+          data-pw-toggle="auth-password"
+          tabindex="-1"
+        >
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z"/>
+            <circle cx="12" cy="12" r="3"/>
+          </svg>
+        </button>
+      </div>
+      <label for="auth-totp">Authenticator Code <span class="muted" style="font-weight:400;font-size:0.8em">(6 digits)</span></label>
+      <input
+        id="auth-totp"
+        type="text"
+        name="totp_code"
+        inputmode="numeric"
+        pattern="[0-9]{6}"
+        maxlength="6"
+        autocomplete="one-time-code"
+        placeholder="000000"
+        enterkeyhint="done"
+        {% if require_2fa %}required autofocus{% endif %}
+      >
+      <button type="submit" class="primary" data-loading-label="Signing in…">Sign In</button>
     </form>
     <p class="muted">New users need an invite code. <a class="text-link" href="{{ url_for('auth.register') }}">Create account</a></p>
   </article>
 </section>
+{% endblock %}
+
+{% block page_scripts %}
+<script>
+(function () {
+  document.querySelectorAll("[data-pw-toggle]").forEach(function (btn) {
+    var targetId = btn.getAttribute("data-pw-toggle");
+    var input = document.getElementById(targetId);
+    if (!input) return;
+    btn.addEventListener("click", function () {
+      var isText = input.type === "text";
+      input.type = isText ? "password" : "text";
+      btn.setAttribute("aria-label", isText ? "Show password" : "Hide password");
+      var eye = btn.querySelector("svg");
+      if (eye) eye.style.opacity = isText ? "1" : "0.55";
+    });
+  });
+})();
+</script>
 {% endblock %}

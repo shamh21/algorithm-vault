@@ -9,6 +9,8 @@ import {
   Copy,
   Download,
   Edit3,
+  Eye,
+  EyeOff,
   LogOut,
   Loader2,
   LockKeyhole,
@@ -446,7 +448,7 @@ export function InviteAdminDashboard() {
       <header className="sticky top-0 z-20 -mx-4 border-b border-white/10 bg-[#030304]/90 px-4 py-3 backdrop-blur md:static md:mx-0 md:border-0 md:bg-transparent md:px-0">
         <div className="flex items-center justify-between gap-3">
           <div>
-            <p className="text-xs font-semibold uppercase text-amber-300">Admin</p>
+            <p className="text-xs font-semibold uppercase text-[#c58bff]">Admin</p>
             <h1 className="text-2xl font-semibold text-white md:text-4xl">Invite Codes</h1>
           </div>
           <div className="flex items-center gap-2">
@@ -503,7 +505,9 @@ export function InviteAdminDashboard() {
             <button
               key={item.key}
               className={`tap-target shrink-0 rounded-full px-4 text-sm font-semibold ${
-                status === item.key ? "bg-amber-300 text-black" : "border border-white/10 bg-white/5 text-white"
+                status === item.key
+                  ? "bg-gradient-to-b from-[#e82035] to-[#a8152a] text-white shadow-[0_6px_18px_rgba(255,31,54,0.22)]"
+                  : "border border-white/10 bg-white/5 text-white"
               }`}
               onClick={() => setStatus(item.key)}
               type="button"
@@ -629,7 +633,7 @@ function AdminAuthShell({ children }: { children: ReactNode }) {
 function CheckingState() {
   return (
     <div className="flex min-h-72 flex-col items-center justify-center text-center">
-      <Loader2 className="h-8 w-8 animate-spin text-amber-300" aria-hidden="true" />
+      <Loader2 className="h-8 w-8 animate-spin text-[#c58bff]" aria-hidden="true" />
       <h1 className="mt-5 text-2xl font-semibold text-white">Admin sign in</h1>
       <p className="mt-2 text-sm text-white/60">Checking your admin session.</p>
     </div>
@@ -639,13 +643,13 @@ function CheckingState() {
 function SessionErrorState({ message, onRetry }: { message: string; onRetry: () => void }) {
   return (
     <div className="text-center">
-      <AlertTriangle className="mx-auto h-10 w-10 text-amber-300" aria-hidden="true" />
+      <AlertTriangle className="mx-auto h-10 w-10 text-[#ff6b70]" aria-hidden="true" />
       <h1 className="mt-5 text-2xl font-semibold text-white">Admin sign in</h1>
       <p className="mt-2 text-sm text-white/60">The admin session could not be checked.</p>
-      <p className="mt-4 rounded-xl border border-amber-300/30 bg-amber-300/10 p-3 text-sm text-amber-100" role="alert" aria-live="polite">
+      <p className="mt-4 rounded-xl border border-red-400/30 bg-red-400/10 p-3 text-sm text-red-100" role="alert" aria-live="polite">
         {message || "Network error. Check your connection and try again."}
       </p>
-      <button className="tap-target mt-5 w-full rounded-2xl bg-amber-300 px-4 font-bold text-black" type="button" onClick={onRetry}>
+      <button className="tap-target mt-5 w-full rounded-2xl bg-gradient-to-b from-[#e82035] to-[#a8152a] px-4 font-bold text-white shadow-[0_10px_28px_rgba(255,31,54,0.22)]" type="button" onClick={onRetry}>
         Retry
       </button>
     </div>
@@ -669,22 +673,23 @@ function AdminSignIn({
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onRetrySession: () => void;
 }) {
+  const [showPassword, setShowPassword] = useState(false);
   const totpCode = values.totpCode.trim();
   const canSubmit = Boolean(values.username.trim() && values.password && /^\d{6}$/.test(totpCode) && !submitting && !disabled);
   return (
     <>
-      <div className="flex items-start gap-3">
-        <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border border-amber-300/25 bg-amber-300/10 text-amber-200">
+      <div className="av-slide-up flex items-start gap-3">
+        <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border border-[rgba(255,31,54,0.28)] bg-[rgba(255,31,54,0.1)] text-[#ff6b70]">
           <LockKeyhole className="h-6 w-6" aria-hidden="true" />
         </div>
         <div>
-          <p className="text-xs font-semibold uppercase text-amber-300">AlgVault Admin</p>
+          <p className="text-xs font-semibold uppercase text-[#c58bff]">AlgVault Admin</p>
           <h1 className="mt-1 text-2xl font-semibold text-white">Admin sign in</h1>
           <p className="mt-2 text-sm leading-6 text-white/60">Enter your admin credentials and verification code to continue.</p>
         </div>
       </div>
 
-      <form className="mt-6 grid gap-4" onSubmit={onSubmit}>
+      <form className="mt-6 grid gap-4" onSubmit={onSubmit} autoComplete="on">
         <Field label="Username">
           <input
             className="Input text-base"
@@ -693,29 +698,47 @@ function AdminSignIn({
             autoCapitalize="none"
             autoComplete="username"
             autoCorrect="off"
+            spellCheck={false}
+            enterKeyHint="next"
             required
+            autoFocus
             onChange={(event) => onChange({ ...values, username: event.target.value })}
           />
         </Field>
         <Field label="Password">
-          <input
-            className="Input text-base"
-            type="password"
-            value={values.password}
-            autoComplete="current-password"
-            required
-            onChange={(event) => onChange({ ...values, password: event.target.value })}
-          />
+          <div className="relative">
+            <input
+              className="Input text-base"
+              type={showPassword ? "text" : "password"}
+              value={values.password}
+              autoComplete="current-password"
+              enterKeyHint="next"
+              required
+              style={{ paddingRight: "3rem" }}
+              onChange={(event) => onChange({ ...values, password: event.target.value })}
+            />
+            <button
+              type="button"
+              tabIndex={-1}
+              aria-label={showPassword ? "Hide password" : "Show password"}
+              className="absolute right-2 top-1/2 -translate-y-1/2 flex h-11 w-11 items-center justify-center text-white/40 hover:text-white/70"
+              onClick={() => setShowPassword((v) => !v)}
+            >
+              {showPassword ? <EyeOff className="h-5 w-5" aria-hidden="true" /> : <Eye className="h-5 w-5" aria-hidden="true" />}
+            </button>
+          </div>
         </Field>
-        <Field label="TOTP code">
+        <Field label="Authenticator code (6 digits)">
           <input
-            className="Input text-base tabular-nums"
+            className="Input text-base tabular-nums tracking-widest"
             type="text"
-            value={values.totpCode}
             inputMode="numeric"
+            value={values.totpCode}
             autoComplete="one-time-code"
             pattern="[0-9]*"
             maxLength={6}
+            placeholder="000000"
+            enterKeyHint="done"
             required
             onChange={(event) => onChange({ ...values, totpCode: event.target.value.replace(/\D/g, "").slice(0, 6) })}
           />
@@ -727,8 +750,14 @@ function AdminSignIn({
           </p>
         )}
 
-        <button className="tap-target w-full rounded-2xl bg-amber-300 px-4 font-bold text-black disabled:opacity-60" type="submit" disabled={!canSubmit}>
-          {submitting ? "Signing in..." : "Sign in"}
+        <button
+          className="tap-target w-full rounded-2xl bg-gradient-to-b from-[#e82035] to-[#a8152a] px-4 font-bold text-white shadow-[0_10px_28px_rgba(255,31,54,0.22)] disabled:opacity-60"
+          type="submit"
+          disabled={!canSubmit}
+        >
+          {submitting ? (
+            <span className="inline-flex items-center gap-2 justify-center"><Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />Signing in…</span>
+          ) : "Sign in"}
         </button>
         {disabled && (
           <button className="tap-target w-full rounded-2xl border border-white/10 bg-white/5 px-4 font-semibold text-white" type="button" onClick={onRetrySession}>
@@ -799,10 +828,10 @@ function LoadingState() {
 function EmptyState({ onCreate }: { onCreate: () => void }) {
   return (
     <div className="rounded-3xl border border-dashed border-white/15 bg-white/[0.04] p-8 text-center">
-      <ShieldCheck className="mx-auto h-10 w-10 text-amber-300" />
+      <ShieldCheck className="mx-auto h-10 w-10 text-[#c58bff]" />
       <h2 className="mt-4 text-xl font-semibold text-white">No invite codes yet</h2>
       <p className="mx-auto mt-2 max-w-sm text-sm text-white/60">No invite codes yet. Create one code or batch-generate a set for a campaign.</p>
-      <button className="tap-target mt-5 rounded-2xl bg-amber-300 px-5 font-bold text-black" onClick={onCreate} type="button">
+      <button className="tap-target mt-5 rounded-2xl bg-gradient-to-b from-[#e82035] to-[#a8152a] px-5 font-bold text-white shadow-[0_10px_28px_rgba(255,31,54,0.22)]" onClick={onCreate} type="button">
         Create Code
       </button>
     </div>
@@ -842,7 +871,7 @@ function InviteCard(props: {
           <Wallet className="h-4 w-4 text-emerald-300" />
           {invite.profitShareWallet}
         </span>
-        <button className="tap-target rounded-xl px-3 font-semibold text-amber-200" onClick={props.onCopy} type="button">
+        <button className="tap-target rounded-xl px-3 font-semibold text-[#c58bff]" onClick={props.onCopy} type="button">
           {props.copied ? "Copied" : "Copy"}
         </button>
       </div>

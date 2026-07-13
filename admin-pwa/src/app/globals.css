@@ -1,8 +1,8 @@
 @import "tailwindcss";
 
 @theme inline {
-  --font-sans: "Geist", "Geist Fallback", ui-sans-serif, system-ui, sans-serif;
-  --font-mono: "Geist Mono", "Geist Mono Fallback", ui-monospace, monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Geist", "Geist Fallback", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "SF Mono", "Geist Mono", "Geist Mono Fallback", ui-monospace, monospace;
 }
 
 :root {
@@ -219,6 +219,108 @@ textarea:focus-visible {
   color: #ffffff;
 }
 
+/* ── Keyframe animations ── */
+@keyframes av-panel-enter {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes av-glow-pulse {
+  0%, 100% { box-shadow: 0 0 12px 2px rgba(192, 92, 255, 0.18); }
+  50%       { box-shadow: 0 0 24px 6px rgba(192, 92, 255, 0.38); }
+}
+
+@keyframes av-status-ping {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%       { opacity: 0.5; transform: scale(0.82); }
+}
+
+@keyframes av-sparkline-draw {
+  from { stroke-dashoffset: 200; }
+  to   { stroke-dashoffset: 0; }
+}
+
+@keyframes av-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes av-slide-up {
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Animation utility classes */
+.av-panel-enter {
+  animation: av-panel-enter 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.av-glow-pulse {
+  animation: av-glow-pulse 2.8s ease-in-out infinite;
+}
+
+.av-status-ping {
+  animation: av-status-ping 2s ease-in-out infinite;
+}
+
+.av-fade-in {
+  animation: av-fade-in 0.22s ease both;
+}
+
+.av-slide-up {
+  animation: av-slide-up 0.32s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Staggered panel entrances */
+.av-enter-1 { animation-delay: 0ms; }
+.av-enter-2 { animation-delay: 55ms; }
+.av-enter-3 { animation-delay: 110ms; }
+.av-enter-4 { animation-delay: 165ms; }
+
+/* Tabular numerics for trading values */
+.tabular-nums,
+.av-metric-value,
+.av-balance-value,
+[data-metric],
+[data-pnl],
+code,
+.font-mono {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}
+
+/* Status dot colors */
+.av-dot-ready   { background: #00c076; }
+.av-dot-stale   { background: #ff9900; }
+.av-dot-danger  { background: #ff4d4f; }
+.av-dot-offline { background: #5f5f72; }
+.av-dot-auth    { background: #9b4dff; }
+
+/* Status chip primitives */
+.av-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.av-chip-ready   { background: rgba(0,192,118,0.14);  border: 1px solid rgba(0,192,118,0.32);  color: #4dffa8; }
+.av-chip-stale   { background: rgba(255,153,0,0.12);  border: 1px solid rgba(255,153,0,0.3);   color: #ffb74d; }
+.av-chip-danger  { background: rgba(255,77,79,0.12);  border: 1px solid rgba(255,77,79,0.32);  color: #ff6b70; }
+.av-chip-offline { background: rgba(95,95,114,0.14);  border: 1px solid rgba(95,95,114,0.28);  color: #9595a8; }
+.av-chip-auth    { background: rgba(155,77,255,0.14); border: 1px solid rgba(155,77,255,0.32); color: #c58bff; }
+
+/* iOS-safe bottom spacing helper */
+.ios-bottom-safe {
+  padding-bottom: max(1rem, var(--safe-bottom));
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -226,5 +328,6 @@ textarea:focus-visible {
     scroll-behavior: auto !important;
     transition-duration: 0.001ms !important;
     animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
   }
 }

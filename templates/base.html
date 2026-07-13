@@ -12,7 +12,7 @@
     <meta name="theme-color" content="#030304" media="(prefers-color-scheme: dark)">
     <meta name="color-scheme" content="dark">
     <meta name="application-name" content="AlgVault">
-    <meta name="format-detection" content="telephone=no">
+    <meta name="format-detection" content="telephone=no, date=no, email=no, address=no">
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-title" content="AlgVault">
@@ -314,6 +314,29 @@
         </section>
       {% endif %}
     {% endwith %}
+
+    {# iOS Install Hint — only shown on Safari/iOS when not already installed #}
+    <div
+      class="ios-install-hint"
+      id="ios-install-hint"
+      role="complementary"
+      aria-label="Add AlgVault to your Home Screen"
+      hidden
+    >
+      <span class="ios-install-hint-icon" aria-hidden="true">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v13"/><path d="m17 8-5-5-5 5"/><rect x="3" y="16" width="18" height="5" rx="1"/></svg>
+      </span>
+      <div class="ios-install-hint-copy">
+        <strong>Add to Home Screen</strong>
+        <p>Tap the Share button in Safari, then select <strong>Add to Home Screen</strong> for the full AlgVault PWA experience.</p>
+      </div>
+      <button
+        type="button"
+        class="ios-install-hint-dismiss"
+        id="ios-install-hint-dismiss"
+        aria-label="Dismiss install prompt"
+      >&#10005;</button>
+    </div>
 
     <main class="page-shell app-main" id="main-content">
       {% block content %}{% endblock %}

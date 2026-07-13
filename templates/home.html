@@ -6,6 +6,34 @@
 {% block content %}
 {% set balance_state = wallet_overview.state %}
 {% set pnl_state = pnl_history.state %}
+
+{# ── Readiness Cockpit ── #}
+{%- set cockpit = readiness_cockpit|default({}) -%}
+{%- set prov_state = cockpit.get('provider', 'offline') if cockpit else 'offline' -%}
+{%- set wallet_state = cockpit.get('wallet', 'offline') if cockpit else 'offline' -%}
+{%- set risk_state = cockpit.get('risk', 'offline') if cockpit else 'offline' -%}
+{%- set vault_state = cockpit.get('vault', 'offline') if cockpit else 'offline' -%}
+{%- set exec_state = cockpit.get('execution', 'offline') if cockpit else 'offline' -%}
+
+<nav class="readiness-cockpit av-panel-enter av-enter-1" aria-label="System readiness">
+  {%- set cells = [
+    ('Provider', prov_state),
+    ('Wallet',   wallet_state),
+    ('Risk',     risk_state),
+    ('Vault',    vault_state),
+    ('Execute',  exec_state)
+  ] -%}
+  {%- for label, state in cells -%}
+    {%- set state_class = 'is-ready' if state == 'ready' else ('is-stale' if state == 'stale' else ('is-danger' if state == 'danger' else ('is-auth' if state == 'auth' else 'is-offline'))) -%}
+    {%- set state_label = 'Ready' if state == 'ready' else ('Stale' if state == 'stale' else ('Blocked' if state == 'danger' else ('Auth' if state == 'auth' else 'Offline'))) -%}
+    <div class="cockpit-cell {{ state_class }} av-panel-enter av-enter-{{ loop.index }}" role="status" aria-label="{{ label }}: {{ state_label }}">
+      <span class="cockpit-cell-dot av-status-ping" aria-hidden="true"></span>
+      <span class="cockpit-cell-state">{{ state_label }}</span>
+      <span class="cockpit-cell-label">{{ label }}</span>
+    </div>
+  {%- endfor -%}
+</nav>
+
 <section
   id="dashboard"
   class="av-command-center av-home-minimal"
@@ -22,9 +50,13 @@
         <span class="card-kicker">Wallet</span>
         <h1 id="total-wallet-balance-title">Total Wallet Balance</h1>
       </div>
-      <span class="av-status-badge av-status-{{ 'danger' if balance_state == 'error' else 'neutral' }}">
-        {{ "Unavailable" if balance_state == "error" else "Live ledger" }}
-      </span>
+      {%- if balance_state == "error" -%}
+        <span class="av-chip av-chip-danger"><span class="av-chip-dot" aria-hidden="true"></span>Unavailable</span>
+      {%- elif balance_state == "empty" -%}
+        <span class="av-chip av-chip-offline"><span class="av-chip-dot" aria-hidden="true"></span>Empty</span>
+      {%- else -%}
+        <span class="av-chip av-chip-fresh"><span class="av-chip-dot av-status-ping" aria-hidden="true"></span>Live ledger</span>
+      {%- endif -%}
     </div>
 
     <div class="av-balance-value" aria-live="polite">
@@ -77,10 +109,29 @@
     {% if pnl_history.summary %}
       <p class="av-data-state">{{ pnl_history.summary }}</p>
     {% endif %}
+
+    {# Lightweight inline SVG sparkline of P&L trend (drawn by mini-charts.js) #}
+    {% if pnl_state == "ready" and pnl_history.points is defined %}
+      <script type="application/json" id="home-pnl-sparkline-data">{{ {"points": pnl_history.points}|tojson }}</script>
+      <svg
+        class="av-svg-sparkline av-panel-enter av-enter-4"
+        data-svg-sparkline
+        data-chart-source="home-pnl-sparkline-data"
+        data-stroke="#ff1f36"
+        data-fill="rgba(255,31,54,0.1)"
+        data-dot-color="#c58bff"
+        viewBox="0 0 240 44"
+        role="img"
+        aria-label="Account P&L trend sparkline"
+        preserveAspectRatio="none"
+        style="margin-top:0.75rem"
+      ></svg>
+    {% endif %}
   </article>
 </section>
 {% endblock %}
 
 {% block page_scripts %}
 <script defer src="{{ url_for('static', filename='js/command-center.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}-minimal-pnl-2"></script>
+<script defer src="{{ url_for('static', filename='js/mini-charts.js') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}-svg-sparkline-1"></script>
 {% endblock %}

@@ -13,26 +13,41 @@ export const metadata: Metadata = {
   },
   appleWebApp: {
     capable: true,
-    title: "Invite Admin",
-    statusBarStyle: "black-translucent"
+    title: "AV Admin",
+    statusBarStyle: "black-translucent",
+    startupImage: "/apple-icon.png"
+  },
+  formatDetection: {
+    telephone: false,
+    date: false,
+    address: false,
+    email: false
   },
   icons: {
-    icon: "/icon.png",
-    apple: "/apple-icon.png"
+    icon: [
+      { url: "/icon.png", sizes: "192x192", type: "image/png" },
+      { url: "/icon-512.png", sizes: "512x512", type: "image/png" }
+    ],
+    apple: [{ url: "/apple-icon.png", sizes: "180x180", type: "image/png" }]
   }
 };
 
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
+  maximumScale: 1,
+  userScalable: false,
   viewportFit: "cover",
-  themeColor: "#030304",
+  themeColor: [
+    { media: "(prefers-color-scheme: dark)", color: "#030304" },
+    { media: "(prefers-color-scheme: light)", color: "#030304" }
+  ],
   colorScheme: "dark"
 };
 
 export default function RootLayout({ children }: Readonly<{ children: ReactNode }>) {
   return (
-    <html lang="en">
+    <html lang="en" className="bg-[#030304]">
       <body>{children}</body>
     </html>
   );
