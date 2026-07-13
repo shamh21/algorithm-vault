@@ -80,7 +80,7 @@
     ctx.lineWidth = 2.25 * ratio;
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
-    ctx.strokeStyle = canvas.getAttribute("data-chart-color") || "#7dd3fc";
+    ctx.strokeStyle = canvas.getAttribute("data-chart-color") || "#c05cff";
     ctx.stroke();
 
     if (!reduceMotion) {

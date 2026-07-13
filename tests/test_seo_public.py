@@ -84,8 +84,8 @@ def test_public_pages_have_unique_metadata_canonicals_and_internal_links(app) ->
         assert html.count("<h1") == 1, path
         assert heading in html
         assert f'<link rel="canonical" href="https://algvault.app{path}">' in html
-        assert '<meta property="og:image" content="https://algvault.app/icons/algvault-mascot-512.png">' in html
-        assert '<meta name="twitter:image" content="https://algvault.app/icons/algvault-mascot-512.png">' in html
+        assert '<meta property="og:image" content="https://algvault.app/icons/algvault-ios-512.png">' in html
+        assert '<meta name="twitter:image" content="https://algvault.app/icons/algvault-ios-512.png">' in html
         assert "/features/" in html
         assert "/security/" in html
 

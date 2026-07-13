@@ -17,6 +17,12 @@
   --algvault-red: #ff1f36;
   --algvault-red-soft: rgba(255, 31, 54, 0.14);
   --algvault-red-border: rgba(255, 31, 54, 0.42);
+  --algvault-purple: #9b4dff;
+  --algvault-purple-hot: #c05cff;
+  --algvault-purple-soft: rgba(155, 77, 255, 0.16);
+  --algvault-purple-border: rgba(192, 92, 255, 0.34);
+  --algvault-glass: rgba(12, 10, 18, 0.84);
+  --algvault-grid: rgba(255, 255, 255, 0.026);
 }
 
 * {
@@ -35,13 +41,29 @@ body {
   margin: 0;
   background:
     radial-gradient(circle at 18% 0%, rgba(255, 31, 54, 0.18), transparent 25rem),
-    radial-gradient(circle at 100% 16%, rgba(143, 14, 29, 0.16), transparent 24rem),
+    radial-gradient(circle at 100% 16%, rgba(155, 77, 255, 0.24), transparent 24rem),
+    radial-gradient(circle at 52% 112%, rgba(255, 31, 54, 0.1), transparent 26rem),
     linear-gradient(180deg, #030304 0%, #0a0a0d 52%, #030304 100%);
   color: #f8f8fa;
   font-family: var(--font-sans);
   letter-spacing: 0;
   overscroll-behavior-y: none;
   -webkit-tap-highlight-color: transparent;
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image:
+    linear-gradient(var(--algvault-grid) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.018) 1px, transparent 1px),
+    radial-gradient(circle at 18% 18%, rgba(255, 31, 54, 0.1), transparent 24rem),
+    radial-gradient(circle at 80% 8%, rgba(155, 77, 255, 0.12), transparent 24rem);
+  background-size: 34px 34px, 34px 34px, auto, auto;
+  opacity: 0.88;
 }
 
 button,
@@ -89,16 +111,17 @@ textarea:focus-visible {
 .Input {
   min-height: 48px;
   width: 100%;
-  border-radius: 1rem;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(255, 255, 255, 0.055);
+  border-radius: 0.9rem;
+  border: 1px solid rgba(192, 92, 255, 0.18);
+  background: rgba(9, 8, 13, 0.82);
   padding: 0 0.9rem;
   color: #ffffff;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.045);
 }
 
 .Input:focus {
-  border-color: var(--algvault-red-border);
-  box-shadow: 0 0 0 3px var(--algvault-red-soft);
+  border-color: var(--algvault-purple-border);
+  box-shadow: 0 0 0 3px var(--algvault-purple-soft), 0 0 24px rgba(155, 77, 255, 0.12);
 }
 
 .Input::placeholder {
@@ -109,30 +132,86 @@ textarea:focus-visible {
   max-height: min(82svh, 760px);
 }
 
+.ios-safe-page > header,
+.ios-bottom-bar,
+.ios-safe-page > section,
+.ios-safe-page [class*="rounded-2xl"][class*="bg-white"],
+.ios-safe-page [class*="rounded-xl"][class*="bg-white"] {
+  border-color: rgba(192, 92, 255, 0.18) !important;
+  background:
+    linear-gradient(135deg, rgba(255, 31, 54, 0.07), transparent 38%),
+    linear-gradient(215deg, rgba(155, 77, 255, 0.12), transparent 48%),
+    linear-gradient(180deg, rgba(18, 17, 24, 0.92), rgba(6, 6, 9, 0.94)) !important;
+  box-shadow:
+    0 22px 60px rgba(0, 0, 0, 0.45),
+    0 0 38px rgba(155, 77, 255, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.055);
+}
+
+.ios-safe-page > section {
+  position: relative;
+  overflow: hidden;
+  border-radius: 0.9rem;
+}
+
+.ios-safe-page > section::before,
+.ios-safe-page > header::before,
+.ios-bottom-bar::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 1px;
+  pointer-events: none;
+  background: linear-gradient(90deg, transparent, rgba(255, 31, 54, 0.56), rgba(192, 92, 255, 0.54), transparent);
+}
+
+.ios-safe-page svg {
+  filter: drop-shadow(0 0 10px rgba(155, 77, 255, 0.18));
+}
+
 /* Normalize former amber brand utilities to the AlgVault red system.
    Green remains available for genuine success and profit states. */
 [class*="bg-amber-"] {
-  background-color: var(--algvault-red) !important;
+  background: linear-gradient(135deg, #ff4054 0%, #d81f42 44%, #7c2dff 100%) !important;
+  box-shadow: 0 14px 34px rgba(255, 31, 54, 0.22), 0 0 28px rgba(155, 77, 255, 0.16) !important;
 }
 
 [class*="text-amber-"] {
-  color: #ff6877 !important;
+  color: #c58bff !important;
 }
 
 [class*="border-amber-"] {
-  border-color: var(--algvault-red-border) !important;
+  border-color: var(--algvault-purple-border) !important;
 }
 
 [class*="ring-amber-"] {
-  --tw-ring-color: rgba(255, 31, 54, 0.42) !important;
+  --tw-ring-color: rgba(192, 92, 255, 0.42) !important;
 }
 
 [class*="bg-amber-"][class*="text-black"] {
   color: #ffffff !important;
 }
 
-[class*="bg-[#070807]"] {
-  background-color: rgba(3, 3, 4, 0.95) !important;
+[class*="bg-[#070807]"],
+[class*="bg-[#030304]"] {
+  background:
+    linear-gradient(135deg, rgba(255, 31, 54, 0.08), rgba(155, 77, 255, 0.11)),
+    rgba(3, 3, 4, 0.95) !important;
+}
+
+[class*="border-white/10"] {
+  border-color: rgba(192, 92, 255, 0.18) !important;
+}
+
+[class*="bg-white/5"],
+[class*="bg-white/[0.06]"] {
+  background-color: rgba(255, 255, 255, 0.045) !important;
+}
+
+[class*="text-white/60"],
+[class*="text-white/65"],
+[class*="text-white/55"] {
+  color: rgba(218, 203, 255, 0.72) !important;
 }
 
 ::selection {

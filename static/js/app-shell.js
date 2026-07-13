@@ -148,7 +148,7 @@
       themeCurrentLabels.forEach((node) => {
         node.textContent = label;
       });
-      themeMeta?.setAttribute("content", nextTheme === "dark" ? "#050607" : "#f8fbff");
+      themeMeta?.setAttribute("content", nextTheme === "dark" ? "#030304" : "#f8fbff");
       colorSchemeMeta?.setAttribute("content", nextTheme === "dark" ? "dark" : "light");
     };
 

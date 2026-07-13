@@ -84,7 +84,7 @@
           labels,
           datasets: [
             { label: "Reserve", data: reserve, borderColor: "#00c076", backgroundColor: "rgba(0,192,118,.12)", tension: 0.32, pointRadius: 2 },
-            { label: "Liability", data: liability, borderColor: "#f0b90b", backgroundColor: "rgba(240,185,11,.10)", tension: 0.32, pointRadius: 2 },
+            { label: "Liability", data: liability, borderColor: "#9b4dff", backgroundColor: "rgba(155,77,255,.12)", tension: 0.32, pointRadius: 2 },
           ],
         },
         options: {

@@ -397,8 +397,8 @@ def test_pwa_manifest_has_ios_install_shape(app) -> None:
     assert payload["id"] == "/"
     assert payload["start_url"] == "/"
     assert payload["scope"] == "/"
-    assert payload["background_color"] == "#050607"
-    assert payload["theme_color"] == "#050607"
+    assert payload["background_color"] == "#030304"
+    assert payload["theme_color"] == "#030304"
     assert {icon["src"] for icon in payload["icons"]} >= {
         "/icons/algvault-ios-192.png",
         "/icons/algvault-ios-512.png",
@@ -416,7 +416,7 @@ def test_ios_pwa_head_tags_target_algvault(app) -> None:
     assert '<meta name="apple-mobile-web-app-capable" content="yes">' in shell
     assert '<meta name="apple-mobile-web-app-title" content="AlgVault">' in shell
     assert '<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">' in shell
-    assert '<meta name="theme-color" content="#050607">' in shell
+    assert '<meta name="theme-color" content="#030304">' in shell
     assert '<meta name="color-scheme" content="dark">' in shell
     assert '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">' in shell
     assert '<link rel="apple-touch-icon" href="/icons/algvault-ios-180.png">' in shell

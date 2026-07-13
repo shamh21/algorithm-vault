@@ -1,4 +1,4 @@
-const CACHE_VERSION = "algvault-v21-vault-shell-polish-9";
+const CACHE_VERSION = "algvault-v22-red-purple-theme-1";
 const SHELL_CACHE = `${CACHE_VERSION}-shell`;
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 
@@ -26,14 +26,14 @@ const OFFLINE_HTML = `<!doctype html>
   <title>AlgVault Offline</title>
   <style>
     html,body{margin:0;min-height:100%;background:#030304;color:#fafafa;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text",Inter,system-ui,sans-serif}
-    body{background:radial-gradient(circle at 50% 20%,rgba(255,31,54,.18),transparent 25rem),linear-gradient(180deg,#030304,#09090b 58%,#030304)}
+    body{background:radial-gradient(circle at 36% 18%,rgba(255,31,54,.2),transparent 25rem),radial-gradient(circle at 78% 12%,rgba(155,77,255,.2),transparent 23rem),linear-gradient(180deg,#030304,#09090b 58%,#030304)}
     main{min-height:100svh;display:grid;place-items:center;padding:calc(2rem + env(safe-area-inset-top)) max(1.25rem,env(safe-area-inset-right)) calc(2rem + env(safe-area-inset-bottom)) max(1.25rem,env(safe-area-inset-left))}
-    section{max-width:28rem;border:1px solid rgba(255,31,54,.34);border-radius:16px;padding:1.25rem;background:linear-gradient(180deg,rgba(18,18,22,.98),rgba(7,7,9,.98));box-shadow:0 22px 56px rgba(0,0,0,.55),0 0 38px rgba(255,31,54,.08)}
-    span{color:#ff6877;font-size:.74rem;font-weight:800;text-transform:uppercase;letter-spacing:.08em}
+    section{max-width:28rem;border:1px solid rgba(192,92,255,.34);border-radius:16px;padding:1.25rem;background:linear-gradient(135deg,rgba(255,31,54,.1),rgba(155,77,255,.12)),linear-gradient(180deg,rgba(18,18,22,.98),rgba(7,7,9,.98));box-shadow:0 22px 56px rgba(0,0,0,.55),0 0 38px rgba(255,31,54,.08),0 0 34px rgba(155,77,255,.09)}
+    span{color:#c58bff;font-size:.74rem;font-weight:800;text-transform:uppercase;letter-spacing:.08em}
     h1{margin:.35rem 0;font-size:1.35rem} p{margin:0;color:#b8b8c0}
   </style>
 </head>
-<body><main><section><span>Offline</span><h1>AlgVault is offline</h1><p>Reconnect to refresh wallet, vault, and market data. Static app assets remain cached safely. The red/black application shell remains available.</p></section></main></body>
+<body><main><section><span>Offline</span><h1>AlgVault is offline</h1><p>Reconnect to refresh wallet, vault, and market data. Static app assets remain cached safely. The red/black/purple application shell remains available.</p></section></main></body>
 </html>`;
 
 const isHtmlRequest = (request) => request.mode === "navigate" || Boolean(request.headers.get("accept")?.includes("text/html"));

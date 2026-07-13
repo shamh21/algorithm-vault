@@ -4,15 +4,15 @@
   --safe-right: env(safe-area-inset-right);
   --safe-bottom: env(safe-area-inset-bottom);
   --safe-left: env(safe-area-inset-left);
-  --bg: #050607;
-  --panel: rgba(12, 15, 20, 0.94);
-  --panel-strong: rgba(17, 21, 28, 0.98);
+  --bg: #030304;
+  --panel: rgba(13, 13, 16, 0.94);
+  --panel-strong: rgba(18, 18, 22, 0.98);
   --ink: #f8fafc;
   --muted: #9aa4b2;
   --muted-strong: #c7ced8;
   --accent: #ff2d2d;
   --accent-soft: rgba(255, 45, 45, 0.12);
-  --cyan: #6ee7ff;
+  --cyan: #b26dff;
   --warning: #ffb156;
   --border: rgba(255, 255, 255, 0.1);
   --border-red: rgba(255, 45, 45, 0.26);
@@ -44,7 +44,9 @@ body {
   background:
     linear-gradient(rgba(255, 255, 255, 0.018) 1px, transparent 1px),
     linear-gradient(90deg, rgba(255, 255, 255, 0.014) 1px, transparent 1px),
-    linear-gradient(180deg, #07080a 0%, #050607 44%, #07080a 100%);
+    radial-gradient(circle at 16% -10%, rgba(255, 31, 54, 0.16), transparent 28rem),
+    radial-gradient(circle at 92% 8%, rgba(155, 77, 255, 0.2), transparent 28rem),
+    linear-gradient(180deg, #030304 0%, #09090b 44%, #030304 100%);
   background-size: 34px 34px, 34px 34px, auto;
   -webkit-tap-highlight-color: transparent;
 }

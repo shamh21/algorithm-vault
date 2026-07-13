@@ -7,8 +7,8 @@ export default function manifest(): MetadataRoute.Manifest {
     description: "Invite-code profit-share administration for AlgVault.",
     start_url: "/",
     display: "standalone",
-    background_color: "#070807",
-    theme_color: "#070807",
+    background_color: "#030304",
+    theme_color: "#030304",
     icons: [
       {
         src: "/icon.png",

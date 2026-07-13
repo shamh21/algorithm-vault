@@ -19,6 +19,8 @@ def test_canonical_algvault_theme_contract() -> None:
     assert "--accent: #ff1f36" in theme
     assert "--bg: #030304" in theme
     assert "--panel: #0d0d10" in theme
+    assert "--violet: #9b4dff" in theme
+    assert "red/black/purple" in theme
     assert "#f0b90b" not in theme
     assert "rgba(240, 185, 11" not in theme
     assert "Green is reserved for actual success/profit states" in theme
@@ -62,6 +64,7 @@ def test_admin_pwa_uses_algvault_red_brand_tokens() -> None:
 
     assert "--algvault-red: #ff1f36" in css
     assert "--algvault-bg: #030304" in css
+    assert "--algvault-purple: #9b4dff" in css
     assert "rgba(34, 197, 94, 0.1)" not in css
     assert "rgba(245, 158, 11, 0.12)" not in css
     assert '[class*="bg-amber-"]' in css
@@ -73,6 +76,7 @@ def test_service_worker_precaches_and_renders_red_black_shell() -> None:
     assert '"/static/css/algvault-theme.css"' in worker
     assert '"/static/css/public.css"' in worker
     assert 'content="#030304"' in worker
-    assert "#ff6877" in worker
+    assert "#c58bff" in worker
+    assert "red/black/purple" in worker
     assert "#7dd3fc" not in worker
     assert "#101826" not in worker

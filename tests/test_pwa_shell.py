@@ -17,8 +17,8 @@ def test_manifest_contains_dark_standalone_pwa_contract(app) -> None:
     assert manifest["start_url"] == "/"
     assert manifest["scope"] == "/"
     assert manifest["display"] == "standalone"
-    assert manifest["background_color"] == "#050607"
-    assert manifest["theme_color"] == "#050607"
+    assert manifest["background_color"] == "#030304"
+    assert manifest["theme_color"] == "#030304"
     assert "finance" in manifest["categories"]
 
     icons = {icon["sizes"]: icon for icon in manifest["icons"]}
@@ -45,7 +45,7 @@ def test_base_template_has_dark_ios_pwa_metadata(app) -> None:
 
     assert response.status_code == 200
     assert '<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">' in html
-    assert '<meta name="theme-color" content="#050607">' in html
+    assert '<meta name="theme-color" content="#030304">' in html
     assert '<meta name="color-scheme" content="dark">' in html
     assert '<meta name="apple-mobile-web-app-capable" content="yes">' in html
     assert '<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">' in html
@@ -124,9 +124,10 @@ def test_command_center_dark_theme_layer_is_final() -> None:
     source = Path("static/css/app.css").read_text(encoding="utf-8")
     final_layer = source.split("/* AlgVault command-center redesign. Final layer wins over legacy theme passes. */", 1)[1]
 
-    assert "--bg: #050607" in final_layer
-    assert "--panel: rgba(12, 16, 22, 0.96)" in final_layer
-    assert "--accent: #6ee7ff" in final_layer
+    assert "--bg: #030304" in final_layer
+    assert "--panel: rgba(13, 13, 16, 0.96)" in final_layer
+    assert "--accent: #ff1f36" in final_layer
+    assert "--accent-strong: #9b4dff" in final_layer
     assert 'html[data-theme="light"]' in final_layer
     assert ".av-command-center" in final_layer
     assert ".av-home-minimal" in source

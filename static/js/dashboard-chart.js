@@ -151,7 +151,7 @@
 
     fallbackLine(ctx, candles, width, height) {
       ctx.save();
-      ctx.strokeStyle = "rgba(240,185,11,0.85)";
+      ctx.strokeStyle = "rgba(155,77,255,0.85)";
       ctx.lineWidth = 1.8;
       ctx.beginPath();
       candles.forEach((row, index) => {
@@ -167,7 +167,7 @@
     zones(ctx, overlays, width, height, candles) {
       const zones = overlays.zones || {};
       [
-        ["entry", zones.entry?.price, "rgba(240,185,11,0.8)"],
+        ["entry", zones.entry?.price, "rgba(155,77,255,0.82)"],
         ["exit", zones.exit?.price, "rgba(0,192,118,0.75)"],
         ["stop", zones.stop_loss?.price, "rgba(255,77,79,0.75)"],
       ].forEach(([name, raw, color]) => {
@@ -194,7 +194,7 @@
       const max = Math.max(...allPrices);
       const y = (value) => height - ((value - min) / Math.max(max - min, 1e-9)) * height;
       ctx.save();
-      ctx.strokeStyle = "rgba(240,185,11,0.96)";
+      ctx.strokeStyle = "rgba(192,92,255,0.96)";
       ctx.lineWidth = 2;
       ctx.setLineDash([6, 5]);
       ctx.beginPath();
@@ -221,7 +221,7 @@
       const max = Math.max(...allPrices);
       const y = (value) => height - ((value - min) / Math.max(max - min, 1e-9)) * height;
       ctx.save();
-      ctx.fillStyle = "rgba(240,185,11,0.08)";
+      ctx.fillStyle = "rgba(155,77,255,0.1)";
       ctx.beginPath();
       upper.forEach((point, index) => {
         const x = width * (0.62 + (index / Math.max(upper.length - 1, 1)) * 0.34);
@@ -243,8 +243,8 @@
       if (!intensity) return;
       ctx.save();
       const gradient = ctx.createLinearGradient(width * 0.58, 0, width, 0);
-      gradient.addColorStop(0, `rgba(240,185,11,${0.02 + intensity * 0.03})`);
-      gradient.addColorStop(1, `rgba(240,185,11,${0.08 + intensity * 0.06})`);
+      gradient.addColorStop(0, `rgba(155,77,255,${0.02 + intensity * 0.03})`);
+      gradient.addColorStop(1, `rgba(155,77,255,${0.08 + intensity * 0.06})`);
       ctx.fillStyle = gradient;
       ctx.fillRect(width * 0.58, 0, width * 0.42, height);
       ctx.restore();

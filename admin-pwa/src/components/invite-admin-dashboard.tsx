@@ -443,7 +443,7 @@ export function InviteAdminDashboard() {
 
   return (
     <main className="ios-safe-page mx-auto min-h-screen w-full max-w-7xl">
-      <header className="sticky top-0 z-20 -mx-4 border-b border-white/10 bg-[#070807]/90 px-4 py-3 backdrop-blur md:static md:mx-0 md:border-0 md:bg-transparent md:px-0">
+      <header className="sticky top-0 z-20 -mx-4 border-b border-white/10 bg-[#030304]/90 px-4 py-3 backdrop-blur md:static md:mx-0 md:border-0 md:bg-transparent md:px-0">
         <div className="flex items-center justify-between gap-3">
           <div>
             <p className="text-xs font-semibold uppercase text-amber-300">Admin</p>
@@ -574,7 +574,7 @@ export function InviteAdminDashboard() {
         )}
       </section>
 
-      <div className="ios-bottom-bar fixed inset-x-0 bottom-0 z-30 border-t border-white/10 bg-[#070807]/95 pt-3 backdrop-blur">
+      <div className="ios-bottom-bar fixed inset-x-0 bottom-0 z-30 border-t border-white/10 bg-[#030304]/95 pt-3 backdrop-blur">
         <div className="mx-auto grid max-w-7xl grid-cols-3 gap-2">
           <button className="tap-target rounded-2xl bg-amber-300 px-3 text-sm font-bold text-black" onClick={() => startCreate("create")} type="button">
             <Plus className="mx-auto h-5 w-5" />

@@ -1,5 +1,5 @@
 /* Canonical AlgVault visual system.
-   Loaded after app.css/public.css so branding stays red/black while
+   Loaded after app.css/public.css so branding stays red/black/purple while
    semantic profit/success states may remain green. */
 
 :root,
@@ -17,10 +17,14 @@ html[data-theme="light"] {
   --accent: #ff1f36;
   --accent-soft: rgba(255, 31, 54, 0.12);
   --accent-ink: #ffffff;
+  --violet: #9b4dff;
+  --violet-hot: #c05cff;
+  --violet-soft: rgba(155, 77, 255, 0.14);
+  --violet-border: rgba(192, 92, 255, 0.34);
   --danger: #ff1f36;
   --warning: #ff6877;
   --success: #32d583;
-  --cyan: #ff6877;
+  --cyan: #b26dff;
   --border: rgba(255, 255, 255, 0.1);
   --border-red: rgba(255, 31, 54, 0.28);
   --border-strong: rgba(255, 31, 54, 0.5);
@@ -37,8 +41,8 @@ body,
 .app-body {
   background-image:
     radial-gradient(circle at 16% -10%, rgba(255, 31, 54, 0.18), transparent 30rem),
-    radial-gradient(circle at 92% 8%, rgba(143, 14, 29, 0.12), transparent 28rem),
-    radial-gradient(circle at 50% 112%, rgba(255, 31, 54, 0.08), transparent 28rem),
+    radial-gradient(circle at 92% 8%, rgba(155, 77, 255, 0.2), transparent 28rem),
+    radial-gradient(circle at 50% 112%, rgba(255, 31, 54, 0.1), transparent 28rem),
     linear-gradient(180deg, #030304 0%, #09090b 48%, #030304 100%) !important;
   color: var(--ink) !important;
 }
@@ -47,7 +51,8 @@ body::before {
   background-image:
     linear-gradient(rgba(255, 255, 255, 0.018) 1px, transparent 1px),
     linear-gradient(90deg, rgba(255, 255, 255, 0.016) 1px, transparent 1px),
-    radial-gradient(circle at 18% 20%, rgba(255, 31, 54, 0.1), transparent 24rem) !important;
+    radial-gradient(circle at 18% 20%, rgba(255, 31, 54, 0.1), transparent 24rem),
+    radial-gradient(circle at 78% 12%, rgba(155, 77, 255, 0.1), transparent 22rem) !important;
 }
 
 .site-header::before,
@@ -68,9 +73,13 @@ body::before {
 
 .brand-mark,
 .brand-mark--mascot {
-  border-color: rgba(255, 31, 54, 0.36) !important;
-  background: #030304 !important;
-  box-shadow: 0 0 30px rgba(255, 31, 54, 0.2) !important;
+  border-color: rgba(192, 92, 255, 0.48) !important;
+  background:
+    radial-gradient(circle at 32% 22%, rgba(255, 255, 255, 0.14), transparent 25%),
+    linear-gradient(145deg, rgba(255, 31, 54, 0.24), rgba(155, 77, 255, 0.2) 52%, #030304 100%) !important;
+  box-shadow:
+    0 0 30px rgba(255, 31, 54, 0.22),
+    0 0 34px rgba(155, 77, 255, 0.18) !important;
 }
 
 .brand-copy .eyebrow,
@@ -79,7 +88,7 @@ body::before {
 .auth-route-context,
 .text-link,
 a.text-link {
-  color: #ff6877 !important;
+  color: #c58bff !important;
 }
 
 .nav a,
@@ -98,9 +107,12 @@ button:hover,
 .button-link:hover,
 .secondary:hover,
 .public-topbar-link:hover {
-  border-color: rgba(255, 31, 54, 0.48) !important;
+  border-color: rgba(192, 92, 255, 0.52) !important;
   background: #18181d !important;
-  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.34), 0 0 0 1px rgba(255, 31, 54, 0.08) !important;
+  box-shadow:
+    0 12px 28px rgba(0, 0, 0, 0.34),
+    0 0 0 1px rgba(255, 31, 54, 0.08),
+    0 0 24px rgba(155, 77, 255, 0.08) !important;
 }
 
 .nav a.primary,
@@ -109,16 +121,16 @@ button.primary,
 .public-topbar-cta,
 .bottom-nav-item.active {
   border-color: rgba(255, 31, 54, 0.72) !important;
-  background: linear-gradient(180deg, #ff4054, #b70d20) !important;
+  background: linear-gradient(135deg, #ff4054 0%, #d81f42 44%, #7c2dff 100%) !important;
   color: #ffffff !important;
-  box-shadow: 0 14px 34px rgba(255, 31, 54, 0.24) !important;
+  box-shadow: 0 14px 34px rgba(255, 31, 54, 0.24), 0 0 28px rgba(155, 77, 255, 0.18) !important;
 }
 
 .nav-link.active,
 .bottom-nav-item.active,
 .public-topnav a.active,
 .public-topnav a[aria-current="page"] {
-  border-color: rgba(255, 31, 54, 0.42) !important;
+  border-color: rgba(192, 92, 255, 0.44) !important;
   color: #ffffff !important;
 }
 
@@ -126,8 +138,8 @@ button.primary,
 .status-dot,
 .nav-link.active::before,
 .bottom-nav-item.active::before {
-  background: #ff1f36 !important;
-  box-shadow: 0 0 0 5px rgba(255, 31, 54, 0.12), 0 0 18px rgba(255, 31, 54, 0.38) !important;
+  background: linear-gradient(135deg, #ff1f36, #9b4dff) !important;
+  box-shadow: 0 0 0 5px rgba(155, 77, 255, 0.13), 0 0 18px rgba(255, 31, 54, 0.38) !important;
 }
 
 input,
@@ -168,9 +180,12 @@ textarea:focus-visible {
 .admin-card,
 .auth-ops-panel,
 .intro-loader__panel {
-  border-color: rgba(255, 255, 255, 0.1) !important;
-  background: linear-gradient(180deg, rgba(18, 18, 22, 0.97), rgba(7, 7, 9, 0.98)) !important;
-  box-shadow: var(--shadow) !important;
+  border-color: rgba(192, 92, 255, 0.18) !important;
+  background:
+    linear-gradient(135deg, rgba(255, 31, 54, 0.08), transparent 34%),
+    linear-gradient(215deg, rgba(155, 77, 255, 0.11), transparent 45%),
+    linear-gradient(180deg, rgba(18, 18, 22, 0.97), rgba(7, 7, 9, 0.98)) !important;
+  box-shadow: var(--shadow), 0 0 0 1px rgba(255, 31, 54, 0.035) inset !important;
 }
 
 .card::before,
@@ -178,7 +193,7 @@ textarea:focus-visible {
 .auth-card::before,
 .panel::before,
 .intro-loader__panel::before {
-  background: linear-gradient(90deg, transparent, rgba(255, 31, 54, 0.5), transparent) !important;
+  background: linear-gradient(90deg, transparent, rgba(255, 31, 54, 0.56), rgba(192, 92, 255, 0.54), transparent) !important;
 }
 
 .banner,
@@ -223,6 +238,7 @@ tr:hover td {
 .intro-loader {
   background:
     radial-gradient(circle at 50% 42%, rgba(255, 31, 54, 0.2), transparent 26rem),
+    radial-gradient(circle at 72% 28%, rgba(155, 77, 255, 0.18), transparent 22rem),
     #030304 !important;
 }
 
@@ -230,9 +246,9 @@ tr:hover td {
 .intro-loader__ring,
 .intro-loader__bar span,
 .intro-loader__ticks span {
-  border-color: rgba(255, 31, 54, 0.5) !important;
-  background-color: #ff1f36 !important;
-  box-shadow: 0 0 26px rgba(255, 31, 54, 0.32) !important;
+  border-color: rgba(192, 92, 255, 0.5) !important;
+  background: linear-gradient(135deg, #ff1f36, #9b4dff) !important;
+  box-shadow: 0 0 26px rgba(255, 31, 54, 0.32), 0 0 28px rgba(155, 77, 255, 0.2) !important;
 }
 
 .intro-loader__vault,
@@ -244,7 +260,55 @@ tr:hover td {
 .intro-loader__vault-dial,
 .intro-loader__monogram,
 .intro-loader__eyebrow {
-  color: #ff6877 !important;
+  color: #c58bff !important;
+}
+
+.public-card-icon,
+.features-icon-tile,
+.features-floating-tile,
+.pricing-visual-tile,
+.overview-final-cta__mark,
+.coin-icon,
+.topnav-icon {
+  filter: drop-shadow(0 0 12px rgba(155, 77, 255, 0.22));
+}
+
+.public-card-icon,
+.features-icon-tile,
+.features-floating-tile,
+.pricing-visual-tile,
+.overview-final-cta__mark {
+  border-color: rgba(192, 92, 255, 0.35) !important;
+  color: #d8b4ff !important;
+  background:
+    radial-gradient(circle at 28% 22%, rgba(255, 255, 255, 0.13), transparent 28%),
+    linear-gradient(145deg, rgba(255, 31, 54, 0.18), rgba(155, 77, 255, 0.2)) !important;
+  box-shadow: 0 0 24px rgba(155, 77, 255, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.08) !important;
+}
+
+.public-device-frame,
+.overview-phone__shell,
+.features-dashboard-card,
+.pricing-console-card,
+.public-terminal,
+.auth-ops-panel,
+.admin-login-card {
+  border-color: rgba(192, 92, 255, 0.22) !important;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.018) 1px, transparent 1px),
+    linear-gradient(135deg, rgba(255, 31, 54, 0.08), rgba(155, 77, 255, 0.09) 48%, rgba(6, 6, 9, 0.98)) !important;
+  background-size: 34px 34px, 34px 34px, auto !important;
+  box-shadow:
+    0 24px 70px rgba(0, 0, 0, 0.52),
+    0 0 42px rgba(155, 77, 255, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06) !important;
+}
+
+.features-chart,
+.pricing-console-chart,
+.overview-phone__portfolio svg {
+  filter: drop-shadow(0 0 14px rgba(255, 31, 54, 0.18)) drop-shadow(0 0 16px rgba(155, 77, 255, 0.16));
 }
 
 ::selection {

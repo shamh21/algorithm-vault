@@ -10,7 +10,7 @@ from flask import Flask
 
 CANONICAL_ORIGIN = "https://algvault.app"
 BRAND_NAME = "AlgVault"
-SOCIAL_IMAGE_PATH = "/icons/algvault-mascot-512.png"
+SOCIAL_IMAGE_PATH = "/icons/algvault-ios-512.png"
 PUBLIC_HTML_CACHE_CONTROL = "public, max-age=300, s-maxage=3600, stale-while-revalidate=86400"
 SEO_ASSET_CACHE_CONTROL = "public, max-age=3600, s-maxage=86400, stale-while-revalidate=86400"
 
