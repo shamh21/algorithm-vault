@@ -1,0 +1,167 @@
+{% macro public_badges(page) -%}
+  {% if page.badges %}
+    <ul class="public-badge-row" aria-label="{{ page.nav_label }} trust signals">
+      {% for badge in page.badges %}
+        <li class="public-trust-badge public-trust-badge--{{ badge.tone|default('secure') }}">
+          <span aria-hidden="true"></span>{{ badge.label }}
+        </li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+{%- endmacro %}
+
+
+{% macro public_hero(page, title_id, navigation) -%}
+  <section class="overview-hero public-hero" aria-labelledby="{{ title_id }}">
+    <span class="overview-hero__grid" aria-hidden="true"></span>
+    <span class="overview-hero__glow" aria-hidden="true"></span>
+    <div class="overview-hero__copy">
+      <span class="card-kicker">{{ page.eyebrow }}</span>
+      <h1 id="{{ title_id }}">{{ page.heading }}</h1>
+      <p>{{ page.lead }}</p>
+      {{ public_badges(page) }}
+      <div class="public-hero__actions" aria-label="Overview actions">
+        <a class="button-link primary" href="{{ page.primary_href }}">{{ page.primary_label }}</a>
+        <a class="button-link secondary" href="{{ page.secondary_href }}">{{ page.secondary_label }}</a>
+      </div>
+      <nav class="overview-quick-nav" aria-label="Explore AlgVault">
+        {% for item in navigation %}
+          {% if item.key != page.key %}<a href="{{ item.href }}">{{ item.label }}</a>{% endif %}
+        {% endfor %}
+      </nav>
+    </div>
+
+    <aside class="overview-phone public-device-frame" aria-label="AlgVault mobile command center preview">
+      <div class="overview-phone__shell">
+        <span class="overview-phone__notch" aria-hidden="true"></span>
+        <div class="overview-phone__screen">
+          <header class="overview-phone__header">
+            <span><img src="/icons/algvault-mascot-64.png" alt="" width="36" height="36"> AlgVault</span>
+            <strong>LIVE SYSTEM</strong>
+          </header>
+          <section class="overview-phone__portfolio" aria-label="Portfolio preview">
+            <small>Portfolio value</small>
+            <strong>$128,420.58</strong>
+            <span>Protected operating view</span>
+            <svg viewBox="0 0 280 108" role="img" aria-label="Illustrative portfolio trend">
+              <defs>
+                <linearGradient id="overview-fill" x1="0" x2="0" y1="0" y2="1">
+                  <stop offset="0%" stop-color="#ff1f36" stop-opacity="0.34"></stop>
+                  <stop offset="100%" stop-color="#ff1f36" stop-opacity="0"></stop>
+                </linearGradient>
+              </defs>
+              <path fill="url(#overview-fill)" d="M4 92 L34 75 L60 82 L92 57 L122 64 L154 39 L184 49 L216 23 L246 31 L276 12 L276 108 L4 108 Z"></path>
+              <path fill="none" stroke="#ff4054" stroke-width="4" stroke-linecap="round" stroke-linejoin="round" d="M4 92 L34 75 L60 82 L92 57 L122 64 L154 39 L184 49 L216 23 L246 31 L276 12"></path>
+            </svg>
+          </section>
+          <section class="overview-phone__status" aria-label="Provider status preview">
+            <article><span></span><div><small>Provider</small><strong>Hyperliquid Connected</strong></div></article>
+            <article><span></span><div><small>Risk engine</small><strong>Server controls active</strong></div></article>
+            <article><span></span><div><small>Vault cycle</small><strong>Readiness checked</strong></div></article>
+          </section>
+        </div>
+      </div>
+    </aside>
+  </section>
+{%- endmacro %}
+
+
+{% macro public_metrics(page) -%}
+  {% if page.highlights %}
+    <section class="overview-metrics public-metric-system" aria-label="AlgVault operating metrics">
+      {% for item in page.highlights %}
+        <article>
+          <span>{{ item.label }}</span>
+          <strong>{{ item.value }}</strong>
+          <p>{{ item.detail }}</p>
+        </article>
+      {% endfor %}
+    </section>
+  {% endif %}
+{%- endmacro %}
+
+
+{% macro public_cards(page, compact=False) -%}
+  <section class="overview-capabilities public-card-system" aria-labelledby="overview-capabilities-title">
+    <div class="public-section-heading">
+      <span class="card-kicker">Operating workspace</span>
+      <h2 id="overview-capabilities-title">Core controls in one focused surface</h2>
+      <p>Review strategy, provider, wallet, and execution posture before protected actions.</p>
+    </div>
+    <div class="overview-capability-grid">
+      <article>
+        <span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-activity"></use></svg></span>
+        <h3>Strategy Monitor</h3>
+        <p>Signals, confidence, cycle state, and no-trade conditions remain visible.</p>
+      </article>
+      <article>
+        <span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-markets"></use></svg></span>
+        <h3>Broker/API</h3>
+        <p>Provider connectivity and readiness are checked before execution-sensitive workflows.</p>
+      </article>
+      <article>
+        <span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-wallet"></use></svg></span>
+        <h3>Wallet Controls</h3>
+        <p>Balances, allocations, conversions, and protected movement states share one view.</p>
+      </article>
+    </div>
+  </section>
+{%- endmacro %}
+
+
+{% macro public_status(page) -%}
+  <section class="overview-mobile public-status-system" aria-labelledby="overview-mobile-title">
+    <div>
+      <span class="card-kicker">Mobile PWA</span>
+      <h2 id="overview-mobile-title">Mobile-first by design</h2>
+      <p>AlgVault is shaped for iPhone safe areas, thumb-friendly controls, clear status labels, and fast repeated checks.</p>
+      <a class="button-link primary" href="/mobile/">Add to Home Screen</a>
+    </div>
+    <div class="overview-mobile__checks" role="list" aria-label="Mobile application qualities">
+      <article role="listitem"><strong>Installable</strong><span>PWA manifest and service worker</span></article>
+      <article role="listitem"><strong>Responsive</strong><span>No horizontal overflow</span></article>
+      <article role="listitem"><strong>Accessible</strong><span>Reduced-motion and focus support</span></article>
+      <article role="listitem"><strong>Protected</strong><span>Server-confirmed sensitive actions</span></article>
+    </div>
+  </section>
+{%- endmacro %}
+
+
+{% macro public_sections(page, stacked=False) -%}
+  <section class="overview-trust" aria-labelledby="overview-trust-title">
+    <div class="public-section-heading">
+      <span class="card-kicker">Trust and reach</span>
+      <h2 id="overview-trust-title">Security architecture and connected operations</h2>
+    </div>
+    <div class="overview-trust-grid">
+      <article>
+        <span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-shield"></use></svg></span>
+        <h3>Security architecture</h3>
+        <p>Private routes, credentials, readiness gates, and protected actions stay server-authoritative.</p>
+        <a href="/security/">Review security</a>
+      </article>
+      <article>
+        <span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-markets"></use></svg></span>
+        <h3>Connected ecosystem</h3>
+        <p>Provider state, market data, wallet posture, and operational status remain visible without exposing secrets.</p>
+        <a href="/connectivity/">Review connectivity</a>
+      </article>
+    </div>
+  </section>
+{%- endmacro %}
+
+
+{% macro public_cta(page) -%}
+  <section class="overview-final-cta public-cta-block" aria-labelledby="overview-final-title">
+    <span class="overview-final-cta__mark" aria-hidden="true">AV</span>
+    <div>
+      <span class="card-kicker">Secure access</span>
+      <h2 id="overview-final-title">Ready to take control?</h2>
+      <p>Create protected access to review wallet, vault, provider, strategy, and risk controls.</p>
+    </div>
+    <nav class="public-cta-actions" aria-label="Overview final actions">
+      <a class="button-link primary" href="{{ page.primary_href }}">{{ page.primary_label }}</a>
+      <a class="button-link secondary" href="/security/">Review security</a>
+    </nav>
+  </section>
+{%- endmacro %}

@@ -124,6 +124,7 @@ def test_alembic_upgrade_fresh_sqlite_creates_hardening_tables(tmp_path) -> None
     db_path = tmp_path / "fresh-migrations.db"
     env = {
         **os.environ,
+        "APP_ENV": "development",
         "SKIP_SCHEMA_BOOTSTRAP": "1",
         "DATABASE_URL": f"sqlite:///{db_path}",
         "PUBLIC_APP_ORIGIN": "https://app.algvault.com",

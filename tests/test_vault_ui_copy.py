@@ -109,10 +109,12 @@ def test_vault_assets_use_explicit_readiness_cache_busters() -> None:
     vault_source = Path("templates/vault.html").read_text()
     base_source = Path("templates/base.html").read_text()
     sw_source = Path("static/js/sw.js").read_text()
+    intro_source = Path("templates/components/algvault_intro.html").read_text()
 
     assert "vault-shell-polish-9" in vault_source
-    assert "algvault-vault-shell-polish-10-wallet-merge-1" in base_source
-    assert "algvault-v21-vault-shell-polish-9" in sw_source
+    assert "asset_v" in base_source
+    assert "algvault-theme.css" in intro_source
+    assert 'const CACHE_VERSION = "algvault-v21-vault-shell-polish-9"' in sw_source
 
 
 def test_pwa_shell_keeps_heavy_chart_libraries_off_precache_path() -> None:

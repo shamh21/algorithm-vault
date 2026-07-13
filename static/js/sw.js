@@ -4,6 +4,8 @@ const STATIC_CACHE = `${CACHE_VERSION}-static`;
 
 const APP_SHELL = [
   "/static/css/app.css",
+  "/static/css/public.css",
+  "/static/css/algvault-theme.css",
   "/static/js/app-shell.js",
   "/static/js/responsive-tables.js",
   "/manifest.json",
@@ -20,17 +22,18 @@ const OFFLINE_HTML = `<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#050607">
+  <meta name="theme-color" content="#030304">
   <title>AlgVault Offline</title>
   <style>
-    html,body{margin:0;min-height:100%;background:#050607;color:#f8fafc;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text",Inter,system-ui,sans-serif}
+    html,body{margin:0;min-height:100%;background:#030304;color:#fafafa;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text",Inter,system-ui,sans-serif}
+    body{background:radial-gradient(circle at 50% 20%,rgba(255,31,54,.18),transparent 25rem),linear-gradient(180deg,#030304,#09090b 58%,#030304)}
     main{min-height:100svh;display:grid;place-items:center;padding:calc(2rem + env(safe-area-inset-top)) max(1.25rem,env(safe-area-inset-right)) calc(2rem + env(safe-area-inset-bottom)) max(1.25rem,env(safe-area-inset-left))}
-    section{max-width:28rem;border:1px solid rgba(148,163,184,.2);border-radius:16px;padding:1.25rem;background:#101826;box-shadow:0 22px 56px rgba(0,0,0,.46)}
-    span{color:#7dd3fc;font-size:.74rem;font-weight:800;text-transform:uppercase}
-    h1{margin:.35rem 0;font-size:1.35rem} p{margin:0;color:#aeb9ca}
+    section{max-width:28rem;border:1px solid rgba(255,31,54,.34);border-radius:16px;padding:1.25rem;background:linear-gradient(180deg,rgba(18,18,22,.98),rgba(7,7,9,.98));box-shadow:0 22px 56px rgba(0,0,0,.55),0 0 38px rgba(255,31,54,.08)}
+    span{color:#ff6877;font-size:.74rem;font-weight:800;text-transform:uppercase;letter-spacing:.08em}
+    h1{margin:.35rem 0;font-size:1.35rem} p{margin:0;color:#b8b8c0}
   </style>
 </head>
-<body><main><section><span>Offline</span><h1>AlgVault is offline</h1><p>Reconnect to refresh wallet, vault, and market data. Static app assets remain cached safely.</p></section></main></body>
+<body><main><section><span>Offline</span><h1>AlgVault is offline</h1><p>Reconnect to refresh wallet, vault, and market data. Static app assets remain cached safely. The red/black application shell remains available.</p></section></main></body>
 </html>`;
 
 const isHtmlRequest = (request) => request.mode === "navigate" || Boolean(request.headers.get("accept")?.includes("text/html"));

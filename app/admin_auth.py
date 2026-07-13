@@ -11,7 +11,6 @@ from .auth import current_user, require_admin_user, require_authenticated_user, 
 from .models import User
 
 
-_USER_BLUEPRINT_PREFIXES = ("dashboard.",)
 _USER_BACKTEST_ENDPOINTS = {
     "backtests.index",
     "backtests.symbols_api",
@@ -43,8 +42,8 @@ def check_admin_credentials(username: str, password: str) -> bool:
 
 
 def _authenticated_user_route() -> bool:
-    endpoint = str(request.endpoint or "")
-    return endpoint in _USER_BACKTEST_ENDPOINTS or endpoint.startswith(_USER_BLUEPRINT_PREFIXES)
+    """Return true only for explicitly user-accessible research routes."""
+    return str(request.endpoint or "") in _USER_BACKTEST_ENDPOINTS
 
 
 def require_admin() -> Response | None:

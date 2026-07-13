@@ -6,6 +6,11 @@ export const metadata: Metadata = {
   title: "Invite Codes · AlgVault Admin",
   description: "Mobile admin dashboard for invite-code profit-share controls.",
   applicationName: "AlgVault Invite Admin",
+  robots: {
+    index: false,
+    follow: false,
+    nocache: true
+  },
   appleWebApp: {
     capable: true,
     title: "Invite Admin",
@@ -21,7 +26,7 @@ export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   viewportFit: "cover",
-  themeColor: "#070807",
+  themeColor: "#030304",
   colorScheme: "dark"
 };
 
