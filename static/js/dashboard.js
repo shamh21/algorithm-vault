@@ -399,10 +399,12 @@
 
       const meta = document.createElement("span");
       meta.className = "opportunity-score";
+      meta.style.fontVariantNumeric = "tabular-nums";
       meta.innerHTML = `<small>Score</small>${hasNumber(row.score) ? number(row.score).toFixed(2) : dash}`;
 
       const roiNode = document.createElement("span");
       roiNode.className = number(row.predicted_roi) >= 0 ? "opportunity-roi positive" : "opportunity-roi negative";
+      roiNode.style.fontVariantNumeric = "tabular-nums";
       roiNode.innerHTML = `<small>ROI</small>${roi(row.predicted_roi)}`;
 
       button.append(rank, main, meta, roiNode);
@@ -606,6 +608,10 @@
       return `${index === 0 ? "M" : "L"}${x.toFixed(2)} ${y.toFixed(2)}`;
     }).join(" ");
     refs.vaultPerformancePath.setAttribute("d", path);
+    // Restart CSS draw-in animation on each new render
+    refs.vaultPerformancePath.classList.remove("av-sparkline-path");
+    void refs.vaultPerformancePath.offsetWidth; // force reflow to restart animation
+    refs.vaultPerformancePath.classList.add("av-sparkline-path");
     const direction = changePercent > 0 ? "up" : changePercent < 0 ? "down" : "flat";
     refs.vaultPerformanceSparkline.setAttribute(
       "aria-label",
