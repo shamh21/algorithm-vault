@@ -65,3 +65,14 @@ def test_admin_pwa_uses_algvault_red_brand_tokens() -> None:
     assert "rgba(34, 197, 94, 0.1)" not in css
     assert "rgba(245, 158, 11, 0.12)" not in css
     assert '[class*="bg-amber-"]' in css
+
+
+def test_service_worker_precaches_and_renders_red_black_shell() -> None:
+    worker = Path("static/js/sw.js").read_text(encoding="utf-8")
+
+    assert '"/static/css/algvault-theme.css"' in worker
+    assert '"/static/css/public.css"' in worker
+    assert 'content="#030304"' in worker
+    assert "#ff6877" in worker
+    assert "#7dd3fc" not in worker
+    assert "#101826" not in worker
