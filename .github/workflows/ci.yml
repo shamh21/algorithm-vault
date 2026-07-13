@@ -67,7 +67,26 @@ jobs:
         env:
           SKIP_SCHEMA_BOOTSTRAP: ""
           DATABASE_URL: sqlite://
-        run: coverage run -m pytest && coverage report
+        run: |
+          set +e
+          coverage run -m pytest -q --tb=short > pytest.log 2>&1
+          status=$?
+          if [ "$status" -eq 0 ]; then
+            cat pytest.log
+            coverage report
+          else
+            echo "Pytest failed; final diagnostic output follows."
+            tail -n 240 pytest.log
+          fi
+          exit "$status"
+      - name: Upload pytest failure log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-failure-log
+          path: pytest.log
+          if-no-files-found: error
+          retention-days: 7
       - name: Admin PWA dependencies
         working-directory: admin-pwa
         run: npm ci
