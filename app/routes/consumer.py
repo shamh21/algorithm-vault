@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import sys as _sys
 
-from flask import redirect, render_template, request, url_for
+from flask import current_app, redirect, render_template, request, url_for
 
-from ..services.seo import PUBLIC_ENDPOINTS, public_page
+from ..services.seo import PUBLIC_ENDPOINTS, public_navigation, public_page, seo_context
 from .consumer_parts import legacy as _legacy
 
 
@@ -24,7 +24,13 @@ def _public_page_view(key: str):
     """Build a public marketing view without exposing private app helpers."""
 
     def view():
-        html = render_template("marketing/page.html", page=public_page(key))
+        page = public_page(key)
+        html = render_template(
+            "marketing/page.html",
+            page=page,
+            seo=seo_context(current_app, endpoint=page.endpoint, path=page.path, authenticated=False),
+            public_seo_pages=public_navigation(),
+        )
         theme_href = url_for("static", filename="css/algvault-theme.css")
         theme_link = f'<link rel="stylesheet" href="{theme_href}?v=redblack-20260712">'
         return html.replace("</head>", f"  {theme_link}\n  </head>", 1)
