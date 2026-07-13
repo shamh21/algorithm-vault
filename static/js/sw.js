@@ -1,4 +1,4 @@
-const CACHE_VERSION = "algvault-v22-redblack-shell-1";
+const CACHE_VERSION = "algvault-v21-vault-shell-polish-9";
 const SHELL_CACHE = `${CACHE_VERSION}-shell`;
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 
@@ -33,7 +33,7 @@ const OFFLINE_HTML = `<!doctype html>
     h1{margin:.35rem 0;font-size:1.35rem} p{margin:0;color:#b8b8c0}
   </style>
 </head>
-<body><main><section><span>Offline</span><h1>AlgVault is offline</h1><p>Reconnect to refresh wallet, vault, and market data. The red/black application shell remains available.</p></section></main></body>
+<body><main><section><span>Offline</span><h1>AlgVault is offline</h1><p>Reconnect to refresh wallet, vault, and market data. Static app assets remain cached safely. The red/black application shell remains available.</p></section></main></body>
 </html>`;
 
 const isHtmlRequest = (request) => request.mode === "navigate" || Boolean(request.headers.get("accept")?.includes("text/html"));
