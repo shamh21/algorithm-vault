@@ -1,0 +1,263 @@
+/* Canonical AlgVault visual system.
+   Loaded after app.css/public.css so branding stays red/black while
+   semantic profit/success states may remain green. */
+
+:root,
+html[data-theme="dark"],
+html[data-theme="light"] {
+  color-scheme: dark;
+  --bg: #030304;
+  --bg-soft: #08080a;
+  --panel: #0d0d10;
+  --panel-strong: #121216;
+  --panel-elevated: #18181d;
+  --ink: #fafafa;
+  --muted: #92939b;
+  --muted-strong: #d0d1d6;
+  --accent: #ff1f36;
+  --accent-soft: rgba(255, 31, 54, 0.12);
+  --accent-ink: #ffffff;
+  --danger: #ff1f36;
+  --warning: #ff6877;
+  --success: #32d583;
+  --cyan: #ff6877;
+  --border: rgba(255, 255, 255, 0.1);
+  --border-red: rgba(255, 31, 54, 0.28);
+  --border-strong: rgba(255, 31, 54, 0.5);
+  --shadow: 0 22px 56px rgba(0, 0, 0, 0.5);
+}
+
+html,
+body,
+.app-body {
+  background-color: #030304 !important;
+}
+
+body,
+.app-body {
+  background-image:
+    radial-gradient(circle at 16% -10%, rgba(255, 31, 54, 0.18), transparent 30rem),
+    radial-gradient(circle at 92% 8%, rgba(143, 14, 29, 0.12), transparent 28rem),
+    radial-gradient(circle at 50% 112%, rgba(255, 31, 54, 0.08), transparent 28rem),
+    linear-gradient(180deg, #030304 0%, #09090b 48%, #030304 100%) !important;
+  color: var(--ink) !important;
+}
+
+body::before {
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.018) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.016) 1px, transparent 1px),
+    radial-gradient(circle at 18% 20%, rgba(255, 31, 54, 0.1), transparent 24rem) !important;
+}
+
+.site-header::before,
+.app-topbar::before,
+.bottom-nav,
+.app-nav,
+.nav-backdrop,
+.public-footer {
+  background-color: rgba(3, 3, 4, 0.94) !important;
+}
+
+.site-header::before,
+.app-topbar::before,
+.bottom-nav,
+.app-nav {
+  border-color: rgba(255, 255, 255, 0.1) !important;
+}
+
+.brand-mark,
+.brand-mark--mascot {
+  border-color: rgba(255, 31, 54, 0.36) !important;
+  background: #030304 !important;
+  box-shadow: 0 0 30px rgba(255, 31, 54, 0.2) !important;
+}
+
+.brand-copy .eyebrow,
+.card-kicker,
+.nav-section-title,
+.auth-route-context,
+.text-link,
+a.text-link {
+  color: #ff6877 !important;
+}
+
+.nav a,
+button,
+.button-link,
+.secondary,
+.public-topbar-link,
+.nav-toggle {
+  border-color: rgba(255, 255, 255, 0.11) !important;
+  background: linear-gradient(180deg, rgba(22, 22, 27, 0.98), rgba(10, 10, 13, 0.98)) !important;
+  color: var(--ink) !important;
+}
+
+.nav a:hover,
+button:hover,
+.button-link:hover,
+.secondary:hover,
+.public-topbar-link:hover {
+  border-color: rgba(255, 31, 54, 0.48) !important;
+  background: #18181d !important;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.34), 0 0 0 1px rgba(255, 31, 54, 0.08) !important;
+}
+
+.nav a.primary,
+button.primary,
+.button-link.primary,
+.public-topbar-cta,
+.bottom-nav-item.active {
+  border-color: rgba(255, 31, 54, 0.72) !important;
+  background: linear-gradient(180deg, #ff4054, #b70d20) !important;
+  color: #ffffff !important;
+  box-shadow: 0 14px 34px rgba(255, 31, 54, 0.24) !important;
+}
+
+.nav-link.active,
+.bottom-nav-item.active,
+.public-topnav a.active,
+.public-topnav a[aria-current="page"] {
+  border-color: rgba(255, 31, 54, 0.42) !important;
+  color: #ffffff !important;
+}
+
+.mode-dot,
+.status-dot,
+.nav-link.active::before,
+.bottom-nav-item.active::before {
+  background: #ff1f36 !important;
+  box-shadow: 0 0 0 5px rgba(255, 31, 54, 0.12), 0 0 18px rgba(255, 31, 54, 0.38) !important;
+}
+
+input,
+select,
+textarea,
+.Input {
+  border-color: rgba(255, 255, 255, 0.11) !important;
+  background: #0b0b0e !important;
+  color: #ffffff !important;
+}
+
+input:focus,
+select:focus,
+textarea:focus,
+.Input:focus {
+  border-color: rgba(255, 31, 54, 0.68) !important;
+  background: #101014 !important;
+  box-shadow: 0 0 0 3px rgba(255, 31, 54, 0.12) !important;
+}
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline-color: rgba(255, 31, 54, 0.72) !important;
+}
+
+.card,
+.vault-card,
+.auth-card,
+.panel,
+.metric-card,
+.summary-card,
+.dashboard-card,
+.wallet-card,
+.settings-card,
+.admin-card,
+.auth-ops-panel,
+.intro-loader__panel {
+  border-color: rgba(255, 255, 255, 0.1) !important;
+  background: linear-gradient(180deg, rgba(18, 18, 22, 0.97), rgba(7, 7, 9, 0.98)) !important;
+  box-shadow: var(--shadow) !important;
+}
+
+.card::before,
+.vault-card::before,
+.auth-card::before,
+.panel::before,
+.intro-loader__panel::before {
+  background: linear-gradient(90deg, transparent, rgba(255, 31, 54, 0.5), transparent) !important;
+}
+
+.banner,
+.flash,
+.auth-ops-panel {
+  background: rgba(13, 13, 16, 0.94) !important;
+}
+
+.banner.info,
+.flash.info,
+.flash.warning,
+.banner.warning {
+  border-color: rgba(255, 31, 54, 0.34) !important;
+  background: linear-gradient(90deg, rgba(255, 31, 54, 0.13), rgba(13, 13, 16, 0.94)) !important;
+}
+
+.banner.danger,
+.flash.danger,
+.auth-ops-panel-attention {
+  border-color: rgba(255, 31, 54, 0.48) !important;
+  background: linear-gradient(90deg, rgba(255, 31, 54, 0.17), rgba(13, 13, 16, 0.96)) !important;
+}
+
+/* Green is reserved for actual success/profit states, never primary branding. */
+.flash.success,
+.banner.success,
+.positive,
+.profit,
+.status-success,
+.state-ready {
+  --semantic-success: #32d583;
+}
+
+th {
+  background: rgba(13, 13, 16, 0.98) !important;
+}
+
+tr:hover td {
+  background: rgba(255, 31, 54, 0.035) !important;
+}
+
+.intro-loader {
+  background:
+    radial-gradient(circle at 50% 42%, rgba(255, 31, 54, 0.2), transparent 26rem),
+    #030304 !important;
+}
+
+.intro-loader__glow,
+.intro-loader__ring,
+.intro-loader__bar span,
+.intro-loader__ticks span {
+  border-color: rgba(255, 31, 54, 0.5) !important;
+  background-color: #ff1f36 !important;
+  box-shadow: 0 0 26px rgba(255, 31, 54, 0.32) !important;
+}
+
+.intro-loader__vault,
+.intro-loader__vault-door {
+  border-color: rgba(255, 31, 54, 0.58) !important;
+  background: linear-gradient(180deg, #1a1a20, #08080a) !important;
+}
+
+.intro-loader__vault-dial,
+.intro-loader__monogram,
+.intro-loader__eyebrow {
+  color: #ff6877 !important;
+}
+
+::selection {
+  background: rgba(255, 31, 54, 0.38);
+  color: #ffffff;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}
