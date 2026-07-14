@@ -78,6 +78,18 @@
       <p class="av-data-state">{{ pnl_history.summary }}</p>
     {% endif %}
   </article>
+
+  <article class="av-panel av-trading-ops-launch" aria-labelledby="trading-ops-launch-title">
+    <div class="av-panel-head">
+      <div>
+        <span class="card-kicker">Trading Ops</span>
+        <h2 id="trading-ops-launch-title">User Operations</h2>
+      </div>
+      {{ av.status_badge("Read-only", "neutral") }}
+    </div>
+    <p class="av-data-state">Monitor provider readiness, vault posture, risk state, and user-scoped account activity without opening admin tools.</p>
+    <a class="button-link primary" href="{{ url_for('trading_ops_index') }}">Open Trading Ops</a>
+  </article>
 </section>
 {% endblock %}
 
