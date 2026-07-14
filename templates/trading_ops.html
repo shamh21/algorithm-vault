@@ -1,0 +1,268 @@
+{% extends "base.html" %}
+
+{% block title %}Trading Ops · AlgVault{% endblock %}
+
+{% block page_styles %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/trading-ops.css') }}?v={{ current_app.config.get('ASSET_VERSION', '1') }}">
+{% endblock %}
+
+{% block content %}
+{% set snapshot = account_snapshot|default({}) %}
+{% set health = provider_health|default({}) %}
+{% set snapshot_status = snapshot.get('status', 'unavailable') %}
+{% set broker_label = snapshot.get('provider') or health.get('provider') or '—' %}
+{% set sync_label = snapshot.get('synced_at') or health.get('last_checked_at') or '—' %}
+{% set equity_value = snapshot.get('equity_usd') %}
+{% set live_blocked = risk_status.live_trading_blocked if risk_status.live_trading_blocked is defined else none %}
+{% set emergency_active = risk_status.panic_lock if risk_status.panic_lock is defined else none %}
+{% set provider_cards = ops_provider_cards|default([]) %}
+{% set recent_cycles = ops_recent_cycles|default([]) %}
+{% set strategy_runs = ops_strategy_runs|default([]) %}
+{% set wallet_activity = ops_wallet_activity|default([]) %}
+{% set summary = ops_summary|default({}) %}
+
+<section class="trading-dashboard-shell user-ops-shell" aria-labelledby="user-trading-ops-title">
+  <header class="trade-command-bar user-ops-hero">
+    <div class="trade-command-copy">
+      <span class="trade-kicker">{{ ops_kicker }}</span>
+      <h1 id="user-trading-ops-title">{{ ops_title }}</h1>
+      <p>{{ ops_subtitle }}</p>
+    </div>
+    <div class="trade-command-statuses" aria-label="Trading ops status">
+      <div class="trade-health-pill">
+        <span class="trade-health-dot" aria-hidden="true"></span>
+        <span>{{ 'Provider linked' if provider_cards else 'Setup pending' }}</span>
+      </div>
+      <span class="trade-live-badge">{{ ops_badge }}</span>
+    </div>
+  </header>
+
+  <nav class="ops-page-tabs" aria-label="Trading ops pages">
+    {% for tab in ops_tabs %}
+      <a href="{{ tab.href }}" class="ops-page-tab {% if tab.key == ops_active_tab %}is-active{% endif %}" {% if tab.key == ops_active_tab %}aria-current="page"{% endif %}>{{ tab.label }}</a>
+    {% endfor %}
+  </nav>
+
+  <section class="trade-account-strip" aria-label="User operational summary">
+    <div class="trade-metric">
+      <span>Account Equity</span>
+      <strong>{% if equity_value is not none %}${{ "%.2f"|format(equity_value|float) }}{% else %}—{% endif %}</strong>
+      <small>{{ 'Live snapshot' if snapshot_status == 'live' else ('Cached snapshot' if snapshot_status == 'cached' else 'Not loaded') }}</small>
+    </div>
+    <div class="trade-metric">
+      <span>Active Cycles</span>
+      <strong>{{ summary.active_cycles|default(0) }}</strong>
+      <small>{{ summary.recent_cycle_count|default(0) }} recent cycle records</small>
+    </div>
+    <div class="trade-metric {{ 'status-connected' if summary.enabled_providers|default(0) > 0 else 'status-stale' }}">
+      <span>Providers</span>
+      <strong>{{ summary.enabled_providers|default(0) }}/{{ summary.provider_count|default(0) }}</strong>
+      <small>Enabled and user-scoped</small>
+    </div>
+    <div class="trade-metric {{ 'status-error' if live_blocked else 'status-connected' }}">
+      <span>Risk Engine</span>
+      <strong>{{ 'Blocked' if live_blocked else ('Armed' if live_blocked is not none else '—') }}</strong>
+      <small>{{ 'Server gate blocking live execution' if live_blocked else ('Readiness checks active' if live_blocked is not none else 'Status unavailable') }}</small>
+    </div>
+    <div class="trade-metric {{ 'status-error' if emergency_active else 'status-connected' }}">
+      <span>Safety Lock</span>
+      <strong>{{ 'Engaged' if emergency_active else ('Clear' if emergency_active is not none else '—') }}</strong>
+      <small>{{ 'Manual review required' if emergency_active else ('No lock reported' if emergency_active is not none else 'Status unavailable') }}</small>
+    </div>
+    <div class="trade-metric {{ 'status-connected' if broker_label != '—' and snapshot_status == 'live' else 'status-stale' }}">
+      <span>Last Sync</span>
+      <strong>{{ sync_label }}</strong>
+      <small>{{ broker_label|upper if broker_label != '—' else 'Provider activity appears after connection' }}</small>
+    </div>
+  </section>
+
+  <section class="exchange-cache-note user-ops-note" aria-label="Server-authoritative operations note">
+    <p>Trading Ops is read-only. Vault starts, withdrawals, allocation routing, leverage, and exchange actions continue to require the existing authenticated server-side checks.</p>
+    <a class="button-link secondary" href="{{ ops_links.refresh }}">Refresh Ops</a>
+  </section>
+
+  {% if ops_active_tab == 'providers' %}
+    <section class="user-ops-grid user-ops-grid--wide" aria-label="Provider readiness">
+      {% for provider in provider_cards %}
+        <article class="trade-panel user-ops-card provider-card {{ 'is-enabled' if provider.enabled else 'is-muted' }}">
+          <div class="trade-panel-head">
+            <div>
+              <span class="trade-kicker">{{ provider.connection_type }}</span>
+              <h2>{{ provider.provider }}</h2>
+              <p class="panel-helper">{{ provider.impact }}</p>
+            </div>
+            <span class="ops-state-chip">{{ 'Enabled' if provider.enabled else 'Disabled' }}</span>
+          </div>
+          <dl class="ops-detail-list">
+            <div><dt>Verification</dt><dd>{{ provider.verification_status }}</dd></div>
+            <div><dt>Status</dt><dd>{{ provider.status }}</dd></div>
+            <div><dt>Last verified</dt><dd>{{ provider.last_verified_at }}</dd></div>
+            <div><dt>Updated</dt><dd>{{ provider.updated_at }}</dd></div>
+          </dl>
+        </article>
+      {% else %}
+        <article class="trade-panel user-ops-empty">
+          <span class="trade-kicker">Connectivity</span>
+          <h2>No provider connected</h2>
+          <p>Add and verify a provider before live wallet, vault, or order workflows become available.</p>
+          <a class="button-link primary" href="{{ ops_links.connections }}">Open Connections</a>
+        </article>
+      {% endfor %}
+    </section>
+  {% elif ops_active_tab == 'risk' %}
+    <section class="user-ops-grid" aria-label="Risk and readiness">
+      <article class="trade-panel user-ops-card">
+        <div class="trade-panel-head">
+          <div>
+            <span class="trade-kicker">Risk</span>
+            <h2>Execution Envelope</h2>
+            <p class="panel-helper">Visibility only. Server policy remains authoritative.</p>
+          </div>
+        </div>
+        {% if risk_status %}
+          <dl class="ops-detail-list">
+            <div><dt>Daily loss limit</dt><dd>{{ risk_status.daily_loss_limit if risk_status.daily_loss_limit is defined else '—' }}</dd></div>
+            <div><dt>Current daily PnL</dt><dd>{% if risk_status.daily_realized_pnl is defined %}{{ "%.4f"|format(risk_status.daily_realized_pnl|float) }}{% else %}—{% endif %}</dd></div>
+            <div><dt>Max leverage</dt><dd>{{ risk_status.max_leverage if risk_status.max_leverage is defined else '—' }}</dd></div>
+            <div><dt>Adaptive slippage</dt><dd>{% if risk_status.adaptive_slippage is defined %}{{ "%.2f"|format((risk_status.adaptive_slippage.estimate_bps or 0)|float) }} bps{% else %}—{% endif %}</dd></div>
+            <div><dt>Live blocked</dt><dd>{{ 'Yes' if risk_status.live_trading_blocked else 'No' }}</dd></div>
+          </dl>
+        {% else %}
+          <p class="trade-empty-state">Risk status is unavailable. Refresh data or check provider connectivity.</p>
+        {% endif %}
+      </article>
+      <article class="trade-panel user-ops-card">
+        <div class="trade-panel-head">
+          <div>
+            <span class="trade-kicker">Readiness</span>
+            <h2>Server Gates</h2>
+            <p class="panel-helper">No client-side control can override these checks.</p>
+          </div>
+        </div>
+        <ul class="ops-check-list">
+          <li class="{{ 'is-ready' if provider_cards else 'is-waiting' }}">Verified provider connection</li>
+          <li class="{{ 'is-ready' if not emergency_active else 'is-blocked' }}">Safety lock clear</li>
+          <li class="{{ 'is-ready' if not live_blocked else 'is-blocked' }}">Risk engine not blocking live execution</li>
+          <li class="is-waiting">Vault cycle actions remain gated in the Vault flow</li>
+        </ul>
+        <a class="button-link secondary" href="{{ ops_links.settings }}">Open Settings</a>
+      </article>
+    </section>
+  {% elif ops_active_tab == 'activity' %}
+    <section class="ops-accordion" aria-label="User activity">
+      <details class="trade-panel" open>
+        <summary>Recent Vault Cycles</summary>
+        <div class="ops-table-wrap">
+          <table>
+            <thead><tr><th>Cycle</th><th>Status</th><th>Asset</th><th>Amount</th><th>Unlocks</th></tr></thead>
+            <tbody>
+              {% for cycle in recent_cycles %}
+                <tr>
+                  <td>#{{ cycle.id }}<br><span class="muted">{{ cycle.substatus }}</span></td>
+                  <td>{{ cycle.status }}</td>
+                  <td>{{ cycle.deposit_asset }} → {{ cycle.settlement_asset }}</td>
+                  <td>{{ "%.6f"|format(cycle.deposit_amount|float) }}</td>
+                  <td>{{ cycle.unlocks_at }}</td>
+                </tr>
+              {% else %}
+                <tr><td colspan="5">No vault cycles recorded for this account yet.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </details>
+      <details class="trade-panel" open>
+        <summary>Wallet Activity</summary>
+        <div class="ops-table-wrap">
+          <table>
+            <thead><tr><th>Type</th><th>Asset</th><th>Amount</th><th>Status</th><th>Created</th></tr></thead>
+            <tbody>
+              {% for item in wallet_activity %}
+                <tr>
+                  <td>{{ item.type }}</td>
+                  <td>{{ item.asset }}<br><span class="muted">{{ item.network }}</span></td>
+                  <td>{{ "%.8f"|format(item.amount|float) }}</td>
+                  <td>{{ item.status }}</td>
+                  <td>{{ item.created_at }}</td>
+                </tr>
+              {% else %}
+                <tr><td colspan="5">No wallet activity recorded for this account yet.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </details>
+      <details class="trade-panel">
+        <summary>Strategy Runs</summary>
+        <div class="ops-table-wrap">
+          <table>
+            <thead><tr><th>Strategy</th><th>Symbol</th><th>Status</th><th>Signal</th></tr></thead>
+            <tbody>
+              {% for run in strategy_runs %}
+                <tr>
+                  <td>{{ run.strategy_name }}<br><span class="muted">{{ run.mode }}</span></td>
+                  <td>{{ run.symbol }} / {{ run.timeframe }}</td>
+                  <td>{{ run.status }}</td>
+                  <td>{{ run.last_signal }}</td>
+                </tr>
+              {% else %}
+                <tr><td colspan="4">No user-scoped strategy runs recorded yet.</td></tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </details>
+    </section>
+  {% else %}
+    <section class="user-ops-grid" aria-label="Trading ops overview">
+      <article class="trade-panel user-ops-card user-ops-card--featured">
+        <div class="trade-panel-head">
+          <div>
+            <span class="trade-kicker">Vault</span>
+            <h2>Cycle Posture</h2>
+            <p class="panel-helper">Recent cycle state for this account. Start and allocation actions stay inside the Vault flow.</p>
+          </div>
+          <a class="button-link secondary" href="{{ ops_links.vault }}">Open Vault</a>
+        </div>
+        <div class="ops-stat-stack">
+          <div><span>Active cycles</span><strong>{{ summary.active_cycles|default(0) }}</strong></div>
+          <div><span>Recent records</span><strong>{{ summary.recent_cycle_count|default(0) }}</strong></div>
+          <div><span>Strategy runs</span><strong>{{ summary.strategy_run_count|default(0) }}</strong></div>
+        </div>
+      </article>
+      <article class="trade-panel user-ops-card">
+        <div class="trade-panel-head">
+          <div>
+            <span class="trade-kicker">Provider</span>
+            <h2>Connectivity</h2>
+            <p class="panel-helper">{{ broker_label|upper if broker_label != '—' else 'Connect a provider to populate live exchange posture.' }}</p>
+          </div>
+        </div>
+        <dl class="ops-detail-list">
+          <div><dt>Providers</dt><dd>{{ summary.enabled_providers|default(0) }} enabled / {{ summary.provider_count|default(0) }} total</dd></div>
+          <div><dt>Snapshot</dt><dd>{{ snapshot_status|replace('_', ' ')|title }}</dd></div>
+          <div><dt>Sync</dt><dd>{{ sync_label }}</dd></div>
+        </dl>
+        <a class="button-link secondary" href="{{ ops_links.providers }}">Review Providers</a>
+      </article>
+      <article class="trade-panel user-ops-card">
+        <div class="trade-panel-head">
+          <div>
+            <span class="trade-kicker">Activity</span>
+            <h2>Recent Account Events</h2>
+            <p class="panel-helper">User-scoped vault, strategy, and wallet records.</p>
+          </div>
+        </div>
+        <div class="activity-feed compact-feed" role="list">
+          {% for item in wallet_activity[:4] %}
+            <div class="activity-item" role="listitem"><strong>{{ item.type|title }}</strong><span>{{ item.asset }} · {{ item.status }}</span><small>{{ item.created_at }}</small></div>
+          {% else %}
+            <div class="activity-empty">No user activity has been recorded yet.</div>
+          {% endfor %}
+        </div>
+        <a class="button-link secondary" href="{{ ops_links.activity }}">Open Activity</a>
+      </article>
+    </section>
+  {% endif %}
+</section>
+{% endblock %}
