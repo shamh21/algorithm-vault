@@ -52,19 +52,19 @@ PUBLIC_PAGES: dict[str, PublicSeoPage] = {
             "server-side execution controls, wallet visibility, and broker/API connectivity."
         ),
         eyebrow="Automated trading infrastructure",
-        heading="Automated trading control without the noise",
+        heading="A cleaner command center for automated trading",
         lead=(
-            "AlgVault gives operators a compact way to review strategy, wallet, provider, and risk state from a premium iPhone-ready PWA."
+            "AlgVault centralizes strategy, wallet, provider, and risk status in a sharp iPhone-ready PWA built for fast decisions."
         ),
         primary_label="Create secure access",
         primary_href="/register",
         secondary_label="Explore features",
         secondary_href="/features/",
         highlights=(
-            {"label": "Active Strategies", "value": "12", "detail": "Online strategy monitor."},
-            {"label": "Connected Providers", "value": "4", "detail": "Healthy broker/API posture."},
-            {"label": "System Latency", "value": "42ms", "detail": "Fast public operating shell."},
-            {"label": "Risk Engine Status", "value": "Online", "detail": "Server-side controls visible."},
+            {"label": "Strategies", "value": "12", "detail": "Monitored in one view."},
+            {"label": "Providers", "value": "4", "detail": "Connection state visible."},
+            {"label": "Shell", "value": "42ms", "detail": "Fast public load path."},
+            {"label": "Risk", "value": "Online", "detail": "Controls stay visible."},
         ),
         sections=(),
         badges=(
@@ -73,14 +73,14 @@ PUBLIC_PAGES: dict[str, PublicSeoPage] = {
             {"label": "Risk states visible", "tone": "alert"},
         ),
         hero_rows=(
-            {"label": "Strategy monitor", "value": "Online", "state": "Signals visible"},
-            {"label": "Broker/API", "value": "Checked", "state": "Readiness first"},
-            {"label": "Wallet controls", "value": "Protected", "state": "No browser secrets"},
+            {"label": "Strategy", "value": "Online", "state": "Signals visible"},
+            {"label": "Providers", "value": "Checked", "state": "Ready first"},
+            {"label": "Wallet", "value": "Protected", "state": "Server guarded"},
         ),
         cta={
             "kicker": "Secure Access",
             "title": "Move from public overview to protected setup",
-            "body": "Create access to review wallet, vault, provider, and strategy controls behind authenticated server-side gates.",
+            "body": "Create access to review wallet, vault, provider, and strategy controls behind protected account gates.",
             "primary_label": "Create secure access",
             "primary_href": "/register",
             "secondary_label": "Review security",
@@ -98,19 +98,18 @@ PUBLIC_PAGES: dict[str, PublicSeoPage] = {
             "provider readiness, risk controls, and account visibility in a premium crypto trading PWA."
         ),
         eyebrow="Platform features",
-        heading="All the features you need to trade with confidence",
+        heading="Powerful trading tools, kept easy to scan",
         lead=(
-            "AlgVault brings automated trading, execution state, strategy posture, analytics, provider readiness, "
-            "and account visibility into a compact operating workspace built for fast checks and protected actions."
+            "AlgVault turns strategy state, provider readiness, risk context, and account visibility into compact cards built for mobile checks."
         ),
         primary_label="View pricing",
         primary_href="/pricing/",
         secondary_label="Mobile PWA",
         secondary_href="/mobile/",
         highlights=(
-            {"label": "Automation", "value": "Controlled", "detail": "Execution flows remain server-authoritative."},
-            {"label": "Analytics", "value": "Explainable", "detail": "Confidence, blockers, and degraded states are visible."},
-            {"label": "Operations", "value": "Real time", "detail": "Provider and runtime posture stay close to actions."},
+            {"label": "Automation", "value": "Guarded", "detail": "Server checks before action."},
+            {"label": "Signals", "value": "Clear", "detail": "Confidence and blockers shown."},
+            {"label": "Ops", "value": "Live", "detail": "Provider state near actions."},
         ),
         sections=(
             {
@@ -130,7 +129,7 @@ PUBLIC_PAGES: dict[str, PublicSeoPage] = {
             {"label": "Exchange-style UI", "tone": "secure"},
         ),
         hero_rows=(
-            {"label": "Signals", "value": "Contextual", "state": "Confidence shown"},
+            {"label": "Signals", "value": "Clear", "state": "Confidence shown"},
             {"label": "Vault cycles", "value": "Guarded", "state": "Readiness gated"},
             {"label": "Portfolio", "value": "Visible", "state": "Wallet-aware"},
         ),
@@ -138,16 +137,16 @@ PUBLIC_PAGES: dict[str, PublicSeoPage] = {
             {
                 "icon": "icon-vault",
                 "kicker": "Platform",
-                "title": "Features readiness",
-                "body": "Stay ahead with a platform built for what's next.",
+                "title": "Readiness at a glance",
+                "body": "See provider, strategy, wallet, and risk status without digging through screens.",
                 "meta": "Readiness",
                 "group": "platform",
             },
             {
                 "icon": "icon-dashboard",
                 "kicker": "Platform",
-                "title": "Contextual",
-                "body": "Real-time context that powers smarter decisions.",
+                "title": "Live context",
+                "body": "Current state and blockers sit beside the controls that need them.",
                 "meta": "Context",
                 "group": "platform",
             },
@@ -155,7 +154,7 @@ PUBLIC_PAGES: dict[str, PublicSeoPage] = {
                 "icon": "icon-activity",
                 "kicker": "Platform",
                 "title": "Cycle-based execution",
-                "body": "Automate with precision at every market cycle.",
+                "body": "Review cycle state, readiness, and next action from one focused card.",
                 "meta": "Cycles",
                 "group": "platform",
             },
@@ -163,7 +162,7 @@ PUBLIC_PAGES: dict[str, PublicSeoPage] = {
                 "icon": "icon-wallet",
                 "kicker": "Platform",
                 "title": "Portfolio visibility",
-                "body": "See your entire portfolio in one clear view.",
+                "body": "Balances, allocation, and vault activity stay grouped for quick review.",
                 "meta": "Portfolio",
                 "group": "platform",
             },
@@ -242,8 +241,8 @@ PUBLIC_PAGES: dict[str, PublicSeoPage] = {
         ),
         cta={
             "kicker": "Ready to get started?",
-            "title": "Experience AlgVault the smart way",
-            "body": "Join traders who automate smarter, trade safer, and move faster with server-side controls.",
+            "title": "Open AlgVault from a cleaner mobile workspace",
+            "body": "Use a focused trading workspace with server-side controls, clear status, and no outcome hype.",
             "primary_label": "Create access",
             "primary_href": "/register",
             "secondary_label": "Explore pricing",
@@ -264,16 +263,16 @@ PUBLIC_PAGES: dict[str, PublicSeoPage] = {
             "broker/API connectivity, portfolio visibility, and operational analytics."
         ),
         eyebrow="Pricing",
-        heading="Simple access tiers for monitored automation",
-        lead=("Choose the AlgVault access level that matches your workflow, visibility needs, and control requirements."),
+        heading="Simple access tiers for focused automation",
+        lead=("Choose the access level that matches how much monitoring, provider visibility, and vault control you need."),
         primary_label="Create account",
         primary_href="/register",
         secondary_label="Compare features",
         secondary_href="/features/",
         highlights=(
-            {"label": "Setup", "value": "2FA-aware", "detail": "Secure account creation before private tools."},
-            {"label": "Billing", "value": "No hype", "detail": "No guaranteed return or investment advice claims."},
-            {"label": "Controls", "value": "Server-led", "detail": "Sensitive workflows stay behind validation gates."},
+            {"label": "Setup", "value": "2FA", "detail": "Protected account creation."},
+            {"label": "Claims", "value": "No hype", "detail": "Tools, not promises."},
+            {"label": "Controls", "value": "Gated", "detail": "Server checks required."},
         ),
         sections=(),
         badges=(
@@ -339,10 +338,9 @@ PUBLIC_PAGES: dict[str, PublicSeoPage] = {
             "touch-optimized controls, offline-ready assets, and app-style navigation."
         ),
         eyebrow="Mobile PWA",
-        heading="An iPhone-ready trading command center",
+        heading="An iPhone-ready trading PWA",
         lead=(
-            "AlgVault is designed to feel fast and app-like across iPhone Safari and installed PWA mode, "
-            "with clear operational states and responsive controls."
+            "AlgVault is shaped for iPhone Safari and installed PWA mode, with thumb-safe controls, stable scrolling, and clear status."
         ),
         primary_label="Review connectivity",
         primary_href="/connectivity/",
@@ -409,10 +407,9 @@ PUBLIC_PAGES: dict[str, PublicSeoPage] = {
             "and continuously supervised public operating states."
         ),
         eyebrow="Connectivity",
-        heading="Secure connections. Operational clarity.",
+        heading="Secure connections, clearly shown",
         lead=(
-            "Connect brokers, data sources, and exchanges through AlgVault's monitored gateway. Every connection "
-            "is validated, encrypted, and continuously supervised."
+            "Review broker, data, and exchange status through a monitored connection layer with clear degraded, disconnected, and recovery states."
         ),
         primary_label="Review connectivity",
         primary_href="#supported-connections",
@@ -515,8 +512,8 @@ PUBLIC_PAGES: dict[str, PublicSeoPage] = {
             "operational transparency, bounded automation, and explicit system states."
         ),
         eyebrow="Security",
-        heading="Trust built through visible controls",
-        lead=("AlgVault keeps operational policy and explicit protected actions visible before sensitive workflows execute."),
+        heading="Security controls you can actually see",
+        lead=("AlgVault keeps auth, provider, wallet, risk, and recovery states visible before sensitive workflows proceed."),
         primary_label="Create secure access",
         primary_href="/register",
         secondary_label="Connectivity",
@@ -528,9 +525,9 @@ PUBLIC_PAGES: dict[str, PublicSeoPage] = {
         ),
         sections=(
             {
-                "kicker": "No Fake Compliance",
-                "title": "Precise security language",
-                "body": "The page describes implemented product posture without implying certifications that are not present.",
+                "kicker": "Plain language",
+                "title": "Security copy stays precise",
+                "body": "The page describes visible product controls without implying certifications that are not present.",
             },
             {
                 "kicker": "User Control",
