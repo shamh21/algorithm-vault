@@ -325,3 +325,37 @@ tr:hover td {
     transition-duration: 0.001ms !important;
   }
 }
+
+/* Public auth navigation polish. Keep header/footer links on-brand after the canonical theme layer loads. */
+.public-topnav a,
+.public-topbar-link,
+.public-footer__links a {
+  border-radius: 999px !important;
+  text-decoration: none !important;
+}
+
+.public-topnav a:hover,
+.public-topnav a.active,
+.public-topnav a[aria-current="page"],
+.public-topbar-link:hover,
+.public-topbar-link.active,
+.public-topbar-link[aria-current="page"],
+.public-footer__links a:hover,
+.public-footer__links a.active,
+.public-footer__links a[aria-current="page"] {
+  border-color: rgba(192, 92, 255, 0.46) !important;
+  background: rgba(155, 77, 255, 0.14) !important;
+  color: #ffffff !important;
+  box-shadow: 0 10px 24px rgba(155, 77, 255, 0.1) !important;
+}
+
+.public-topbar-cta.active,
+.public-topbar-cta[aria-current="page"] {
+  border-color: rgba(255, 31, 54, 0.76) !important;
+  background: linear-gradient(135deg, #ff4054 0%, #d81f42 44%, #7c2dff 100%) !important;
+  color: #ffffff !important;
+}
+
+.public-footer__links strong {
+  color: #c58bff !important;
+}

@@ -1,4 +1,4 @@
-const CACHE_VERSION = "algvault-v22-red-purple-theme-1";
+const CACHE_VERSION = "algvault-v23-auth-shell-polish-1";
 const SHELL_CACHE = `${CACHE_VERSION}-shell`;
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
 
