@@ -60,7 +60,7 @@ def test_mobile_drawer_restores_scroll_focus_and_inert_state() -> None:
 def test_ios_install_help_is_dismissible_and_hidden_standalone() -> None:
     shell = source("static/js/app-shell.js")
     theme = source("static/css/algvault-theme.css")
-    assert 'window.navigator.standalone === true' in shell
+    assert "window.navigator.standalone === true" in shell
     assert "av-ios-install-help-dismissed" in shell
     assert "data-ios-install-dismiss" in shell
     assert "@media (display-mode: standalone)" in theme
