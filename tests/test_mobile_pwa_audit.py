@@ -92,9 +92,7 @@ def test_manifest_and_service_worker_update_contract() -> None:
     assert any("maskable" in icon.get("purpose", "") for icon in manifest["icons"])
 
     worker = source("static/js/sw.js")
-    install_block = worker.split('self.addEventListener("install"', 1)[1].split(
-        'self.addEventListener("activate"', 1
-    )[0]
+    install_block = worker.split('self.addEventListener("install"', 1)[1].split('self.addEventListener("activate"', 1)[0]
     assert "self.skipWaiting()" not in install_block
     assert 'const CACHE_VERSION = "algvault-v23-ios-audit"' in worker
     assert 'fetch(request, { cache: "no-store", credentials: "same-origin" })' in worker
