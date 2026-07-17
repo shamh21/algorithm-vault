@@ -2,913 +2,122 @@
 {% import "marketing/_components.html" as public_ui with context %}
 
 {% block content %}
-{% if page.key == "features" %}
-  <section class="features-landing" aria-labelledby="features-page-title">
-    <div class="features-hero">
-      <div class="features-hero__copy">
-        <nav class="features-breadcrumb" aria-label="Breadcrumb">
-          <a href="{{ url_for('consumer.public_overview') }}">Home</a>
-          <span aria-hidden="true">/</span>
-          <span>Features</span>
-        </nav>
-        <span class="features-kicker">{{ page.eyebrow }}</span>
-        <h1 id="features-page-title">{{ page.heading }}</h1>
-        <p>{{ page.lead }}</p>
-        <div class="features-hero__actions" aria-label="Features page actions">
-          <a class="button-link primary" href="{{ page.cta.primary_href }}">{{ page.cta.primary_label }}</a>
-          <a class="button-link secondary" href="{{ page.primary_href }}">{{ page.primary_label }}</a>
-          <a class="button-link secondary" href="{{ page.secondary_href }}">{{ page.secondary_label }}</a>
-        </div>
-      </div>
-      <aside class="features-hero-visual" aria-label="AlgVault trading dashboard preview">
-        <span class="features-hero-visual__glow" aria-hidden="true"></span>
-        <div class="features-dashboard-card">
-          <div class="features-dashboard-card__top">
-            <span>AV / USDC</span>
-            <strong>Readiness online</strong>
-          </div>
-          <div class="features-chart" aria-hidden="true">
-            <span class="features-candle features-candle--up" style="--h: 46%; --y: 42%;"></span>
-            <span class="features-candle features-candle--down" style="--h: 31%; --y: 52%;"></span>
-            <span class="features-candle features-candle--up" style="--h: 58%; --y: 32%;"></span>
-            <span class="features-candle features-candle--up" style="--h: 72%; --y: 22%;"></span>
-            <span class="features-candle features-candle--down" style="--h: 48%; --y: 36%;"></span>
-            <span class="features-candle features-candle--up" style="--h: 64%; --y: 24%;"></span>
-            <span class="features-candle features-candle--down" style="--h: 42%; --y: 45%;"></span>
-            <span class="features-candle features-candle--up" style="--h: 68%; --y: 18%;"></span>
-            <span class="features-candle features-candle--up" style="--h: 52%; --y: 27%;"></span>
-          </div>
-          <div class="features-dashboard-card__rows">
-            <span><b>Provider</b><em>Synced</em></span>
-            <span><b>Risk gate</b><em>Active</em></span>
-            <span><b>Cycle state</b><em>Ready</em></span>
-          </div>
-        </div>
-        <span class="features-floating-tile features-floating-tile--shield" aria-hidden="true">
-          <svg class="topnav-icon"><use href="#icon-shield"></use></svg>
-        </span>
-        <span class="features-floating-tile features-floating-tile--activity" aria-hidden="true">
-          <svg class="topnav-icon"><use href="#icon-activity"></use></svg>
-        </span>
-        <span class="features-floating-tile features-floating-tile--target" aria-hidden="true">
-          <svg class="topnav-icon"><use href="#icon-dashboard"></use></svg>
-        </span>
-      </aside>
-    </div>
+  <div class="public-audit-shell public-audit-shell--{{ page.key }}">
+    {{ public_ui.public_hero(page, "public-page-title", public_seo_pages) }}
+    {{ public_ui.public_metrics(page) }}
 
-    <div class="features-filter" role="toolbar" aria-label="Feature categories">
-      <button class="is-active" type="button" aria-pressed="true">All features</button>
-      <button type="button" aria-pressed="false">Platform</button>
-      <button type="button" aria-pressed="false">Automation</button>
-      <button type="button" aria-pressed="false">Risk &amp; Control</button>
-      <button type="button" aria-pressed="false">Accessibility</button>
-      <button type="button" aria-pressed="false">Security</button>
-      <button type="button" aria-pressed="false">Insights</button>
-    </div>
+    <nav class="public-section-nav" aria-label="On this page">
+      <a href="#public-page-title" aria-current="location">Overview</a>
+      <a href="#capabilities">Capabilities</a>
+      {% if page.cards %}<a href="#page-details">Details</a>{% endif %}
+      {% if page.status_rows %}<a href="#state-model">State model</a>{% endif %}
+      <a href="#mobile-pwa">Mobile PWA</a>
+      <a href="#trust">Security</a>
+    </nav>
 
-    <section class="features-section" id="platform-features" aria-labelledby="platform-features-title">
-      <h2 id="platform-features-title">Platform Features</h2>
-      <div class="features-card-grid features-card-grid--platform">
-        {% for card in page.cards %}
-          {% if card.group == "platform" %}
-            <article class="features-card">
-              <span class="features-icon-tile" aria-hidden="true"><svg class="topnav-icon"><use href="#{{ card.icon }}"></use></svg></span>
+    {{ public_ui.public_cards(page) }}
+
+    {% if page.cards %}
+      <section class="public-detail-section" id="page-details" aria-labelledby="page-details-title">
+        <header class="public-section-heading">
+          <span class="card-kicker">{{ page.nav_label }}</span>
+          <h2 id="page-details-title">Operational capabilities</h2>
+          <p>Capabilities describe interface and control behavior. They do not represent live account state, provider availability, balances, or execution history.</p>
+        </header>
+        <div class="public-detail-grid">
+          {% for card in page.cards %}
+            <article class="public-detail-card">
+              <span class="public-detail-card__icon" aria-hidden="true">
+                <svg class="topnav-icon"><use href="#{{ card.icon|default('icon-shield') }}"></use></svg>
+              </span>
+              {% if card.kicker %}<small>{{ card.kicker }}</small>{% endif %}
               <h3>{{ card.title }}</h3>
               <p>{{ card.body }}</p>
+              {% if card.features %}
+                <ul aria-label="{{ card.title }} capabilities">
+                  {% for feature in card.features %}<li>{{ feature }}</li>{% endfor %}
+                </ul>
+              {% endif %}
             </article>
-          {% endif %}
-        {% endfor %}
-      </div>
-    </section>
+          {% endfor %}
+        </div>
+      </section>
+    {% endif %}
 
-    <section class="features-section" id="automation-features" aria-labelledby="automation-features-title">
-      <h2 id="automation-features-title">Automation &amp; Smart Features</h2>
-      <div class="features-card-grid features-card-grid--automation">
-        {% for card in page.cards %}
-          {% if card.group == "automation" %}
-            <article class="features-card features-card--dense">
-              <span class="features-icon-tile" aria-hidden="true"><svg class="topnav-icon"><use href="#{{ card.icon }}"></use></svg></span>
-              <span class="features-card__meta">{{ card.meta }}</span>
-              <h3>{{ card.title }}</h3>
-              <p>{{ card.body }}</p>
+    {% if page.status_rows %}
+      <section class="public-state-section" id="state-model" aria-labelledby="state-model-title">
+        <header class="public-section-heading">
+          <span class="card-kicker">State model</span>
+          <h2 id="state-model-title">Readiness is explicit, not optimistic</h2>
+          <p>Actual state comes from authenticated server responses. Public examples explain labels only.</p>
+        </header>
+        <div class="public-state-grid" role="list">
+          {% for row in page.status_rows %}
+            <article role="listitem">
+              <span>{{ row.state }}</span>
+              <h3>{{ row.label }}</h3>
+              <p>{{ row.detail }}</p>
             </article>
-          {% endif %}
-        {% endfor %}
-      </div>
-    </section>
-
-    <section class="features-insight" aria-labelledby="features-insight-title">
-      <div class="features-icon-tile" aria-hidden="true"><svg class="topnav-icon"><use href="#icon-markets"></use></svg></div>
-      <div>
-        <span class="features-kicker">Insights &amp; Oversight</span>
-        <h2 id="features-insight-title">Review access plans and mobile behavior</h2>
-        <p>Correlate plans, runtime posture, and PWA experience without leaving the desk.</p>
-      </div>
-      <nav aria-label="Insights next steps">
-        <a class="button-link primary" href="{{ page.primary_href }}">{{ page.primary_label }}</a>
-        <a class="button-link secondary" href="{{ page.secondary_href }}">{{ page.secondary_label }}</a>
-      </nav>
-    </section>
-
-    <section class="features-matters" aria-labelledby="features-matters-title">
-      <span class="features-kicker">Why it matters</span>
-      <h2 id="features-matters-title">A faster operating surface for protected trading workflows</h2>
-      <div class="features-matters-grid">
-        <article>
-          <span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-activity"></use></svg></span>
-          <h3>Faster decisions</h3>
-          <p>Everything you need, exactly where you need it.</p>
-        </article>
-        <article>
-          <span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-shield"></use></svg></span>
-          <h3>Smarter risk control</h3>
-          <p>Built-in safeguards before every action.</p>
-        </article>
-        <article>
-          <span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-dashboard"></use></svg></span>
-          <h3>Operational clarity</h3>
-          <p>End-to-end visibility across your stack.</p>
-        </article>
-        <article>
-          <span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-login"></use></svg></span>
-          <h3>Enterprise-grade by design</h3>
-          <p>Security, reliability, and control at every layer.</p>
-        </article>
-      </div>
-    </section>
-
-    <section class="features-final-cta" aria-labelledby="features-final-title">
-      <div>
-        <span class="features-kicker">{{ page.cta.kicker }}</span>
-        <h2 id="features-final-title">{{ page.cta.title }}</h2>
-        <p>{{ page.cta.body }}</p>
-      </div>
-      <nav aria-label="Features final actions">
-        <a class="button-link primary" href="{{ page.cta.primary_href }}">{{ page.cta.primary_label }}</a>
-        <a class="button-link secondary" href="{{ page.cta.secondary_href }}">{{ page.cta.secondary_label }}</a>
-      </nav>
-    </section>
-
-    <p class="features-disclaimer">{{ page.disclaimer }}</p>
-  </section>
-{% elif page.key == "pricing" %}
-  <section class="pricing-landing" aria-labelledby="pricing-page-title">
-    <div class="pricing-hero">
-      <div class="pricing-hero__copy">
-        <nav class="pricing-breadcrumb" aria-label="Breadcrumb">
-          <a href="{{ url_for('consumer.public_overview') }}">Home</a>
-          <span aria-hidden="true">/</span>
-          <span>Pricing</span>
-        </nav>
-        <span class="pricing-kicker">{{ page.eyebrow }}</span>
-        <h1 id="pricing-page-title">{{ page.heading }}</h1>
-        <p>{{ page.lead }}</p>
-        <ul class="pricing-trust-pills" aria-label="Pricing trust signals">
-          {% for badge in page.badges %}
-            <li>
-              <span aria-hidden="true"><svg class="topnav-icon"><use href="#{% if loop.index == 1 %}icon-shield{% elif loop.index == 2 %}icon-alert{% else %}icon-activity{% endif %}"></use></svg></span>
-              {{ badge.label }}
-            </li>
           {% endfor %}
-        </ul>
-        <div class="pricing-hero__actions" aria-label="Pricing page actions">
-          <a class="button-link primary" href="{{ page.primary_href }}">{{ page.primary_label }}</a>
-          <a class="button-link secondary" href="{{ page.secondary_href }}">{{ page.secondary_label }}</a>
         </div>
-      </div>
+      </section>
+    {% endif %}
 
-      <aside class="pricing-hero-visual" aria-label="AlgVault plan and control preview">
-        <span class="pricing-hero-visual__line" aria-hidden="true"></span>
-        <div class="pricing-console-card">
-          <div class="pricing-console-card__top">
-            <span>Access matrix</span>
-            <strong>Server-led</strong>
-          </div>
-          <div class="pricing-console-chart" aria-hidden="true">
-            <span style="--h: 32%; --x: 8%;"></span>
-            <span style="--h: 46%; --x: 22%;"></span>
-            <span style="--h: 39%; --x: 36%;"></span>
-            <span style="--h: 62%; --x: 50%;"></span>
-            <span style="--h: 74%; --x: 64%;"></span>
-            <span style="--h: 58%; --x: 78%;"></span>
-          </div>
-          <div class="pricing-console-rows">
-            <span><b>Mobile PWA</b><em>Included</em></span>
-            <span><b>Risk gates</b><em>Visible</em></span>
-            <span><b>Provider state</b><em>Checked</em></span>
-          </div>
-        </div>
-        <span class="pricing-visual-tile pricing-visual-tile--shield" aria-hidden="true">
-          <svg class="topnav-icon"><use href="#icon-shield"></use></svg>
-        </span>
-        <span class="pricing-visual-tile pricing-visual-tile--wallet" aria-hidden="true">
-          <svg class="topnav-icon"><use href="#icon-wallet"></use></svg>
-        </span>
-      </aside>
-    </div>
-
-    <section class="pricing-plans" aria-labelledby="pricing-plans-title">
-      <span class="pricing-kicker">Access tiers</span>
-      <h2 id="pricing-plans-title">Choose the operating level that fits your workflow</h2>
-      <div class="pricing-plan-grid">
-        {% for card in page.cards %}
-          {% set is_recommended = card.title == "Operator" %}
-          <article class="pricing-plan-card {% if is_recommended %}pricing-plan-card--recommended{% endif %}">
-            {% if is_recommended %}
-              <span class="pricing-recommended-badge">Recommended</span>
-            {% endif %}
-            <div class="pricing-plan-card__head">
-              <span class="pricing-plan-icon" aria-hidden="true"><svg class="topnav-icon"><use href="#{% if card.title == 'Starter' %}icon-user-plus{% elif card.title == 'Operator' %}icon-vault{% else %}icon-settings{% endif %}"></use></svg></span>
-              <h3>{{ card.title }}</h3>
-            </div>
-            <p>{{ card.body }}</p>
-            <ul aria-label="{{ card.title }} includes">
-              {% for feature in card.features %}
-                <li>{{ feature }}</li>
-              {% endfor %}
-            </ul>
-            <a class="button-link {% if is_recommended %}primary{% else %}secondary{% endif %}" href="{{ page.primary_href }}">
-              {% if card.title == "Starter" %}Choose Starter{% elif card.title == "Operator" %}Choose Operator{% else %}Choose Custom{% endif %}
-            </a>
-          </article>
-        {% endfor %}
-      </div>
-    </section>
-
-    <section class="pricing-comparison" aria-labelledby="pricing-comparison-title">
-      <h2 id="pricing-comparison-title">Compare access tiers</h2>
-      <table>
-        <caption>AlgVault public plan comparison</caption>
-        <thead>
-          <tr>
-            <th scope="col">Capability</th>
-            <th scope="col">Starter</th>
-            <th scope="col">Operator</th>
-            <th scope="col">Custom</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% set comparison_rows = (
-            ("Mobile PWA", true, true, true, "icon-wallet"),
-            ("Account tools", true, true, true, "icon-user-plus"),
-            ("Execution controls", false, true, true, "icon-convert"),
-            ("Risk language", false, true, true, "icon-shield"),
-            ("Provider visibility", false, true, true, "icon-markets"),
-            ("Operational support", false, true, true, "icon-dashboard"),
-            ("Custom workflows", false, false, true, "icon-settings"),
-          ) %}
-          {% for label, starter, operator, custom, icon in comparison_rows %}
-            <tr>
-              <th scope="row"><svg class="topnav-icon" aria-hidden="true"><use href="#{{ icon }}"></use></svg>{{ label }}</th>
-              <td data-label="Starter">{% if starter %}<span class="pricing-check"><span class="pricing-sr-only">Included</span></span>{% else %}<span class="pricing-dash" aria-label="Not included">-</span>{% endif %}</td>
-              <td data-label="Operator">{% if operator %}<span class="pricing-check"><span class="pricing-sr-only">Included</span></span>{% else %}<span class="pricing-dash" aria-label="Not included">-</span>{% endif %}</td>
-              <td data-label="Custom">{% if custom %}<span class="pricing-check"><span class="pricing-sr-only">Included</span></span>{% else %}<span class="pricing-dash" aria-label="Not included">-</span>{% endif %}</td>
-            </tr>
+    {% if page.sections %}
+      <section class="public-explainer-section" aria-labelledby="public-explainer-title">
+        <header class="public-section-heading">
+          <span class="card-kicker">How AlgVault communicates state</span>
+          <h2 id="public-explainer-title">Compact context before protected action</h2>
+        </header>
+        <div class="public-explainer-grid">
+          {% for section in page.sections %}
+            <article>
+              {% if section.kicker %}<small>{{ section.kicker }}</small>{% endif %}
+              <h3>{{ section.title }}</h3>
+              <p>{{ section.body }}</p>
+            </article>
           {% endfor %}
-        </tbody>
-      </table>
-    </section>
-
-    <section class="pricing-safety" aria-labelledby="pricing-safety-title">
-      <h2 id="pricing-safety-title">Built on safety and clarity</h2>
-      <div class="pricing-safety-grid">
-        <article>
-          <span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-shield"></use></svg></span>
-          <h3>Server-led validation</h3>
-          <p>Sensitive workflows stay behind validation gates.</p>
-        </article>
-        <article>
-          <span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-alert"></use></svg></span>
-          <h3>No guaranteed returns</h3>
-          <p>No guaranteed returns or investment advice.</p>
-        </article>
-        <article>
-          <span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-login"></use></svg></span>
-          <h3>Secure account setup</h3>
-          <p>Secure account creation before private tools.</p>
-        </article>
-        <article>
-          <span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-dashboard"></use></svg></span>
-          <h3>Plan boundaries stay clear</h3>
-          <p>Plans describe tools and controls, not trading outcomes.</p>
-        </article>
-      </div>
-    </section>
-
-    <p class="pricing-disclaimer">{{ page.disclaimer }}</p>
-
-    <section class="pricing-final-cta" aria-labelledby="pricing-final-title">
-      <span class="pricing-final-cta__icon" aria-hidden="true"><svg class="topnav-icon"><use href="#icon-login"></use></svg></span>
-      <div>
-        <span class="pricing-kicker">{{ page.cta.kicker }}</span>
-        <h2 id="pricing-final-title">{{ page.cta.title }}</h2>
-        <p>{{ page.cta.body }}</p>
-      </div>
-      <nav aria-label="Pricing final actions">
-        <a class="button-link primary" href="{{ page.cta.primary_href }}">{{ page.cta.primary_label }}</a>
-        <a class="button-link secondary" href="{{ page.cta.secondary_href }}">{{ page.cta.secondary_label }}</a>
-      </nav>
-    </section>
-  </section>
-{% elif page.key == "mobile" %}
-  <section class="mobile-landing" aria-labelledby="public-page-title">
-    <section class="mobile-hero" aria-labelledby="public-page-title">
-      <span class="mobile-hero__grid" aria-hidden="true"></span>
-      <span class="mobile-hero__glow mobile-hero__glow--one" aria-hidden="true"></span>
-      <span class="mobile-hero__glow mobile-hero__glow--two" aria-hidden="true"></span>
-      <div class="mobile-hero__copy">
-        <span class="card-kicker">{{ page.eyebrow }}</span>
-        <h1 id="public-page-title">{{ page.heading }}</h1>
-        <p>{{ page.lead }}</p>
-        {{ public_ui.public_badges(page) }}
-        <div class="mobile-hero__actions public-hero__actions" aria-label="{{ page.nav_label }} actions">
-          <a class="button-link primary" href="{{ page.primary_href }}">{{ page.primary_label }}</a>
-          <a class="button-link secondary" href="{{ page.secondary_href }}">{{ page.secondary_label }}</a>
         </div>
-      </div>
-      <aside class="mobile-hero__visual public-device-frame" aria-label="AlgVault iPhone trading preview">
-        <div class="mobile-phone mobile-phone--float">
-          <span class="mobile-phone__notch" aria-hidden="true"></span>
-          <div class="mobile-phone__screen">
-            <div class="mobile-phone__status" aria-label="iPhone status bar preview">
-              <span>9:42</span>
-              <span>5G</span>
-            </div>
-            <div class="mobile-phone__brand">
-              <span><img src="/icons/algvault-ios-192.png" alt="" width="64" height="64" decoding="async"> AlgVault</span>
-              <svg class="topnav-icon" aria-hidden="true"><use href="#icon-settings"></use></svg>
-            </div>
-            <section class="mobile-phone__portfolio" aria-label="Portfolio preview">
-              <span>Portfolio</span>
-              <strong>Total value</strong>
-              <b>$128,420.58</b>
-              <em>+2.41% today</em>
-              <svg viewBox="0 0 240 92" role="img" aria-label="Trading chart trending upward">
-                <defs>
-                  <linearGradient id="mobile-chart-fill" x1="0" x2="0" y1="0" y2="1">
-                    <stop offset="0%" stop-color="#ff3342" stop-opacity="0.32"></stop>
-                    <stop offset="100%" stop-color="#ff3342" stop-opacity="0"></stop>
-                  </linearGradient>
-                </defs>
-                <path class="mobile-chart-area" d="M8 74 L28 62 L48 68 L68 47 L88 54 L108 38 L128 44 L148 28 L168 36 L188 21 L212 26 L232 12 L232 92 L8 92 Z"></path>
-                <path class="mobile-chart-line" d="M8 74 L28 62 L48 68 L68 47 L88 54 L108 38 L128 44 L148 28 L168 36 L188 21 L212 26 L232 12"></path>
-              </svg>
-              <div class="mobile-phone__tabs" aria-label="Chart range preview">
-                <span>1H</span>
-                <span class="is-active">1D</span>
-                <span>1W</span>
-                <span>1M</span>
-              </div>
-            </section>
-            <section class="mobile-phone__cycle" aria-label="Vault cycle status preview">
-              <div>
-                <span>Vault Cycle</span>
-                <strong>Expansion</strong>
-                <small>Phase 3 of 4</small>
-              </div>
-              <b>72%</b>
-            </section>
-            <section class="mobile-phone__signals" aria-label="Signal preview">
-              <span>Signals</span>
-              <p><strong>BTC/USDT</strong><em>Bullish</em></p>
-              <p><strong>ETH/USDT</strong><em>Neutral</em></p>
-            </section>
-          </div>
+      </section>
+    {% endif %}
+
+    {% if page.key == "connectivity" %}
+      <section class="public-provider-model" aria-labelledby="provider-model-title">
+        <header class="public-section-heading">
+          <span class="card-kicker">Provider readiness</span>
+          <h2 id="provider-model-title">Implemented providers remain eligibility-gated</h2>
+          <p>AlgVault does not publish invented connection counts, heartbeat history, latency, or availability. Authenticated provider state is checked at runtime.</p>
+        </header>
+        <div class="public-state-grid" role="list">
+          <article role="listitem"><span>Configured</span><h3>Hyperliquid</h3><p>Connection and account eligibility are confirmed by the server before protected use.</p></article>
+          <article role="listitem"><span>Eligibility-dependent</span><h3>KuCoin</h3><p>Provider restrictions, credential status, and network policy remain visible blockers.</p></article>
+          <article role="listitem"><span>Not assumed</span><h3>Additional providers</h3><p>Only implemented and configured integrations appear in authenticated workflows.</p></article>
         </div>
-      </aside>
-    </section>
+      </section>
+    {% endif %}
 
-    <section class="mobile-showcase public-card-system" aria-labelledby="mobile-showcase-title">
-      <div class="mobile-showcase__copy">
-        <span class="card-kicker">Mobile experience</span>
-        <h2 id="mobile-showcase-title">Built for the way you operate</h2>
-        <p>A mobile shell that stays fast, focused, and reliable wherever you are.</p>
-        <ul>
-          <li>Installed PWA mode</li>
-          <li>Compact trading cards</li>
-          <li>Operational state at a glance</li>
-          <li>Safe-area aware layout</li>
-        </ul>
-      </div>
-      <div class="mobile-showcase__panels" aria-label="Mobile app shell concepts">
-        <article class="mobile-app-card mobile-app-card--watchlist">
-          <div class="mobile-card-head"><strong>Watchlist</strong><svg class="topnav-icon" aria-hidden="true"><use href="#icon-markets"></use></svg></div>
-          <p><span>BTC / USDT</span><b class="is-down">-2.41%</b></p>
-          <p><span>ETH / USDT</span><b>+1.23%</b></p>
-          <p><span>SOL / USDT</span><b class="is-down">-0.71%</b></p>
-        </article>
-        <article class="mobile-app-card">
-          <div class="mobile-card-head"><strong>Vault Cycle</strong><svg class="topnav-icon" aria-hidden="true"><use href="#icon-vault"></use></svg></div>
-          <p><span>Condition</span><b>Favorable</b></p>
-          <p><span>Risk</span><b>Managed</b></p>
-          <p><span>Next check</span><b>12m 44s</b></p>
-        </article>
-        <article class="mobile-app-card">
-          <div class="mobile-card-head"><strong>Signals</strong><svg class="topnav-icon" aria-hidden="true"><use href="#icon-activity"></use></svg></div>
-          <p><span>BTC/USDT</span><b class="is-red">Bullish</b></p>
-          <p><span>ETH/USDT</span><b>Neutral</b></p>
-          <p><span>SOL/USDT</span><b class="is-red">Watch</b></p>
-        </article>
-        <article class="mobile-app-card">
-          <div class="mobile-card-head"><strong>Orders</strong><svg class="topnav-icon" aria-hidden="true"><use href="#icon-dashboard"></use></svg></div>
-          <p><span>Open</span><b>2</b></p>
-          <p><span>History</span><b>18</b></p>
-          <span class="mobile-card-action">New order</span>
-        </article>
-        <nav class="mobile-bottom-nav" aria-label="Sticky bottom navigation concept">
-          <span class="is-active"><svg class="topnav-icon" aria-hidden="true"><use href="#icon-home"></use></svg>Overview</span>
-          <span><svg class="topnav-icon" aria-hidden="true"><use href="#icon-markets"></use></svg>Markets</span>
-          <span><svg class="topnav-icon" aria-hidden="true"><use href="#icon-vault"></use></svg>Vault</span>
-          <span><svg class="topnav-icon" aria-hidden="true"><use href="#icon-wallet"></use></svg>Orders</span>
-        </nav>
-      </div>
-    </section>
-
-    <section class="mobile-feature-rows public-status-system" aria-labelledby="mobile-pwa-title">
-      <div class="public-section-heading">
-        <h2 id="mobile-pwa-title">Built for iPhone PWA usage</h2>
-      </div>
-      <div class="mobile-feature-list">
-        <article>
-          <span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-activity"></use></svg></span>
-          <div>
-            <h3>Fast perceived load</h3>
-            <p>Server-rendered shell content keeps the first view immediate while scripts defer.</p>
-          </div>
-        </article>
-        <article>
-          <span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-dashboard"></use></svg></span>
-          <div>
-            <h3>No horizontal overflow</h3>
-            <p>Narrow layouts and safe-area spacing preserve the viewport on every screen.</p>
-          </div>
-        </article>
-        <article>
-          <span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-theme"></use></svg></span>
-          <div>
-            <h3>Reduced motion support</h3>
-            <p>Motion respects system settings and avoids distracting movement.</p>
-          </div>
-        </article>
-      </div>
-    </section>
-
-    <section class="mobile-ops public-card-system" aria-labelledby="mobile-ops-title">
-      <div class="public-section-heading">
-        <span class="card-kicker">Mobile operations</span>
-        <h2 id="mobile-ops-title">Operational clarity on mobile</h2>
-      </div>
-      <div class="mobile-ops-grid">
-        <article><span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-alert"></use></svg></span><h3>Explicit network states</h3><p>Know exactly when you are online or offline.</p></article>
-        <article><span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-shield"></use></svg></span><h3>Safe offline behavior</h3><p>Cached shell keeps key information available.</p></article>
-        <article><span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-login"></use></svg></span><h3>Server-validated actions</h3><p>Sensitive actions require server confirmation.</p></article>
-        <article><span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-user-plus"></use></svg></span><h3>Touch-friendly controls</h3><p>44px+ targets and room for your thumb.</p></article>
-        <article><span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-dashboard"></use></svg></span><h3>Stable viewport sizing</h3><p>No jumpy layouts or content shifts.</p></article>
-        <article><span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-vault"></use></svg></span><h3>Compact repeated workflows</h3><p>Complete tasks with fewer taps and clearer steps.</p></article>
-      </div>
-    </section>
-
-    <section class="mobile-install" aria-labelledby="mobile-install-title">
-      <div class="mobile-install__copy">
-        <span class="card-kicker">Installable PWA</span>
-        <h2 id="mobile-install-title">Installable PWA in seconds</h2>
-        <p>Add AlgVault to your iPhone for an app-like operating surface.</p>
-        <ol>
-          <li><strong>Installable icon metadata</strong><span>Home Screen icons and maskable assets are defined.</span></li>
-          <li><strong>Standalone display mode</strong><span>The shell is prepared for installed PWA launch.</span></li>
-          <li><strong>Theme-color support</strong><span>Dark system chrome matches the AlgVault shell.</span></li>
-          <li><strong>Splash-screen readiness</strong><span>Apple metadata supports a clean app start.</span></li>
-          <li><strong>Safe-area support</strong><span>Viewport-fit spacing handles notch and Home Indicator devices.</span></li>
+    {% if page.key == "security" %}
+      <section class="public-security-flow" aria-labelledby="security-flow-title">
+        <header class="public-section-heading">
+          <span class="card-kicker">Protected workflow</span>
+          <h2 id="security-flow-title">No success state before server confirmation</h2>
+        </header>
+        <ol class="public-security-flow__list">
+          <li><strong>Identity</strong><span>Authentication and route protection</span></li>
+          <li><strong>Provider</strong><span>Connection, credentials, and eligibility</span></li>
+          <li><strong>Risk</strong><span>Policy, limits, data quality, and readiness</span></li>
+          <li><strong>Action</strong><span>Pending until the server returns a final state</span></li>
+          <li><strong>Audit</strong><span>Completed, rejected, or failed remain distinct</span></li>
         </ol>
-      </div>
-      <aside class="mobile-install__visual" aria-label="iPhone install prompt preview">
-        <div class="mobile-install-prompt">
-          <div class="mobile-install-prompt__app">
-            <img src="/icons/algvault-ios-192.png" alt="" width="64" height="64" loading="lazy" decoding="async">
-            <div><strong>AlgVault</strong><span>algvault.app</span></div>
-          </div>
-          <p>Add to Reading List <span aria-hidden="true">+</span></p>
-          <p>Add Bookmark <span aria-hidden="true">+</span></p>
-          <p>Add to Favorites <span aria-hidden="true">+</span></p>
-          <p class="is-selected">Add to Home Screen <span aria-hidden="true">+</span></p>
-          <p>Markup <span aria-hidden="true">+</span></p>
-          <div class="mobile-install-prompt__share" aria-hidden="true"><svg class="topnav-icon"><use href="#icon-login"></use></svg></div>
-        </div>
-      </aside>
-    </section>
-
-    <section class="mobile-touch" aria-labelledby="mobile-touch-title">
-      <div class="public-section-heading">
-        <h2 id="mobile-touch-title">Designed around touch-first operation</h2>
-      </div>
-      <div class="mobile-touch-strip">
-        <article><span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-user-plus"></use></svg></span><h3>44px+ tap targets</h3><p>Built for accurate mobile input.</p></article>
-        <article><span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-vault"></use></svg></span><h3>Thumb-zone controls</h3><p>Important actions stay within easy reach.</p></article>
-        <article><span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-dashboard"></use></svg></span><h3>Responsive spacing</h3><p>Breathing room adapts to any device.</p></article>
-        <article><span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-shield"></use></svg></span><h3>Reduced accidental actions</h3><p>Confirmation for high-impact actions.</p></article>
-        <article><span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-wallet"></use></svg></span><h3>Fixed action bars</h3><p>Primary actions stay accessible.</p></article>
-        <article><span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-markets"></use></svg></span><h3>Compact navigation</h3><p>Bottom nav keeps you oriented.</p></article>
-      </div>
-    </section>
-
-    <section class="mobile-connectivity public-status-system" aria-labelledby="mobile-connectivity-title">
-      <div class="public-section-heading">
-        <h2 id="mobile-connectivity-title">Connectivity you can trust</h2>
-      </div>
-      <div class="mobile-status-strip" aria-label="Operational status">
-        <article class="is-green"><span aria-hidden="true"></span><strong>API connected</strong><p>All systems operational</p></article>
-        <article class="is-green"><span aria-hidden="true"></span><strong>Sync healthy</strong><p>Data updated just now</p></article>
-        <article class="is-gold"><span aria-hidden="true"></span><strong>Cached shell available</strong><p>Available offline</p></article>
-        <article class="is-red"><span aria-hidden="true"></span><strong>Authentication required</strong><p>Auth required for sensitive actions</p></article>
-      </div>
-    </section>
-
-    <section class="mobile-final-cta public-cta-block" aria-labelledby="mobile-final-title">
-      <span class="mobile-final-cta__icon" aria-hidden="true"><svg class="topnav-icon"><use href="#icon-shield"></use></svg></span>
-      <div>
-        <span class="card-kicker">{{ page.cta.kicker }}</span>
-        <h2 id="mobile-final-title">{{ page.cta.title }}</h2>
-        <p>{{ page.cta.body }}</p>
-      </div>
-      <nav class="public-cta-actions" aria-label="{{ page.nav_label }} next actions">
-        <a class="button-link primary" href="{{ page.cta.primary_href }}">{{ page.cta.primary_label }}</a>
-        <a class="button-link secondary" href="{{ page.cta.secondary_href }}">{{ page.cta.secondary_label }}</a>
-      </nav>
-    </section>
-  </section>
-{% elif page.key == "connectivity" %}
-  <section class="connectivity-landing" aria-labelledby="connectivity-page-title">
-    <section class="connectivity-hero" aria-label="Connectivity overview">
-      <span class="connectivity-grid" aria-hidden="true"></span>
-      <span class="connectivity-orbit connectivity-orbit--one" aria-hidden="true"></span>
-      <span class="connectivity-orbit connectivity-orbit--two" aria-hidden="true"></span>
-      <div class="connectivity-hero__copy">
-        <span class="card-kicker">{{ page.eyebrow }}</span>
-        <h1 id="connectivity-page-title">{{ page.heading }}</h1>
-        <p>{{ page.lead }}</p>
-        <ul class="connectivity-trust-row" aria-label="Connectivity trust signals">
-          <li class="public-trust-badge connectivity-trust-pill">Encrypted</li>
-          <li class="public-trust-badge connectivity-trust-pill">Monitored</li>
-          <li class="public-trust-badge connectivity-trust-pill">Resilient</li>
-          <li class="public-trust-badge connectivity-trust-pill">Transparent</li>
-        </ul>
-        <div class="connectivity-hero__actions" aria-label="Connectivity actions">
-          <a class="button-link primary" href="{{ page.primary_href }}">{{ page.primary_label }}</a>
-          <a class="button-link secondary" href="{{ page.secondary_href }}">{{ page.secondary_label }}</a>
-        </div>
-      </div>
-
-      <aside class="connectivity-hero__visual" aria-label="Connection overview visual">
-        <div class="connection-overview-card">
-          <div class="connection-overview-card__header">
-            <span>Connection overview</span>
-            <strong>Gateway live</strong>
-          </div>
-          <div class="connection-overview-card__body">
-            <div class="connection-health-ring" aria-label="12 monitored connections">
-              <span>12</span>
-              <strong>Connections</strong>
-            </div>
-            <dl class="connection-status-list" aria-label="Connection status counts">
-              <div class="is-connected">
-                <dt>Connected</dt>
-                <dd>10</dd>
-              </div>
-              <div class="is-degraded">
-                <dt>Degraded</dt>
-                <dd>1</dd>
-              </div>
-              <div class="is-disconnected">
-                <dt>Disconnected</dt>
-                <dd>1</dd>
-              </div>
-            </dl>
-          </div>
-          <a class="connection-overview-link" href="#supported-connections">View all connections</a>
-        </div>
-        <div class="connectivity-shield-glow" aria-hidden="true">
-          <span class="connectivity-shield-glow__shield">A</span>
-        </div>
-      </aside>
-    </section>
-
-    <section class="connectivity-panel" id="supported-connections" aria-labelledby="supported-connections-title">
-      <div class="connectivity-section-head">
-        <div>
-          <h2 id="supported-connections-title">Supported connections</h2>
-          <p>Connect to leading brokers, exchanges, and data providers.</p>
-        </div>
-        <a href="/register" aria-label="Create access to review all providers">View all providers</a>
-      </div>
-      {% set connection_providers = [
-        {"name": "Interactive Brokers", "type": "Broker", "status": "Connected", "mark": "IB", "key": "interactive-brokers"},
-        {"name": "Tradovate", "type": "Broker", "status": "Available", "mark": "TV", "key": "tradovate"},
-        {"name": "Binance", "type": "Exchange", "status": "Connected", "mark": "BN", "key": "binance"},
-        {"name": "Coinbase Exchange", "type": "Exchange", "status": "Connected", "mark": "CB", "key": "coinbase"},
-        {"name": "Bybit", "type": "Exchange", "status": "Available", "mark": "BY", "key": "bybit"},
-        {"name": "Kraken", "type": "Exchange", "status": "Degraded", "mark": "KR", "key": "kraken"},
-        {"name": "OANDA", "type": "Broker", "status": "Connected", "mark": "OA", "key": "oanda"},
-        {"name": "dxFeed", "type": "Data", "status": "Connected", "mark": "DX", "key": "dxfeed"},
-        {"name": "TradingView", "type": "Data", "status": "Connected", "mark": "TV", "key": "tradingview"},
-        {"name": "Polygon.io", "type": "Data", "status": "Connected", "mark": "PG", "key": "polygon"},
-        {"name": "Alpaca", "type": "Broker", "status": "Available", "mark": "AP", "key": "alpaca"},
-        {"name": "More providers", "type": "Browse all integrations", "status": "Available", "mark": "+", "key": "more"}
-      ] %}
-      <div class="provider-connection-grid" aria-label="Supported provider statuses">
-        {% for provider in connection_providers %}
-          <article class="provider-connection-card provider-connection-card--{{ provider.key }}">
-            <span class="provider-connection-mark" aria-hidden="true">{{ provider.mark }}</span>
-            <div>
-              <h3>{{ provider.name }}</h3>
-              <p>{{ provider.type }}</p>
-              <span class="provider-connection-status is-{{ provider.status|lower }}">{{ provider.status }}</span>
-            </div>
-          </article>
-        {% endfor %}
-      </div>
-    </section>
-
-    <div class="connectivity-ops-grid">
-      <section class="connectivity-panel" aria-labelledby="live-connectivity-status-title">
-        <div class="connectivity-section-head">
-          <div>
-            <h2 id="live-connectivity-status-title">Live connectivity status</h2>
-            <p>Public operational posture without account-sensitive details.</p>
-          </div>
-        </div>
-        {% set operational_rows = [
-          {"label": "Broker Gateway", "detail": "All systems operational", "icon": "icon-vault"},
-          {"label": "Market Data", "detail": "Low latency feed active", "icon": "icon-markets"},
-          {"label": "Order Routing", "detail": "Execution path verified", "icon": "icon-convert"},
-          {"label": "Account Sync", "detail": "Positions and balances updated", "icon": "icon-activity"},
-          {"label": "Notifications", "detail": "Delivery channels active", "icon": "icon-alert"}
-        ] %}
-        <div class="connectivity-status-list" role="list" aria-label="Operational systems">
-          {% for row in operational_rows %}
-            <article class="connectivity-status-row" role="listitem">
-              <span class="connectivity-row-icon" aria-hidden="true"><svg class="topnav-icon"><use href="#{{ row.icon }}"></use></svg></span>
-              <div>
-                <h3>{{ row.label }}</h3>
-                <p>{{ row.detail }}</p>
-              </div>
-              <span class="connectivity-operational-badge">Operational</span>
-            </article>
-          {% endfor %}
-        </div>
-        <a class="connectivity-panel-link" href="/login">View status dashboard</a>
       </section>
+    {% endif %}
 
-      <section class="connectivity-panel" aria-labelledby="recent-connectivity-activity-title">
-        <div class="connectivity-section-head">
-          <div>
-            <h2 id="recent-connectivity-activity-title">Recent activity</h2>
-            <p>Sample connection events only.</p>
-          </div>
-          <a href="/login" aria-label="Sign in to view activity logs">View all logs</a>
-        </div>
-        {% set activity_rows = [
-          {"provider": "Interactive Brokers", "event": "Connection established", "time": "2m ago", "tone": "connected", "mark": "IB"},
-          {"provider": "Binance", "event": "Heartbeat successful", "time": "3m ago", "tone": "connected", "mark": "BN"},
-          {"provider": "Kraken", "event": "Reconnected", "time": "7m ago", "tone": "connected", "mark": "KR"},
-          {"provider": "OANDA", "event": "Authentication refreshed", "time": "11m ago", "tone": "connected", "mark": "OA"},
-          {"provider": "Bybit", "event": "Temporary latency detected", "time": "18m ago", "tone": "degraded", "mark": "BY"}
-        ] %}
-        <div class="connectivity-activity-list" role="list" aria-label="Recent non-sensitive connection activity">
-          {% for activity in activity_rows %}
-            <article class="connectivity-activity-row" role="listitem">
-              <span class="provider-activity-mark" aria-hidden="true">{{ activity.mark }}</span>
-              <div>
-                <h3>{{ activity.provider }}</h3>
-                <p>{{ activity.event }}</p>
-              </div>
-              <time>{{ activity.time }}</time>
-              <span class="activity-dot is-{{ activity.tone }}" aria-label="{{ activity.tone }} activity"></span>
-            </article>
-          {% endfor %}
-        </div>
-      </section>
-    </div>
+    {{ public_ui.public_status(page) }}
+    {{ public_ui.public_sections(page) }}
+    {{ public_ui.public_cta(page) }}
 
-    <section class="connectivity-panel connectivity-security" aria-labelledby="security-control-title">
-      <div class="connectivity-section-head">
-        <div>
-          <h2 id="security-control-title">Security and control</h2>
-          <p>Connection security is built into every layer.</p>
-        </div>
-      </div>
-      {% set control_cards = [
-        {"title": "Read-only by default", "body": "You control permissions. Trade only when enabled.", "icon": "icon-shield"},
-        {"title": "Encrypted transport", "body": "All data is encrypted in transit and at rest.", "icon": "icon-vault"},
-        {"title": "Least-privilege access", "body": "Only the data and actions you approve are allowed.", "icon": "icon-user-plus"},
-        {"title": "Session monitoring", "body": "Active sessions are tracked and logged in real time.", "icon": "icon-activity"}
-      ] %}
-      <div class="connectivity-control-grid">
-        {% for card in control_cards %}
-          <article class="connectivity-control-card">
-            <span class="connectivity-control-icon" aria-hidden="true"><svg class="topnav-icon"><use href="#{{ card.icon }}"></use></svg></span>
-            <div>
-              <h3>{{ card.title }}</h3>
-              <p>{{ card.body }}</p>
-            </div>
-          </article>
-        {% endfor %}
-      </div>
-    </section>
-
-    <section class="connectivity-final-cta public-cta-block" aria-labelledby="connectivity-final-title">
-      <span class="connectivity-final-cta__shield" aria-hidden="true">A</span>
-      <div>
-        <h2 id="connectivity-final-title">{{ page.cta.title }}</h2>
-        <p>{{ page.cta.body }}</p>
-      </div>
-      <div class="public-cta-actions" aria-label="Connectivity next actions">
-        <a class="button-link primary" href="{{ page.cta.primary_href }}">{{ page.cta.primary_label }}</a>
-        <a class="button-link secondary" href="{{ page.cta.secondary_href }}">{{ page.cta.secondary_label }}</a>
-      </div>
-    </section>
-  </section>
-{% elif page.key == "security" %}
-  <section class="security-landing" aria-labelledby="security-page-title">
-    <section class="security-hero" aria-label="Security overview">
-      <span class="security-grid" aria-hidden="true"></span>
-      <span class="security-glow security-glow--one" aria-hidden="true"></span>
-      <span class="security-glow security-glow--two" aria-hidden="true"></span>
-      <div class="security-hero__copy">
-        <span class="card-kicker">{{ page.eyebrow }}</span>
-        <h1 id="security-page-title">{{ page.heading }}</h1>
-        <p>{{ page.lead }}</p>
-        <ul class="security-trust-row" aria-label="Security trust signals">
-          {% for badge in page.badges %}
-            <li><span aria-hidden="true"><svg class="topnav-icon"><use href="#{% if loop.index == 1 %}icon-shield{% elif loop.index == 2 %}icon-alert{% elif loop.index == 3 %}icon-login{% else %}icon-activity{% endif %}"></use></svg></span>{{ badge.label }}</li>
-          {% endfor %}
-        </ul>
-        <div class="security-hero__actions" aria-label="Security actions">
-          <a class="button-link primary" href="{{ page.primary_href }}">{{ page.primary_label }}</a>
-          <a class="button-link secondary" href="{{ page.secondary_href }}">{{ page.secondary_label }}</a>
-        </div>
-      </div>
-
-      <aside class="security-ops-panel" aria-label="Security operations panel preview">
-        <div class="security-ops-panel__top">
-          <span>Security overview</span>
-          <strong>Policy online</strong>
-        </div>
-        <div class="security-ops-panel__body">
-          <div class="security-connection-state">
-            <span aria-hidden="true"></span>
-            <div>
-              <small>Connection status</small>
-              <strong>Secure</strong>
-              <em>All systems operational</em>
-            </div>
-          </div>
-          <div class="security-shield-visual" aria-hidden="true">
-            <span class="security-map"></span>
-            <span class="security-shield">A</span>
-          </div>
-        </div>
-        <section class="security-checkpoint-strip" aria-label="Validation checkpoints">
-          <h2>Validation checkpoints</h2>
-          <ol>
-            <li><span></span>Identity</li>
-            <li><span></span>Policy</li>
-            <li><span></span>Risk gates</li>
-            <li><span></span>Execution route</li>
-            <li class="is-audit"><span></span>Audit</li>
-          </ol>
-        </section>
-        <div class="security-ops-cards" aria-label="Protected operational controls">
-          <article>
-            <span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-login"></use></svg></span>
-            <h3>Protected routes</h3>
-            <p>All sensitive actions are server-authoritative.</p>
-          </article>
-          <article>
-            <span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-activity"></use></svg></span>
-            <h3>Monitoring</h3>
-            <p>Real-time system and workflow monitoring.</p>
-          </article>
-          <article>
-            <span aria-hidden="true"><svg class="topnav-icon"><use href="#icon-dashboard"></use></svg></span>
-            <h3>Audit trail</h3>
-            <p>Immutable logs for actions and changes.</p>
-          </article>
-        </div>
-      </aside>
-    </section>
-
-    <section class="security-panel security-readiness" aria-labelledby="security-readiness-title">
-      <h2 id="security-readiness-title">Security readiness</h2>
-      {% set readiness_cards = [
-        {"title": "Connections encrypted", "body": "Connection data uses encrypted transport in transit.", "icon": "icon-shield"},
-        {"title": "Server-side controls", "body": "Policy decisions and validation happen on the server.", "icon": "icon-settings"},
-        {"title": "Risk gates visible", "body": "Required checks are shown before protected action.", "icon": "icon-alert"},
-        {"title": "Protected execution paths", "body": "Sensitive workflows use protected routes.", "icon": "icon-login"},
-        {"title": "Runtime state visibility", "body": "System and workflow states stay visible.", "icon": "icon-activity"},
-        {"title": "Auditable actions", "body": "Actions are logged and reviewable.", "icon": "icon-dashboard"}
-      ] %}
-      <div class="security-readiness-grid">
-        {% for card in readiness_cards %}
-          <article>
-            <span aria-hidden="true"><svg class="topnav-icon"><use href="#{{ card.icon }}"></use></svg></span>
-            <h3>{{ card.title }}</h3>
-            <p>{{ card.body }}</p>
-          </article>
-        {% endfor %}
-      </div>
-    </section>
-
-    <section class="security-panel security-trust" aria-labelledby="security-trust-title">
-      <h2 id="security-trust-title">Trust and control surfaces</h2>
-      <div class="security-trust-grid">
-        {% for card in page.cards %}
-          <article>
-            <span class="security-control-icon" aria-hidden="true"><svg class="topnav-icon"><use href="#{{ card.icon }}"></use></svg></span>
-            <div>
-              <small>{{ card.kicker }}</small>
-              <h3>{{ card.title }}</h3>
-              <p>{{ card.body }}</p>
-            </div>
-          </article>
-        {% endfor %}
-      </div>
-    </section>
-
-    <section class="security-panel security-flow" aria-labelledby="security-flow-title">
-      <h2 id="security-flow-title">Sensitive workflows stay gated</h2>
-      {% set flow_cards = [
-        {"kicker": "Unauthorized", "title": "Blocked", "body": "Unauthorized attempts are denied.", "icon": "icon-user-plus"},
-        {"kicker": "Secrets", "title": "Protected", "body": "Sensitive values never leave secure systems.", "icon": "icon-settings"},
-        {"kicker": "Risk gate", "title": "Required", "body": "Risk and policy checks must pass.", "icon": "icon-shield"},
-        {"kicker": "Validation", "title": "Required", "body": "Server validation confirms eligibility.", "icon": "icon-dashboard"},
-        {"kicker": "Protected action", "title": "Server-confirmed", "body": "Actions execute only after confirmation.", "icon": "icon-login"}
-      ] %}
-      <div class="security-flow-track" role="list" aria-label="Sensitive workflow gate sequence">
-        {% for card in flow_cards %}
-          <article role="listitem">
-            <small>{{ card.kicker }}</small>
-            <span aria-hidden="true"><svg class="topnav-icon"><use href="#{{ card.icon }}"></use></svg></span>
-            <h3>{{ card.title }}</h3>
-            <p>{{ card.body }}</p>
-          </article>
-        {% endfor %}
-      </div>
-    </section>
-
-    <section class="security-panel security-visibility" aria-labelledby="security-visibility-title">
-      <h2 id="security-visibility-title">Visibility before automation</h2>
-      {% set visibility_cards = [
-        {"title": "Account states", "body": "Live state of accounts and connections.", "icon": "icon-user-plus"},
-        {"title": "Readiness labels", "body": "Clear labels indicate whether action is safe.", "icon": "icon-shield"},
-        {"title": "Degraded-mode awareness", "body": "System degradation is detected and communicated.", "icon": "icon-alert"},
-        {"title": "Execution route visibility", "body": "Routes are visible before any action.", "icon": "icon-convert"},
-        {"title": "Monitored sync status", "body": "Sync and heartbeat status is visible.", "icon": "icon-activity"},
-        {"title": "Explicit operational context", "body": "Context is provided before sensitive operations.", "icon": "icon-dashboard"}
-      ] %}
-      <div class="security-visibility-grid">
-        {% for card in visibility_cards %}
-          <article>
-            <span aria-hidden="true"><svg class="topnav-icon"><use href="#{{ card.icon }}"></use></svg></span>
-            <h3>{{ card.title }}</h3>
-            <p>{{ card.body }}</p>
-          </article>
-        {% endfor %}
-      </div>
-    </section>
-
-    <section class="security-language" aria-labelledby="security-language-title">
-      <h2 id="security-language-title">Our security language</h2>
-      <ul>
-        <li>Public pages do not expose secrets.</li>
-        <li>Sensitive actions require backend validation.</li>
-        <li>Credentials are not rendered publicly.</li>
-        <li>Runtime checks occur before execution.</li>
-        <li>Protected workflows remain server-authoritative.</li>
-      </ul>
-    </section>
-
-    <section class="security-final-cta public-cta-block" aria-labelledby="security-final-title">
-      <span class="security-final-cta__shield" aria-hidden="true">A</span>
-      <div>
-        <h2 id="security-final-title">{{ page.cta.title }}</h2>
-        <p>{{ page.cta.body }}</p>
-      </div>
-      <div class="public-cta-actions" aria-label="Security next actions">
-        <a class="button-link primary" href="{{ page.cta.primary_href }}">{{ page.cta.primary_label }}</a>
-        <a class="button-link secondary" href="{{ page.cta.secondary_href }}">{{ page.cta.secondary_label }}</a>
-      </div>
-    </section>
-
-    <p class="security-disclaimer">{{ page.disclaimer }}</p>
-  </section>
-{% else %}
-  {{ public_ui.public_hero(page, "public-page-title", public_seo_pages) }}
-  {{ public_ui.public_metrics(page) }}
-  {{ public_ui.public_cards(page, compact=True) }}
-  {{ public_ui.public_status(page) }}
-  {{ public_ui.public_sections(page, stacked=True) }}
-{% endif %}
-{% if page.key != "features" and page.key != "pricing" and page.key != "mobile" and page.key != "connectivity" and page.key != "security" %}
-  {{ public_ui.public_cta(page) }}
-{% endif %}
+    <p class="public-compliance-note">
+      AlgVault provides automation, analytics, monitoring, and execution-control tooling. It does not provide investment advice, promise returns, or represent a protected action as successful before server confirmation.
+    </p>
+  </div>
 {% endblock %}
