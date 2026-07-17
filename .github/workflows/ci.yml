@@ -46,21 +46,34 @@ jobs:
           tests/test_vault_cycle_engine.py
           tests/test_worker_and_runtime_hardening.py
       - name: Ruff format check
-        run: >
-          ruff format --check
-          app/settings_validation.py
-          app/services/audit_events.py
-          app/services/failures.py
-          app/services/response_envelope.py
-          app/services/vault_cycle_orchestrator.py
-          app/services/worker_lease.py
-          app/services/model_registry.py
-          app/workers
-          tests/test_audit_events.py
-          tests/test_mobile_pwa_audit.py
-          tests/test_production_hardening_migrations.py
-          tests/test_vault_cycle_engine.py
-          tests/test_worker_and_runtime_hardening.py
+        run: |
+          set +e
+          ruff format --check --diff \
+            app/settings_validation.py \
+            app/services/audit_events.py \
+            app/services/failures.py \
+            app/services/response_envelope.py \
+            app/services/vault_cycle_orchestrator.py \
+            app/services/worker_lease.py \
+            app/services/model_registry.py \
+            app/workers \
+            tests/test_audit_events.py \
+            tests/test_mobile_pwa_audit.py \
+            tests/test_production_hardening_migrations.py \
+            tests/test_vault_cycle_engine.py \
+            tests/test_worker_and_runtime_hardening.py \
+            > ruff-format.log 2>&1
+          status=$?
+          cat ruff-format.log
+          exit "$status"
+      - name: Upload Ruff format diagnostic
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ruff-format-diagnostic
+          path: ruff-format.log
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Targeted typecheck
         run: mypy
       - name: Static PWA syntax and manifest validation
@@ -94,7 +107,7 @@ jobs:
         with:
           name: pytest-failure-log
           path: pytest.log
-          if-no-files-found: error
+          if-no-files-found: ignore
           retention-days: 7
       - name: Admin PWA dependencies
         working-directory: admin-pwa
