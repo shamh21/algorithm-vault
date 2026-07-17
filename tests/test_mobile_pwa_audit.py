@@ -32,7 +32,7 @@ def test_public_templates_do_not_render_fabricated_operational_data() -> None:
         '"OANDA"',
         "2m ago",
     }
-    assert not forbidden.intersection(content)
+    assert all(value not in content for value in forbidden)
 
 
 def test_public_templates_keep_server_authoritative_language() -> None:
@@ -109,6 +109,7 @@ def test_public_sections_use_real_links_and_landmarks() -> None:
     components = source("templates/marketing/_components.html")
     assert '<nav class="public-section-nav"' in page
     assert 'href="#capabilities"' in page
+    assert 'id="supported-connections"' in page
     assert 'id="mobile-pwa"' in components
     assert 'id="trust"' in components
 
