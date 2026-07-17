@@ -114,7 +114,7 @@ def test_vault_assets_use_explicit_readiness_cache_busters() -> None:
     assert "vault-shell-polish-9" in vault_source
     assert "asset_v" in base_source
     assert "algvault-theme.css" in intro_source
-    assert 'const CACHE_VERSION = "algvault-v21-vault-shell-polish-9"' in sw_source
+    assert 'const CACHE_VERSION = "algvault-v23-ios-audit"' in sw_source
 
 
 def test_pwa_shell_keeps_heavy_chart_libraries_off_precache_path() -> None:

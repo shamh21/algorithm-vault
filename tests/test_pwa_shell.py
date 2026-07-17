@@ -17,8 +17,9 @@ def test_manifest_contains_dark_standalone_pwa_contract(app) -> None:
     assert manifest["start_url"] == "/"
     assert manifest["scope"] == "/"
     assert manifest["display"] == "standalone"
-    assert manifest["background_color"] == "#030304"
-    assert manifest["theme_color"] == "#030304"
+    assert manifest["orientation"] == "any"
+    assert manifest["background_color"] == "#050507"
+    assert manifest["theme_color"] == "#050507"
     assert "finance" in manifest["categories"]
 
     icons = {icon["sizes"]: icon for icon in manifest["icons"]}
@@ -27,8 +28,9 @@ def test_manifest_contains_dark_standalone_pwa_contract(app) -> None:
     assert icons["512x512"]["src"] == "/icons/algvault-ios-512.png"
     assert icons["512x512"]["purpose"] == "any maskable"
     assert icons["180x180"]["src"] == "/icons/algvault-ios-180.png"
-    assert "/admin/panic/" not in {shortcut["url"] for shortcut in manifest["shortcuts"]}
-    assert "/convert/" in {shortcut["url"] for shortcut in manifest["shortcuts"]}
+    shortcut_urls = {shortcut["url"] for shortcut in manifest["shortcuts"]}
+    assert shortcut_urls == {"/", "/wallet/", "/vault/"}
+    assert "/admin/panic/" not in shortcut_urls
 
 
 def test_manifest_files_stay_in_sync() -> None:
@@ -118,21 +120,21 @@ def test_service_worker_precaches_only_safe_shell_assets() -> None:
     assert "isAuthPath" in source
     assert 'url.pathname === "/sw.js"' in source
     assert 'cache: "no-store"' in source
+    assert "MAX_STATIC_ENTRIES = 80" in source
+    assert 'const CACHE_VERSION = "algvault-v23-ios-audit"' in source
 
 
-def test_command_center_dark_theme_layer_is_final() -> None:
-    source = Path("static/css/app.css").read_text(encoding="utf-8")
-    final_layer = source.split("/* AlgVault command-center redesign. Final layer wins over legacy theme passes. */", 1)[1]
+def test_semantic_theme_layer_is_final() -> None:
+    source = Path("static/css/algvault-theme.css").read_text(encoding="utf-8")
 
-    assert "--bg: #030304" in final_layer
-    assert "--panel: rgba(13, 13, 16, 0.96)" in final_layer
-    assert "--accent: #ff1f36" in final_layer
-    assert "--accent-strong: #9b4dff" in final_layer
-    assert 'html[data-theme="light"]' in final_layer
-    assert ".av-command-center" in final_layer
-    assert ".av-home-minimal" in source
-    assert ".av-strategy-card" in final_layer
-    assert ".settings-theme-toggle" in source
+    assert "--page-bg: #050507" in source
+    assert "--surface: #0c0c10" in source
+    assert "--brand-red: #ff3148" in source
+    assert "--brand-purple: #934cff" in source
+    assert "--state-positive: #32d583" in source
+    assert "--focus-ring:" in source
+    assert "--motion-standard: 210ms" in source
+    assert "@media (prefers-reduced-motion: reduce)" in source
 
 
 def test_pwa_static_headers_keep_sw_fresh_and_assets_cacheable(app) -> None:

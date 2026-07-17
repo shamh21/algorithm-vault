@@ -26,7 +26,7 @@ def _title(html: str) -> str:
     return match.group(1)
 
 
-def test_public_home_is_crawlable_and_has_rich_metadata(app) -> None:
+def test_public_home_is_crawlable_and_uses_compliant_shared_system(app) -> None:
     response = app.test_client().get("/overview/")
     html = response.get_data(as_text=True)
 
@@ -44,30 +44,21 @@ def test_public_home_is_crawlable_and_has_rich_metadata(app) -> None:
     assert "css/app.css" not in html
     assert "ops-bridge.js" not in html
     assert "responsive-tables.js" not in html
-    assert "crypto-rail" not in html
-    assert "<h1" in html
     assert html.count("<h1") == 1
     assert PUBLIC_PATHS["/overview/"] in html
     assert 'aria-label="Open navigation menu"' in html
     assert "overview-hero" in html
-    assert "LIVE SYSTEM" in html
-    assert "Hyperliquid Connected" in html
-    assert "overview-phone" in html
-    assert "Active Strategies" in html
-    assert "Connected Providers" in html
-    assert "System Latency" in html
-    assert "Risk Engine Status" in html
-    assert "Strategy Monitor" in html
-    assert "Broker/API" in html
-    assert "Wallet Controls" in html
-    assert "Mobile-first by design" in html
-    assert "Add to Home Screen" in html
-    assert "Security architecture" in html
-    assert "Connected ecosystem" in html
-    assert "Ready to take control?" in html
-    assert "public-link-band" not in html
-    assert "guaranteed profits" not in html.lower()
-    assert "risk-free trading" not in html.lower()
+    assert "ILLUSTRATIVE UI" in html
+    assert "Server-confirmed only" in html
+    assert "Execution authority" in html
+    assert "Provider state" in html
+    assert "Trading outcomes" in html
+    assert "Not promised" in html
+    assert "Designed for repeated iPhone checks" in html
+    assert "Security architecture before automation" in html
+    assert "Move from public context to protected setup" in html
+    for forbidden in ("$128,420.58", "LIVE SYSTEM", "Hyperliquid Connected", "Active Strategies", "42ms"):
+        assert forbidden not in html
 
 
 def test_public_pages_have_unique_metadata_canonicals_and_internal_links(app) -> None:
@@ -88,6 +79,11 @@ def test_public_pages_have_unique_metadata_canonicals_and_internal_links(app) ->
         assert '<meta name="twitter:image" content="https://algvault.app/icons/algvault-ios-512.png">' in html
         assert "/features/" in html
         assert "/security/" in html
+        assert 'class="public-audit-shell' in html
+        assert 'class="public-section-nav"' in html
+        assert 'id="capabilities"' in html
+        assert 'id="mobile-pwa"' in html
+        assert 'id="trust"' in html
 
         titles.add(_title(html))
         descriptions.add(_meta_content(html, "description"))
@@ -96,206 +92,40 @@ def test_public_pages_have_unique_metadata_canonicals_and_internal_links(app) ->
     assert len(descriptions) == len(PUBLIC_PATHS)
 
 
-def test_public_features_page_uses_exchange_landing_system(app) -> None:
-    response = app.test_client().get("/features/")
-    html = response.get_data(as_text=True)
+def test_public_feature_pricing_connectivity_and_security_states_are_explicit(app) -> None:
+    client = app.test_client()
 
-    assert response.status_code == 200
-    assert html.count("<h1") == 1
-    assert "features-landing" in html
-    assert "features-hero" in html
-    assert "features-hero-visual" in html
-    assert "All features" in html
-    assert "Risk &amp; Control" in html
-    assert "Platform Features" in html
-    assert "Automation &amp; Smart Features" in html
-    assert "Insights &amp; Oversight" in html
-    assert "Why it matters" in html
-    assert "Experience AlgVault the smart way" in html
-    assert "Features readiness" in html
-    assert "Stay ahead with a platform built for what&#39;s next." in html
-    assert "Contextual" in html
-    assert "Cycle-based execution" in html
-    assert "Portfolio visibility" in html
-    assert "Guarded execution workflows" in html
-    assert "Strategy posture at a glance" in html
-    assert "Signals with control" in html
-    assert "Wallet and vault clarity" in html
-    assert "Provider-aware workflows" in html
-    assert "Gates before action" in html
-    assert "Runtime posture in view" in html
-    assert "Built for repeated checks, not long reads" in html
-    assert "Buttons do not bypass validation" in html
-    assert 'href="/register"' in html
-    assert 'href="/pricing/"' in html
-    assert 'href="/mobile/"' in html
-    assert "css/public.css" in html
-    assert "css/app.css" not in html
-    assert "ops-bridge.js" not in html
-    assert "guaranteed profits" not in html.lower()
-    assert "risk-free trading" not in html.lower()
+    features = client.get("/features/").get_data(as_text=True)
+    assert "Operational capabilities" in features
+    assert "Guarded execution workflows" in features
+    assert "Buttons do not bypass validation" in features
+    assert 'href="/pricing/"' in features
+
+    pricing = client.get("/pricing/").get_data(as_text=True)
+    assert "Starter" in pricing
+    assert "Operator" in pricing
+    assert "Custom" in pricing
+    assert "Trading outcomes" in pricing
+    assert "Not promised" in pricing
+    assert "Move from public context to protected setup" in pricing
+
+    connectivity = client.get("/connectivity/").get_data(as_text=True)
+    assert 'id="supported-connections"' in connectivity
+    assert "Implemented providers remain eligibility-gated" in connectivity
+    assert "Hyperliquid" in connectivity
+    assert "KuCoin" in connectivity
+    assert "does not publish invented connection counts" in connectivity
+    for forbidden in ("Interactive Brokers", "Tradovate", "Heartbeat successful", "2m ago"):
+        assert forbidden not in connectivity
+
+    security = client.get("/security/").get_data(as_text=True)
+    assert "No success state before server confirmation" in security
+    assert "Pending until the server returns a final state" in security
+    assert "Completed, rejected, or failed remain distinct" in security
+    assert "Server-authoritative" in security
 
 
-def test_public_pricing_page_uses_exchange_plan_comparison(app) -> None:
-    response = app.test_client().get("/pricing/")
-    html = response.get_data(as_text=True)
-
-    assert response.status_code == 200
-    assert html.count("<h1") == 1
-    assert "pricing-landing" in html
-    assert "pricing-hero" in html
-    assert "Simple access tiers for monitored automation" in html
-    assert "Choose the AlgVault access level that matches your workflow" in html
-    assert "Transparent tiers" in html
-    assert "No hidden urgency" in html
-    assert "No performance claims" in html
-    assert "Starter" in html
-    assert "Operator" in html
-    assert "Recommended" in html
-    assert "Custom" in html
-    assert "Phone/PWA access" in html
-    assert "Automated execution controls" in html
-    assert "Operational audit visibility" in html
-    assert "Compare access tiers" in html
-    assert "Mobile PWA" in html
-    assert "Execution controls" in html
-    assert "Provider visibility" in html
-    assert "Custom workflows" in html
-    assert "Built on safety and clarity" in html
-    assert "Server-led validation" in html
-    assert "No guaranteed returns" in html
-    assert "Secure account setup" in html
-    assert "Plan boundaries stay clear" in html
-    assert "Start with secure setup" in html
-    assert "Final plan details are confirmed during account setup." in html
-    assert 'href="/register"' in html
-    assert 'href="/features/"' in html
-    assert 'href="/security/"' in html
-    assert "css/public.css" in html
-    assert "css/app.css" not in html
-    assert "ops-bridge.js" not in html
-    assert "public-cta-block" not in html
-    assert html.count("Start with secure setup") == 1
-    assert "guaranteed profits" not in html.lower()
-    assert "risk-free trading" not in html.lower()
-
-
-def test_public_connectivity_page_uses_operations_dashboard_layout(app) -> None:
-    response = app.test_client().get("/connectivity/")
-    html = response.get_data(as_text=True)
-
-    assert response.status_code == 200
-    assert html.count("<h1") == 1
-    assert "connectivity-landing" in html
-    assert "connection-overview-card" in html
-    assert "Secure connections. Operational clarity." in html
-    assert "Every connection is validated, encrypted, and continuously supervised." in html
-    assert "Encrypted" in html
-    assert "Monitored" in html
-    assert "Resilient" in html
-    assert "Transparent" in html
-    assert "Connected" in html
-    assert "Degraded" in html
-    assert "Disconnected" in html
-    assert "Interactive Brokers" in html
-    assert "Tradovate" in html
-    assert "Binance" in html
-    assert "Coinbase Exchange" in html
-    assert "Bybit" in html
-    assert "Kraken" in html
-    assert "OANDA" in html
-    assert "dxFeed" in html
-    assert "TradingView" in html
-    assert "Polygon.io" in html
-    assert "Alpaca" in html
-    assert "More providers" in html
-    assert "Broker Gateway" in html
-    assert "Market Data" in html
-    assert "Order Routing" in html
-    assert "Account Sync" in html
-    assert "Notifications" in html
-    assert html.count("Operational") >= 5
-    assert "Connection established" in html
-    assert "Heartbeat successful" in html
-    assert "Reconnected" in html
-    assert "Authentication refreshed" in html
-    assert "Temporary latency detected" in html
-    assert "Read-only by default" in html
-    assert "Encrypted transport" in html
-    assert "Least-privilege access" in html
-    assert "Session monitoring" in html
-    assert "Connect with confidence" in html
-    assert "Review connectivity" in html
-    assert "Security model" in html
-    assert "API key" not in html
-    assert "webhook URL" not in html
-    assert "token" not in html.lower()
-
-
-def test_public_security_page_uses_operational_security_layout(app) -> None:
-    response = app.test_client().get("/security/")
-    html = response.get_data(as_text=True)
-
-    assert response.status_code == 200
-    assert html.count("<h1") == 1
-    assert "security-landing" in html
-    assert "security-ops-panel" in html
-    assert "Trust built through visible controls" in html
-    assert "AlgVault keeps operational policy and explicit protected actions visible before sensitive workflows execute." in html
-    assert "Server-authoritative" in html
-    assert "No browser overrides" in html
-    assert "Protected credentials" in html
-    assert "Auditable actions" in html
-    assert "Security readiness" in html
-    assert "Connections encrypted" in html
-    assert "Server-side controls" in html
-    assert "Risk gates visible" in html
-    assert "Protected execution paths" in html
-    assert "Runtime state visibility" in html
-    assert "Trust and control surfaces" in html
-    assert "HTTPS public surface" in html
-    assert "Secrets stay backend-owned" in html
-    assert "Protected auth paths" in html
-    assert "Private routes stay private" in html
-    assert "Runtime readiness conflict detection" in html
-    assert "Operational states are visible" in html
-    assert "Controls before action" in html
-    assert "Sensitive workflows stay gated" in html
-    assert "Unauthorized" in html
-    assert "Blocked" in html
-    assert "Server-confirmed" in html
-    assert "Visibility before automation" in html
-    assert "Account states" in html
-    assert "Readiness labels" in html
-    assert "Degraded-mode awareness" in html
-    assert "Execution route visibility" in html
-    assert "Monitored sync status" in html
-    assert "Explicit operational context" in html
-    assert "Our security language" in html
-    assert "Public pages do not expose secrets." in html
-    assert "Sensitive actions require backend validation." in html
-    assert "Credentials are not rendered publicly." in html
-    assert "Runtime checks occur before execution." in html
-    assert "Protected workflows remain server-authoritative." in html
-    assert "Keep automation observable and gated" in html
-    assert "without performance claims or guaranteed outcomes" in html
-    assert 'href="/register"' in html
-    assert 'href="/connectivity/"' in html
-    assert "css/public.css" in html
-    assert "css/app.css" not in html
-    assert "ops-bridge.js" not in html
-    assert "public-hero--security" not in html
-    assert "API key" not in html
-    assert "webhook URL" not in html
-    assert "private key" not in html.lower()
-    assert "bearer token" not in html.lower()
-    assert "insured" not in html.lower()
-    assert "guaranteed safety" not in html.lower()
-    assert "guaranteed profits" not in html.lower()
-    assert "risk-free trading" not in html.lower()
-
-
-def test_public_pages_render_premium_product_system_without_sensitive_material(app) -> None:
+def test_public_pages_exclude_sensitive_material_and_false_outcomes(app) -> None:
     client = app.test_client()
     forbidden = (
         "WALLET_MPC_SIGNER_TOKEN",
@@ -305,37 +135,17 @@ def test_public_pages_render_premium_product_system_without_sensitive_material(a
         "HYPERLIQUID_PRIVATE_KEY",
         "guaranteed profits",
         "risk-free trading",
+        "$128,420.58",
+        "All systems operational",
+        "Heartbeat successful",
     )
 
     for path in PUBLIC_PATHS:
         html = client.get(path).get_data(as_text=True)
-
-        if path == "/overview/":
-            assert "overview-hero" in html, path
-            assert "overview-final-cta" in html, path
-            assert "public-link-band" not in html, path
-        elif path == "/features/":
-            assert "features-landing" in html, path
-            assert "features-final-cta" in html, path
-            assert "features-filter" in html, path
-        elif path == "/pricing/":
-            assert "pricing-landing" in html, path
-            assert "pricing-plan-grid" in html, path
-            assert "pricing-final-cta" in html, path
-        elif path == "/connectivity/":
-            assert "connectivity-landing" in html, path
-            assert "connection-overview-card" in html, path
-            assert "provider-connection-grid" in html, path
-            assert "connectivity-final-cta" in html, path
-        elif path == "/security/":
-            assert "security-landing" in html, path
-            assert "security-ops-panel" in html, path
-            assert "security-final-cta" in html, path
-        else:
-            assert "public-device-frame" in html, path
-            assert "public-trust-badge" in html, path
-            assert "public-cta-block" in html, path
-            assert "public-card-system" in html or "public-status-system" in html, path
+        assert "public-device-frame" in html, path
+        assert "public-trust-badge" in html, path
+        assert "public-cta-block" in html, path
+        assert "public-card-system" in html, path
         assert any(term in html for term in ("server", "Server", "Protected", "Blocked", "Readiness")), path
         for term in forbidden:
             assert term.lower() not in html.lower(), path
@@ -363,13 +173,8 @@ def test_robots_txt_blocks_private_surfaces_and_links_sitemap(app) -> None:
     assert "Allow: /overview/" in body
     assert "Allow: /features/" in body
     assert "Allow: /connectivity/" in body
-    assert "Disallow: /admin/" in body
-    assert "Disallow: /api/" in body
-    assert "Disallow: /wallet/" in body
-    assert "Disallow: /vault/" in body
-    assert "Disallow: /convert/" in body
-    assert "Disallow: /settings/" in body
-    assert "Disallow: /_internal/" in body
+    for path in ("/admin/", "/api/", "/wallet/", "/vault/", "/convert/", "/settings/", "/_internal/"):
+        assert f"Disallow: {path}" in body
     assert "Sitemap: https://algvault.app/sitemap.xml" in body
 
 
@@ -400,18 +205,14 @@ def test_auth_and_private_routes_are_noindexed(app) -> None:
     assert root.headers["X-Robots-Tag"] == "noindex, nofollow"
 
     login = client.get("/login")
-    login_html = login.get_data(as_text=True)
     assert login.status_code == 200
     assert login.headers["X-Robots-Tag"] == "noindex, nofollow"
-    assert '<meta name="robots" content="noindex, nofollow">' in login_html
+    assert '<meta name="robots" content="noindex, nofollow">' in login.get_data(as_text=True)
 
-    wallet = client.get("/wallet/")
-    assert wallet.status_code == 302
-    assert wallet.headers["X-Robots-Tag"] == "noindex, nofollow"
-
-    admin = client.get("/admin/dashboard")
-    assert admin.status_code == 302
-    assert admin.headers["X-Robots-Tag"] == "noindex, nofollow"
+    for path in ("/wallet/", "/admin/dashboard"):
+        response = client.get(path)
+        assert response.status_code == 302
+        assert response.headers["X-Robots-Tag"] == "noindex, nofollow"
 
 
 def test_admin_pwa_metadata_is_noindex() -> None:

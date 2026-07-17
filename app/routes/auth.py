@@ -22,9 +22,16 @@ from ..auth import (
 )
 from ..extensions import db
 from ..models import InviteCodeUsage, ReferralInviteCode, TradingConnection, TreasuryReserveState, User
+from ..services.seo import public_navigation
 from ..services.withdrawal_config import wallet_withdrawals_enabled
 
 auth_bp = Blueprint("auth", __name__)
+
+
+@auth_bp.app_context_processor
+def inject_public_navigation() -> dict[str, object]:
+    """Keep shared public navigation available on authentication routes."""
+    return {"public_seo_pages": public_navigation()}
 
 
 @auth_bp.get("/register")

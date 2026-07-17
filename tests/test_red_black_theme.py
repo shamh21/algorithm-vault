@@ -16,14 +16,17 @@ PUBLIC_PATHS = (
 def test_canonical_algvault_theme_contract() -> None:
     theme = Path("static/css/algvault-theme.css").read_text(encoding="utf-8")
 
-    assert "--accent: #ff1f36" in theme
-    assert "--bg: #030304" in theme
-    assert "--panel: #0d0d10" in theme
-    assert "--violet: #9b4dff" in theme
-    assert "red/black/purple" in theme
+    assert "--page-bg: #050507" in theme
+    assert "--surface: #0c0c10" in theme
+    assert "--brand-red: #ff3148" in theme
+    assert "--brand-purple: #934cff" in theme
+    assert "--state-positive: #32d583" in theme
+    assert "--state-warning: #f7b955" in theme
+    assert "--state-error: #ff4d64" in theme
+    assert "--focus-ring:" in theme
+    assert "Green remains reserved" in theme
     assert "#f0b90b" not in theme
     assert "rgba(240, 185, 11" not in theme
-    assert "Green is reserved for actual success/profit states" in theme
 
 
 def test_private_app_shell_loads_canonical_theme() -> None:
@@ -70,13 +73,14 @@ def test_admin_pwa_uses_algvault_red_brand_tokens() -> None:
     assert '[class*="bg-amber-"]' in css
 
 
-def test_service_worker_precaches_and_renders_red_black_shell() -> None:
+def test_service_worker_precaches_and_renders_audited_shell() -> None:
     worker = Path("static/js/sw.js").read_text(encoding="utf-8")
 
     assert '"/static/css/algvault-theme.css"' in worker
     assert '"/static/css/public.css"' in worker
-    assert 'content="#030304"' in worker
-    assert "#c58bff" in worker
-    assert "red/black/purple" in worker
+    assert '<meta name="theme-color" content="#050507">' in worker
+    assert "rgba(255,49,72,.17)" in worker
+    assert "rgba(147,76,255,.18)" in worker
+    assert "Protected actions remain unavailable while offline" in worker
     assert "#7dd3fc" not in worker
     assert "#101826" not in worker
