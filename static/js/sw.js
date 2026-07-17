@@ -1,6 +1,7 @@
-const CACHE_VERSION = "algvault-v22-red-purple-theme-1";
+const CACHE_VERSION = "algvault-v23-ios-audit";
 const SHELL_CACHE = `${CACHE_VERSION}-shell`;
 const STATIC_CACHE = `${CACHE_VERSION}-static`;
+const MAX_STATIC_ENTRIES = 80;
 
 const APP_SHELL = [
   "/static/css/app.css",
@@ -22,52 +23,67 @@ const OFFLINE_HTML = `<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#030304">
+  <meta name="theme-color" content="#050507">
   <title>AlgVault Offline</title>
   <style>
-    html,body{margin:0;min-height:100%;background:#030304;color:#fafafa;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text",Inter,system-ui,sans-serif}
-    body{background:radial-gradient(circle at 36% 18%,rgba(255,31,54,.2),transparent 25rem),radial-gradient(circle at 78% 12%,rgba(155,77,255,.2),transparent 23rem),linear-gradient(180deg,#030304,#09090b 58%,#030304)}
-    main{min-height:100svh;display:grid;place-items:center;padding:calc(2rem + env(safe-area-inset-top)) max(1.25rem,env(safe-area-inset-right)) calc(2rem + env(safe-area-inset-bottom)) max(1.25rem,env(safe-area-inset-left))}
-    section{max-width:28rem;border:1px solid rgba(192,92,255,.34);border-radius:16px;padding:1.25rem;background:linear-gradient(135deg,rgba(255,31,54,.1),rgba(155,77,255,.12)),linear-gradient(180deg,rgba(18,18,22,.98),rgba(7,7,9,.98));box-shadow:0 22px 56px rgba(0,0,0,.55),0 0 38px rgba(255,31,54,.08),0 0 34px rgba(155,77,255,.09)}
-    span{color:#c58bff;font-size:.74rem;font-weight:800;text-transform:uppercase;letter-spacing:.08em}
-    h1{margin:.35rem 0;font-size:1.35rem} p{margin:0;color:#b8b8c0}
+    :root{color-scheme:dark}*{box-sizing:border-box}html,body{margin:0;min-height:100%;background:#050507;color:#f8f8fb;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",Inter,system-ui,sans-serif}body{background:radial-gradient(circle at 20% 0,rgba(255,49,72,.17),transparent 24rem),radial-gradient(circle at 88% 8%,rgba(147,76,255,.18),transparent 22rem),linear-gradient(180deg,#050507,#09090d 60%,#040405)}main{min-height:100vh;min-height:100svh;min-height:100dvh;display:grid;place-items:center;padding:calc(2rem + env(safe-area-inset-top)) max(1rem,env(safe-area-inset-right)) calc(2rem + env(safe-area-inset-bottom)) max(1rem,env(safe-area-inset-left))}section{width:min(100%,30rem);border:1px solid rgba(180,98,255,.34);border-radius:18px;padding:1.25rem;background:linear-gradient(135deg,rgba(255,49,72,.09),rgba(147,76,255,.11)),rgba(12,12,16,.98);box-shadow:0 24px 64px rgba(0,0,0,.56)}span{color:#c69aff;font-size:.74rem;font-weight:800;text-transform:uppercase;letter-spacing:.08em}h1{margin:.35rem 0;font-size:1.4rem}p{margin:.4rem 0 0;color:#c7c7d0;line-height:1.5}strong{display:block;margin-top:1rem;color:#ff788a;font-size:.88rem}
   </style>
 </head>
-<body><main><section><span>Offline</span><h1>AlgVault is offline</h1><p>Reconnect to refresh wallet, vault, and market data. Static app assets remain cached safely. The red/black/purple application shell remains available.</p></section></main></body>
+<body><main><section><span>Offline</span><h1>AlgVault cannot refresh current state</h1><p>Reconnect to load wallet, vault, provider, market, and readiness data. Protected actions remain unavailable while offline.</p><strong>No cached response is treated as execution success.</strong></section></main></body>
 </html>`;
 
 const isHtmlRequest = (request) => request.mode === "navigate" || Boolean(request.headers.get("accept")?.includes("text/html"));
 const isStaticAsset = (url) => url.pathname.startsWith("/static/") || url.pathname.startsWith("/icons/");
 const isApiRequest = (url) => url.pathname.startsWith("/api/") || url.pathname.startsWith("/admin/api/") || url.pathname.includes("/stream");
 const isAuthPath = (url) => ["/login", "/logout", "/register"].some((path) => url.pathname === path || url.pathname.startsWith(`${path}/`));
-const isDashboardHtml = (url) => url.pathname === "/admin/dashboard";
 const isServiceWorkerAsset = (url) => url.pathname === "/sw.js" || url.pathname === "/static/js/sw.js" || url.pathname === "/manifest.json" || url.pathname === "/static/manifest.webmanifest";
+const isCriticalShellAsset = (url) => [
+  "/static/css/app.css",
+  "/static/css/public.css",
+  "/static/css/algvault-theme.css",
+  "/static/js/app-shell.js",
+  "/static/js/responsive-tables.js",
+].includes(url.pathname);
 const isCacheableStaticResponse = (response) => response && response.ok && response.type !== "opaqueredirect";
+
+const trimCache = async (cache, maxEntries) => {
+  const keys = await cache.keys();
+  const excess = keys.length - maxEntries;
+  if (excess <= 0) return;
+  await Promise.all(keys.slice(0, excess).map((key) => cache.delete(key)));
+};
+
+const networkOnly = (request) => fetch(request, { cache: "no-store", credentials: "same-origin" });
+
+const refreshCriticalAsset = async (request) => {
+  const cache = await caches.open(SHELL_CACHE);
+  try {
+    const response = await fetch(request, { cache: "reload", credentials: "same-origin" });
+    if (isCacheableStaticResponse(response)) await cache.put(request, response.clone());
+    return response;
+  } catch (error) {
+    const cached = await cache.match(request, { ignoreSearch: true });
+    if (cached) return cached;
+    throw error;
+  }
+};
 
 const cacheFirstStatic = async (request) => {
   const cache = await caches.open(STATIC_CACHE);
   const cached = await cache.match(request);
   if (cached) return cached;
-
-  const response = await fetch(request);
+  const response = await fetch(request, { credentials: "same-origin" });
   if (isCacheableStaticResponse(response)) {
-    cache.put(request, response.clone());
+    await cache.put(request, response.clone());
+    await trimCache(cache, MAX_STATIC_ENTRIES);
   }
   return response;
 };
 
-const networkOnly = async (request) => {
-  return fetch(request, { cache: "no-store", credentials: "same-origin" });
-};
-
 const networkFirstNavigation = async (request) => {
   try {
-    const response = await fetch(request, { cache: "no-store", credentials: "same-origin" });
-    if (response && response.ok && response.type !== "opaqueredirect") {
-      return response;
-    }
-    return response;
-  } catch (error) {
+    return await fetch(request, { cache: "no-store", credentials: "same-origin" });
+  } catch {
     return new Response(OFFLINE_HTML, {
       status: 503,
       statusText: "Offline",
@@ -82,8 +98,11 @@ const networkFirstNavigation = async (request) => {
 self.addEventListener("install", (event) => {
   event.waitUntil((async () => {
     const cache = await caches.open(SHELL_CACHE);
-    await cache.addAll(APP_SHELL);
-    self.skipWaiting();
+    await Promise.allSettled(APP_SHELL.map(async (path) => {
+      const request = new Request(path, { cache: "reload", credentials: "same-origin" });
+      const response = await fetch(request);
+      if (isCacheableStaticResponse(response)) await cache.put(request, response);
+    }));
   })());
 });
 
@@ -93,10 +112,7 @@ self.addEventListener("activate", (event) => {
     const keep = new Set([SHELL_CACHE, STATIC_CACHE]);
     await Promise.all(
       names
-        .filter((name) => {
-          if (keep.has(name)) return false;
-          return name.startsWith("algvault-") || name.startsWith("tradingbot-");
-        })
+        .filter((name) => !keep.has(name) && (name.startsWith("algvault-") || name.startsWith("tradingbot-")))
         .map((name) => caches.delete(name))
     );
     await self.clients.claim();
@@ -104,10 +120,8 @@ self.addEventListener("activate", (event) => {
 });
 
 self.addEventListener("message", (event) => {
-  if (event.data && event.data.type === "SKIP_WAITING") {
-    self.skipWaiting();
-  }
-  if (event.data && event.data.type === "CLEAR_CACHES") {
+  if (event.data?.type === "SKIP_WAITING") self.skipWaiting();
+  if (event.data?.type === "CLEAR_CACHES") {
     event.waitUntil((async () => {
       const names = await caches.keys();
       await Promise.all(
@@ -131,12 +145,15 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
+  if (isCriticalShellAsset(url)) {
+    event.respondWith(refreshCriticalAsset(request));
+    return;
+  }
+
   if (isStaticAsset(url)) {
     event.respondWith(cacheFirstStatic(request));
     return;
   }
 
-  if (isHtmlRequest(request) || isDashboardHtml(url)) {
-    event.respondWith(networkFirstNavigation(request));
-  }
+  if (isHtmlRequest(request)) event.respondWith(networkFirstNavigation(request));
 });
