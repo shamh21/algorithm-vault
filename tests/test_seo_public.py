@@ -105,7 +105,8 @@ def test_public_feature_pricing_connectivity_and_security_states_are_explicit(ap
     assert "Starter" in pricing
     assert "Operator" in pricing
     assert "Custom" in pricing
-    assert "No performance claims" in pricing
+    assert "Trading outcomes" in pricing
+    assert "Not promised" in pricing
     assert "Final plan details are confirmed during account setup." in pricing
 
     connectivity = client.get("/connectivity/").get_data(as_text=True)
