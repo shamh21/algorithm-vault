@@ -3,14 +3,21 @@
 {% block title %}Sign In · Algorithm Vault{% endblock %}
 
 {% block content %}
-<section class="auth-shell">
+<section class="auth-shell auth-shell--login">
+  <div class="auth-stage" aria-hidden="true">
+    <span>Protected PWA session</span>
+    <strong>Encrypted access layer</strong>
+    <small>Network-first sign-in keeps credentials out of offline caches.</small>
+  </div>
   <article class="vault-card auth-card">
-    <span class="card-kicker">Secure Access</span>
-    <h1>Sign In</h1>
+    <div class="auth-card__head">
+      <span class="card-kicker">Secure Access</span>
+      <h1>Sign In</h1>
+      <p>Open your mobile command center with password plus app-based verification when enabled.</p>
+    </div>
     {% if next_destination %}
       <p class="auth-route-context">Continue to {{ next_destination }}</p>
     {% endif %}
-    <p class="muted">Use your password and, when enabled, your 6-digit authenticator code.</p>
     {% if ops_snapshot %}
       <section class="auth-ops-panel auth-ops-panel-{{ ops_snapshot.tone }}" aria-label="Production operations snapshot">
         <div class="auth-ops-head">
@@ -49,9 +56,14 @@
       <label>Authenticator Code
         <input type="text" name="totp_code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" placeholder="000000" {% if require_2fa %}required autofocus{% endif %}>
       </label>
-      <button type="submit" class="primary" data-loading-label="Signing in...">Sign In</button>
+      <button type="submit" class="primary auth-submit" data-loading-label="Signing in...">Sign In</button>
     </form>
-    <p class="muted">New users need an invite code. <a class="text-link" href="{{ url_for('auth.register') }}">Create account</a></p>
+    <div class="auth-card__meta" aria-label="Security notes">
+      <span>2FA ready</span>
+      <span>Installable PWA</span>
+      <span>No offline credential cache</span>
+    </div>
+    <p class="muted auth-switch">New users need an invite code. <a class="text-link" href="{{ url_for('auth.register') }}">Create account</a></p>
   </article>
 </section>
 {% endblock %}

@@ -19,7 +19,7 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="msapplication-TileColor" content="#030304">
     <meta name="msapplication-TileImage" content="/icons/algvault-ios-192.png">
-    {% set asset_v = current_app.config.get('ASSET_VERSION', '1') ~ '-algvault-red-purple-theme-1' %}
+    {% set asset_v = current_app.config.get('ASSET_VERSION', '1') ~ '-auth-shell-polish-1' %}
     <script>
       try {
         const storedTheme = window.localStorage.getItem("av-color-theme");
@@ -183,8 +183,8 @@
 
       <div class="topbar-actions">
         {% if not current_user %}
-          <a class="public-topbar-link" href="{{ url_for('auth.login') }}">Sign in</a>
-          <a class="button-link primary public-topbar-cta" href="{{ url_for('auth.register') }}">Create access</a>
+          <a class="public-topbar-link {% if request.endpoint == 'auth.login' %}active{% endif %}" href="{{ url_for('auth.login') }}" {% if request.endpoint == 'auth.login' %}aria-current="page"{% endif %}>Sign in</a>
+          <a class="button-link primary public-topbar-cta {% if request.endpoint == 'auth.register' %}active{% endif %}" href="{{ url_for('auth.register') }}" {% if request.endpoint == 'auth.register' %}aria-current="page"{% endif %}>Create access</a>
         {% endif %}
         <div class="mode-chip mode-chip-{{ nav_mode|default('live') }}" aria-label="Current app mode">
           <span class="mode-dot" aria-hidden="true"></span>
@@ -369,8 +369,8 @@
             <strong>Platform</strong>
             <a href="{{ url_for('consumer.public_connectivity') }}">Connectivity</a>
             <a href="{{ url_for('consumer.public_security') }}">Security</a>
-            <a href="{{ url_for('auth.login') }}">Sign in</a>
-            <a href="{{ url_for('auth.register') }}">Create access</a>
+            <a href="{{ url_for('auth.login') }}" class="{% if request.endpoint == 'auth.login' %}active{% endif %}" {% if request.endpoint == 'auth.login' %}aria-current="page"{% endif %}>Sign in</a>
+            <a href="{{ url_for('auth.register') }}" class="{% if request.endpoint == 'auth.register' %}active{% endif %}" {% if request.endpoint == 'auth.register' %}aria-current="page"{% endif %}>Create access</a>
           </nav>
         </div>
         <p class="public-footer__note">AlgVault provides automation, analytics, and operational tooling. It does not provide investment advice or guaranteed trading outcomes.</p>
