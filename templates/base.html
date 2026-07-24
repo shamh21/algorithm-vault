@@ -19,7 +19,7 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="msapplication-TileColor" content="#030304">
     <meta name="msapplication-TileImage" content="/icons/algvault-ios-192.png">
-    {% set asset_v = current_app.config.get('ASSET_VERSION', '1') ~ '-algvault-red-purple-theme-1' %}
+    {% set asset_v = current_app.config.get('ASSET_VERSION', '1') ~ '-algvault-red-purple-theme-2' %}
     <script>
       try {
         const storedTheme = window.localStorage.getItem("av-color-theme");
@@ -174,9 +174,21 @@
       </a>
 
       {% if not current_user %}
+        {% set public_nav_icons = {
+          'home': 'icon-home',
+          'features': 'icon-dashboard',
+          'pricing': 'icon-wallet',
+          'mobile': 'icon-vault',
+          'connectivity': 'icon-markets',
+          'security': 'icon-shield'
+        } %}
         <nav class="public-topnav" aria-label="Public pages">
           {% for public_page in public_seo_pages %}
-            <a href="{{ public_page.href }}" class="{% if request.path == public_page.href %}active{% endif %}" {% if request.path == public_page.href %}aria-current="page"{% endif %}>{{ public_page.label }}</a>
+            {% set public_nav_icon = public_nav_icons.get(public_page.key, 'icon-markets') %}
+            <a href="{{ public_page.href }}" class="{% if request.path == public_page.href %}active{% endif %}" {% if request.path == public_page.href %}aria-current="page"{% endif %}>
+              <svg class="topnav-icon public-topnav-icon" aria-hidden="true"><use href="#{{ public_nav_icon }}"></use></svg>
+              <span>{{ public_page.label }}</span>
+            </a>
           {% endfor %}
         </nav>
       {% endif %}
@@ -264,10 +276,27 @@
           </div>
           <div class="nav-section">
             <span class="nav-section-title">Platform</span>
+            {% set public_nav_icons = {
+              'home': 'icon-home',
+              'features': 'icon-dashboard',
+              'pricing': 'icon-wallet',
+              'mobile': 'icon-vault',
+              'connectivity': 'icon-markets',
+              'security': 'icon-shield'
+            } %}
+            {% set public_nav_subcopy = {
+              'home': 'Overview',
+              'features': 'Tools',
+              'pricing': 'Plans',
+              'mobile': 'iPhone PWA',
+              'connectivity': 'Providers',
+              'security': 'Controls'
+            } %}
             {% for public_page in public_seo_pages %}
+              {% set public_nav_icon = public_nav_icons.get(public_page.key, 'icon-markets') %}
               <a href="{{ public_page.href }}" class="nav-link {% if request.path == public_page.href %}active{% endif %}" {% if request.path == public_page.href %}aria-current="page"{% endif %}>
-                <svg class="topnav-icon" aria-hidden="true"><use href="#icon-markets"></use></svg>
-                <span class="nav-link-copy"><strong>{{ public_page.label }}</strong><small>Public page</small></span>
+                <svg class="topnav-icon" aria-hidden="true"><use href="#{{ public_nav_icon }}"></use></svg>
+                <span class="nav-link-copy"><strong>{{ public_page.label }}</strong><small>{{ public_nav_subcopy.get(public_page.key, 'Public') }}</small></span>
               </a>
             {% endfor %}
           </div>

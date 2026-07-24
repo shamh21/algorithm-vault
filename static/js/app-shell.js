@@ -166,6 +166,7 @@
       if (!toggle || !nav) return;
       toggle.setAttribute("aria-expanded", "false");
       nav.setAttribute("aria-hidden", "true");
+      nav.setAttribute("inert", "");
       backdrop?.setAttribute("aria-hidden", "true");
       nav.classList.remove("is-open");
       document.body.classList.remove("nav-open");
@@ -175,6 +176,7 @@
       if (!toggle || !nav) return;
       toggle.setAttribute("aria-expanded", "true");
       nav.setAttribute("aria-hidden", "false");
+      nav.removeAttribute("inert");
       backdrop?.setAttribute("aria-hidden", "false");
       nav.classList.add("is-open");
       document.body.classList.add("nav-open");

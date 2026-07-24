@@ -5,12 +5,12 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 PUBLIC_PATHS = {
-    "/overview/": "Automated trading control without the noise",
-    "/features/": "All the features you need to trade with confidence",
-    "/pricing/": "Simple access tiers for monitored automation",
-    "/mobile/": "An iPhone-ready trading command center",
-    "/connectivity/": "Secure connections. Operational clarity.",
-    "/security/": "Trust built through visible controls",
+    "/overview/": "A cleaner command center for automated trading",
+    "/features/": "Powerful trading tools, kept easy to scan",
+    "/pricing/": "Simple access tiers for focused automation",
+    "/mobile/": "An iPhone-ready trading PWA",
+    "/connectivity/": "Secure connections, clearly shown",
+    "/security/": "Security controls you can actually see",
 }
 
 
@@ -53,10 +53,10 @@ def test_public_home_is_crawlable_and_has_rich_metadata(app) -> None:
     assert "LIVE SYSTEM" in html
     assert "Hyperliquid Connected" in html
     assert "overview-phone" in html
-    assert "Active Strategies" in html
-    assert "Connected Providers" in html
-    assert "System Latency" in html
-    assert "Risk Engine Status" in html
+    assert "Strategies" in html
+    assert "Providers" in html
+    assert "Shell" in html
+    assert "Risk" in html
     assert "Strategy Monitor" in html
     assert "Broker/API" in html
     assert "Wallet Controls" in html
@@ -111,10 +111,10 @@ def test_public_features_page_uses_exchange_landing_system(app) -> None:
     assert "Automation &amp; Smart Features" in html
     assert "Insights &amp; Oversight" in html
     assert "Why it matters" in html
-    assert "Experience AlgVault the smart way" in html
-    assert "Features readiness" in html
-    assert "Stay ahead with a platform built for what&#39;s next." in html
-    assert "Contextual" in html
+    assert "Open AlgVault from a cleaner mobile workspace" in html
+    assert "Readiness at a glance" in html
+    assert "See provider, strategy, wallet, and risk status without digging through screens." in html
+    assert "Live context" in html
     assert "Cycle-based execution" in html
     assert "Portfolio visibility" in html
     assert "Guarded execution workflows" in html
@@ -144,8 +144,8 @@ def test_public_pricing_page_uses_exchange_plan_comparison(app) -> None:
     assert html.count("<h1") == 1
     assert "pricing-landing" in html
     assert "pricing-hero" in html
-    assert "Simple access tiers for monitored automation" in html
-    assert "Choose the AlgVault access level that matches your workflow" in html
+    assert "Simple access tiers for focused automation" in html
+    assert "Choose the access level that matches how much monitoring" in html
     assert "Transparent tiers" in html
     assert "No hidden urgency" in html
     assert "No performance claims" in html
@@ -188,8 +188,8 @@ def test_public_connectivity_page_uses_operations_dashboard_layout(app) -> None:
     assert html.count("<h1") == 1
     assert "connectivity-landing" in html
     assert "connection-overview-card" in html
-    assert "Secure connections. Operational clarity." in html
-    assert "Every connection is validated, encrypted, and continuously supervised." in html
+    assert "Secure connections, clearly shown" in html
+    assert "clear degraded, disconnected, and recovery states" in html
     assert "Encrypted" in html
     assert "Monitored" in html
     assert "Resilient" in html
@@ -240,8 +240,8 @@ def test_public_security_page_uses_operational_security_layout(app) -> None:
     assert html.count("<h1") == 1
     assert "security-landing" in html
     assert "security-ops-panel" in html
-    assert "Trust built through visible controls" in html
-    assert "AlgVault keeps operational policy and explicit protected actions visible before sensitive workflows execute." in html
+    assert "Security controls you can actually see" in html
+    assert "AlgVault keeps auth, provider, wallet, risk, and recovery states visible before sensitive workflows proceed." in html
     assert "Server-authoritative" in html
     assert "No browser overrides" in html
     assert "Protected credentials" in html
